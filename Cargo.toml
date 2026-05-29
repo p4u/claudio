@@ -1,11 +1,11 @@
 [package]
-name = "claude-poc"
+name = "claudio"
 version = "0.1.0"
 edition = "2021"
 description = "Reference PoC: drive interactive Claude Code under a PTY to emulate claude -p (responsible-disclosure research)"
 
 [[bin]]
-name = "claude-poc"
+name = "claudio"
 path = "src/main.rs"
 
 [dependencies]

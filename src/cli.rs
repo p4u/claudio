@@ -25,7 +25,7 @@
 //!   --no-session-persistence   suppresses the session JSONL (our source of truth)
 //!
 //! Everything else is forwarded untouched. Wrapper-only knobs live in
-//! `CLAUDE_POC_*` env vars so the CLI surface stays byte-for-byte claude's.
+//! `CLAUDIO_*` env vars so the CLI surface stays byte-for-byte claude's.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -242,16 +242,16 @@ impl WrapperEnv {
     pub fn from_env() -> Self {
         let g = |k: &str| std::env::var(k).ok();
         WrapperEnv {
-            debug: g("CLAUDE_POC_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false),
-            timeout_sec: g("CLAUDE_POC_TIMEOUT_SEC").and_then(|v| v.parse().ok()).unwrap_or(300),
-            hook_transport: match g("CLAUDE_POC_HOOK_TRANSPORT").as_deref() {
+            debug: g("CLAUDIO_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false),
+            timeout_sec: g("CLAUDIO_TIMEOUT_SEC").and_then(|v| v.parse().ok()).unwrap_or(300),
+            hook_transport: match g("CLAUDIO_HOOK_TRANSPORT").as_deref() {
                 Some("file") => HookTransport::File,
                 _ => HookTransport::Tcp,
             },
-            raw_log: g("CLAUDE_POC_RAW_LOG"),
-            cols: g("CLAUDE_POC_COLS").and_then(|v| v.parse().ok()).unwrap_or(120),
-            rows: g("CLAUDE_POC_ROWS").and_then(|v| v.parse().ok()).unwrap_or(40),
-            claude_path: g("CLAUDE_POC_CLAUDE_PATH").unwrap_or_else(|| "claude".into()),
+            raw_log: g("CLAUDIO_RAW_LOG"),
+            cols: g("CLAUDIO_COLS").and_then(|v| v.parse().ok()).unwrap_or(120),
+            rows: g("CLAUDIO_ROWS").and_then(|v| v.parse().ok()).unwrap_or(40),
+            claude_path: g("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|| "claude".into()),
         }
     }
 }

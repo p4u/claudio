@@ -54,7 +54,7 @@ pub fn emit(w: &mut dyn Write, fmt: OutputFormat, out: &Outcome) -> std::io::Res
                     if !out.summary.final_text.is_empty() {
                         writeln!(w, "{}", out.summary.final_text)?;
                     }
-                    return Err(std::io::Error::other(format!("claude-poc error: {reason}")));
+                    return Err(std::io::Error::other(format!("claudio error: {reason}")));
                 }
             }
             writeln!(w, "{}", out.summary.final_text)

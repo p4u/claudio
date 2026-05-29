@@ -92,7 +92,7 @@ macro_rules! trace {
     ($debug:expr, $start:expr, $($arg:tt)*) => {
         if $debug {
             let ms = $start.elapsed().as_millis();
-            eprintln!("[claude-poc +{}ms] {}", ms, format!($($arg)*));
+            eprintln!("[claudio +{}ms] {}", ms, format!($($arg)*));
         }
     };
 }
@@ -122,7 +122,7 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
     let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
     let (settings, settings_warns) = hooks::build_settings_merged(&exe, relay_arg, parsed.user_settings.as_deref());
     for w in &settings_warns {
-        eprintln!("claude-poc: {w}");
+        eprintln!("claudio: {w}");
     }
 
     // §4.9.5 — randomise PTY geometry per session within realistic ranges.
@@ -162,13 +162,13 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
         cmd.arg(a);
     }
 
-    // §4.9.2 — rebuild child environment WITHOUT any CLAUDE_POC_* vars.
+    // §4.9.2 — rebuild child environment WITHOUT any CLAUDIO_* vars.
     // portable-pty seeds CommandBuilder from std::env, so we clear and
     // re-add everything except our own wrapper vars.  ANTHROPIC_*, proxies,
     // CLAUDE_CODE_* all pass through unchanged.
     cmd.env_clear();
     for (k, v) in std::env::vars() {
-        if !k.starts_with("CLAUDE_POC_") {
+        if !k.starts_with("CLAUDIO_") {
             cmd.env(k, v);
         }
     }
@@ -379,10 +379,10 @@ impl Rng {
 /// Type `prompt` character-by-character with human-like cadence (§4.9.1),
 /// then send Enter after a randomised dwell.
 ///
-/// Enabled by default.  Set `CLAUDE_POC_CADENCE=0` to revert to single-burst
+/// Enabled by default.  Set `CLAUDIO_CADENCE=0` to revert to single-burst
 /// delivery (faster, useful when typing latency matters more than stealth).
 fn type_prompt(writer: &Arc<Mutex<Box<dyn Write + Send>>>, prompt: &str) -> std::io::Result<()> {
-    let cadence = std::env::var("CLAUDE_POC_CADENCE").map(|v| v != "0").unwrap_or(true);
+    let cadence = std::env::var("CLAUDIO_CADENCE").map(|v| v != "0").unwrap_or(true);
 
     if !cadence {
         // Fast burst path — send everything at once then pause before Enter.

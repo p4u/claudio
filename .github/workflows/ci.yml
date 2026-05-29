@@ -27,4 +27,4 @@ jobs:
       - name: Unit tests
         run: cargo test --locked
       # End-to-end tests require an authenticated `claude` and are gated behind
-      # CLAUDE_POC_E2E; they do not run in CI.
+      # CLAUDIO_E2E; they do not run in CI.

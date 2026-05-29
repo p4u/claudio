@@ -1,4 +1,4 @@
-# claude-poc
+# claudio
 
 A **drop-in wrapper for `claude`** that emulates `claude -p` (print mode) by
 driving the *interactive* Claude Code TUI under a real pseudo-terminal, instead
@@ -7,8 +7,7 @@ of calling `claude -p`.
 > **What this is.** A responsible-disclosure proof of concept. It demonstrates
 > that client-side restrictions on programmatic Claude Code use cannot be
 > enforced: every signal that would distinguish "human" from "automation" lives
-> on the user's machine, and the model requests produced are identical either
-> way. Full argument in [`../REPORT.md`](../REPORT.md).
+> on the user's machine, and the model requests produced are identical either way.
 >
 > It uses only your own authenticated session and documented, supported Claude
 > Code features. It does **not** bypass authentication or billing — every
@@ -18,7 +17,7 @@ of calling `claude -p`.
 ## Drop-in behavior
 
 The wrapper proxies the real `claude` (found on `PATH`, or via
-`$CLAUDE_POC_CLAUDE_PATH`):
+`$CLAUDIO_CLAUDE_PATH`):
 
 - **Without `-p`/`--print`** it `exec`s the real `claude` unchanged — interactive
   sessions, subcommands (`auth`, `mcp`, …), `--help`, and `--version` are 100%
@@ -33,7 +32,7 @@ Because it only special-cases the flags it owns (`-p`, `--output-format`,
 **a new claude flag keeps working with no code change** — there is no hardcoded
 copy of claude's grammar.
 
-Point any tool that runs `claude -p ...` at `claude-poc -p ...` (rename the
+Point any tool that runs `claude -p ...` at `claudio -p ...` (rename the
 invocation or alias it). Do **not** install it *as* `claude` — the wrapper needs
 to find the real `claude`.
 
@@ -42,8 +41,8 @@ to find the real `claude`.
 Requires a Rust toolchain and a locally authenticated `claude` on `PATH`.
 
 ```bash
-make            # native release build → target/release/claude-poc
-make static     # portable static musl binary → dist/claude-poc (≈1 MB, no libc dep)
+make            # native release build → target/release/claudio
+make static     # portable static musl binary → dist/claudio (≈1 MB, no libc dep)
 make test       # 32 unit tests (no network/claude needed)
 ```
 
@@ -55,23 +54,23 @@ static-docker` builds the same static binary inside a container.
 
 ```bash
 # default text, like `claude -p`
-claude-poc -p "Explain quicksort in one sentence."
+claudio -p "Explain quicksort in one sentence."
 
 # JSON result with the real token-usage object
-claude-poc -p --output-format json "Reply with exactly: OK"
+claudio -p --output-format json "Reply with exactly: OK"
 
 # streaming-shaped events
-claude-poc -p --output-format stream-json "Reply with exactly: OK"
+claudio -p --output-format stream-json "Reply with exactly: OK"
 
 # any claude flag is forwarded verbatim
-claude-poc -p --model opus --dangerously-skip-permissions \
+claudio -p --model opus --dangerously-skip-permissions \
     --allowedTools Bash Read "Run 'uname -a' and report the kernel."
 
 # prompt from stdin
-git diff | claude-poc -p --output-format json "Summarize the staged diff."
+git diff | claudio -p --output-format json "Summarize the staged diff."
 
 # unambiguous prompt delimiter (recommended for scripts / dashy prompts)
-claude-poc -p --model opus -- "--this is definitely the prompt--"
+claudio -p --model opus -- "--this is definitely the prompt--"
 ```
 
 ### Flags
@@ -97,12 +96,12 @@ So the CLI surface stays byte-for-byte claude's, wrapper knobs are env vars:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `CLAUDE_POC_DEBUG` | `0` | trace timeline to stderr |
-| `CLAUDE_POC_TIMEOUT_SEC` | `300` | wall-clock cap |
-| `CLAUDE_POC_HOOK_TRANSPORT` | `tcp` | `tcp` or `file` (sandboxes blocking loopback) |
-| `CLAUDE_POC_RAW_LOG` | — | dump the raw PTY byte stream to this path |
-| `CLAUDE_POC_COLS` / `CLAUDE_POC_ROWS` | `120`/`40` | PTY size |
-| `CLAUDE_POC_CLAUDE_PATH` | `claude` | path to the real claude binary |
+| `CLAUDIO_DEBUG` | `0` | trace timeline to stderr |
+| `CLAUDIO_TIMEOUT_SEC` | `300` | wall-clock cap |
+| `CLAUDIO_HOOK_TRANSPORT` | `tcp` | `tcp` or `file` (sandboxes blocking loopback) |
+| `CLAUDIO_RAW_LOG` | — | dump the raw PTY byte stream to this path |
+| `CLAUDIO_COLS` / `CLAUDIO_ROWS` | `120`/`40` | PTY size |
+| `CLAUDIO_CLAUDE_PATH` | `claude` | path to the real claude binary |
 
 ## How it works (and why it's version-robust)
 
@@ -126,8 +125,8 @@ state is mounted in.
 
 ```bash
 docker compose build
-docker compose run --rm claude-poc -p --dangerously-skip-permissions "Reply with exactly: DOCKER_OK"
-docker compose run --rm claude-poc -p --output-format json "Reply with exactly: OK"
+docker compose run --rm claudio -p --dangerously-skip-permissions "Reply with exactly: DOCKER_OK"
+docker compose run --rm claudio -p --output-format json "Reply with exactly: OK"
 ```
 
 **Auth.** The wrapper passes the whole environment through, and the compose file
@@ -142,7 +141,7 @@ disk). So whatever your host uses works in the container:
   (macOS Keychain; Linux libsecret) and leaves `~/.claude/.credentials.json` as
   a stale fallback — a keychain-backed host then mounts an expired token and
   gets `401` in the container. In that case use env-var auth above, log in
-  inside the container (`docker compose run --rm --entrypoint claude claude-poc
+  inside the container (`docker compose run --rm --entrypoint claude claudio
   /login`), or just run the native binary.
 
 If you see `401 Invalid authentication credentials`, your auth isn't reaching
@@ -169,8 +168,3 @@ src/session.rs   session-JSONL parse, stop-reason logic, flush-race retry
 src/driver.rs    PTY lifecycle, type-the-prompt, Stop-hook completion, teardown
 src/emit.rs      text / json / stream-json formatters
 ```
-
-## Scope & ethics
-
-Single account, local only, own authenticated session, no auth or billing
-bypass, fully documented. See [`../REPORT.md` §7](../REPORT.md).

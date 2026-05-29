@@ -1,12 +1,12 @@
-# claude-poc — build a portable static binary that wraps the real `claude`.
+# claudio — build a portable static binary that wraps the real `claude`.
 #
-# The wrapper finds `claude` on PATH (or $CLAUDE_POC_CLAUDE_PATH) and proxies
+# The wrapper finds `claude` on PATH (or $CLAUDIO_CLAUDE_PATH) and proxies
 # every invocation. With -p/--print it emulates print mode by driving the
 # interactive TUI; without it, it execs the real claude transparently.
 #
 # Common targets:
-#   make            → native release build           (target/release/claude-poc)
-#   make static     → portable static musl binary    (dist/claude-poc)
+#   make            → native release build           (target/release/claudio)
+#   make static     → portable static musl binary    (dist/claudio)
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
@@ -18,7 +18,7 @@
 
 CARGO       ?= cargo
 PREFIX      ?= $(HOME)/.local
-BIN         := claude-poc
+BIN         := claudio
 # Static target. Override ARCH for cross builds, e.g. ARCH=aarch64.
 ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
@@ -56,20 +56,20 @@ static-docker:
 	@file $(DIST)/$(BIN) || true
 
 ## Full test suite: unit tests first, then E2E against real claude.
-## Cadence typing is disabled (CLAUDE_POC_CADENCE=0) so E2E runs complete
+## Cadence typing is disabled (CLAUDIO_CADENCE=0) so E2E runs complete
 ## in ~5 min rather than ~15 min; stealth is verified by the detect_* tests.
 ## Requires an authenticated `claude` on PATH.
 test: test-unit
-	CLAUDE_POC_E2E=1 CLAUDE_POC_CADENCE=0 $(CARGO) test --locked --test integration \
+	CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 $(CARGO) test --locked --test integration \
 		-- --test-threads=1 --nocapture
 
 ## Unit tests only — no network, no claude, ~0.1 s.
 test-unit:
-	$(CARGO) test --locked --bin claude-poc
+	$(CARGO) test --locked --bin claudio
 
 ## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
-	CLAUDE_POC_E2E=1 CLAUDE_POC_CADENCE=0 $(CARGO) test --locked --test integration \
+	CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 $(CARGO) test --locked --test integration \
 		-- --test-threads=1 --nocapture
 
 fmt:
@@ -85,7 +85,7 @@ docker:
 
 ## Install the static binary. NOTE: do NOT install it as `claude` — the wrapper
 ## must be able to find the real `claude` on PATH. Point your tooling at
-## `claude-poc -p ...` (or alias it).
+## `claudio -p ...` (or alias it).
 install: static
 	@mkdir -p $(PREFIX)/bin
 	@cp $(DIST)/$(BIN) $(PREFIX)/bin/$(BIN)

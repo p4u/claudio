@@ -1,4 +1,4 @@
-//! claude-poc — a drop-in for `claude` that emulates `-p` (print mode) by
+//! claudio — a drop-in for `claude` that emulates `-p` (print mode) by
 //! driving the interactive TUI under a PTY. Responsible-disclosure research
 //! PoC: every mechanism is a documented, supported Claude Code feature, and
 //! nothing is hidden from the vendor. See ../REPORT.md.
@@ -40,7 +40,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // Legacy relay mode, invoked as `claude-poc __hook <Event>`.
+    // Legacy relay mode, invoked as `claudio __hook <Event>`.
     if argv.len() >= 3 && argv[1] == "__hook" {
         hooks::run_relay(&argv[2]);
         return std::process::ExitCode::SUCCESS;
@@ -55,7 +55,7 @@ fn main() -> std::process::ExitCode {
     }
 
     for w in &parsed.warnings {
-        eprintln!("claude-poc: {w}");
+        eprintln!("claudio: {w}");
     }
 
     let env = WrapperEnv::from_env();
@@ -65,12 +65,12 @@ fn main() -> std::process::ExitCode {
         Some(p) => p.clone(),
         None => {
             if std::io::stdin().is_terminal() {
-                eprintln!("claude-poc: a prompt is required (positional arg, `-- <prompt>`, or stdin)");
+                eprintln!("claudio: a prompt is required (positional arg, `-- <prompt>`, or stdin)");
                 return std::process::ExitCode::from(2);
             }
             let mut buf = String::new();
             if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-                eprintln!("claude-poc: empty prompt on stdin");
+                eprintln!("claudio: empty prompt on stdin");
                 return std::process::ExitCode::from(2);
             }
             buf
@@ -96,7 +96,7 @@ fn main() -> std::process::ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("claude-poc: {e}");
+            eprintln!("claudio: {e}");
             if matches!(parsed.output_format, OutputFormat::Json | OutputFormat::StreamJson) {
                 let obj = serde_json::json!({
                     "type": "result", "subtype": "error", "is_error": true,
@@ -113,14 +113,14 @@ fn main() -> std::process::ExitCode {
 /// Unix this is a true `execvp` (transparent signals, exit code, TTY). On other
 /// platforms we spawn, wait, and propagate the exit code.
 fn exec_claude_transparently(args: &[String]) -> std::process::ExitCode {
-    let claude = std::env::var("CLAUDE_POC_CLAUDE_PATH").unwrap_or_else(|_| "claude".into());
+    let claude = std::env::var("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|_| "claude".into());
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let err = std::process::Command::new(&claude).args(args).exec();
         // exec only returns on failure.
-        eprintln!("claude-poc: could not exec '{claude}': {err}");
+        eprintln!("claudio: could not exec '{claude}': {err}");
         std::process::ExitCode::from(127)
     }
 
@@ -129,7 +129,7 @@ fn exec_claude_transparently(args: &[String]) -> std::process::ExitCode {
         match std::process::Command::new(&claude).args(args).status() {
             Ok(status) => std::process::ExitCode::from(status.code().unwrap_or(1) as u8),
             Err(e) => {
-                eprintln!("claude-poc: could not run '{claude}': {e}");
+                eprintln!("claudio: could not run '{claude}': {e}");
                 std::process::ExitCode::from(127)
             }
         }

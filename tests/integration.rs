@@ -1,16 +1,16 @@
-//! Integration tests that run the compiled `claude-poc` binary against a real,
+//! Integration tests that run the compiled `claudio` binary against a real,
 //! locally-authenticated `claude`.
 //!
-//! **These tests are gated on `CLAUDE_POC_E2E=1`.**
+//! **These tests are gated on `CLAUDIO_E2E=1`.**
 //! They each call the real Claude API and take ~3–10 s to complete.
 //!
 //! Run with:
-//!   CLAUDE_POC_E2E=1 cargo test --test integration -- --nocapture
+//!   CLAUDIO_E2E=1 cargo test --test integration -- --nocapture
 //!
 //! The Makefile target `make e2e` does the same thing.
 //!
 //! Design notes:
-//! - `env!("CARGO_BIN_EXE_claude-poc")` gives the path to the binary built
+//! - `env!("CARGO_BIN_EXE_claudio")` gives the path to the binary built
 //!   during `cargo test`, so no manual path resolution is needed.
 //! - Every test passes `--dangerously-skip-permissions` explicitly because the
 //!   shell alias that adds it automatically does not apply to subprocess execs.
@@ -19,19 +19,19 @@
 
 use std::process::{Command, Output};
 
-const BIN: &str = env!("CARGO_BIN_EXE_claude-poc");
+const BIN: &str = env!("CARGO_BIN_EXE_claudio");
 const SKIP_PERMS: &str = "--dangerously-skip-permissions";
 
 /// Returns true when the E2E environment variable is set.
 fn e2e_enabled() -> bool {
-    std::env::var("CLAUDE_POC_E2E").map(|v| v == "1").unwrap_or(false)
+    std::env::var("CLAUDIO_E2E").map(|v| v == "1").unwrap_or(false)
 }
 
 /// Build a base command with a generous timeout (the wrapper enforces 300 s
 /// internally, but we cap at 180 s here so a hung test doesn't block CI forever).
 fn cmd() -> Command {
     let mut c = Command::new(BIN);
-    c.env("CLAUDE_POC_TIMEOUT_SEC", "150");
+    c.env("CLAUDIO_TIMEOUT_SEC", "150");
     c
 }
 
@@ -40,9 +40,9 @@ fn run(mut c: Command, _timeout_secs: u64) -> Output {
     c.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to spawn claude-poc")
+        .expect("failed to spawn claudio")
         .wait_with_output()
-        .expect("failed to wait for claude-poc")
+        .expect("failed to wait for claudio")
 }
 
 /// Assert a command exits 0 and return its stdout as a String.
@@ -51,7 +51,7 @@ fn assert_success(out: &Output) -> String {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "claude-poc failed (exit {:?})\nstdout: {stdout}\nstderr: {stderr}",
+        "claudio failed (exit {:?})\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code()
     );
     stdout
@@ -158,12 +158,12 @@ fn e2e_stdin_prompt() {
 
     let mut proc = Command::new(BIN)
         .args(["-p", SKIP_PERMS])
-        .env("CLAUDE_POC_TIMEOUT_SEC", "150")
+        .env("CLAUDIO_TIMEOUT_SEC", "150")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to spawn claude-poc");
+        .expect("failed to spawn claudio");
 
     proc.stdin
         .take()
@@ -238,7 +238,7 @@ fn e2e_file_transport() {
     if !e2e_enabled() { return; }
 
     let mut c = cmd();
-    c.env("CLAUDE_POC_HOOK_TRANSPORT", "file");
+    c.env("CLAUDIO_HOOK_TRANSPORT", "file");
     c.args(["-p", SKIP_PERMS, "Reply with exactly: E2E_FILE_OK"]);
     let out = run(c, 150);
     let stdout = assert_success(&out);
@@ -335,14 +335,14 @@ fn e2e_json_single_line() {
 // observable and assert it looks interactive.
 //
 // Tool-using tests pass --dangerously-skip-permissions so Claude can run Bash.
-// All detection tests disable cadence typing (CLAUDE_POC_CADENCE=0) for speed.
+// All detection tests disable cadence typing (CLAUDIO_CADENCE=0) for speed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Helper: a command configured for detection tests (Bash allowed, cadence off).
 fn det_cmd() -> Command {
     let mut c = Command::new(BIN);
-    c.env("CLAUDE_POC_TIMEOUT_SEC", "180")
-     .env("CLAUDE_POC_CADENCE", "0");
+    c.env("CLAUDIO_TIMEOUT_SEC", "180")
+     .env("CLAUDIO_CADENCE", "0");
     c
 }
 
@@ -376,7 +376,7 @@ fn detect_mode_no_tools() {
 
 // ── §4.9.2: environment variable concealment ──────────────────────────────
 
-/// CLAUDE_POC_* environment variables must be invisible inside the claude
+/// CLAUDIO_* environment variables must be invisible inside the claude
 /// child process.  If found, the wrapper's presence is detectable via `env`.
 #[test]
 fn detect_env_vars_clean() {
@@ -384,18 +384,18 @@ fn detect_env_vars_clean() {
 
     let mut c = det_cmd();
     c.args(["-p", SKIP_PERMS,
-        "Run this bash command exactly: env | grep -i CLAUDE_POC\n\
+        "Run this bash command exactly: env | grep -i CLAUDIO\n\
          If the command produces ANY output, reply with: FOUND\n\
          If the command produces NO output (empty), reply with: NONE_FOUND"]);
     let out = run(c, 180);
     let stdout = assert_success(&out);
     assert!(
         stdout.contains("NONE_FOUND"),
-        "CLAUDE_POC_* env vars leaked into child process! stdout: {stdout:?}"
+        "CLAUDIO_* env vars leaked into child process! stdout: {stdout:?}"
     );
 }
 
-/// The CLAUDE_POC_HOOK_PORT env var specifically must not appear — it would
+/// The CLAUDIO_HOOK_PORT env var specifically must not appear — it would
 /// reveal the hook rendezvous mechanism.
 #[test]
 fn detect_hook_port_env_absent() {
@@ -403,20 +403,20 @@ fn detect_hook_port_env_absent() {
 
     let mut c = det_cmd();
     c.args(["-p", SKIP_PERMS,
-        "Run this bash command: echo \"HOOK_PORT=${CLAUDE_POC_HOOK_PORT:-UNSET}\"\n\
+        "Run this bash command: echo \"HOOK_PORT=${CLAUDIO_HOOK_PORT:-UNSET}\"\n\
          Report the exact output."]);
     let out = run(c, 180);
     let stdout = assert_success(&out);
     assert!(
         stdout.contains("UNSET"),
-        "CLAUDE_POC_HOOK_PORT is set in child env! stdout: {stdout:?}"
+        "CLAUDIO_HOOK_PORT is set in child env! stdout: {stdout:?}"
     );
 }
 
 // ── §4.9.2: hook command concealment ─────────────────────────────────────
 
 /// The hook commands registered in --settings must not contain the string
-/// "claude-poc".  If they do, the wrapper is identifiable by inspecting
+/// "claudio".  If they do, the wrapper is identifiable by inspecting
 /// claude's own process arguments.
 #[test]
 fn detect_hook_command_no_wrapper_name() {
@@ -427,8 +427,8 @@ fn detect_hook_command_no_wrapper_name() {
         "Run this bash command and show me only the output:\n\
          cat /proc/self/cmdline 2>/dev/null | tr '\\0' '\\n' | \
          grep -o '\"command\":\"[^\"]*\"' | head -4\n\
-         If the output contains the text 'claude-poc', reply: WRAPPER_EXPOSED\n\
-         If it does not contain 'claude-poc', reply: HOOK_CLEAN"]);
+         If the output contains the text 'claudio', reply: WRAPPER_EXPOSED\n\
+         If it does not contain 'claudio', reply: HOOK_CLEAN"]);
     let out = run(c, 180);
     let stdout = assert_success(&out);
     assert!(
@@ -589,7 +589,7 @@ fn detect_comprehensive_attempt() {
          Use the Bash tool to run ALL of these commands (Bash tool subprocesses \
          always have piped stdin — that is normal even in interactive sessions, \
          so do NOT use `test -t 0/1` as evidence):\n\
-         1. env | grep -i CLAUDE_POC || echo no_claude_poc_vars\n\
+         1. env | grep -i CLAUDIO || echo no_claudio_vars\n\
          2. cat /proc/self/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -E '^-p$|^--print$' || echo no_print_flag\n\
          3. echo TERM=$TERM\n\
          4. found=NO; pid=$$; for d in 1 2 3 4 5 6; do ppid=$(awk '/PPid/{print $2}' /proc/$pid/status 2>/dev/null) || break; stdin=$(readlink /proc/$ppid/fd/0 2>/dev/null); if echo \"$stdin\" | grep -q '^/dev/pts/'; then found=YES; break; fi; pid=$ppid; done; echo pty_in_tree=$found\n\

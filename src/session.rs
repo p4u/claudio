@@ -126,7 +126,7 @@ mod tests {
     use std::io::Write;
 
     fn write_tmp(name: &str, content: &str) -> String {
-        let path = std::env::temp_dir().join(format!("claude-poc-test-{name}.jsonl"));
+        let path = std::env::temp_dir().join(format!("claudio-test-{name}.jsonl"));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path.to_string_lossy().into_owned()

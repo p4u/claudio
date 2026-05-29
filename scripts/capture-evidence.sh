@@ -6,7 +6,7 @@
 set -u
 
 OUT="${1:-../evidence}"
-BIN="./target/release/claude-poc"
+BIN="./target/release/claudio"
 mkdir -p "$OUT"
 
 echo "Building release binary..."
@@ -34,9 +34,9 @@ run variadic -p --output-format json --dangerously-skip-permissions --allowedToo
 # 7. passthrough --model
 run model-passthrough -p --dangerously-skip-permissions --model opus "Reply with exactly: MODEL_OK"
 # 8. file hook transport (no loopback TCP)
-CLAUDE_POC_HOOK_TRANSPORT=file run file-transport -p --dangerously-skip-permissions "Reply with exactly: FILE_OK"
+CLAUDIO_HOOK_TRANSPORT=file run file-transport -p --dangerously-skip-permissions "Reply with exactly: FILE_OK"
 # 9. debug timing trace (wrapper-only knob via env)
-CLAUDE_POC_DEBUG=1 run debug-trace -p --dangerously-skip-permissions "Reply with exactly: DEBUG_OK"
+CLAUDIO_DEBUG=1 run debug-trace -p --dangerously-skip-permissions "Reply with exactly: DEBUG_OK"
 
 echo
 echo "Wrote evidence to $OUT/"

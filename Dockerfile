@@ -19,7 +19,7 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /src/target/release/claude-poc /usr/local/bin/claude-poc
+COPY --from=build /src/target/release/claudio /usr/local/bin/claudio
 
 # The node base image ships an unprivileged `node` user (uid 1000). Running as
 # non-root also avoids Claude Code's refusal to use --dangerously-skip-permissions
@@ -28,4 +28,4 @@ ENV HOME=/home/node
 USER node
 WORKDIR /work
 
-ENTRYPOINT ["claude-poc"]
+ENTRYPOINT ["claudio"]

@@ -10,9 +10,9 @@
 //! **Relay concealment (§4.9.2)** — for TCP transport, `Relay::setup` copies
 //! the wrapper binary to a temp dir under a random hex name (e.g.
 //! `/tmp/.xdg-a3f2bc1d/b8e41caf`), then registers that neutral path as the
-//! hook command.  The binary name `claude-poc` never appears in the --settings
+//! hook command.  The binary name `claudio` never appears in the --settings
 //! JSON that claude parses.  The port is a positional argv token, not an env
-//! var, so `env | grep CLAUDE_POC` in the child finds nothing.
+//! var, so `env | grep CLAUDIO` in the child finds nothing.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -25,9 +25,9 @@ use crate::cli::HookTransport;
 
 // Kept for the file-transport relay path (env var is still needed there
 // because the hook command writes to a dir, not connects to a port).
-pub const ENV_DIR: &str = "CLAUDE_POC_HOOK_DIR";
+pub const ENV_DIR: &str = "CLAUDIO_HOOK_DIR";
 // Legacy TCP env — still accepted by run_relay for backward compat.
-pub const ENV_PORT: &str = "CLAUDE_POC_HOOK_PORT";
+pub const ENV_PORT: &str = "CLAUDIO_HOOK_PORT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
@@ -56,7 +56,7 @@ pub struct Hook {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A copy of our binary living under a random hex name in a temp directory.
-/// The hook command references this path, not `claude-poc`, so the binary name
+/// The hook command references this path, not `claudio`, so the binary name
 /// does not appear in claude's `--settings` JSON or process tree.
 pub struct Relay {
     dir: PathBuf,
@@ -136,7 +136,7 @@ pub fn relay_to_port(event: &str, port: u16) {
     }
 }
 
-/// Legacy relay: invoked as `claude-poc __hook <event>`. Reads port from env
+/// Legacy relay: invoked as `claudio __hook <event>`. Reads port from env
 /// or falls back to file transport. Kept for backward compatibility and for
 /// the file-transport path where env vars are unavoidable.
 pub fn run_relay(event: &str) {
@@ -201,7 +201,7 @@ impl Listener {
                 Ok(Listener::Tcp { rx, port })
             }
             HookTransport::File => {
-                let dir = std::env::temp_dir().join(format!("claude-poc-{}", uuid::Uuid::new_v4()));
+                let dir = std::env::temp_dir().join(format!("claudio-{}", uuid::Uuid::new_v4()));
                 std::fs::create_dir_all(&dir)?;
                 Ok(Listener::File { dir })
             }
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn settings_json_has_both_events() {
-        let (s, warns) = build_settings_merged("/path/to/claude-poc", None, None);
+        let (s, warns) = build_settings_merged("/path/to/claudio", None, None);
         assert!(warns.is_empty());
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         let hooks = &v["hooks"];
@@ -377,7 +377,7 @@ mod tests {
         assert!(hooks.get("Stop").is_some());
         let cmd = hooks["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
         assert!(cmd.ends_with("__hook Stop"));
-        assert!(cmd.contains("/path/to/claude-poc"));
+        assert!(cmd.contains("/path/to/claudio"));
     }
 
     #[test]
@@ -394,8 +394,8 @@ mod tests {
         let session_cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str().unwrap();
         // Must not contain the wrapper name.
-        assert!(!stop_cmd.contains("claude-poc"), "stop cmd: {stop_cmd}");
-        assert!(!session_cmd.contains("claude-poc"), "session cmd: {session_cmd}");
+        assert!(!stop_cmd.contains("claudio"), "stop cmd: {stop_cmd}");
+        assert!(!session_cmd.contains("claudio"), "session cmd: {session_cmd}");
         // Must contain the port as a plain number.
         assert!(stop_cmd.contains("49152"), "port missing from: {stop_cmd}");
         // The relay binary must exist.
@@ -407,7 +407,7 @@ mod tests {
         let relay = Relay::setup().unwrap();
         let cmd = relay.command("Stop", 1234);
         assert!(cmd.ends_with(" Stop 1234"), "got: {cmd}");
-        assert!(!cmd.contains("claude-poc"), "got: {cmd}");
+        assert!(!cmd.contains("claudio"), "got: {cmd}");
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn settings_merge_preserves_user_keys_and_hooks() {
         let user = r#"{"model":"opus","hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"echo mine"}]}]}}"#;
-        let (s, warns) = build_settings_merged("/p/claude-poc", None, Some(user));
+        let (s, warns) = build_settings_merged("/p/claudio", None, Some(user));
         assert!(warns.is_empty());
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["model"], "opus");
@@ -440,13 +440,13 @@ mod tests {
 
     #[test]
     fn settings_merge_invalid_json_warns() {
-        let (_s, warns) = build_settings_merged("/p/claude-poc", None, Some("not json"));
+        let (_s, warns) = build_settings_merged("/p/claudio", None, Some("not json"));
         assert!(!warns.is_empty());
     }
 
     #[test]
     fn settings_merge_non_object_json_warns() {
-        let (_s, warns) = build_settings_merged("/p/claude-poc", None, Some("[1,2,3]"));
+        let (_s, warns) = build_settings_merged("/p/claudio", None, Some("[1,2,3]"));
         assert!(!warns.is_empty());
     }
 
@@ -454,11 +454,11 @@ mod tests {
     fn settings_merge_from_file() {
         use std::io::Write as IoWrite;
         let dir = std::env::temp_dir();
-        let path = dir.join("claude-poc-test-settings-2.json");
+        let path = dir.join("claudio-test-settings-2.json");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(br#"{"custom_key":"custom_val"}"#).unwrap();
         drop(f);
-        let (s, warns) = build_settings_merged("/p/claude-poc", None, Some(path.to_str().unwrap()));
+        let (s, warns) = build_settings_merged("/p/claudio", None, Some(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
         assert!(warns.is_empty(), "unexpected warnings: {warns:?}");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn settings_merge_missing_file_warns() {
-        let (_s, warns) = build_settings_merged("/p/claude-poc", None, Some("/nonexistent/path.json"));
+        let (_s, warns) = build_settings_merged("/p/claudio", None, Some("/nonexistent/path.json"));
         assert!(!warns.is_empty());
     }
 
