@@ -1,0 +1,21 @@
+# Rust build output
+/target
+
+# dist/ holds the committed portable static binary (kept on purpose).
+# Ignore anything else that lands in dist/.
+/dist/*
+!/dist/claude-poc
+
+# Docker bind-mount scratch — keep the directory, ignore its contents.
+/workspace/*
+!/workspace/.gitkeep
+
+# Session / plugin scratch
+/.remember
+
+# Editor / OS noise
+*.swp
+*.tmp
+*.orig
+*.rs.bk
+.DS_Store

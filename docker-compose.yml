@@ -1,0 +1,52 @@
+# Run the PoC in a container against your locally-authenticated Claude Code.
+#
+#   docker compose build
+#   docker compose run --rm claude-poc -p --dangerously-skip-permissions "Reply with exactly: DOCKER_OK"
+#   docker compose run --rm claude-poc -p --output-format json "Summarize: $(cat file)"
+#   docker compose run --rm claude-poc --version          # transparent (no -p) → real claude
+#
+# AUTH PORTABILITY (read this if you get "401 Invalid authentication credentials"):
+#   The container reuses your host login via the mounts below. This works only
+#   when your credentials are *file-portable*. Claude Code often keeps the live
+#   OAuth token in the OS keychain (macOS Keychain; on Linux, libsecret/gnome-
+#   keyring) and leaves ~/.claude/.credentials.json as a stale fallback. A
+#   keychain-backed host therefore mounts an expired token → 401 in the container.
+#   In that case, either:
+#     • run the native binary instead (recommended; see Makefile), or
+#     • authenticate inside the container once:
+#         docker compose run --rm --entrypoint claude claude-poc /login
+#       (or `setup-token`), or
+#     • supply a token via env: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN.
+#   The mounts are read-write so Claude can write the session JSONL the PoC reads.
+
+services:
+  claude-poc:
+    build:
+      context: .
+      args:
+        # Pin the Claude Code version if you need reproducibility, e.g. 2.1.154
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-latest}
+    image: claude-poc:latest
+    # Match the host user so the mounted ~/.claude stays writable. Override if
+    # your host uid:gid is not 1000:1000:  USERSPEC=1001:1001 docker compose ...
+    user: "${USERSPEC:-1000:1000}"
+    environment:
+      HOME: /home/node
+      # Forwarded FROM YOUR SHELL by name — values are never written here.
+      # claude authenticates with whatever your host uses: a gateway token
+      # (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL), an API key, etc.
+      ANTHROPIC_BASE_URL:
+      ANTHROPIC_AUTH_TOKEN:
+      ANTHROPIC_API_KEY:
+      ANTHROPIC_MODEL:
+      ANTHROPIC_DEFAULT_OPUS_MODEL:
+      ANTHROPIC_DEFAULT_SONNET_MODEL:
+    volumes:
+      # OAuth/keychain users mount their login state in (harmless if you use
+      # env-var auth above):
+      - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.claude.json:/home/node/.claude.json
+      - ./workspace:/work
+    working_dir: /work
+    # Prompt + flags are supplied on the `docker compose run` command line and
+    # appended to the ENTRYPOINT (claude-poc).

@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build + unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: poc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: poc
+      - name: Build (release)
+        run: cargo build --release --locked
+      - name: Unit tests
+        run: cargo test --locked
+      # End-to-end tests require an authenticated `claude` and are gated behind
+      # CLAUDE_POC_E2E; they do not run in CI.
