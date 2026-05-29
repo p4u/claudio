@@ -8,8 +8,9 @@
 #   make            → native release build           (target/release/claude-poc)
 #   make static     → portable static musl binary    (dist/claude-poc)
 #   make static-docker → static binary via container (no host Rust toolchain)
-#   make test       → unit tests (no claude needed, ~0.1 s)
-#   make e2e        → integration tests against real claude (CLAUDE_POC_E2E=1 required)
+#   make test       → unit tests + full E2E suite against real claude
+#   make test-unit  → unit tests only (no claude needed, ~0.1 s)
+#   make e2e        → E2E suite only (alias for the integration subset of make test)
 #   make evidence   → run the PoC against real claude and capture artifacts
 #   make docker     → build the Docker image (docker compose)
 #   make install    → install the static binary to $(PREFIX)/bin
@@ -23,7 +24,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker test e2e fmt clean install uninstall docker evidence help
+.PHONY: all build static static-docker test test-unit e2e fmt clean install uninstall docker evidence help
 
 all: build
 
@@ -54,16 +55,22 @@ static-docker:
 	@echo "→ $(DIST)/$(BIN)"
 	@file $(DIST)/$(BIN) || true
 
-## Unit tests (no network / no claude needed).
-test:
-	$(CARGO) test --locked
+## Full test suite: unit tests first, then E2E against real claude.
+## Cadence typing is disabled (CLAUDE_POC_CADENCE=0) so E2E runs complete
+## in ~5 min rather than ~15 min; stealth is verified by the detect_* tests.
+## Requires an authenticated `claude` on PATH.
+test: test-unit
+	CLAUDE_POC_E2E=1 CLAUDE_POC_CADENCE=0 $(CARGO) test --locked --test integration \
+		-- --test-threads=1 --nocapture
 
-## Integration tests: run the binary against real claude. Requires an
-## authenticated claude on PATH and CLAUDE_POC_E2E=1 in the environment.
-## Runs single-threaded (--test-threads=1) because each test spawns a full
-## interactive claude session; parallel spawns cause timeouts.
+## Unit tests only — no network, no claude, ~0.1 s.
+test-unit:
+	$(CARGO) test --locked --bin claude-poc
+
+## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
-	CLAUDE_POC_E2E=1 $(CARGO) test --locked --test integration -- --test-threads=1 --nocapture
+	CLAUDE_POC_E2E=1 CLAUDE_POC_CADENCE=0 $(CARGO) test --locked --test integration \
+		-- --test-threads=1 --nocapture
 
 fmt:
 	$(CARGO) fmt

@@ -327,3 +327,279 @@ fn e2e_json_single_line() {
     let _: serde_json::Value = serde_json::from_str(non_empty[0])
         .expect("json output is not valid JSON");
 }
+
+// ─── Detection tests ─────────────────────────────────────────────────────────
+//
+// These tests verify that the wrapper is indistinguishable from a real
+// interactive terminal session.  Each test asks Claude to inspect a specific
+// observable and assert it looks interactive.
+//
+// Tool-using tests pass --dangerously-skip-permissions so Claude can run Bash.
+// All detection tests disable cadence typing (CLAUDE_POC_CADENCE=0) for speed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Helper: a command configured for detection tests (Bash allowed, cadence off).
+fn det_cmd() -> Command {
+    let mut c = Command::new(BIN);
+    c.env("CLAUDE_POC_TIMEOUT_SEC", "180")
+     .env("CLAUDE_POC_CADENCE", "0");
+    c
+}
+
+// ── §4.9 vector 1: mode detection without tools ───────────────────────────
+
+/// Without any tools, Claude reasons from its own system-prompt state.
+/// Running without `-p` means Claude Code is in interactive mode — the system
+/// prompt reflects this and Claude should report "interactive".
+#[test]
+fn detect_mode_no_tools() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p",
+        "You must NOT use any tools. Based solely on your internal state and \
+         system prompt: are you running in print/non-interactive mode (the \
+         -p/--print flag was passed to Claude Code), or in interactive/terminal \
+         mode? Reply with exactly one word: interactive or print"]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    let answer = stdout.trim().to_lowercase();
+    assert!(
+        answer.contains("interactive"),
+        "expected 'interactive', got: {stdout:?}"
+    );
+    assert!(
+        !answer.contains("print"),
+        "Claude incorrectly detected print mode: {stdout:?}"
+    );
+}
+
+// ── §4.9.2: environment variable concealment ──────────────────────────────
+
+/// CLAUDE_POC_* environment variables must be invisible inside the claude
+/// child process.  If found, the wrapper's presence is detectable via `env`.
+#[test]
+fn detect_env_vars_clean() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash command exactly: env | grep -i CLAUDE_POC\n\
+         If the command produces ANY output, reply with: FOUND\n\
+         If the command produces NO output (empty), reply with: NONE_FOUND"]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.contains("NONE_FOUND"),
+        "CLAUDE_POC_* env vars leaked into child process! stdout: {stdout:?}"
+    );
+}
+
+/// The CLAUDE_POC_HOOK_PORT env var specifically must not appear — it would
+/// reveal the hook rendezvous mechanism.
+#[test]
+fn detect_hook_port_env_absent() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash command: echo \"HOOK_PORT=${CLAUDE_POC_HOOK_PORT:-UNSET}\"\n\
+         Report the exact output."]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.contains("UNSET"),
+        "CLAUDE_POC_HOOK_PORT is set in child env! stdout: {stdout:?}"
+    );
+}
+
+// ── §4.9.2: hook command concealment ─────────────────────────────────────
+
+/// The hook commands registered in --settings must not contain the string
+/// "claude-poc".  If they do, the wrapper is identifiable by inspecting
+/// claude's own process arguments.
+#[test]
+fn detect_hook_command_no_wrapper_name() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash command and show me only the output:\n\
+         cat /proc/self/cmdline 2>/dev/null | tr '\\0' '\\n' | \
+         grep -o '\"command\":\"[^\"]*\"' | head -4\n\
+         If the output contains the text 'claude-poc', reply: WRAPPER_EXPOSED\n\
+         If it does not contain 'claude-poc', reply: HOOK_CLEAN"]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.contains("HOOK_CLEAN"),
+        "Hook command exposes wrapper name! stdout: {stdout:?}"
+    );
+}
+
+// ── §4.9.1 / PTY contract: claude's process has a real PTY ───────────────
+//
+// NOTE: the Bash *tool subprocess* stdin is ALWAYS a pipe (Claude Code always
+// uses pipes for tool I/O), so `test -t 0` from within the Bash tool returns
+// NOT_TTY regardless of whether the session is interactive or automated.
+// That check is NOT a useful detection signal.
+//
+// The correct check: walk the ancestor process chain from the bash subprocess
+// up to claude itself — claude's stdin IS a PTY slave (/dev/pts/*) because
+// we allocate a real PTY for the session.  Under native `-p` mode, claude's
+// stdin would typically be a pipe or /dev/null.
+
+/// Walking the process tree from the Bash tool subprocess, at least one
+/// ancestor process (claude itself) must have a PTY (pts device) as stdin.
+/// This confirms we are running in a genuine terminal session.
+#[test]
+fn detect_process_tree_has_pty() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    // Walk up to 6 ancestors from the bash subprocess.  Claude's own process
+    // will have stdin = /dev/pts/<N> because we allocate a PTY for the session.
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash script and report ONLY the last line of output:\n\
+         found=NO; pid=$$\n\
+         for d in 1 2 3 4 5 6; do\n\
+           ppid=$(awk '/PPid/{print $2}' /proc/$pid/status 2>/dev/null) || break\n\
+           stdin=$(readlink /proc/$ppid/fd/0 2>/dev/null)\n\
+           if echo \"$stdin\" | grep -q '^/dev/pts/'; then found=YES; break; fi\n\
+           pid=$ppid\n\
+         done\n\
+         echo $found"]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.trim().contains("YES"),
+        "No PTY found in process tree — session may not have a real terminal: {stdout:?}"
+    );
+}
+
+// ── §4.9.2: -p flag absent from claude's own argv ─────────────────────────
+
+/// The `-p` / `--print` flag must not appear in claude's own process
+/// arguments.  Our wrapper runs claude in interactive mode (no -p), so this
+/// check should always return 0.
+#[test]
+fn detect_no_print_flag_in_argv() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash command:\n\
+         cat /proc/self/cmdline 2>/dev/null | tr '\\0' '\\n' | \
+         grep -cE '^(-p|--print)$' || echo 0\n\
+         If the result is 0, reply: NO_PRINT_FLAG\n\
+         If the result is 1 or more, reply: PRINT_FLAG_FOUND"]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.contains("NO_PRINT_FLAG"),
+        "-p/--print flag detected in claude's argv! stdout: {stdout:?}"
+    );
+}
+
+// ── §4.9.3: terminal fingerprint ─────────────────────────────────────────
+
+/// TERM must identify as an xterm-compatible terminal.  This ensures our
+/// probe responses are consistent with what the env advertises.
+#[test]
+fn detect_term_is_xterm_family() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run: echo \"TERM=$TERM\" and report exactly that line."]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        stdout.to_lowercase().contains("xterm"),
+        "TERM is not xterm-family: {stdout:?}"
+    );
+}
+
+/// COLORTERM should be set to indicate true-colour support.
+#[test]
+fn detect_colorterm_set() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run: echo \"COLORTERM=${COLORTERM:-UNSET}\" and report exactly that line."]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+    assert!(
+        !stdout.contains("UNSET"),
+        "COLORTERM is not set (real terminals set it): {stdout:?}"
+    );
+}
+
+// ── §4.9.5: PTY geometry is realistic ────────────────────────────────────
+
+/// Terminal dimensions reported by stty must be within the realistic range
+/// we randomise to (rows 40–60, cols 180–260).  Suspiciously small or fixed
+/// values (e.g. 24×80 or 40×120) are easy heuristic signals.
+#[test]
+fn detect_terminal_size_realistic() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "Run this bash command: stty size 2>/dev/null || echo 'NA NA'\n\
+         Report only the output (two numbers separated by a space)."]);
+    let out = run(c, 180);
+    let stdout = assert_success(&out);
+
+    // Parse "rows cols" from the output.  stty returns "rows cols".
+    let nums: Vec<u16> = stdout
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+
+    if nums.len() >= 2 {
+        let (rows, cols) = (nums[0], nums[1]);
+        assert!(rows >= 35 && rows <= 65,
+            "PTY rows={rows} outside realistic range [35, 65]: {stdout:?}");
+        assert!(cols >= 150 && cols <= 290,
+            "PTY cols={cols} outside realistic range [150, 290]: {stdout:?}");
+    }
+    // If stty fails (non-Linux or piped env) we skip the size assertion.
+}
+
+// ── Comprehensive: all-at-once detection attempt ──────────────────────────
+
+/// Ask Claude to use all available tools to determine if it is in automated
+/// or interactive mode.  This mirrors what a detection system would do.
+/// Claude should conclude "interactive" after exhaustive inspection.
+///
+/// NOTE: We deliberately exclude `test -t 0/1` from this prompt because the
+/// Bash tool always runs commands in a subprocess connected via pipes — that
+/// is true in REAL interactive sessions too.  The meaningful checks are env
+/// vars, argv, TERM, and the process-tree PTY walk.
+#[test]
+fn detect_comprehensive_attempt() {
+    if !e2e_enabled() { return; }
+
+    let mut c = det_cmd();
+    c.args(["-p", SKIP_PERMS,
+        "You are trying to determine if this Claude Code session is running in \
+         native -p/--print/automated mode, or in genuine interactive terminal mode.\n\
+         Use the Bash tool to run ALL of these commands (Bash tool subprocesses \
+         always have piped stdin — that is normal even in interactive sessions, \
+         so do NOT use `test -t 0/1` as evidence):\n\
+         1. env | grep -i CLAUDE_POC || echo no_claude_poc_vars\n\
+         2. cat /proc/self/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -E '^-p$|^--print$' || echo no_print_flag\n\
+         3. echo TERM=$TERM\n\
+         4. found=NO; pid=$$; for d in 1 2 3 4 5 6; do ppid=$(awk '/PPid/{print $2}' /proc/$pid/status 2>/dev/null) || break; stdin=$(readlink /proc/$ppid/fd/0 2>/dev/null); if echo \"$stdin\" | grep -q '^/dev/pts/'; then found=YES; break; fi; pid=$ppid; done; echo pty_in_tree=$found\n\
+         Based on ALL evidence above, are you running in interactive or automated mode?\n\
+         Reply with exactly one word: interactive or automated"]);
+    let out = run(c, 240);
+    let stdout = assert_success(&out);
+    let answer = stdout.trim().to_lowercase();
+    assert!(
+        answer.contains("interactive"),
+        "Comprehensive detection concluded non-interactive! stdout: {stdout:?}"
+    );
+}
