@@ -111,18 +111,43 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
 
     let listener = Listener::start(env.hook_transport).map_err(|e| DriverError::Spawn(e.to_string()))?;
 
+    // §4.9.2 — set up neutral relay binary (TCP transport only).
+    // On failure we fall back to the legacy __hook path — no hard error.
+    let relay = listener.port().and_then(|_p| hooks::Relay::setup().ok());
+
     let exe = std::env::current_exe()
         .map_err(|e| DriverError::Internal(e.to_string()))?
         .to_string_lossy()
         .into_owned();
-    let (settings, settings_warns) = hooks::build_settings_merged(&exe, parsed.user_settings.as_deref());
+    let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
+    let (settings, settings_warns) = hooks::build_settings_merged(&exe, relay_arg, parsed.user_settings.as_deref());
     for w in &settings_warns {
         eprintln!("claude-poc: {w}");
     }
 
-    // Assemble the child argv: our injected flags first (so they parse as
-    // options regardless of any later `--`), then everything the user passed
-    // that we don't own. The prompt is NOT here — we type it.
+    // §4.9.5 — randomise PTY geometry per session within realistic ranges.
+    let (cols, rows) = {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xabcdef12);
+        let cols = if env.cols == 120 {
+            // Default not overridden: vary between 180 and 260 (common terminal widths).
+            180 + (seed % 81) as u16
+        } else {
+            env.cols
+        };
+        let rows = if env.rows == 40 {
+            // Default not overridden: vary between 40 and 60.
+            40 + (seed >> 8 & 0x1f) as u16
+        } else {
+            env.rows
+        };
+        (cols, rows)
+    };
+    trace!(debug, start, "PTY size: {cols}×{rows}");
+
+    // Assemble child argv.
     let mut cargs: Vec<String> = Vec::new();
     cargs.push("--settings".into());
     cargs.push(settings);
@@ -136,28 +161,41 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
     for a in &cargs {
         cmd.arg(a);
     }
-    // The child inherits our full environment (portable-pty seeds it from
-    // std::env), so every variable claude honors — ANTHROPIC_*, CLAUDE_CODE_*,
-    // proxies, etc. — passes through unchanged. We add only our hook-relay vars
-    // and ensure a sane TERM (preferring the user's, defaulting to a value our
-    // probe responder satisfies) so Ink renders.
+
+    // §4.9.2 — rebuild child environment WITHOUT any CLAUDE_POC_* vars.
+    // portable-pty seeds CommandBuilder from std::env, so we clear and
+    // re-add everything except our own wrapper vars.  ANTHROPIC_*, proxies,
+    // CLAUDE_CODE_* all pass through unchanged.
+    cmd.env_clear();
+    for (k, v) in std::env::vars() {
+        if !k.starts_with("CLAUDE_POC_") {
+            cmd.env(k, v);
+        }
+    }
+    // File-transport hook dir still needs to reach the child (it's not a port).
     for (k, v) in listener.child_env() {
         cmd.env(k, v);
     }
+    // Ensure a sane TERM that matches our probe responses.
     let term = std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into());
     cmd.env("TERM", term);
+    // COLORTERM tells apps (including Ink) we support 24-bit colour — matches
+    // what real xterm / most modern terminals advertise.
+    if std::env::var("COLORTERM").is_err() {
+        cmd.env("COLORTERM", "truecolor");
+    }
     if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
     }
 
     let pty = native_pty_system();
     let pair = pty
-        .openpty(PtySize { rows: env.rows, cols: env.cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| DriverError::Spawn(e.to_string()))?;
     let child = pair.slave.spawn_command(cmd).map_err(|e| DriverError::Spawn(e.to_string()))?;
     let mut guard = ChildGuard { child };
     drop(pair.slave);
-    trace!(debug, start, "claude spawned under PTY ({}x{})", env.cols, env.rows);
+    trace!(debug, start, "claude spawned under PTY ({}x{})", cols, rows);
 
     let writer = Arc::new(Mutex::new(
         pair.master.take_writer().map_err(|e| DriverError::Spawn(e.to_string()))?,
@@ -174,8 +212,6 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
     {
         let writer = Arc::clone(&writer);
         let shared = Arc::clone(&shared);
-        let rows = env.rows;
-        let cols = env.cols;
         thread::spawn(move || {
             let mut responder = ProbeResponder::new(rows, cols);
             let mut buf = [0u8; 8192];
@@ -312,16 +348,103 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
     Ok(RunResult { summary, duration_ms, failure })
 }
 
-fn type_prompt(writer: &Arc<Mutex<Box<dyn Write + Send>>>, prompt: &str) -> std::io::Result<()> {
-    // Ink merges back-to-back writes via its bracketed-paste/burst heuristic;
-    // a gap between the body and Enter makes it register two events so the
-    // Enter submits rather than landing in the input buffer.
-    {
-        let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
-        w.write_all(prompt.as_bytes())?;
-        w.flush()?;
+// ─────────────────────────────────────────────────────────────────────────────
+// §4.9.1 — Typing cadence: per-character delays that mimic human input.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Minimal XOR-shift PRNG — no external dependency.
+struct Rng(u64);
+impl Rng {
+    fn from_time() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x853c49e6748fea9b);
+        let mut r = Self(seed | 1);
+        for _ in 0..16 { r.next(); } // Warm up.
+        r
     }
-    thread::sleep(Duration::from_millis(150));
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    /// Uniform random in [lo, hi).
+    fn range(&mut self, lo: u64, hi: u64) -> u64 {
+        lo + self.next() % (hi - lo)
+    }
+}
+
+/// Type `prompt` character-by-character with human-like cadence (§4.9.1),
+/// then send Enter after a randomised dwell.
+///
+/// Enabled by default.  Set `CLAUDE_POC_CADENCE=0` to revert to single-burst
+/// delivery (faster, useful when typing latency matters more than stealth).
+fn type_prompt(writer: &Arc<Mutex<Box<dyn Write + Send>>>, prompt: &str) -> std::io::Result<()> {
+    let cadence = std::env::var("CLAUDE_POC_CADENCE").map(|v| v != "0").unwrap_or(true);
+
+    if !cadence {
+        // Fast burst path — send everything at once then pause before Enter.
+        {
+            let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
+            w.write_all(prompt.as_bytes())?;
+            w.flush()?;
+        }
+        thread::sleep(Duration::from_millis(150));
+        let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
+        w.write_all(b"\r")?;
+        w.flush()?;
+        return Ok(());
+    }
+
+    let mut rng = Rng::from_time();
+
+    // Sample a per-session WPM from 45–95.  This gives base delay:
+    //   base_us = 60_000_000 µs/min  ÷  (5 chars/word × WPM)
+    // e.g. 70 WPM → ~171 µs/char base.
+    let wpm = rng.range(45, 96);
+    let base_us = 60_000_000u64 / (5 * wpm);
+
+    let bytes = prompt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+
+        // Multiplicative jitter in [0.4, 1.6] (100 steps of 1.2 / 100).
+        let jitter = 40 + rng.next() % 121; // 40–160 → ÷100
+        let base_delay = base_us * jitter / 100;
+
+        // Contextual multiplier: word boundary or punctuation → slower.
+        let delay_us = if ch == ' ' || ch == '\t' || ch == '\n' {
+            base_delay * 3 / 2           // 1.5× after whitespace
+        } else if ".!?,;:".contains(ch) {
+            base_delay * 2               // 2× after punctuation
+        } else {
+            base_delay
+        };
+
+        // Rare "think" pause (~1 % of characters, 150–700 ms).
+        let think_us = if rng.range(0, 100) == 0 {
+            rng.range(150_000, 700_001)
+        } else {
+            0
+        };
+
+        thread::sleep(Duration::from_micros(delay_us + think_us));
+
+        {
+            let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
+            w.write_all(&bytes[i..i + 1])?;
+            w.flush()?;
+        }
+        i += 1;
+    }
+
+    // Pre-Enter dwell: 180–520 ms (randomised per session).
+    let dwell_ms = rng.range(180, 521);
+    thread::sleep(Duration::from_millis(dwell_ms));
+
     {
         let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
         w.write_all(b"\r")?;

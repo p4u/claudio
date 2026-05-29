@@ -25,7 +25,22 @@ use emit::Outcome;
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
 
-    // Hook relay mode, invoked by Claude Code: `claude-poc __hook <Event>`.
+    // §4.9.2 concealed relay: invoked as `<neutral-binary> <EventName> <port>`.
+    // The binary is a copy of ourselves with a random hex name in /tmp; the hook
+    // command is `<copy> Stop 49152` — no wrapper name, no env var.
+    if argv.len() == 3 {
+        if let Ok(port) = argv[2].parse::<u16>() {
+            if matches!(argv[1].as_str(),
+                "SessionStart" | "Stop" | "PreToolUse" | "PostToolUse"
+                | "PreCompact" | "PostCompact" | "Notification"
+            ) {
+                hooks::relay_to_port(&argv[1], port);
+                return std::process::ExitCode::SUCCESS;
+            }
+        }
+    }
+
+    // Legacy relay mode, invoked as `claude-poc __hook <Event>`.
     if argv.len() >= 3 && argv[1] == "__hook" {
         hooks::run_relay(&argv[2]);
         return std::process::ExitCode::SUCCESS;
