@@ -164,4 +164,108 @@ mod tests {
         assert_eq!(payload_field(p, "last_assistant_message").as_deref(), Some("OK"));
         assert_eq!(payload_field(p, "missing"), None);
     }
+
+    #[test]
+    fn empty_file_returns_none() {
+        let path = write_tmp("empty", "");
+        assert!(parse_transcript(&path, true).is_none());
+        assert!(parse_transcript(&path, false).is_none());
+    }
+
+    #[test]
+    fn malformed_json_lines_are_skipped() {
+        let jsonl = concat!(
+            "not json at all\n",
+            r#"{"type":"user","sessionId":"s1"}"#, "\n",
+            "{ broken json }\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("malformed", jsonl);
+        let s = parse_transcript(&path, true).unwrap();
+        assert_eq!(s.final_text, "ok");
+    }
+
+    #[test]
+    fn session_id_camelcase_extracted() {
+        let jsonl = concat!(
+            r#"{"type":"user","sessionId":"camel-sid"}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("camelcase", jsonl);
+        assert_eq!(parse_transcript(&path, true).unwrap().session_id, "camel-sid");
+    }
+
+    #[test]
+    fn session_id_snake_case_fallback() {
+        let jsonl = concat!(
+            r#"{"type":"user","session_id":"snake-sid"}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("snakecase", jsonl);
+        assert_eq!(parse_transcript(&path, true).unwrap().session_id, "snake-sid");
+    }
+
+    #[test]
+    fn num_turns_counts_all_assistant_lines() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t1"}],"stop_reason":"tool_use"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t2"}],"stop_reason":"tool_use"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("numturns", jsonl);
+        let s = parse_transcript(&path, true).unwrap();
+        assert_eq!(s.num_turns, 3);
+        assert_eq!(s.final_text, "final");
+    }
+
+    #[test]
+    fn content_as_plain_string_extracted() {
+        // Some older Claude transcript versions use a plain string for content.
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":"plain string answer","stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("contentstr", jsonl);
+        let s = parse_transcript(&path, true).unwrap();
+        assert_eq!(s.final_text, "plain string answer");
+    }
+
+    #[test]
+    fn multi_content_blocks_concatenated() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("multiblocks", jsonl);
+        assert_eq!(parse_transcript(&path, true).unwrap().final_text, "hello world");
+    }
+
+    #[test]
+    fn non_text_blocks_skipped() {
+        // tool_use blocks have no "text" field — they must not crash or appear.
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"x"},{"type":"text","text":"answer"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("nontext", jsonl);
+        assert_eq!(parse_transcript(&path, true).unwrap().final_text, "answer");
+    }
+
+    #[test]
+    fn payload_field_invalid_json_returns_none() {
+        assert_eq!(payload_field("{bad json}", "field"), None);
+        assert_eq!(payload_field("", "field"), None);
+    }
+
+    #[test]
+    fn payload_field_non_object_returns_none() {
+        assert_eq!(payload_field("[1,2,3]", "field"), None);
+    }
+
+    #[test]
+    fn read_with_retry_finds_content_immediately() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"retry-ok"}],"stop_reason":"end_turn"}}"#, "\n",
+        );
+        let path = write_tmp("retry", jsonl);
+        let s = read_with_retry(&path, 3, std::time::Duration::from_millis(1)).unwrap();
+        assert_eq!(s.final_text, "retry-ok");
+    }
 }

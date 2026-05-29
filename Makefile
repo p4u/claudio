@@ -8,7 +8,8 @@
 #   make            → native release build           (target/release/claude-poc)
 #   make static     → portable static musl binary    (dist/claude-poc)
 #   make static-docker → static binary via container (no host Rust toolchain)
-#   make test       → unit tests
+#   make test       → unit tests (no claude needed, ~0.1 s)
+#   make e2e        → integration tests against real claude (CLAUDE_POC_E2E=1 required)
 #   make evidence   → run the PoC against real claude and capture artifacts
 #   make docker     → build the Docker image (docker compose)
 #   make install    → install the static binary to $(PREFIX)/bin
@@ -22,7 +23,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker test fmt clean install uninstall docker evidence help
+.PHONY: all build static static-docker test e2e fmt clean install uninstall docker evidence help
 
 all: build
 
@@ -56,6 +57,13 @@ static-docker:
 ## Unit tests (no network / no claude needed).
 test:
 	$(CARGO) test --locked
+
+## Integration tests: run the binary against real claude. Requires an
+## authenticated claude on PATH and CLAUDE_POC_E2E=1 in the environment.
+## Runs single-threaded (--test-threads=1) because each test spawns a full
+## interactive claude session; parallel spawns cause timeouts.
+e2e:
+	CLAUDE_POC_E2E=1 $(CARGO) test --locked --test integration -- --test-threads=1 --nocapture
 
 fmt:
 	$(CARGO) fmt

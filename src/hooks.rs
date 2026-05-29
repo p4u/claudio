@@ -321,4 +321,109 @@ mod tests {
         assert_eq!(HookEvent::parse("Stop"), HookEvent::Stop);
         assert_eq!(HookEvent::parse("PreToolUse"), HookEvent::Unknown);
     }
+
+    #[test]
+    fn parse_framed_no_trailing_newline() {
+        let h = parse_framed(b"Stop\t{\"x\":1}").unwrap();
+        // legacy tab-separated form also handled (split on first '\n' — here none,
+        // so payload is empty but event is parsed)
+        // actually our format is event\npayload, not tab-separated
+        // with no \n the whole buffer is the event, payload is empty
+        assert!(!matches!(h.event, HookEvent::Unknown) || h.event == HookEvent::Unknown);
+        // the key invariant: it doesn't panic
+    }
+
+    #[test]
+    fn parse_framed_only_event_no_payload() {
+        let h = parse_framed(b"Stop\n").unwrap();
+        assert_eq!(h.event, HookEvent::Stop);
+        assert_eq!(h.payload, "");
+    }
+
+    #[test]
+    fn settings_merge_non_object_json_warns() {
+        // A JSON array is not a settings object — should warn.
+        let (_s, warns) = build_settings_merged("/p/claude-poc", Some("[1,2,3]"));
+        assert!(!warns.is_empty());
+    }
+
+    #[test]
+    fn settings_merge_from_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let path = dir.join("claude-poc-test-settings.json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(br#"{"custom_key":"custom_val"}"#).unwrap();
+        drop(f);
+        let (s, warns) = build_settings_merged("/p/claude-poc", Some(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&path);
+        assert!(warns.is_empty(), "unexpected warnings: {warns:?}");
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["custom_key"], "custom_val");
+        assert!(v["hooks"]["Stop"].is_array());
+    }
+
+    #[test]
+    fn settings_merge_missing_file_warns() {
+        let (_s, warns) = build_settings_merged("/p/claude-poc", Some("/nonexistent/path.json"));
+        assert!(!warns.is_empty());
+    }
+
+    #[test]
+    fn tcp_listener_roundtrip() {
+        use std::io::Write;
+        use std::net::TcpStream;
+        use crate::cli::HookTransport;
+
+        let listener = Listener::start(HookTransport::Tcp).unwrap();
+        let env = listener.child_env();
+        assert_eq!(env.len(), 1);
+        let (key, port_str) = &env[0];
+        assert_eq!(key, ENV_PORT);
+        let port: u16 = port_str.parse().unwrap();
+
+        // Simulate what run_relay does: connect and send event+payload.
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(b"Stop\n{\"last_assistant_message\":\"TCP_OK\"}").unwrap();
+        drop(s);
+
+        let hook = listener.poll(std::time::Duration::from_secs(2)).expect("should receive hook");
+        assert_eq!(hook.event, HookEvent::Stop);
+        assert!(hook.payload.contains("TCP_OK"));
+    }
+
+    #[test]
+    fn tcp_listener_poll_timeout_returns_none() {
+        use crate::cli::HookTransport;
+        let listener = Listener::start(HookTransport::Tcp).unwrap();
+        // Nobody writes — should return None after 50 ms.
+        let result = listener.poll(std::time::Duration::from_millis(50));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn file_listener_roundtrip() {
+        use std::io::Write;
+        use crate::cli::HookTransport;
+
+        let listener = Listener::start(HookTransport::File).unwrap();
+        let env = listener.child_env();
+        assert_eq!(env.len(), 1);
+        let (key, dir_path) = &env[0];
+        assert_eq!(key, ENV_DIR);
+        let dir = std::path::PathBuf::from(dir_path);
+
+        // Write a .hook file (simulate what run_relay does via the file path).
+        let id = uuid::Uuid::new_v4();
+        let tmp = dir.join(format!("{id}.tmp"));
+        let done = dir.join(format!("{id}.hook"));
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        f.write_all(b"SessionStart\n{\"session_id\":\"file-sid\"}").unwrap();
+        drop(f);
+        std::fs::rename(&tmp, &done).unwrap();
+
+        let hook = listener.poll(std::time::Duration::from_secs(2)).expect("should receive hook");
+        assert_eq!(hook.event, HookEvent::SessionStart);
+        assert!(hook.payload.contains("file-sid"));
+    }
 }

@@ -453,4 +453,83 @@ mod tests {
         assert_eq!(classify_failure("Do you trust this folder?", true), "workspace_trust_blocked");
         assert_eq!(classify_failure("", false), "assistant_output_timeout");
     }
+
+    #[test]
+    fn classify_api_error_403() {
+        assert_eq!(classify_failure("API Error: 403 forbidden", true), "auth_blocked");
+    }
+
+    #[test]
+    fn classify_usage_limit() {
+        assert_eq!(classify_failure("You have exceeded your usage limit", true), "rate_limit");
+        assert_eq!(classify_failure("rate limit exceeded", true), "rate_limit");
+    }
+
+    #[test]
+    fn classify_tool_approval() {
+        assert_eq!(
+            classify_failure("permission required — allow or deny?", true),
+            "tool_approval_blocked"
+        );
+    }
+
+    #[test]
+    fn classify_trust_compact() {
+        // After CSI stripping the dialog words may run together.
+        assert_eq!(
+            classify_failure("doyoutrustthisfolder", true),
+            "workspace_trust_blocked"
+        );
+    }
+
+    #[test]
+    fn classify_got_stop_no_answer() {
+        // stop received but transcript had no text
+        assert_eq!(classify_failure("", true), "assistant_output_not_found");
+    }
+
+    #[test]
+    fn strip_csi_bold_and_cursor_move() {
+        assert_eq!(strip_escapes(b"\x1b[1mhello\x1b[0m"), "hello");
+        assert_eq!(strip_escapes(b"do\x1b[1Cyou\x1b[1Ctrust"), "doyoutrust");
+    }
+
+    #[test]
+    fn strip_osc_sequence() {
+        // OSC 0 (set window title): ESC ] 0 ; title BEL
+        let input = b"before\x1b]0;My Terminal\x07after";
+        assert_eq!(strip_escapes(input), "beforeafter");
+    }
+
+    #[test]
+    fn strip_osc_st_terminated() {
+        // OSC terminated by ST (ESC \) instead of BEL
+        let input = b"x\x1b]2;title\x1b\\y";
+        assert_eq!(strip_escapes(input), "xy");
+    }
+
+    #[test]
+    fn strip_dcs_sequence() {
+        // DCS (ESC P ... ESC \)
+        let input = b"a\x1bP>|xterm\x1b\\b";
+        assert_eq!(strip_escapes(input), "ab");
+    }
+
+    #[test]
+    fn strip_leaves_plain_text() {
+        assert_eq!(strip_escapes(b"hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_incomplete_escape_at_end() {
+        // Incomplete escape at end of buffer should not panic.
+        assert_eq!(strip_escapes(b"text\x1b"), "text");
+    }
+
+    #[test]
+    fn strip_two_letter_escape() {
+        // ESC M (reverse index) — 2-byte sequence, no bracket
+        let input = b"a\x1bMb";
+        assert_eq!(strip_escapes(input), "ab");
+    }
 }

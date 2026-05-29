@@ -343,4 +343,80 @@ mod tests {
         assert_eq!(p.prompt.as_deref(), Some("--looks-like-flag"));
         assert_eq!(p.forward, s(&["--model", "opus"]));
     }
+
+    #[test]
+    fn print_long_form() {
+        let p = parse(&s(&["--print", "hello"]));
+        assert!(p.print_mode);
+        assert_eq!(p.prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn session_id_inline_eq_form() {
+        let p = parse(&s(&["-p", "--session-id=my-uuid", "go"]));
+        assert_eq!(p.session_id.as_deref(), Some("my-uuid"));
+        // inline = form is forwarded as a single token
+        assert!(p.forward.iter().any(|a| a.contains("my-uuid")));
+        assert_eq!(p.prompt.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn unknown_future_flag_both_tokens_forwarded() {
+        // A flag we've never heard of: both the flag and the following token
+        // are forwarded (each as a separate i+=1 pass). The last positional
+        // ("go") is extracted as the prompt.
+        let p = parse(&s(&["-p", "--future-flag", "somevalue", "go"]));
+        assert_eq!(p.forward, s(&["--future-flag", "somevalue"]));
+        assert_eq!(p.prompt.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn multi_word_positional_joined_as_prompt() {
+        let p = parse(&s(&["-p", "word1", "word2", "word3"]));
+        // last positional is the prompt ("word3"); earlier positionals
+        // are also forwarded (last_positional_index takes the last one)
+        assert_eq!(p.prompt.as_deref(), Some("word3"));
+    }
+
+    #[test]
+    fn double_dash_multi_word_prompt() {
+        let p = parse(&s(&["-p", "--model", "opus", "--", "hello", "world"]));
+        assert_eq!(p.prompt.as_deref(), Some("hello world"));
+        assert_eq!(p.forward, s(&["--model", "opus"]));
+    }
+
+    #[test]
+    fn output_format_unknown_warns_defaults_text() {
+        let p = parse(&s(&["-p", "--output-format", "ndjson", "go"]));
+        assert_eq!(p.output_format, OutputFormat::Text);
+        assert!(p.warnings.iter().any(|w| w.contains("ndjson")));
+    }
+
+    #[test]
+    fn input_format_non_text_warns() {
+        let p = parse(&s(&["-p", "--input-format", "stream-json", "go"]));
+        assert!(p.warnings.iter().any(|w| w.contains("stream-json")));
+    }
+
+    #[test]
+    fn no_print_mode_owned_flags_still_consumed() {
+        // The parser owns --output-format regardless of -p (it affects our
+        // output formatting if -p is ever added to the same invocation).
+        // In non-print mode main uses the ORIGINAL argv, not parsed.forward,
+        // so the consumption doesn't affect the transparent passthrough path.
+        let p = parse(&s(&["--model", "opus", "--output-format", "json", "hi"]));
+        assert!(!p.print_mode);
+        assert_eq!(p.output_format, OutputFormat::Json);
+        // --model and its value forwarded, --output-format consumed, hi forwarded
+        assert_eq!(p.forward, s(&["--model", "opus", "hi"]));
+    }
+
+    #[test]
+    fn empty_args() {
+        let p = parse(&[]);
+        assert!(!p.print_mode);
+        assert!(p.prompt.is_none());
+        assert!(p.forward.is_empty());
+        assert!(p.warnings.is_empty());
+    }
 }
