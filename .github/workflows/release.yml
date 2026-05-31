@@ -46,15 +46,15 @@ jobs:
           # musl static binaries report "not a dynamic executable".
           ldd "target/$TARGET/release/$BIN" 2>&1 || true
 
-      - name: Package
+      - name: Stage the binary as a release asset
         id: pkg
         run: |
-          version="${GITHUB_REF_NAME}"
-          asset="${BIN}-${version}-${TARGET}"
-          mkdir -p dist
-          install -m755 "target/$TARGET/release/$BIN" "dist/$BIN"
-          tar -C dist -czf "${asset}.tar.gz" "$BIN"
-          sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256"
+          # Publish the static binary under its plain name, `claudio`, so it can
+          # be downloaded and run directly (the version/target are in the release
+          # tag and notes). Plus a checksum.
+          asset="$BIN"
+          install -m755 "target/$TARGET/release/$BIN" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 
       - name: Upload run artifact (always)
@@ -62,8 +62,8 @@ jobs:
         with:
           name: ${{ steps.pkg.outputs.asset }}
           path: |
-            ${{ steps.pkg.outputs.asset }}.tar.gz
-            ${{ steps.pkg.outputs.asset }}.tar.gz.sha256
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.asset }}.sha256
           if-no-files-found: error
 
       - name: Publish GitHub Release
@@ -71,7 +71,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ steps.pkg.outputs.asset }}.tar.gz
-            ${{ steps.pkg.outputs.asset }}.tar.gz.sha256
+            ${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.asset }}.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
