@@ -17,7 +17,10 @@
 //! - Each test uses a unique prompt token (e.g. `E2E_TEXT_OK`) so assertion
 //!   matches are unambiguous even if Claude adds surrounding text.
 
-use std::process::{Command, Output};
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_claudio");
 const SKIP_PERMS: &str = "--dangerously-skip-permissions";
@@ -602,4 +605,180 @@ fn detect_comprehensive_attempt() {
         answer.contains("interactive"),
         "Comprehensive detection concluded non-interactive! stdout: {stdout:?}"
     );
+}
+
+// ─── API mode tests (`claudio --api`) ─────────────────────────────────────────
+//
+// These exercise the OpenAI-compatible server. /health, /v1/models, and auth
+// need no `claude` turn; the chat-completion test does (it resolves through the
+// PTY backend, like `claudio -p`). All are gated on CLAUDIO_E2E so they run
+// under `make e2e` / `make test`, which is single-threaded — avoiding port
+// races between the spawned servers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Grab a currently-free loopback port by binding to :0 and releasing it.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A `claudio --api` server child, killed on drop.
+struct ApiServer {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl ApiServer {
+    fn start(extra_env: &[(&str, &str)]) -> Self {
+        let port = free_port();
+        let mut c = Command::new(BIN);
+        c.arg("--api")
+            .env("CLAUDIO_API_BIND", format!("127.0.0.1:{port}"))
+            .env("CLAUDIO_TIMEOUT_SEC", "150")
+            .env("CLAUDIO_CADENCE", "0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (k, v) in extra_env {
+            c.env(k, v);
+        }
+        let child = c.spawn().expect("failed to spawn claudio --api");
+        let srv = ApiServer { child, port };
+        srv.wait_ready();
+        srv
+    }
+
+    /// Poll until the server returns any HTTP response (or time out). We accept
+    /// any status — when an API key is configured, even /health answers 401,
+    /// which still proves the listener is up.
+    fn wait_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Ok(resp) = self.request("GET", "/health", None, &[]) {
+                if resp.starts_with("HTTP/") {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("claudio --api did not become ready on port {}", self.port);
+    }
+
+    /// Issue one HTTP/1.1 request over a fresh connection; return the raw
+    /// response (status line + headers + body).
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> std::io::Result<String> {
+        let mut s = TcpStream::connect(("127.0.0.1", self.port))?;
+        s.set_read_timeout(Some(Duration::from_secs(160)))?;
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        if let Some(b) = body {
+            req.push_str("Content-Type: application/json\r\n");
+            req.push_str(&format!("Content-Length: {}\r\n", b.len()));
+        }
+        req.push_str("\r\n");
+        if let Some(b) = body {
+            req.push_str(b);
+        }
+        s.write_all(req.as_bytes())?;
+        s.flush()?;
+        let mut resp = String::new();
+        s.read_to_string(&mut resp)?;
+        Ok(resp)
+    }
+}
+
+impl Drop for ApiServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Split an HTTP response into (status_line, body).
+fn split_response(resp: &str) -> (&str, &str) {
+    let status = resp.lines().next().unwrap_or("");
+    let body = resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    (status, body)
+}
+
+/// `/health` returns 200 and "ok".
+#[test]
+fn api_health_ok() {
+    if !e2e_enabled() { return; }
+    let srv = ApiServer::start(&[]);
+    let resp = srv.request("GET", "/health", None, &[]).unwrap();
+    let (status, body) = split_response(&resp);
+    assert!(status.contains("200 OK"), "status: {status:?}");
+    assert!(body.contains("ok"), "body: {body:?}");
+}
+
+/// `/v1/models` lists the curated Claude models.
+#[test]
+fn api_models_list() {
+    if !e2e_enabled() { return; }
+    let srv = ApiServer::start(&[]);
+    let resp = srv.request("GET", "/v1/models", None, &[]).unwrap();
+    let (status, body) = split_response(&resp);
+    assert!(status.contains("200 OK"), "status: {status:?}");
+    let v: serde_json::Value = serde_json::from_str(body).expect("models JSON");
+    assert_eq!(v["object"], "list");
+    let ids: Vec<&str> = v["data"].as_array().unwrap().iter()
+        .filter_map(|m| m["id"].as_str()).collect();
+    assert!(ids.contains(&"opus") && ids.contains(&"sonnet") && ids.contains(&"haiku"),
+        "model ids: {ids:?}");
+}
+
+/// An unknown, non-Claude model id is rejected.
+#[test]
+fn api_models_unknown_rejected() {
+    if !e2e_enabled() { return; }
+    let srv = ApiServer::start(&[]);
+    let resp = srv.request("GET", "/v1/models/gpt-4o", None, &[]).unwrap();
+    let (status, _) = split_response(&resp);
+    assert!(status.contains("400"), "expected 400 for unknown model, got: {status:?}");
+}
+
+/// When an API key is configured, requests need a matching bearer token.
+#[test]
+fn api_auth_required() {
+    if !e2e_enabled() { return; }
+    let srv = ApiServer::start(&[("CLAUDIO_API_KEY", "s3cret")]);
+
+    let no_key = srv.request("GET", "/v1/models", None, &[]).unwrap();
+    assert!(split_response(&no_key).0.contains("401"), "expected 401 without key");
+
+    let bad = srv.request("GET", "/v1/models", None, &[("Authorization", "Bearer nope")]).unwrap();
+    assert!(split_response(&bad).0.contains("401"), "expected 401 with wrong key");
+
+    let good = srv.request("GET", "/v1/models", None, &[("Authorization", "Bearer s3cret")]).unwrap();
+    assert!(split_response(&good).0.contains("200 OK"), "expected 200 with correct key");
+}
+
+/// End-to-end: a non-streaming chat completion is resolved through the PTY
+/// backend and returned in OpenAI shape, with a real usage object.
+#[test]
+fn api_chat_completion_roundtrip() {
+    if !e2e_enabled() { return; }
+    let srv = ApiServer::start(&[]);
+    let body = r#"{"model":"haiku","messages":[{"role":"user","content":"Reply with exactly: API_E2E_OK"}]}"#;
+    let resp = srv.request("POST", "/v1/chat/completions", Some(body), &[]).unwrap();
+    let (status, json_body) = split_response(&resp);
+    assert!(status.contains("200 OK"), "status: {status:?}\nfull: {resp}");
+    let v: serde_json::Value = serde_json::from_str(json_body).expect("completion JSON");
+    assert_eq!(v["object"], "chat.completion");
+    assert_eq!(v["choices"][0]["message"]["role"], "assistant");
+    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    assert!(content.contains("API_E2E_OK"), "unexpected content: {content:?}");
+    // Real usage flows through from the transcript.
+    assert!(v["usage"]["total_tokens"].as_u64().unwrap_or(0) > 0, "missing usage: {v}");
 }

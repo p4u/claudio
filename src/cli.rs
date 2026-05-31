@@ -15,6 +15,8 @@
 //!
 //! Flags this wrapper owns:
 //!   -p/--print            mode switch (consumed; not forwarded)
+//!   --api                 run the OpenAI-compatible API server (consumed)
+//!   --fast                strip human-like delays for lowest latency (consumed)
 //!   --output-format       we format output ourselves (consumed)
 //!   --input-format        only `text` supported by this backend (consumed)
 //!   --settings            captured; merged with our hooks; re-injected
@@ -54,6 +56,12 @@ pub enum HookTransport {
 #[derive(Debug)]
 pub struct Parsed {
     pub print_mode: bool,
+    /// `--api`: run the OpenAI-compatible API server instead of a single turn.
+    /// Mutually exclusive with the `-p` print path; takes precedence in `main`.
+    pub api_mode: bool,
+    /// `--fast`: strip the human-like delays (typing cadence, Ink-quiescence
+    /// wait, pre-Enter dwell) for lowest latency. OR-ed with `CLAUDIO_FAST`.
+    pub fast: bool,
     pub output_format: OutputFormat,
     pub session_id: Option<String>,
     pub user_settings: Option<String>,
@@ -94,6 +102,8 @@ fn split_eq(tok: &str) -> (&str, Option<&str>) {
 pub fn parse(args: &[String]) -> Parsed {
     let mut p = Parsed {
         print_mode: false,
+        api_mode: false,
+        fast: false,
         output_format: OutputFormat::Text,
         session_id: None,
         user_settings: None,
@@ -133,6 +143,18 @@ pub fn parse(args: &[String]) -> Parsed {
         match flag {
             "-p" | "--print" => {
                 p.print_mode = true;
+                i += 1;
+            }
+            "--api" => {
+                // Owned switch: start the OpenAI-compatible API server. All
+                // server configuration lives in CLAUDIO_API_* / OPENAI_PROXY_*
+                // env vars so the CLI surface stays claude's.
+                p.api_mode = true;
+                i += 1;
+            }
+            "--fast" => {
+                // Owned switch: disable all human-like delays for lowest latency.
+                p.fast = true;
                 i += 1;
             }
             "--output-format" => {
@@ -236,6 +258,8 @@ pub struct WrapperEnv {
     pub cols: u16,
     pub rows: u16,
     pub claude_path: String,
+    /// Strip human-like delays (cadence, quiescence wait, dwell) for low latency.
+    pub fast: bool,
 }
 
 impl WrapperEnv {
@@ -252,6 +276,7 @@ impl WrapperEnv {
             cols: g("CLAUDIO_COLS").and_then(|v| v.parse().ok()).unwrap_or(120),
             rows: g("CLAUDIO_ROWS").and_then(|v| v.parse().ok()).unwrap_or(40),
             claude_path: g("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|| "claude".into()),
+            fast: g("CLAUDIO_FAST").map(|v| v == "1" || v == "true").unwrap_or(false),
         }
     }
 }
@@ -415,8 +440,25 @@ mod tests {
     fn empty_args() {
         let p = parse(&[]);
         assert!(!p.print_mode);
+        assert!(!p.api_mode);
         assert!(p.prompt.is_none());
         assert!(p.forward.is_empty());
         assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn api_flag_sets_api_mode_and_is_not_forwarded() {
+        let p = parse(&s(&["--api"]));
+        assert!(p.api_mode);
+        assert!(!p.print_mode);
+        assert!(p.forward.is_empty());
+    }
+
+    #[test]
+    fn api_flag_does_not_consume_following_tokens() {
+        // --api is a bare switch; nothing after it is treated as its value.
+        let p = parse(&s(&["--api", "--model", "opus"]));
+        assert!(p.api_mode);
+        assert_eq!(p.forward, s(&["--model", "opus"]));
     }
 }

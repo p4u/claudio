@@ -25,7 +25,18 @@ COPY --from=build /src/target/release/claudio /usr/local/bin/claudio
 # non-root also avoids Claude Code's refusal to use --dangerously-skip-permissions
 # as root. The host's ~/.claude is mounted onto this user's home (see compose).
 ENV HOME=/home/node
+
+# When run with `--api`, bind to all interfaces so the server is reachable once
+# the port is published (`-p` / compose `ports`). Ignored in CLI mode, and the
+# native binary still defaults to 127.0.0.1. Override with -e CLAUDIO_API_BIND=…
+ENV CLAUDIO_API_BIND=0.0.0.0:8080
+EXPOSE 8080
+
 USER node
 WORKDIR /work
 
+# Default entrypoint is the CLI (`-p`, transparent passthrough). For the
+# OpenAI-compatible server, append `--api` — e.g.
+#   docker run -p 8080:8080 claudio --api
+#   docker compose up claudio-api
 ENTRYPOINT ["claudio"]

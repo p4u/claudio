@@ -5,6 +5,10 @@
 #   docker compose run --rm claudio -p --output-format json "Summarize: $(cat file)"
 #   docker compose run --rm claudio --version          # transparent (no -p) → real claude
 #
+#   docker compose up claudio-api                       # OpenAI-compatible server on 127.0.0.1:8080
+#   curl localhost:8080/v1/chat/completions -H 'content-type: application/json' \
+#        -d '{"model":"haiku","messages":[{"role":"user","content":"hi"}]}'
+#
 # AUTH PORTABILITY (read this if you get "401 Invalid authentication credentials"):
 #   The container reuses your host login via the mounts below. This works only
 #   when your credentials are *file-portable*. Claude Code often keeps the live
@@ -50,3 +54,41 @@ services:
     working_dir: /work
     # Prompt + flags are supplied on the `docker compose run` command line and
     # appended to the ENTRYPOINT (claudio).
+
+  # ── OpenAI-compatible API server ───────────────────────────────────────────
+  # Long-running server (the persistent-session pool). Start it with:
+  #   docker compose up claudio-api
+  # then point any OpenAI client at http://127.0.0.1:8080/v1.
+  claudio-api:
+    build:
+      context: .
+      args:
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-latest}
+    image: claudio:latest
+    user: "${USERSPEC:-1000:1000}"
+    command: ["--api"]
+    # Published to loopback only by default — change to "8080:8080" to expose it
+    # on the LAN (set CLAUDIO_API_KEY below if you do).
+    ports:
+      - "127.0.0.1:${CLAUDIO_API_PORT:-8080}:8080"
+    environment:
+      HOME: /home/node
+      # In-container the server binds all interfaces (see Dockerfile); the
+      # `ports` mapping above controls host exposure.
+      CLAUDIO_API_BIND: 0.0.0.0:8080
+      # Optional: require `Authorization: Bearer <key>` from clients.
+      CLAUDIO_API_KEY:
+      # Optional pool tuning (defaults shown in the README).
+      CLAUDIO_API_MAX_LIVE:
+      CLAUDIO_API_MAX_SESSIONS:
+      CLAUDIO_API_SESSION_TTL:
+      # Same upstream auth forwarding as the CLI service above.
+      ANTHROPIC_BASE_URL:
+      ANTHROPIC_AUTH_TOKEN:
+      ANTHROPIC_API_KEY:
+      ANTHROPIC_MODEL:
+    volumes:
+      - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.claude.json:/home/node/.claude.json
+      - ./workspace:/work
+    working_dir: /work

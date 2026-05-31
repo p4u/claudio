@@ -2,17 +2,31 @@
 name = "claudio"
 version = "0.1.0"
 edition = "2021"
-description = "Reference PoC: drive interactive Claude Code under a PTY to emulate claude -p (responsible-disclosure research)"
+description = "Drop-in `claude` wrapper emulating `-p`, with an optional OpenAI-compatible API server (--api) routed through the same PTY-driven backend (responsible-disclosure research)"
 
 [[bin]]
 name = "claudio"
 path = "src/main.rs"
 
 [dependencies]
+# Core -p (print-mode) emulation backend.
 portable-pty = "0.8"
 vte = "0.13"
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
+
+# OpenAI-compatible API server (--api). Only exercised in API mode, but linked
+# unconditionally so a single static binary serves both roles.
+serde = { version = "1", features = ["derive"] }
+axum = "0.8"
+futures = "0.3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Only needed in integration tests (no runtime dep).
 [dev-dependencies]

@@ -1,0 +1,77 @@
+name: release
+
+# Build the portable static binary and publish it as a GitHub Release.
+#
+# Trigger by pushing a version tag:
+#     git tag v0.1.0 && git push origin v0.1.0
+# `workflow_dispatch` also builds the binary (and uploads it as a run artifact)
+# without publishing a release — handy for testing the pipeline.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release and upload assets
+
+env:
+  BIN: claudio
+  # x86_64 musl links self-contained with rustup's bundled toolchain (no
+  # musl-gcc needed) — the same target `make static` uses. To add more targets,
+  # turn this into a matrix (e.g. aarch64-unknown-linux-musl via `cross`).
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    name: static build + release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+
+      - name: Build static binary
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Verify it is statically linked
+        run: |
+          file "target/$TARGET/release/$BIN"
+          # musl static binaries report "not a dynamic executable".
+          ldd "target/$TARGET/release/$BIN" 2>&1 || true
+
+      - name: Package
+        id: pkg
+        run: |
+          version="${GITHUB_REF_NAME}"
+          asset="${BIN}-${version}-${TARGET}"
+          mkdir -p dist
+          install -m755 "target/$TARGET/release/$BIN" "dist/$BIN"
+          tar -C dist -czf "${asset}.tar.gz" "$BIN"
+          sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload run artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.asset }}
+          path: |
+            ${{ steps.pkg.outputs.asset }}.tar.gz
+            ${{ steps.pkg.outputs.asset }}.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.asset }}.tar.gz
+            ${{ steps.pkg.outputs.asset }}.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

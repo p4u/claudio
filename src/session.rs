@@ -101,6 +101,72 @@ pub fn parse_transcript(path: &str, require_terminal: bool) -> Option<Summary> {
     })
 }
 
+/// Like [`parse_transcript`] with `require_terminal = true`, but also returns a
+/// stable identity for the chosen assistant line (its `uuid`, or a synthesized
+/// id from turn count + text). The persistent driver uses this to tell one
+/// turn's answer from the next on a transcript that grows across turns.
+pub fn latest_terminal_with_id(path: &str) -> Option<(Summary, String)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut session_id = String::new();
+    let mut num_turns: u32 = 0;
+    let mut best: Option<(Summary, String)> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if session_id.is_empty() {
+            if let Some(s) = v.get("sessionId").and_then(|x| x.as_str()) {
+                session_id = s.to_string();
+            } else if let Some(s) = v.get("session_id").and_then(|x| x.as_str()) {
+                session_id = s.to_string();
+            }
+        }
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = v.get("message") else { continue };
+        num_turns += 1;
+        if !is_terminal(message) {
+            continue;
+        }
+        let Some(content) = message.get("content") else { continue };
+        let text = extract_text(content);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let id = v
+            .get("uuid")
+            .and_then(|u| u.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("turn{num_turns}:{}", &text[..text.len().min(32)]));
+        best = Some((
+            Summary {
+                final_text: text.trim().to_string(),
+                session_id: session_id.clone(),
+                model: message.get("model").and_then(|m| m.as_str()).map(String::from),
+                usage: message.get("usage").cloned(),
+                num_turns,
+                is_error: false,
+            },
+            id,
+        ));
+    }
+
+    best.map(|(mut s, id)| {
+        s.num_turns = num_turns;
+        if s.session_id.is_empty() {
+            s.session_id = session_id;
+        }
+        (s, id)
+    })
+}
+
 /// Read the transcript with retry to absorb the flush race: the Stop hook can
 /// fire a few ms before claude writes the final assistant line.
 pub fn read_with_retry(path: &str, attempts: u32, backoff: Duration) -> Option<Summary> {

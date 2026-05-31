@@ -17,7 +17,8 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -175,7 +176,12 @@ pub fn run_relay(event: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub enum Listener {
-    Tcp { rx: mpsc::Receiver<Hook>, port: u16 },
+    Tcp {
+        rx: mpsc::Receiver<Hook>,
+        port: u16,
+        /// Signals the accept thread to stop so its socket is released on drop.
+        stop: Arc<AtomicBool>,
+    },
     File { dir: PathBuf },
 }
 
@@ -185,20 +191,34 @@ impl Listener {
             HookTransport::Tcp => {
                 let listener = TcpListener::bind(("127.0.0.1", 0))?;
                 let port = listener.local_addr()?.port();
+                // Non-blocking accept + a stop flag so the thread (and its socket)
+                // can be released when the Listener drops. Otherwise `incoming()`
+                // would block forever, leaking one thread + socket + port per turn.
+                listener.set_nonblocking(true)?;
                 let (tx, rx) = mpsc::channel();
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_thread = Arc::clone(&stop);
                 thread::spawn(move || {
-                    for stream in listener.incoming() {
-                        let Ok(mut s) = stream else { continue };
-                        let mut buf = Vec::new();
-                        if s.read_to_end(&mut buf).is_err() {
-                            continue;
-                        }
-                        if let Some(hook) = parse_framed(&buf) {
-                            let _ = tx.send(hook);
+                    while !stop_thread.load(Ordering::Relaxed) {
+                        match listener.accept() {
+                            Ok((mut s, _)) => {
+                                let _ = s.set_nonblocking(false);
+                                let mut buf = Vec::new();
+                                if s.read_to_end(&mut buf).is_ok() {
+                                    if let Some(hook) = parse_framed(&buf) {
+                                        let _ = tx.send(hook);
+                                    }
+                                }
+                            }
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(20));
+                            }
+                            Err(_) => thread::sleep(Duration::from_millis(20)),
                         }
                     }
+                    // `listener` drops here, closing the socket and freeing the port.
                 });
-                Ok(Listener::Tcp { rx, port })
+                Ok(Listener::Tcp { rx, port, stop })
             }
             HookTransport::File => {
                 let dir = std::env::temp_dir().join(format!("claudio-{}", uuid::Uuid::new_v4()));
@@ -250,8 +270,13 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        if let Listener::File { dir } = self {
-            let _ = std::fs::remove_dir_all(dir);
+        match self {
+            // Tell the accept thread to exit; it releases the socket/port within
+            // one poll interval. Without this each turn leaks a thread + socket.
+            Listener::Tcp { stop, .. } => stop.store(true, Ordering::SeqCst),
+            Listener::File { dir } => {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
     }
 }

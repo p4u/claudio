@@ -86,6 +86,10 @@ struct Shared {
     exited: AtomicBool,
     recent: Mutex<Vec<u8>>,
     raw_log: Option<Mutex<Vec<u8>>>,
+    /// Set once the TUI enables bracketed-paste mode (DECSET `?2004h`). When on,
+    /// we frame the typed prompt in paste markers so embedded newlines don't
+    /// submit a partial prompt — essential for large multi-line API prompts.
+    bracketed_paste: AtomicBool,
 }
 
 macro_rules! trace {
@@ -97,255 +101,345 @@ macro_rules! trace {
     };
 }
 
+/// One-shot turn: start a session, run a single turn, tear it down. The CLI
+/// `-p` path. Thin wrapper over [`PtySession`].
 pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult, DriverError> {
     if prompt.trim().is_empty() {
         return Err(DriverError::NoPrompt);
     }
     let start = Instant::now();
-    let debug = env.debug;
     let session_id = parsed
         .session_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    trace!(debug, start, "session_id={session_id}");
+    let mut sess = PtySession::start(env, &parsed.forward, &session_id, parsed.user_settings.as_deref())?;
+    let (summary, failure) = sess.turn(prompt)?;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    sess.close();
+    Ok(RunResult { summary, duration_ms, failure })
+}
 
-    let listener = Listener::start(env.hook_transport).map_err(|e| DriverError::Spawn(e.to_string()))?;
+/// A live, interactive `claude` driven under a PTY, reusable across turns.
+///
+/// `start` spawns claude and waits for the UI (`SessionStart`); `turn` types a
+/// prompt, waits for that turn's `Stop`, and returns the *new* assistant message
+/// from the session transcript. Keeping one process alive across turns is what
+/// lets the API server feed only the conversation delta instead of re-sending
+/// the whole history (and re-paying the cold-start) each request.
+pub struct PtySession {
+    guard: ChildGuard,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    shared: Arc<Shared>,
+    listener: Listener,
+    /// Held for the session's lifetime so the neutral relay binary isn't removed.
+    _relay: Option<hooks::Relay>,
+    transcript_path: Option<String>,
+    session_id: String,
+    fast: bool,
+    debug: bool,
+    timeout: Duration,
+    raw_log_path: Option<String>,
+    /// Identity of the last assistant message we returned, to detect the next one.
+    last_msg_id: Option<String>,
+    start: Instant,
+}
 
-    // §4.9.2 — set up neutral relay binary (TCP transport only).
-    // On failure we fall back to the legacy __hook path — no hard error.
-    let relay = listener.port().and_then(|_p| hooks::Relay::setup().ok());
+impl PtySession {
+    /// Spawn claude under a PTY and wait until the UI is ready to accept input.
+    pub fn start(
+        env: &WrapperEnv,
+        forward: &[String],
+        session_id: &str,
+        user_settings: Option<&str>,
+    ) -> Result<Self, DriverError> {
+        let start = Instant::now();
+        let debug = env.debug;
+        trace!(debug, start, "session_id={session_id}");
 
-    let exe = std::env::current_exe()
-        .map_err(|e| DriverError::Internal(e.to_string()))?
-        .to_string_lossy()
-        .into_owned();
-    let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
-    let (settings, settings_warns) = hooks::build_settings_merged(&exe, relay_arg, parsed.user_settings.as_deref());
-    for w in &settings_warns {
-        eprintln!("claudio: {w}");
-    }
+        let listener =
+            Listener::start(env.hook_transport).map_err(|e| DriverError::Spawn(e.to_string()))?;
 
-    // §4.9.5 — randomise PTY geometry per session within realistic ranges.
-    let (cols, rows) = {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0xabcdef12);
-        let cols = if env.cols == 120 {
-            // Default not overridden: vary between 180 and 260 (common terminal widths).
-            180 + (seed % 81) as u16
-        } else {
-            env.cols
+        // §4.9.2 — neutral relay binary (TCP transport only); fall back silently.
+        let relay = listener.port().and_then(|_p| hooks::Relay::setup().ok());
+
+        let exe = std::env::current_exe()
+            .map_err(|e| DriverError::Internal(e.to_string()))?
+            .to_string_lossy()
+            .into_owned();
+        let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
+        let (settings, settings_warns) = hooks::build_settings_merged(&exe, relay_arg, user_settings);
+        for w in &settings_warns {
+            eprintln!("claudio: {w}");
+        }
+
+        // §4.9.5 — randomise PTY geometry per session within realistic ranges.
+        let (cols, rows) = {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0xabcdef12);
+            let cols = if env.cols == 120 { 180 + (seed % 81) as u16 } else { env.cols };
+            let rows = if env.rows == 40 { 40 + (seed >> 8 & 0x1f) as u16 } else { env.rows };
+            (cols, rows)
         };
-        let rows = if env.rows == 40 {
-            // Default not overridden: vary between 40 and 60.
-            40 + (seed >> 8 & 0x1f) as u16
-        } else {
-            env.rows
-        };
-        (cols, rows)
-    };
-    trace!(debug, start, "PTY size: {cols}×{rows}");
+        trace!(debug, start, "PTY size: {cols}×{rows}");
 
-    // Assemble child argv.
-    let mut cargs: Vec<String> = Vec::new();
-    cargs.push("--settings".into());
-    cargs.push(settings);
-    if parsed.session_id.is_none() {
-        cargs.push("--session-id".into());
-        cargs.push(session_id.clone());
-    }
-    cargs.extend(parsed.forward.iter().cloned());
+        // Assemble child argv. Add --session-id unless the caller already
+        // forwarded one, or is resuming/continuing a session (where --session-id
+        // would conflict with --resume/--continue and claude refuses to start).
+        let resuming = forward
+            .iter()
+            .any(|a| matches!(a.as_str(), "--resume" | "-r" | "--continue" | "-c"));
+        let mut cargs: Vec<String> = vec!["--settings".into(), settings];
+        if !resuming && !forward.iter().any(|a| a == "--session-id") {
+            cargs.push("--session-id".into());
+            cargs.push(session_id.to_string());
+        }
+        cargs.extend(forward.iter().cloned());
 
-    let mut cmd = CommandBuilder::new(&env.claude_path);
-    for a in &cargs {
-        cmd.arg(a);
-    }
-
-    // §4.9.2 — rebuild child environment WITHOUT any CLAUDIO_* vars.
-    // portable-pty seeds CommandBuilder from std::env, so we clear and
-    // re-add everything except our own wrapper vars.  ANTHROPIC_*, proxies,
-    // CLAUDE_CODE_* all pass through unchanged.
-    cmd.env_clear();
-    for (k, v) in std::env::vars() {
-        if !k.starts_with("CLAUDIO_") {
+        let mut cmd = CommandBuilder::new(&env.claude_path);
+        for a in &cargs {
+            cmd.arg(a);
+        }
+        // §4.9.2 — child env WITHOUT any CLAUDIO_* vars.
+        cmd.env_clear();
+        for (k, v) in std::env::vars() {
+            if !k.starts_with("CLAUDIO_") {
+                cmd.env(k, v);
+            }
+        }
+        for (k, v) in listener.child_env() {
             cmd.env(k, v);
         }
-    }
-    // File-transport hook dir still needs to reach the child (it's not a port).
-    for (k, v) in listener.child_env() {
-        cmd.env(k, v);
-    }
-    // Ensure a sane TERM that matches our probe responses.
-    let term = std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into());
-    cmd.env("TERM", term);
-    // COLORTERM tells apps (including Ink) we support 24-bit colour — matches
-    // what real xterm / most modern terminals advertise.
-    if std::env::var("COLORTERM").is_err() {
-        cmd.env("COLORTERM", "truecolor");
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
+        let term = std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into());
+        cmd.env("TERM", term);
+        if std::env::var("COLORTERM").is_err() {
+            cmd.env("COLORTERM", "truecolor");
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.cwd(cwd);
+        }
 
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| DriverError::Spawn(e.to_string()))?;
-    let child = pair.slave.spawn_command(cmd).map_err(|e| DriverError::Spawn(e.to_string()))?;
-    let mut guard = ChildGuard { child };
-    drop(pair.slave);
-    trace!(debug, start, "claude spawned under PTY ({}x{})", cols, rows);
+        let pty = native_pty_system();
+        let pair = pty
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| DriverError::Spawn(e.to_string()))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| DriverError::Spawn(e.to_string()))?;
+        let guard = ChildGuard { child };
+        drop(pair.slave);
+        trace!(debug, start, "claude spawned under PTY ({}x{})", cols, rows);
 
-    let writer = Arc::new(Mutex::new(
-        pair.master.take_writer().map_err(|e| DriverError::Spawn(e.to_string()))?,
-    ));
-    let mut reader = pair.master.try_clone_reader().map_err(|e| DriverError::Spawn(e.to_string()))?;
+        let writer = Arc::new(Mutex::new(
+            pair.master.take_writer().map_err(|e| DriverError::Spawn(e.to_string()))?,
+        ));
+        let mut reader = pair.master.try_clone_reader().map_err(|e| DriverError::Spawn(e.to_string()))?;
 
-    let shared = Arc::new(Shared {
-        last_output_ns: AtomicI64::new(0),
-        exited: AtomicBool::new(false),
-        recent: Mutex::new(Vec::with_capacity(RECENT_CAPACITY)),
-        raw_log: env.raw_log.as_ref().map(|_| Mutex::new(Vec::new())),
-    });
-
-    {
-        let writer = Arc::clone(&writer);
-        let shared = Arc::clone(&shared);
-        thread::spawn(move || {
-            let mut responder = ProbeResponder::new(rows, cols);
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let chunk = &buf[..n];
-                        shared.last_output_ns.store(now_ns(), Ordering::SeqCst);
-                        responder.feed(chunk);
-                        let resp = responder.take_responses();
-                        if !resp.is_empty() {
-                            if let Ok(mut w) = writer.lock() {
-                                let _ = w.write_all(&resp);
-                                let _ = w.flush();
-                            }
-                        }
-                        if let Ok(mut recent) = shared.recent.lock() {
-                            recent.extend_from_slice(chunk);
-                            if recent.len() > RECENT_CAPACITY {
-                                let drop = recent.len() - RECENT_CAPACITY;
-                                recent.drain(0..drop);
-                            }
-                        }
-                        if let Some(raw) = &shared.raw_log {
-                            if let Ok(mut r) = raw.lock() {
-                                r.extend_from_slice(chunk);
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            shared.exited.store(true, Ordering::SeqCst);
+        let shared = Arc::new(Shared {
+            last_output_ns: AtomicI64::new(0),
+            exited: AtomicBool::new(false),
+            recent: Mutex::new(Vec::with_capacity(RECENT_CAPACITY)),
+            bracketed_paste: AtomicBool::new(false),
+            raw_log: env.raw_log.as_ref().map(|_| Mutex::new(Vec::new())),
         });
+
+        {
+            let writer = Arc::clone(&writer);
+            let shared = Arc::clone(&shared);
+            thread::spawn(move || {
+                let mut responder = ProbeResponder::new(rows, cols);
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let chunk = &buf[..n];
+                            shared.last_output_ns.store(now_ns(), Ordering::SeqCst);
+                            if !shared.bracketed_paste.load(Ordering::Relaxed)
+                                && chunk.windows(8).any(|w| w == b"\x1b[?2004h")
+                            {
+                                shared.bracketed_paste.store(true, Ordering::SeqCst);
+                            }
+                            responder.feed(chunk);
+                            let resp = responder.take_responses();
+                            if !resp.is_empty() {
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(&resp);
+                                    let _ = w.flush();
+                                }
+                            }
+                            if let Ok(mut recent) = shared.recent.lock() {
+                                recent.extend_from_slice(chunk);
+                                if recent.len() > RECENT_CAPACITY {
+                                    let drop = recent.len() - RECENT_CAPACITY;
+                                    recent.drain(0..drop);
+                                }
+                            }
+                            if let Some(raw) = &shared.raw_log {
+                                if let Ok(mut r) = raw.lock() {
+                                    r.extend_from_slice(chunk);
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                shared.exited.store(true, Ordering::SeqCst);
+            });
+        }
+
+        let mut sess = PtySession {
+            guard,
+            writer,
+            shared,
+            listener,
+            _relay: relay,
+            transcript_path: None,
+            session_id: session_id.to_string(),
+            fast: env.fast,
+            debug,
+            timeout: Duration::from_secs(env.timeout_sec),
+            raw_log_path: env.raw_log.clone(),
+            last_msg_id: None,
+            start,
+        };
+        sess.wait_session_start()?;
+        Ok(sess)
     }
 
-    let timeout = Duration::from_secs(env.timeout_sec);
-    let mut typed = false;
-    let mut trust_dismissed = false;
-    let mut transcript_path: Option<String> = None;
-    let mut last_assistant_message: Option<String> = None;
-    let mut got_stop = false;
-
-    while start.elapsed() < timeout {
-        // Workspace-trust dialog can block startup before SessionStart and is
-        // not bypassed by --dangerously-skip-permissions. Default is "trust";
-        // Enter accepts.
-        if !typed && !trust_dismissed {
-            if let Ok(recent) = shared.recent.lock() {
-                let stripped = strip_escapes(&recent);
-                let low = stripped.to_lowercase();
-                if low.contains("trust") && low.contains("folder") {
-                    drop(recent);
-                    trace!(debug, start, "workspace-trust dialog detected — sending Enter");
-                    if let Ok(mut w) = writer.lock() {
-                        let _ = w.write_all(b"\r");
-                        let _ = w.flush();
+    /// Block until `SessionStart` (UI ready), dismissing the workspace-trust
+    /// dialog if it appears. Does not type anything.
+    fn wait_session_start(&mut self) -> Result<(), DriverError> {
+        let t0 = Instant::now();
+        let mut trust_dismissed = false;
+        while t0.elapsed() < self.timeout {
+            if !trust_dismissed {
+                if let Ok(recent) = self.shared.recent.lock() {
+                    let low = strip_escapes(&recent).to_lowercase();
+                    if low.contains("trust") && low.contains("folder") {
+                        drop(recent);
+                        trace!(self.debug, self.start, "workspace-trust dialog — sending Enter");
+                        if let Ok(mut w) = self.writer.lock() {
+                            let _ = w.write_all(b"\r");
+                            let _ = w.flush();
+                        }
+                        trust_dismissed = true;
                     }
-                    trust_dismissed = true;
+                }
+            }
+            if self.shared.exited.load(Ordering::SeqCst) {
+                return Err(DriverError::Spawn("claude exited before the UI was ready".into()));
+            }
+            if let Some(hook) = self.listener.poll(Duration::from_millis(100)) {
+                if self.transcript_path.is_none() {
+                    self.transcript_path = session::payload_field(&hook.payload, "transcript_path");
+                }
+                if hook.event == HookEvent::SessionStart {
+                    trace!(self.debug, self.start, "SessionStart — UI ready");
+                    return Ok(());
                 }
             }
         }
+        Err(DriverError::SessionStartTimeout)
+    }
 
-        if !typed && shared.exited.load(Ordering::SeqCst) {
-            return Err(DriverError::Spawn("claude exited before the UI was ready".into()));
+    /// Type `prompt`, wait for this turn's `Stop`, and return the new assistant
+    /// message (plus a classified failure reason if it produced no text).
+    pub fn turn(&mut self, prompt: &str) -> Result<(Summary, Option<String>), DriverError> {
+        if prompt.trim().is_empty() {
+            return Err(DriverError::NoPrompt);
         }
+        let turn_start = Instant::now();
+        // Baseline: the message we must produce something newer than. When we've
+        // already served a turn, that's `last_msg_id`. Otherwise (first turn of a
+        // fresh *or* resumed session) baseline on the transcript's current latest
+        // so a resumed session doesn't return its pre-existing last answer.
+        let prev_id = match &self.last_msg_id {
+            Some(id) => Some(id.clone()),
+            None => self
+                .transcript_path
+                .as_deref()
+                .and_then(session::latest_terminal_with_id)
+                .map(|(_, id)| id),
+        };
 
-        if let Some(hook) = listener.poll(Duration::from_millis(100)) {
-            // Either hook carries transcript_path; grab it as soon as we see it.
-            if transcript_path.is_none() {
-                transcript_path = session::payload_field(&hook.payload, "transcript_path");
+        wait_quiescent(&self.shared, 150, 2000);
+        let bracketed = self.shared.bracketed_paste.load(Ordering::SeqCst);
+        trace!(self.debug, self.start, "typing prompt ({} bytes, bracketed_paste={})", prompt.len(), bracketed);
+        type_prompt(&self.writer, prompt, self.fast, bracketed)
+            .map_err(|e| DriverError::Internal(e.to_string()))?;
+        trace!(self.debug, self.start, "prompt submitted; awaiting Stop");
+
+        let mut got_stop = false;
+        let mut last_assistant_message: Option<String> = None;
+        while turn_start.elapsed() < self.timeout {
+            if self.shared.exited.load(Ordering::SeqCst) {
+                break;
             }
-            match hook.event {
-                HookEvent::SessionStart => {
-                    if !typed {
-                        trace!(debug, start, "SessionStart — waiting for Ink quiescence");
-                        wait_quiescent(&shared, 150, 2000);
-                        trace!(debug, start, "typing prompt ({} bytes)", prompt.len());
-                        type_prompt(&writer, prompt).map_err(|e| DriverError::Internal(e.to_string()))?;
-                        typed = true;
-                        trace!(debug, start, "prompt submitted; awaiting Stop");
-                    }
+            if let Some(hook) = self.listener.poll(Duration::from_millis(100)) {
+                if self.transcript_path.is_none() {
+                    self.transcript_path = session::payload_field(&hook.payload, "transcript_path");
                 }
-                HookEvent::Stop => {
+                if hook.event == HookEvent::Stop {
                     last_assistant_message = session::payload_field(&hook.payload, "last_assistant_message");
                     got_stop = true;
-                    trace!(debug, start, "Stop — turn finished");
+                    trace!(self.debug, self.start, "Stop — turn finished");
                     break;
                 }
-                HookEvent::Unknown => {}
             }
         }
-    }
 
-    if !typed {
-        return Err(DriverError::SessionStartTimeout);
-    }
-    if !got_stop {
-        trace!(debug, start, "no Stop within timeout; attempting transcript read anyway");
-    }
+        if let (Some(path), Some(raw)) = (&self.raw_log_path, &self.shared.raw_log) {
+            if let Ok(bytes) = raw.lock() {
+                let _ = std::fs::write(path, &*bytes);
+            }
+        }
 
-    if let (Some(path), Some(raw)) = (&env.raw_log, &shared.raw_log) {
-        if let Ok(bytes) = raw.lock() {
-            let _ = std::fs::write(path, &*bytes);
+        let summary = self.read_new_message(prev_id.as_deref(), last_assistant_message.as_deref());
+
+        let failure = if summary.as_ref().map(|s| s.final_text.is_empty()).unwrap_or(true) {
+            let recent = self.shared.recent.lock().ok().map(|r| strip_escapes(&r)).unwrap_or_default();
+            Some(classify_failure(&recent, got_stop))
+        } else {
+            None
+        };
+
+        match summary {
+            Some(s) => Ok((s, failure)),
+            None if !got_stop => Err(DriverError::StopTimeout),
+            None => Err(DriverError::TranscriptUnavailable),
         }
     }
 
-    let summary = if let Some(path) = &transcript_path {
-        match session::read_with_retry(path, 40, Duration::from_millis(50)) {
-            Some(s) => Some(s),
-            None => last_assistant_message.as_ref().map(|t| fallback_summary(t, &session_id)),
+    /// Read the transcript until a terminal assistant message whose identity
+    /// differs from the previous turn's appears (absorbing the flush race).
+    fn read_new_message(&mut self, prev_id: Option<&str>, fallback_text: Option<&str>) -> Option<Summary> {
+        if let Some(path) = self.transcript_path.clone() {
+            for _ in 0..60 {
+                if let Some((summary, id)) = session::latest_terminal_with_id(&path) {
+                    if Some(id.as_str()) != prev_id {
+                        self.last_msg_id = Some(id);
+                        return Some(summary);
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            // Last resort: any message we can read (even if we can't prove it's new).
+            if let Some(s) = session::read_with_retry(&path, 3, Duration::from_millis(50)) {
+                return Some(s);
+            }
         }
-    } else {
-        last_assistant_message.as_ref().map(|t| fallback_summary(t, &session_id))
-    };
+        fallback_text.map(|t| fallback_summary(t, &self.session_id))
+    }
 
-    let failure = if summary.as_ref().map(|s| s.final_text.is_empty()).unwrap_or(true) {
-        let recent = shared.recent.lock().ok().map(|r| strip_escapes(&r)).unwrap_or_default();
-        Some(classify_failure(&recent, got_stop))
-    } else {
-        None
-    };
+    /// Whether the underlying claude process has exited.
+    pub fn is_alive(&self) -> bool {
+        !self.shared.exited.load(Ordering::SeqCst)
+    }
 
-    guard.kill_and_wait();
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let summary = match summary {
-        Some(s) => s,
-        None if !got_stop => return Err(DriverError::StopTimeout),
-        None => return Err(DriverError::TranscriptUnavailable),
-    };
-
-    Ok(RunResult { summary, duration_ms, failure })
+    /// Kill the child and reap it.
+    pub fn close(&mut self) {
+        self.guard.kill_and_wait();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,23 +475,64 @@ impl Rng {
 ///
 /// Enabled by default.  Set `CLAUDIO_CADENCE=0` to revert to single-burst
 /// delivery (faster, useful when typing latency matters more than stealth).
-fn type_prompt(writer: &Arc<Mutex<Box<dyn Write + Send>>>, prompt: &str) -> std::io::Result<()> {
-    let cadence = std::env::var("CLAUDIO_CADENCE").map(|v| v != "0").unwrap_or(true);
+/// `fast` (from `--fast`/`CLAUDIO_FAST`) forces the burst path with a minimal
+/// pre-Enter pause, overriding cadence entirely.
+///
+/// When `bracketed`, the prompt is framed in bracketed-paste markers
+/// (`ESC[200~` … `ESC[201~`). The TUI then treats it as one atomic paste, so
+/// embedded newlines land as literal text instead of submitting a partial
+/// prompt — without this, a large multi-line prompt (e.g. a flattened API
+/// conversation) submits at its first `\n` and the turn never completes.
+fn type_prompt(
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    prompt: &str,
+    fast: bool,
+    bracketed: bool,
+) -> std::io::Result<()> {
+    let cadence = !fast && std::env::var("CLAUDIO_CADENCE").map(|v| v != "0").unwrap_or(true);
 
-    if !cadence {
-        // Fast burst path — send everything at once then pause before Enter.
-        {
-            let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
-            w.write_all(prompt.as_bytes())?;
-            w.flush()?;
-        }
-        thread::sleep(Duration::from_millis(150));
+    // Helper to lock and write a slice.
+    let put = |bytes: &[u8]| -> std::io::Result<()> {
         let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
-        w.write_all(b"\r")?;
-        w.flush()?;
-        return Ok(());
+        w.write_all(bytes)?;
+        w.flush()
+    };
+
+    if bracketed {
+        put(b"\x1b[200~")?;
     }
 
+    if !cadence {
+        // Fast burst path — send everything at once.
+        put(prompt.as_bytes())?;
+    } else {
+        // Human-cadence path — per-character with jitter (see below).
+        type_with_cadence(&put, prompt)?;
+    }
+
+    if bracketed {
+        put(b"\x1b[201~")?;
+    }
+
+    // Let the TUI register the input before submitting; `fast` trims this to a
+    // small-but-safe value (Enter too early drops the just-typed text).
+    let dwell_ms: u64 = if cadence {
+        Rng::from_time().range(180, 521)
+    } else if fast {
+        50
+    } else {
+        150
+    };
+    thread::sleep(Duration::from_millis(dwell_ms));
+    put(b"\r")?;
+    Ok(())
+}
+
+/// Per-character typing with human-like cadence (§4.9.1).
+fn type_with_cadence(
+    put: &impl Fn(&[u8]) -> std::io::Result<()>,
+    prompt: &str,
+) -> std::io::Result<()> {
     let mut rng = Rng::from_time();
 
     // Sample a per-session WPM from 45–95.  This gives base delay:
@@ -432,23 +567,8 @@ fn type_prompt(writer: &Arc<Mutex<Box<dyn Write + Send>>>, prompt: &str) -> std:
         };
 
         thread::sleep(Duration::from_micros(delay_us + think_us));
-
-        {
-            let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
-            w.write_all(&bytes[i..i + 1])?;
-            w.flush()?;
-        }
+        put(&bytes[i..i + 1])?;
         i += 1;
-    }
-
-    // Pre-Enter dwell: 180–520 ms (randomised per session).
-    let dwell_ms = rng.range(180, 521);
-    thread::sleep(Duration::from_millis(dwell_ms));
-
-    {
-        let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
-        w.write_all(b"\r")?;
-        w.flush()?;
     }
     Ok(())
 }

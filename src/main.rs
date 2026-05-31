@@ -10,6 +10,7 @@
 //!     interactive claude, type the prompt, read the answer from the session
 //!     JSONL, and emit text/json/stream-json.
 
+mod api;
 mod cli;
 mod driver;
 mod emit;
@@ -49,6 +50,15 @@ fn main() -> std::process::ExitCode {
     let args = &argv[1..];
     let parsed = cli::parse(args);
 
+    // §API — `--api` starts the OpenAI-compatible server, served by the same
+    // PTY backend that powers `-p`. It takes precedence over print mode.
+    if parsed.api_mode {
+        for w in &parsed.warnings {
+            eprintln!("claudio: {w}");
+        }
+        return api::serve_blocking();
+    }
+
     // Transparent passthrough: without -p we are just `claude`.
     if !parsed.print_mode {
         return exec_claude_transparently(args);
@@ -58,7 +68,8 @@ fn main() -> std::process::ExitCode {
         eprintln!("claudio: {w}");
     }
 
-    let env = WrapperEnv::from_env();
+    let mut env = WrapperEnv::from_env();
+    env.fast = env.fast || parsed.fast;
 
     // Resolve the prompt: explicit (positional/`--`) wins; otherwise stdin.
     let prompt = match &parsed.prompt {
