@@ -30,6 +30,7 @@ pub async fn run_raw(
     prompt: &FlatPrompt,
     messages: &[Message],
     model: &str,
+    corr: &str,
 ) -> AppResult<RawResult> {
     let pool = state.pool.clone();
     let env = build_env(&state.config);
@@ -37,9 +38,12 @@ pub async fn run_raw(
     let messages = messages.to_vec();
     let system = prompt.system.clone();
     let body = prompt.user.clone();
-    tokio::task::spawn_blocking(move || pool.resolve_turn(&env, &model, &messages, &system, &body))
-        .await
-        .map_err(|e| AppError::Internal(format!("backend task panicked: {e}")))?
+    let corr = corr.to_string();
+    tokio::task::spawn_blocking(move || {
+        pool.resolve_turn(&env, &model, &messages, &system, &body, &corr)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("backend task panicked: {e}")))?
 }
 
 /// Build the driver environment for an API turn: start from `CLAUDIO_*` env, then

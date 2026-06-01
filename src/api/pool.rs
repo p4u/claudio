@@ -152,6 +152,7 @@ impl SessionPool {
         messages: &[Message],
         system: &str,
         full_body: &str,
+        corr: &str,
     ) -> AppResult<RawResult> {
         let cum = cumulative_hashes(messages);
         let req_hash = *cum.last().unwrap_or(&0);
@@ -198,6 +199,19 @@ impl SessionPool {
             );
             let prompt = build_delta_prompt(delta, system, reinject);
 
+            if crate::msglog::enabled() {
+                crate::msglog::record(
+                    crate::msglog::Dir::ClaudioToClaude,
+                    corr,
+                    &format!(
+                        "DELTA · session {} · turn {} · reinject={reinject}",
+                        short(&csid),
+                        turns + 1
+                    ),
+                    &prompt,
+                );
+            }
+
             // Make room for a live process (this conversation will need one).
             self.enforce_live_cap(&csid);
 
@@ -217,7 +231,7 @@ impl SessionPool {
             }
         } else {
             tracing::info!("NEW (no prefix match) — starting fresh session");
-            self.start_fresh(env, model, messages, system, full_body, req_hash)
+            self.start_fresh(env, model, messages, system, full_body, req_hash, corr)
         }
     }
 
@@ -229,6 +243,7 @@ impl SessionPool {
         system: &str,
         full_body: &str,
         req_hash: u64,
+        corr: &str,
     ) -> AppResult<RawResult> {
         self.evict_to_capacity();
         let csid = uuid::Uuid::new_v4().to_string();
@@ -240,6 +255,16 @@ impl SessionPool {
             .map_err(|e| AppError::Internal(format!("failed to start claude session: {e}")))?;
 
         let prompt = build_full_prompt(system, full_body);
+
+        if crate::msglog::enabled() {
+            crate::msglog::record(
+                crate::msglog::Dir::ClaudioToClaude,
+                corr,
+                &format!("NEW · session {} · model {model}", short(&csid)),
+                &prompt,
+            );
+        }
+
         let res = session.turn(&prompt);
 
         match res {
@@ -396,40 +421,32 @@ fn map_turn_err(e: crate::driver::DriverError) -> AppError {
 // Prompt building
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REMINDER: &str = "\n\n=== REMINDER ===\nFollow the SYSTEM INSTRUCTIONS exactly. If they \
-define an output or tool-calling protocol, obey it literally; never claim a tool ran or a step \
-succeeded unless its result actually appears above.";
-
-/// First turn of a session: full system prompt (in the unscored user channel) +
-/// the whole conversation.
+/// First turn of a session: the system content (plain "helpful assistant" for
+/// chat, or the tool-gateway protocol for agentic) followed by the conversation.
+///
+/// Framing is deliberately plain — no "authoritative system instructions /
+/// follow exactly" wrapper, which itself reads as a prompt injection and makes
+/// the stronger models balk. The system text speaks for itself.
 fn build_full_prompt(system: &str, body: &str) -> String {
     let mut s = String::new();
     if !system.trim().is_empty() {
-        s.push_str("=== SYSTEM INSTRUCTIONS (authoritative — these define your behavior; follow exactly) ===\n");
         s.push_str(system.trim());
         s.push_str("\n\n");
     }
-    s.push_str("=== CONVERSATION ===\n");
+    s.push_str("─── Conversation ───\n");
     s.push_str(body);
-    if !system.trim().is_empty() {
-        s.push_str(REMINDER);
-    }
     s
 }
 
 /// Continuation turn: only the new user/tool messages (the live session already
-/// holds the prior context), with the system prompt re-injected every N turns.
+/// holds the prior context), with the system content re-injected every N turns.
 fn build_delta_prompt(delta: &[Message], system: &str, reinject: bool) -> String {
     let mut s = String::new();
     if reinject && !system.trim().is_empty() {
-        s.push_str("=== SYSTEM INSTRUCTIONS (reminder — still in force; follow exactly) ===\n");
         s.push_str(system.trim());
-        s.push_str("\n\n");
+        s.push_str("\n\n─── Conversation (continued) ───\n");
     }
     s.push_str(&render_delta(delta));
-    if !system.trim().is_empty() {
-        s.push_str(REMINDER);
-    }
     s
 }
 
@@ -559,10 +576,9 @@ mod tests {
     #[test]
     fn full_prompt_has_system_and_conversation() {
         let p = build_full_prompt("Be terse.", "User: hi");
-        assert!(p.contains("SYSTEM INSTRUCTIONS"));
         assert!(p.contains("Be terse."));
+        assert!(p.contains("Conversation"));
         assert!(p.contains("User: hi"));
-        assert!(p.contains("REMINDER"));
     }
 
     #[test]

@@ -21,10 +21,11 @@ use crate::api::backend::{self, map_finish_reason, map_model};
 use crate::api::config::AppState;
 use crate::api::error::{AppError, AppResult};
 use crate::api::types::{
-    ChatCompletion, ChatCompletionChunk, ChatRequest, Choice, ChunkChoice, Delta, ResponseMessage,
-    ToolCallDelta, Usage,
+    ChatCompletion, ChatCompletionChunk, ChatRequest, Choice, ChunkChoice, Delta, Message,
+    ResponseMessage, Tool, ToolCallDelta, Usage,
 };
 use crate::api::{agentic, prompt, util};
+use crate::msglog;
 
 /// An SSE payload item (matches what `axum`'s `Sse` body yields).
 type SseItem = Result<Event, std::convert::Infallible>;
@@ -42,6 +43,16 @@ pub async fn completions(
     let config = state.config.clone();
     let model = map_model(req.model.as_deref(), &config.default_model);
 
+    // Correlation id ties this turn's four message-flow hops together (no-op
+    // unless --log-messages / --log-messages-file is active).
+    let corr = if msglog::enabled() {
+        let c = msglog::new_corr();
+        log_client_request(&c, &req, &model);
+        c
+    } else {
+        String::new()
+    };
+
     // Acquire a concurrency permit; held until this turn resolves. The backend
     // resolves the whole turn up front (no token streaming), so we can drop the
     // permit before emitting the response/SSE body.
@@ -56,10 +67,16 @@ pub async fn completions(
     if config.agentic && req.has_tools() {
         let tools = req.tools.clone().unwrap_or_default();
         let flat = agentic::build_prompt(&req.messages, &tools, req.tool_choice.as_ref());
-        let raw = backend::run_raw(&state, &flat, &req.messages, &model).await;
+        let raw = backend::run_raw(&state, &flat, &req.messages, &model, &corr).await;
         drop(permit);
         let raw = raw?;
+        if msglog::enabled() {
+            log_claude_reply(&corr, &raw);
+        }
         let parsed = agentic::parse_output(&raw.text);
+        if msglog::enabled() {
+            log_agentic_response(&corr, &parsed);
+        }
 
         if req.is_stream() {
             let events = agentic_sse_events(&model, parsed, raw.usage, req.include_usage());
@@ -72,10 +89,19 @@ pub async fn completions(
 
     // Plain chat path (tools ignored).
     let flat = prompt::flatten(&req.messages);
-    let raw = backend::run_raw(&state, &flat, &req.messages, &model).await;
+    let raw = backend::run_raw(&state, &flat, &req.messages, &model, &corr).await;
     drop(permit);
     let raw = raw?;
     let finish_reason = map_finish_reason(raw.stop_reason.as_deref());
+    if msglog::enabled() {
+        log_claude_reply(&corr, &raw);
+        msglog::record(
+            msglog::Dir::ClaudioToCli,
+            &corr,
+            &format!("response · finish={finish_reason}"),
+            &raw.text,
+        );
+    }
 
     if req.is_stream() {
         let events = text_sse_events(&model, raw.text, finish_reason, raw.usage, req.include_usage());
@@ -216,6 +242,78 @@ fn agentic_sse_events(
         mk(Delta::default(), Some(finish_reason), final_usage),
         Ok(Event::default().data("[DONE]")),
     ]
+}
+
+/// Log the incoming client request (`CLI → claudio`): a one-line summary plus
+/// the full rendered conversation as the body (untruncated in the file sink).
+fn log_client_request(corr: &str, req: &ChatRequest, model: &str) {
+    let tools = req.tools.as_deref().unwrap_or(&[]);
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .map(|t: &Tool| t.function.name.as_str())
+        .collect();
+    let head = format!(
+        "request · model={model} · msgs={} · tools=[{}]{}",
+        req.messages.len(),
+        tool_names.join(", "),
+        if req.is_stream() { " · stream" } else { "" },
+    );
+    msglog::record(msglog::Dir::CliToClaudio, corr, &head, &render_messages(&req.messages));
+}
+
+/// Render an OpenAI message array into a readable transcript for the log body.
+fn render_messages(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .map(|m| {
+            let text = m.text();
+            match (m.role.as_str(), &m.tool_calls) {
+                (_, Some(calls)) => {
+                    let calls: Vec<String> = calls
+                        .iter()
+                        .map(|c| format!("{}({})", c.function.name, c.function.arguments))
+                        .collect();
+                    format!("[{}] {}{}", m.role, text, calls.join(" "))
+                }
+                ("tool", _) => format!(
+                    "[tool:{}] {text}",
+                    m.tool_call_id.as_deref().unwrap_or("?")
+                ),
+                _ => format!("[{}] {text}", m.role),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Log claude's raw reply (`claude → claudio`) before any agentic parsing.
+fn log_claude_reply(corr: &str, raw: &backend::RawResult) {
+    let head = format!(
+        "raw reply · stop={} · usage in={} out={}",
+        raw.stop_reason.as_deref().unwrap_or("-"),
+        raw.usage.prompt_tokens,
+        raw.usage.completion_tokens,
+    );
+    msglog::record(msglog::Dir::ClaudeToClaudio, corr, &head, &raw.text);
+}
+
+/// Log the response claudio returns to the client (`claudio → CLI`) in the
+/// agentic path — either the parsed tool calls or the final text.
+fn log_agentic_response(corr: &str, parsed: &agentic::ParsedOutput) {
+    match parsed {
+        agentic::ParsedOutput::ToolCalls(calls) => {
+            let body = calls
+                .iter()
+                .map(|c| format!("{}({})", c.function.name, c.function.arguments))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let head = format!("response · tool_calls ({})", calls.len());
+            msglog::record(msglog::Dir::ClaudioToCli, corr, &head, &body);
+        }
+        agentic::ParsedOutput::Text(text) => {
+            msglog::record(msglog::Dir::ClaudioToCli, corr, "response · final text", text);
+        }
+    }
 }
 
 /// Returns a closure that serializes a chunk into an SSE event, with stable

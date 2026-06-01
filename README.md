@@ -141,6 +141,115 @@ client.chat.completions.create(model="haiku",
     messages=[{"role": "user", "content": "hi"}])
 ```
 
+### Using it from coding agents (pi, opencode, hermes)
+
+claudio is OpenAI-compatible, so any agent that speaks the OpenAI Chat
+Completions API can use it as a custom provider pointing at
+`http://127.0.0.1:8080/v1`. The API key is unused unless you set
+`CLAUDIO_API_KEY` (then put the same value where each tool expects a key).
+
+For **agentic** (tool-calling) clients, claudio additionally recognizes the
+client, propagates its working directory, and translates its tools — see
+[Agentic mode](#agentic-mode-tool-calling) for how and why.
+
+#### Supported agents
+
+"Supported" means claudio **fingerprints** the client from its system prompt and
+grounds the agent in the right **workspace** (so a client launched in
+`~/project` edits files there, even when claudio's backend runs elsewhere — e.g.
+a remote host). Tools are always rendered from the schema the client sends, so an
+unrecognized client still works via the `generic` profile (paths used exactly as
+given). Adding a new agent is a one-line fingerprint entry in `src/api/agentic.rs`.
+
+| Agent | Detected as | Config file | Verified |
+|-------|-------------|-------------|----------|
+| [pi](https://github.com/badlogic/pi-mono) | `pi` | `~/.pi/agent/models.json` | read · write · bash |
+| [opencode](https://github.com/sst/opencode) | `opencode` | `~/.config/opencode/opencode.json` | read · write · glob |
+| [hermes](https://github.com/NousResearch/hermes-agent) | `hermes` | `~/.hermes/config.yaml` | read_file · write_file · terminal |
+| any other OpenAI-compatible client | `generic` | — | works; paths used as given |
+
+**[pi](https://github.com/badlogic/pi-mono)** — add a provider to
+`~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "claudio": {
+      "api": "openai-completions",
+      "apiKey": "dummy",
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "compat": { "supportsDeveloperRole": false, "supportsReasoningEffort": false },
+      "models": [
+        { "id": "sonnet", "name": "Claude Sonnet (claudio)", "contextWindow": 200000, "maxTokens": 32000 },
+        { "id": "haiku",  "name": "Claude Haiku (claudio)",  "contextWindow": 200000, "maxTokens": 32000 },
+        { "id": "opus",   "name": "Claude Opus (claudio)",   "contextWindow": 200000, "maxTokens": 64000 }
+      ]
+    }
+  }
+}
+```
+
+```bash
+pi --provider claudio --model haiku "Refactor this file"
+# or make it the default in ~/.pi/agent/settings.json:
+#   { "defaultProvider": "claudio", "defaultModel": "sonnet" }
+```
+
+**[opencode](https://github.com/sst/opencode)** — add a provider to
+`~/.config/opencode/opencode.json` (it uses the `@ai-sdk/openai-compatible`
+adapter):
+
+```json
+{
+  "provider": {
+    "claudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "claudio (Claude via PTY)",
+      "options": { "baseURL": "http://127.0.0.1:8080/v1" },
+      "models": {
+        "sonnet": { "name": "Claude Sonnet", "limit": { "context": 200000, "output": 32000 } },
+        "haiku":  { "name": "Claude Haiku",  "limit": { "context": 200000, "output": 32000 } },
+        "opus":   { "name": "Claude Opus",   "limit": { "context": 200000, "output": 64000 } }
+      }
+    }
+  }
+}
+```
+
+```bash
+opencode run -m claudio/haiku "Add a test for parse()"
+# or set a default in opencode.json:  "model": "claudio/sonnet"
+```
+
+**[hermes](https://github.com/NousResearch/hermes-agent)** — point its `model`
+section at claudio with the `custom` (OpenAI-compatible) provider in
+`~/.hermes/config.yaml`:
+
+```yaml
+model:
+  provider: "custom"                      # any OpenAI-compatible endpoint
+  base_url: "http://127.0.0.1:8080/v1"
+  api_key: "dummy"                        # any non-empty value unless CLAUDIO_API_KEY is set
+  default: "opus"                         # or sonnet / haiku
+```
+
+```bash
+hermes --provider custom -m opus -z "Add a test for parse()"
+```
+
+The model `id`s map straight through to `--model` (`opus`/`sonnet`/`haiku` or any
+`claude-*` name). Each agent's own tools work through claudio's agentic
+passthrough no matter what they're named — pi's `read`/`bash`/`edit`/`write`,
+opencode's `read`/`glob`/`edit`, hermes's `read_file`/`terminal`/`patch`/
+`write_file` — because claudio renders every tool from the JSON Schema the client
+sends rather than assuming a fixed set. Each conversation reuses one persistent
+session (watch the server's `MATCH … delta=…` logs).
+
+The `context`/`output` numbers above are **client-side budgeting hints** (200K
+context is the standard Claude 4.x window; output is 64K for Opus, 32K for
+Sonnet/Haiku) — claudio does not enforce them or forward the request's
+`max_tokens`, so they only affect how the agent paces compaction and output.
+
 ### Endpoints
 
 | Method | Path | Notes |
@@ -269,14 +378,89 @@ RESUME — reviving dormant session session=660a…
 
 OpenAI tool-calling passthrough is on by default (`CLAUDIO_API_AGENTIC=true`).
 Safe to default on because the server itself never executes tools — the client
-does. When enabled *and* a request includes a non-empty `tools` array, the server
-appends a strict protocol preamble (in the user channel) instructing claude to
-emit a fenced ` ```tool_calls ` JSON block **instead of executing**, parses that
-into OpenAI `tool_calls` (`finish_reason: "tool_calls"`), and lets the client run
-the tools and resend the conversation. With persistent sessions the protocol is
-re-injected every `CLAUDIO_API_REINJECT_TURNS` turns (it stays in the live
-session's context between turns). Set `CLAUDIO_API_AGENTIC=false` to ignore
-`tools` (chat-only).
+does. When a request includes a non-empty `tools` array, the server presents
+claude with its **own** honest *tool-execution gateway* protocol — "you don't run
+tools; request an action and the gateway runs it in the user's workspace and
+returns the result" — and translates the client's `tools[]` into a clean,
+hand-written catalog (a per-tool registry in `agentic.rs` covers `read`/`bash`/
+`edit`/`write`; unknown tools fall back to their JSON Schema). claude requests
+actions as a fenced ` ```tool_calls ` JSON block, which the server parses into
+OpenAI `tool_calls` (`finish_reason: "tool_calls"`); the client executes them and
+resends the conversation, and the live session continues.
+
+> **Why it's framed this way.** The client's own system prompt is **not relayed
+> verbatim** — describing a different agent harness ("you are operating inside
+> pi…") and labeling it "authoritative system instructions" makes the stronger
+> models (Opus/Sonnet) treat the request as a prompt-injection attempt and refuse,
+> reverting to being Claude Code. The neutral gateway framing is what makes
+> Opus/Sonnet/Haiku all comply. Set `CLAUDIO_API_AGENTIC=false` to ignore `tools`
+> (chat-only).
+
+**Client detection & workspace propagation.** The backend `claude` runs in
+claudio's own working directory (default `/tmp`, possibly on a *remote* host), so
+it must never touch its own filesystem — every action has to round-trip to the
+client, which executes it in the *user's* workspace. Two mechanisms make that
+correct:
+
+1. The gateway preamble tells the model it **has no direct access** to the
+   machine (which "may be remote"), cannot act on its own, and must request every
+   action through the gateway. This stops Claude Code from running its built-in
+   tools against the server's directory.
+2. Before discarding the client's prose, claudio **reads it for environment
+   facts** — it fingerprints the CLI (officially: `pi`, `opencode`, `hermes`;
+   otherwise `generic`) and lifts the **working directory** and date out of the
+   system prompt (e.g. `Current working directory: …`). That directory is injected
+   as the authoritative `Workspace:` line so the model resolves paths in the
+   client's tree, not claudio's. When no workspace can be determined, the model is
+   told to use paths exactly as given and assume no absolute root.
+
+Tool arguments are rendered from **the client's own JSON Schema**, never a
+hardcoded per-name table — the same concept is named differently by each client
+(pi's `read` takes `path`, opencode's takes `filePath`; pi's editor is `edit`,
+opencode's is `edit` with `oldString`, hermes's is `patch`; the shell is `bash`
+in pi, `bash` in opencode, `terminal` in hermes), so only the schema is
+authoritative.
+
+This is why a client launched in `/home/me/project` sees its *own* files even
+though claudio's backend lives in `/tmp` — confirmed with pi, opencode, and hermes
+(read + write) on opus and sonnet. Support for a new CLI is just a fingerprint
+entry in `agentic.rs`; the prompt prose and schema rendering stay shared.
+
+### Observing the message flow (`--log-messages`)
+
+To watch exactly what crosses each hop — the client's request, the prompt
+claudio types to the upstream `claude` (full context or delta), claude's raw
+reply, and the response returned to the client — start the server with
+`--log-messages`:
+
+```bash
+claudio --api --log-messages
+# and/or capture the raw, untruncated exchange as JSON Lines:
+claudio --api --log-messages-file /tmp/flow.jsonl
+```
+
+Each turn's four hops share a short correlation id and are printed as compact,
+colorized blocks on stderr:
+
+```
+┌─ #2 [8547d1] claudio ──▶ claude  NEW · session 88b68059 · model sonnet
+│ You are the model powering a tool-execution gateway. …
+└─
+┌─ #3 [8547d1] claude ──▶ claudio  raw reply · stop=end_turn · usage in=6663 out=183
+│ ```tool_calls
+│ [{"name": "write", "arguments": {"path": "logtest.txt", "content": "LOG_OK\n"}}]
+│ ```
+└─
+┌─ #4 [8547d1] claudio ──▶ CLI  response · tool_calls (1)
+│ write({"content":"LOG_OK\n","path":"logtest.txt"})
+└─
+```
+
+`--log-messages-file` writes one JSON object per hop (`{seq, corr, dir, head,
+body}`) with the **full untruncated** payloads — handy for diffing prompts or
+replaying a conversation. Both also work for the single-turn `-p` path. Env
+equivalents: `CLAUDIO_LOG_MESSAGES=1`, `CLAUDIO_LOG_MESSAGES_FILE=<path>`. Run
+`claudio --help` for the complete list of claudio flags and `CLAUDIO_*` vars.
 
 ### Configuration (environment variables)
 

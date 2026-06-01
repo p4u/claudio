@@ -17,6 +17,8 @@
 //!   -p/--print            mode switch (consumed; not forwarded)
 //!   --api                 run the OpenAI-compatible API server (consumed)
 //!   --fast                strip human-like delays for lowest latency (consumed)
+//!   --log-messages        log the CLI⇄claudio⇄claude message flow (consumed)
+//!   --log-messages-file   append the raw message flow as JSONL (consumed)
 //!   --output-format       we format output ourselves (consumed)
 //!   --input-format        only `text` supported by this backend (consumed)
 //!   --settings            captured; merged with our hooks; re-injected
@@ -62,6 +64,12 @@ pub struct Parsed {
     /// `--fast`: strip the human-like delays (typing cadence, Ink-quiescence
     /// wait, pre-Enter dwell) for lowest latency. OR-ed with `CLAUDIO_FAST`.
     pub fast: bool,
+    /// `--log-messages`: log the full CLI⇄claudio⇄claude message flow to stderr.
+    /// OR-ed with `CLAUDIO_LOG_MESSAGES`.
+    pub log_messages: bool,
+    /// `--log-messages-file <path>`: append the raw message flow as JSONL to a
+    /// file. Falls back to `CLAUDIO_LOG_MESSAGES_FILE`.
+    pub log_messages_file: Option<String>,
     pub output_format: OutputFormat,
     pub session_id: Option<String>,
     pub user_settings: Option<String>,
@@ -104,6 +112,8 @@ pub fn parse(args: &[String]) -> Parsed {
         print_mode: false,
         api_mode: false,
         fast: false,
+        log_messages: false,
+        log_messages_file: None,
         output_format: OutputFormat::Text,
         session_id: None,
         user_settings: None,
@@ -156,6 +166,16 @@ pub fn parse(args: &[String]) -> Parsed {
                 // Owned switch: disable all human-like delays for lowest latency.
                 p.fast = true;
                 i += 1;
+            }
+            "--log-messages" => {
+                // Owned switch: log the CLI⇄claudio⇄claude message flow to stderr.
+                p.log_messages = true;
+                i += 1;
+            }
+            "--log-messages-file" => {
+                let (v, n) = take_value(args, i);
+                p.log_messages_file = v;
+                i += n;
             }
             "--output-format" => {
                 let (v, n) = take_value(args, i);
@@ -280,6 +300,47 @@ impl WrapperEnv {
         }
     }
 }
+
+/// Appended to `claude --help` output so `claudio --help` documents the
+/// wrapper-only surface. Everything not listed here is forwarded to `claude`.
+pub const HELP_APPENDIX: &str = "\n\
+\x20Claudio custom flags\n\
+\x20────────────────────\n\
+\x20This binary is `claudio`, a drop-in `claude` wrapper. Without -p/--print it\n\
+\x20execs the real `claude` unchanged; the flags and env vars below are its own.\n\
+\n\
+\x20Flags (consumed by claudio, not forwarded to claude):\n\
+\x20  -p, --print                 Emulate print mode via the interactive PTY (claudio never runs `claude -p`).\n\
+\x20  --api                       Run the OpenAI-compatible API server (POST /v1/chat/completions, /v1/models).\n\
+\x20  --fast                      Strip human-like typing/quiescence delays for lowest latency.\n\
+\x20  --log-messages              Log the full CLI⇄claudio⇄claude message flow to stderr (colorized).\n\
+\x20  --log-messages-file <path>  Also append the raw message flow to <path> as JSON Lines (untruncated).\n\
+\n\
+\x20Environment variables — general:\n\
+\x20  CLAUDIO_CLAUDE_PATH=<path>        Path to the real `claude` binary (default: claude).\n\
+\x20  CLAUDIO_FAST=1                    Same as --fast.\n\
+\x20  CLAUDIO_LOG_MESSAGES=1            Same as --log-messages.\n\
+\x20  CLAUDIO_LOG_MESSAGES_FILE=<path>  Same as --log-messages-file.\n\
+\x20  CLAUDIO_TIMEOUT_SEC=<n>           Per-turn PTY backend timeout, seconds (default: 300).\n\
+\x20  CLAUDIO_COLS=<n> / CLAUDIO_ROWS=<n>  Emulated terminal size (default: 120x40).\n\
+\x20  CLAUDIO_DEBUG=1                   Verbose wrapper diagnostics.\n\
+\x20  CLAUDIO_RAW_LOG=<path>            Dump the raw PTY byte stream to a file.\n\
+\n\
+\x20Environment variables — API server (--api):\n\
+\x20  CLAUDIO_API_BIND=<host:port>      Listen address (default: 127.0.0.1:8080).\n\
+\x20  CLAUDIO_API_KEY=<key>             Require `Authorization: Bearer <key>` on requests.\n\
+\x20  CLAUDIO_API_DEFAULT_MODEL=<m>     Model when the request omits one / isn't a Claude model (default: sonnet).\n\
+\x20  CLAUDIO_API_CWD=<dir>             Backend working directory (default: system temp dir).\n\
+\x20  CLAUDIO_API_MAX_CONCURRENCY=<n>   Max concurrent backend turns (default: 8).\n\
+\x20  CLAUDIO_API_TIMEOUT_SECS=<n>      Per-turn timeout, seconds (default: 600).\n\
+\x20  CLAUDIO_API_AGENTIC=false         Ignore client tools[] (chat-only; default: on).\n\
+\x20  CLAUDIO_API_SETTING_SOURCES=<v>   Value for --setting-sources (default: project; empty = omit).\n\
+\n\
+\x20Environment variables — session pool (--api):\n\
+\x20  CLAUDIO_API_MAX_SESSIONS=<n>      Max conversation mappings kept (default: 32).\n\
+\x20  CLAUDIO_API_MAX_LIVE=<n>          Max live claude processes; idle ones are demoted (default: 6).\n\
+\x20  CLAUDIO_API_SESSION_TTL=<n>       Drop an idle conversation mapping after n seconds (default: 600).\n\
+\x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n";
 
 #[cfg(test)]
 mod tests {
@@ -460,5 +521,39 @@ mod tests {
         let p = parse(&s(&["--api", "--model", "opus"]));
         assert!(p.api_mode);
         assert_eq!(p.forward, s(&["--model", "opus"]));
+    }
+
+    #[test]
+    fn log_messages_flag_consumed() {
+        let p = parse(&s(&["--api", "--log-messages"]));
+        assert!(p.log_messages);
+        assert!(p.log_messages_file.is_none());
+        assert!(p.forward.is_empty());
+    }
+
+    #[test]
+    fn log_messages_file_takes_value_separate_and_inline() {
+        let p = parse(&s(&["--api", "--log-messages-file", "/tmp/flow.jsonl"]));
+        assert_eq!(p.log_messages_file.as_deref(), Some("/tmp/flow.jsonl"));
+        assert!(p.forward.is_empty());
+        let p = parse(&s(&["--api", "--log-messages-file=/tmp/f.jsonl"]));
+        assert_eq!(p.log_messages_file.as_deref(), Some("/tmp/f.jsonl"));
+    }
+
+    #[test]
+    fn log_messages_file_value_not_mistaken_for_prompt() {
+        let p = parse(&s(&["-p", "--log-messages-file", "/tmp/f.jsonl", "do it"]));
+        assert_eq!(p.log_messages_file.as_deref(), Some("/tmp/f.jsonl"));
+        assert_eq!(p.prompt.as_deref(), Some("do it"));
+        assert!(p.forward.is_empty());
+    }
+
+    #[test]
+    fn help_appendix_lists_flags_and_envs() {
+        assert!(HELP_APPENDIX.contains("Claudio custom flags"));
+        assert!(HELP_APPENDIX.contains("--log-messages"));
+        assert!(HELP_APPENDIX.contains("--api"));
+        assert!(HELP_APPENDIX.contains("CLAUDIO_API_BIND"));
+        assert!(HELP_APPENDIX.contains("CLAUDIO_LOG_MESSAGES_FILE"));
     }
 }

@@ -15,10 +15,11 @@ mod cli;
 mod driver;
 mod emit;
 mod hooks;
+mod msglog;
 mod session;
 mod vt;
 
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 
 use cli::{OutputFormat, WrapperEnv};
 use emit::Outcome;
@@ -49,6 +50,26 @@ fn main() -> std::process::ExitCode {
 
     let args = &argv[1..];
     let parsed = cli::parse(args);
+
+    // `claudio --help`/-h (when not driving a turn or the server): show the real
+    // claude help, then append our wrapper-specific flag/env reference.
+    if !parsed.api_mode && !parsed.print_mode && wants_help(args) {
+        return print_help_with_appendix(args);
+    }
+
+    // Optional message-flow logging (CLI⇄claudio⇄claude). Flag or env enables it;
+    // a file path also enables the raw JSONL sink. Init before any turn runs.
+    {
+        let pretty = parsed.log_messages
+            || std::env::var("CLAUDIO_LOG_MESSAGES").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let file = parsed
+            .log_messages_file
+            .clone()
+            .or_else(|| std::env::var("CLAUDIO_LOG_MESSAGES_FILE").ok().filter(|s| !s.is_empty()));
+        if pretty || file.is_some() {
+            msglog::init(pretty, file.as_deref());
+        }
+    }
 
     // §API — `--api` starts the OpenAI-compatible server, served by the same
     // PTY backend that powers `-p`. It takes precedence over print mode.
@@ -116,6 +137,31 @@ fn main() -> std::process::ExitCode {
                 println!("{obj}");
             }
             std::process::ExitCode::from(2)
+        }
+    }
+}
+
+/// Whether argv is asking for help (`-h`/`--help` anywhere on the line).
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--help")
+}
+
+/// Show the real `claude` help, then append claudio's own flag/env reference.
+/// Falls back to printing just our appendix if `claude` can't be run.
+fn print_help_with_appendix(args: &[String]) -> std::process::ExitCode {
+    let claude = std::env::var("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|_| "claude".into());
+    match std::process::Command::new(&claude).args(args).output() {
+        Ok(o) => {
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(&o.stdout);
+            let _ = std::io::stderr().write_all(&o.stderr);
+            let _ = stdout.write_all(cli::HELP_APPENDIX.as_bytes());
+            std::process::ExitCode::from(o.status.code().unwrap_or(0) as u8)
+        }
+        Err(e) => {
+            eprintln!("claudio: could not run '{claude} --help': {e}");
+            print!("{}", cli::HELP_APPENDIX);
+            std::process::ExitCode::SUCCESS
         }
     }
 }

@@ -113,7 +113,32 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut sess = PtySession::start(env, &parsed.forward, &session_id, parsed.user_settings.as_deref())?;
+
+    let corr = if crate::msglog::enabled() {
+        let c = crate::msglog::new_corr();
+        let sid: String = session_id.chars().take(8).collect();
+        crate::msglog::record(
+            crate::msglog::Dir::ClaudioToClaude,
+            &c,
+            &format!("-p turn · session {sid}"),
+            prompt,
+        );
+        c
+    } else {
+        String::new()
+    };
+
     let (summary, failure) = sess.turn(prompt)?;
+
+    if crate::msglog::enabled() {
+        crate::msglog::record(
+            crate::msglog::Dir::ClaudeToClaudio,
+            &corr,
+            &format!("reply · turns={} · error={}", summary.num_turns, summary.is_error),
+            &summary.final_text,
+        );
+    }
+
     let duration_ms = start.elapsed().as_millis() as u64;
     sess.close();
     Ok(RunResult { summary, duration_ms, failure })
