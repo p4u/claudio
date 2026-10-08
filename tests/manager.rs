@@ -665,7 +665,9 @@ fn test_e2e_real_claude() {
     // ── 1. Wait for TUI to start (status bar shows "Alt+q"). ─────────────────
     assert!(wait_for("Alt+q", Duration::from_secs(30)), "TUI never started");
 
-    // ── 2. Pick the session directory in the wizard (bracketed paste + Enter). ─
+    // ── 2. Pick "local" in the host step, then the session directory. ────────
+    write_bytes(&mut writer, ENTER);
+    thread::sleep(Duration::from_millis(150));
     let path = session_dir.to_str().unwrap();
     write_bytes(&mut writer, b"\x1b[200~");
     write_bytes(&mut writer, path.as_bytes());
