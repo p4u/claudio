@@ -1,0 +1,468 @@
+//! Rendering: tab bar, session pane, status bar and modal popups.
+//!
+//! Everything here is a pure function of [`App`]; the tab-fitting and text
+//! helpers are shared with the app (tab hit-testing) and the wizard.
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::Frame;
+
+use crate::proto::SessionState;
+
+use super::app::{App, Modal, SessionView};
+use super::keymap;
+use super::wizard::{resume_label, Wizard};
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Draw the whole UI.
+pub fn draw(frame: &mut Frame, app: &App) {
+    let [tabs, pane, status] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    draw_tabs(frame, app, tabs);
+    draw_pane(frame, app, pane);
+    draw_status(frame, app, status);
+    match &app.modal {
+        Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
+        Some(Modal::Close { id }) => {
+            if let Some(view) = app.sessions.iter().find(|v| v.id == *id) {
+                draw_close(frame, &view.label());
+            }
+        }
+        Some(Modal::Wizard(w)) => draw_wizard(frame, w, app.now),
+        None => {}
+    }
+}
+
+// ── Tab bar ───────────────────────────────────────────────────────────────────
+
+/// The state glyph for a tab, animated by `tick` while working.
+pub fn glyph(state: SessionState, tick: usize) -> (&'static str, Style) {
+    let s = Style::default();
+    match state {
+        SessionState::Working => (SPINNER[tick % SPINNER.len()], s.fg(Color::Cyan)),
+        SessionState::NeedsApproval => ("◆", s.fg(Color::Red)),
+        SessionState::NeedsInput => ("?", s.fg(Color::Yellow)),
+        SessionState::Idle => ("✓", s.fg(Color::Green)),
+        SessionState::Error => ("✗", s.fg(Color::Red)),
+        SessionState::Exited => ("○", s.add_modifier(Modifier::DIM)),
+        SessionState::Starting | SessionState::Unknown => ("·", s),
+    }
+}
+
+/// The text of one tab with its label cut to `cap` columns:
+/// ` {n} {glyph} {label} `, or ` {n} {glyph} ` when no label fits.
+pub fn tab_parts(index: usize, label: &str, cap: usize) -> (String, String) {
+    let label = truncate(label, cap);
+    let suffix = if label.is_empty() { " ".to_owned() } else { format!(" {label} ") };
+    (format!(" {index} "), suffix)
+}
+
+/// Per-tab label widths so that every tab fits in `width` columns (tabs are
+/// separated by one column). Inactive tabs shrink first, all to a common
+/// cap; the active tab shrinks only once the others have no label left.
+pub fn fit_tabs(labels: &[usize], active: Option<usize>, width: usize) -> Vec<usize> {
+    let total = |caps: &[usize]| -> usize {
+        let tabs: usize = caps
+            .iter()
+            .enumerate()
+            .map(|(i, &cap)| {
+                let digits = (i + 1).to_string().len();
+                // " n " + glyph + " " [+ label + " "]
+                digits + 4 + if cap > 0 { cap + 1 } else { 0 }
+            })
+            .sum();
+        tabs + caps.len().saturating_sub(1)
+    };
+    let mut caps = labels.to_vec();
+    if total(&caps) <= width {
+        return caps;
+    }
+    let inactive_max = labels.iter().enumerate().filter(|(i, _)| Some(*i) != active).map(|(_, &w)| w).max();
+    for cap in (0..inactive_max.unwrap_or(0)).rev() {
+        for (i, c) in caps.iter_mut().enumerate() {
+            if Some(i) != active {
+                *c = labels[i].min(cap);
+            }
+        }
+        if total(&caps) <= width {
+            return caps;
+        }
+    }
+    if let Some(a) = active.filter(|&a| a < caps.len()) {
+        for cap in (0..labels[a]).rev() {
+            caps[a] = cap;
+            if total(&caps) <= width {
+                return caps;
+            }
+        }
+    }
+    caps
+}
+
+/// The tab texts as laid out for a bar `width` columns wide.
+pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16) -> Vec<(String, String)> {
+    let labels: Vec<String> = sessions.iter().map(SessionView::label).collect();
+    let widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
+    let caps = fit_tabs(&widths, active, width as usize);
+    labels.iter().zip(caps).enumerate().map(|(i, (l, cap))| tab_parts(i + 1, l, cap)).collect()
+}
+
+/// Which tab is at column `col` of the bar, given its titles.
+pub fn tab_at(titles: &[(String, String)], col: u16) -> Option<usize> {
+    let col = col as usize;
+    let mut x = 0;
+    for (i, (prefix, suffix)) in titles.iter().enumerate() {
+        let w = str_width(prefix) + 1 + str_width(suffix);
+        if (x..x + w).contains(&col) {
+            return Some(i);
+        }
+        x += w + 1;
+    }
+    None
+}
+
+fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let titles = tab_titles(&app.sessions, app.active, area.width);
+    let mut spans = Vec::new();
+    for (i, ((prefix, suffix), view)) in titles.into_iter().zip(&app.sessions).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", Style::default().add_modifier(Modifier::DIM)));
+        }
+        let (g, gstyle) = glyph(view.state, app.tick);
+        let base = if Some(i) == app.active {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else if view.state.wants_attention() {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(prefix, base));
+        spans.push(Span::styled(g, base.patch(gstyle)));
+        spans.push(Span::styled(suffix, base));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// ── Pane ──────────────────────────────────────────────────────────────────────
+
+fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = app.active_view() else {
+        let hint = Paragraph::new("No sessions. Alt+n starts one, Alt+q quits.")
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .centered();
+        let y = area.y + area.height / 2;
+        frame.render_widget(hint, Rect { y, height: 1.min(area.height), ..area });
+        return;
+    };
+    view.mirror.render(area, frame.buffer_mut());
+    if app.modal.is_none() {
+        if let Some((col, row)) = view.mirror.cursor() {
+            if col < area.width && row < area.height {
+                frame.set_cursor_position((area.x + col, area.y + row));
+            }
+        }
+    }
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+
+/// Human name of a session state.
+pub fn state_name(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Starting => "starting",
+        SessionState::Working => "working",
+        SessionState::NeedsApproval => "needs approval",
+        SessionState::NeedsInput => "needs input",
+        SessionState::Idle => "idle",
+        SessionState::Error => "error",
+        SessionState::Exited => "exited",
+        SessionState::Unknown => "unknown",
+    }
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let (left, left_style) = if !app.connected {
+        ("daemon disconnected, reconnecting…".to_owned(), Style::default().fg(Color::Red))
+    } else if let Some(notice) = &app.notice {
+        (notice.text.clone(), Style::default().fg(Color::Yellow))
+    } else if let Some(v) = app.active_view() {
+        let mut parts = vec![abbreviate_home(&v.cwd, &app.home), state_name(v.state).to_owned()];
+        if let Some(csid) = &v.claude_session_id {
+            parts.push(csid.chars().take(8).collect());
+        }
+        parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
+        (parts.join(" · "), Style::default())
+    } else {
+        (String::new(), Style::default())
+    };
+    let width = area.width as usize;
+    let left = truncate(&format!(" {left}"), width);
+    let mut spans = vec![Span::styled(left.clone(), left_style)];
+    // Hints fill what's left, losing their head first so `Alt+q quit` stays.
+    let hints = format!("{} ", keymap::HINTS);
+    let room = width.saturating_sub(str_width(&left) + 2);
+    let hints = if str_width(&hints) <= room {
+        hints
+    } else if room >= 12 {
+        format!("…{}", tail(&hints, room - 1))
+    } else {
+        String::new()
+    };
+    let pad = width.saturating_sub(str_width(&left) + str_width(&hints));
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(hints, Style::default().add_modifier(Modifier::DIM)));
+    let bar = Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(bar, area);
+}
+
+// ── Modals ────────────────────────────────────────────────────────────────────
+
+/// A `width`×`height` rectangle centered in `area` (clamped to it).
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+}
+
+/// Clear `rect`, draw a titled border and return the inner area.
+fn popup(frame: &mut Frame, rect: Rect, title: &str) -> Rect {
+    let block = Block::bordered().title(format!(" {title} "));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    inner
+}
+
+/// Render an input line and place the cursor after it.
+fn draw_input(frame: &mut Frame, area: Rect, prompt: &str, input: &str) {
+    if area.height == 0 {
+        return;
+    }
+    let line = Rect { height: 1, ..area };
+    // Keep the end of a long input visible.
+    let room = (area.width as usize).saturating_sub(str_width(prompt) + 1);
+    let shown = tail(input, room);
+    frame.render_widget(Paragraph::new(format!("{prompt}{shown}")), line);
+    let x = area.x + (str_width(prompt) + str_width(&shown)) as u16;
+    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
+}
+
+fn draw_rename(frame: &mut Frame, input: &str) {
+    let area = frame.area();
+    let rect = centered(area, 60.min(area.width.saturating_sub(4)), 3);
+    let inner = popup(frame, rect, "Rename session (Enter save · Esc cancel)");
+    draw_input(frame, inner, "", input);
+}
+
+fn draw_close(frame: &mut Frame, label: &str) {
+    let text = format!("Kill session {label}? [y] kill · [n]/Esc cancel");
+    let area = frame.area();
+    let rect = centered(area, (str_width(&text) as u16 + 4).min(area.width.saturating_sub(2)), 3);
+    let inner = popup(frame, rect, "Close session");
+    frame.render_widget(Paragraph::new(text), inner);
+}
+
+/// Render `rows` into `area`, highlighting `selected` and scrolling to keep
+/// it visible.
+fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
+    let visible = area.height as usize;
+    if visible == 0 {
+        return;
+    }
+    let offset = selected.saturating_sub(visible - 1);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(i, row)| {
+            let text = truncate(row, area.width as usize);
+            if i == selected {
+                Line::styled(text, Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                Line::raw(text)
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
+    let area = frame.area();
+    let rect = centered(area, 90.min(area.width.saturating_sub(4)), 22.min(area.height.saturating_sub(2)));
+    if let Some(step) = &w.resume {
+        let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back)");
+        let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let cwd = Paragraph::new(w.display(&step.cwd)).style(Style::default().add_modifier(Modifier::DIM));
+        frame.render_widget(cwd, head);
+        let rows: Vec<String> = std::iter::once("+ New session".to_owned())
+            .chain(step.sessions.iter().map(|s| resume_label(s, now)))
+            .collect();
+        draw_list(frame, list, &rows, step.selected);
+        return;
+    }
+    let inner = popup(frame, rect, "New session: directory (Tab complete · Enter pick · Esc cancel)");
+    let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+    if let Some(dir) = &w.pending {
+        frame.render_widget(Paragraph::new(format!("Looking for sessions in {}…", w.display(dir))), head);
+        return;
+    }
+    draw_input(frame, head, "> ", &w.input);
+    let rows: Vec<String> = w.items.iter().map(|p| w.display(p)).collect();
+    draw_list(frame, list, &rows, w.selected);
+}
+
+// ── Text helpers ──────────────────────────────────────────────────────────────
+
+/// Display width of `s` in terminal columns.
+pub fn str_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// Cut `s` to at most `max` columns, ending in `…` when shortened.
+pub fn truncate(s: &str, max: usize) -> String {
+    if str_width(s) <= max {
+        return s.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = char_width(c);
+        if used + w > max - 1 {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// The last `max` columns of `s`.
+fn tail(s: &str, max: usize) -> String {
+    let mut used = 0;
+    let mut chars: Vec<char> = Vec::new();
+    for c in s.chars().rev() {
+        used += char_width(c);
+        if used > max {
+            break;
+        }
+        chars.push(c);
+    }
+    chars.into_iter().rev().collect()
+}
+
+fn char_width(c: char) -> usize {
+    let mut buf = [0u8; 4];
+    str_width(c.encode_utf8(&mut buf))
+}
+
+/// Replace a leading `home` with `~`.
+pub fn abbreviate_home(path: &str, home: &str) -> String {
+    if home.is_empty() || home == "/" {
+        return path.to_owned();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_owned(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
+}
+
+/// A compact duration: `42s`, `12m`, `3h`, `5d`.
+pub fn fmt_age(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn total_width(titles: &[(String, String)]) -> usize {
+        titles.iter().map(|(p, s)| str_width(p) + 1 + str_width(s)).sum::<usize>() + titles.len().saturating_sub(1)
+    }
+
+    #[test]
+    fn truncate_marks_cut_text() {
+        assert_eq!(truncate("claudio", 10), "claudio");
+        assert_eq!(truncate("claudio", 7), "claudio");
+        assert_eq!(truncate("claudio", 5), "clau…");
+        assert_eq!(truncate("claudio", 1), "…");
+        assert_eq!(truncate("claudio", 0), "");
+        // Wide characters count two columns.
+        assert_eq!(truncate("日本語です", 5), "日本…");
+        assert_eq!(str_width(&truncate("日本語です", 4)), 3);
+    }
+
+    #[test]
+    fn tabs_fit_untouched_when_there_is_room() {
+        assert_eq!(fit_tabs(&[5, 7, 3], Some(0), 200), vec![5, 7, 3]);
+    }
+
+    #[test]
+    fn inactive_tabs_shrink_first_to_a_common_cap() {
+        // Full: 3 × (5 + 10 + 1) + 2 separators = 50.
+        let caps = fit_tabs(&[10, 10, 10], Some(1), 40);
+        assert_eq!(caps[1], 10, "active keeps its label");
+        assert!(caps[0] < 10 && caps[0] == caps[2]);
+        // Short labels stay whole while long ones shrink.
+        let caps = fit_tabs(&[2, 30, 30], Some(0), 40);
+        assert_eq!(caps[0], 2);
+        assert_eq!(caps[1], caps[2]);
+    }
+
+    #[test]
+    fn active_shrinks_once_inactive_labels_are_gone() {
+        // Inactive tabs without labels: 2 × 5 + separators 2 = 12; active
+        // overhead 6 → 22 columns leave 4 for the active label.
+        assert_eq!(fit_tabs(&[20, 20, 20], Some(1), 22), vec![0, 4, 0]);
+    }
+
+    #[test]
+    fn fitted_titles_never_exceed_the_bar() {
+        let labels: Vec<usize> = (0..8).map(|i| 5 + i * 3).collect();
+        for width in [50usize, 80, 120] {
+            let caps = fit_tabs(&labels, Some(3), width);
+            let titles: Vec<(String, String)> =
+                caps.iter().enumerate().map(|(i, &c)| tab_parts(i + 1, &"x".repeat(labels[i]), c)).collect();
+            assert!(total_width(&titles) <= width, "width {width}: {titles:?}");
+        }
+    }
+
+    #[test]
+    fn tab_hit_testing_follows_layout() {
+        let titles = vec![tab_parts(1, "api", 3), tab_parts(2, "docs", 4)];
+        // " 1 ✓ api " is 9 columns, then a separator at 9.
+        assert_eq!(tab_at(&titles, 0), Some(0));
+        assert_eq!(tab_at(&titles, 8), Some(0));
+        assert_eq!(tab_at(&titles, 9), None);
+        assert_eq!(tab_at(&titles, 10), Some(1));
+        assert_eq!(tab_at(&titles, 100), None);
+    }
+
+    #[test]
+    fn home_is_abbreviated_only_on_a_path_boundary() {
+        assert_eq!(abbreviate_home("/home/u/repos", "/home/u"), "~/repos");
+        assert_eq!(abbreviate_home("/home/u", "/home/u"), "~");
+        assert_eq!(abbreviate_home("/home/user2", "/home/u"), "/home/user2");
+    }
+
+    #[test]
+    fn ages_are_compact() {
+        assert_eq!(fmt_age(5), "5s");
+        assert_eq!(fmt_age(300), "5m");
+        assert_eq!(fmt_age(7200), "2h");
+        assert_eq!(fmt_age(3 * 86_400), "3d");
+    }
+}

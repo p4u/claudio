@@ -13,12 +13,14 @@
 mod api;
 mod claude;
 mod cli;
+mod client;
 mod daemon;
 mod msglog;
 mod paths;
 mod print;
 mod proto;
 mod term;
+mod tui;
 
 use std::io::{IsTerminal, Read, Write};
 
@@ -58,6 +60,11 @@ fn main() -> std::process::ExitCode {
     // Session daemon: `claudio --daemon` owns the PTYs of the manager sessions.
     if argv.get(1).map(String::as_str) == Some("--daemon") {
         return daemon::run();
+    }
+
+    // A bare `claudio` opens the session manager.
+    if argv.len() == 1 {
+        return tui::run();
     }
 
     let args = &argv[1..];
