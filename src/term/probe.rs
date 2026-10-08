@@ -54,6 +54,12 @@ impl ProbeResponder {
         }
     }
 
+    /// Track a terminal resize, so size reports (`CSI 18t`) stay truthful.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.inner.rows = rows;
+        self.inner.cols = cols;
+    }
+
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.inner.out)
     }

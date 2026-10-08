@@ -350,8 +350,9 @@ impl Actor {
     ) {
         loop {
             tokio::select! {
+                // Commands first: keystrokes and attaches must not queue
+                // behind a long burst of output.
                 biased;
-                Some(bytes) = output.recv() => self.on_output(&bytes),
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Kill) | None => {
                         drop(output);
@@ -360,6 +361,7 @@ impl Actor {
                     }
                     Some(cmd) => self.on_cmd(cmd),
                 },
+                Some(bytes) = output.recv() => self.on_output(&bytes),
                 code = &mut exit => {
                     // Output still queued was written before the exit.
                     while let Ok(bytes) = output.try_recv() {
@@ -473,9 +475,7 @@ impl Actor {
             tracing::warn!(id = %self.id, error = %e, "pty resize failed");
         }
         self.screen.resize(rows, cols);
-        // The responder has no resize; a fresh one only forgets a probe split
-        // across this exact read boundary.
-        self.probe = ProbeResponder::new(rows, cols);
+        self.probe.resize(rows, cols);
 
         let (id, snapshot) = (self.id, self.screen.snapshot());
         self.subs
