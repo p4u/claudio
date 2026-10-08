@@ -569,21 +569,44 @@ fn test_e2e_real_claude() {
         return;
     }
 
-    // Use a fresh isolated state but the real claude binary.
+    // Fresh isolated claudio state; keep the real HOME so claude can read
+    // its credentials from ~/.claude.
     let id = Uuid::new_v4();
     let root = std::env::temp_dir().join(format!("claudio-e2e-{id}"));
     let runtime_dir = root.join("run");
     let config_home = root.join("config");
-    let home = root.join("home");
     let session_dir = root.join("session");
-    for p in [&runtime_dir, &config_home, &home, &session_dir] {
+    for p in [&runtime_dir, &config_home, &session_dir] {
         fs::create_dir_all(p).unwrap();
     }
 
+    // PTY setup.
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    // Isolate claudio via XDG dirs only; HOME stays real so claude finds ~/.claude.
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    // ANTHROPIC_MODEL is inherited by the daemon → passed to every claude subprocess.
+    cmd.env("ANTHROPIC_MODEL", "claude-haiku-4-5");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("COLORTERM");
+
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    // Grab the PID now so the drop guard can kill the TUI process on panic.
+    let child_pid = child.process_id();
+
+    // Drop guard: kill claudio TUI + daemon and clean up temp tree.
+    let runtime_dir_guard = runtime_dir.clone();
     let cleanup_root = root.clone();
     let _guard = scopeguard(move || {
-        // Kill daemon and clean up even if the test panics.
-        let lock = runtime_dir.join("claudio").join("daemon-v1.lock");
+        if let Some(pid) = child_pid {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let lock = runtime_dir_guard.join("claudio").join("daemon-v1.lock");
         if let Some(pid) = fs::read_to_string(&lock)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
@@ -593,21 +616,6 @@ fn test_e2e_real_claude() {
         let _ = fs::remove_dir_all(&cleanup_root);
     });
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-        .unwrap();
-
-    let mut cmd = CommandBuilder::new(BINARY);
-    cmd.env("XDG_RUNTIME_DIR", root.join("run"));
-    cmd.env("XDG_CONFIG_HOME", root.join("config"));
-    cmd.env("HOME", &home);
-    // Let CLAUDIO_CLAUDE_PATH inherit from the real environment (real claude).
-    // Set ANTHROPIC_MODEL so the daemon spawns haiku.
-    cmd.env("ANTHROPIC_MODEL", "claude-haiku-4-5");
-    cmd.env("TERM", "xterm-256color");
-
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
     let mut writer = pair.master.take_writer().unwrap();
     let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let raw2 = Arc::clone(&raw);
@@ -622,6 +630,7 @@ fn test_e2e_real_claude() {
         }
     });
 
+    // Reuse the same poll-loop pattern as TuiSession::wait_for.
     let wait_for = |text: &str, timeout: Duration| -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -630,7 +639,12 @@ fn test_e2e_real_claude() {
                 return true;
             }
             if Instant::now() >= deadline {
-                eprintln!("[e2e] timeout waiting for {text:?}");
+                let buf = strip_ansi(&raw.lock().unwrap());
+                eprintln!(
+                    "[e2e] timeout waiting for {:?}\nlast output (tail):\n{}",
+                    text,
+                    &buf[buf.len().saturating_sub(3000)..]
+                );
                 return false;
             }
             thread::sleep(Duration::from_millis(200));
@@ -640,10 +654,10 @@ fn test_e2e_real_claude() {
         let _ = w.write_all(bytes);
     };
 
-    // Wait for TUI to start.
+    // ── 1. Wait for TUI to start (status bar shows "Alt+q"). ─────────────────
     assert!(wait_for("Alt+q", Duration::from_secs(30)), "TUI never started");
 
-    // Pick the session directory in the wizard.
+    // ── 2. Pick the session directory in the wizard (bracketed paste + Enter). ─
     let path = session_dir.to_str().unwrap();
     write_bytes(&mut writer, b"\x1b[200~");
     write_bytes(&mut writer, path.as_bytes());
@@ -651,31 +665,70 @@ fn test_e2e_real_claude() {
     thread::sleep(Duration::from_millis(200));
     write_bytes(&mut writer, ENTER);
 
-    // Wait for claude to start (spinner appears).
-    assert!(wait_for("⠋", Duration::from_secs(30)), "claude never started");
-
-    // Wait for the session to become idle (claude is ready for input).
-    assert!(wait_for("✓", Duration::from_secs(60)), "claude never reached idle");
-
-    // Type the prompt.
+    // ── 3. Wait for claude to be ready for input. ────────────────────────────
+    //
+    // At startup claude transitions to NeedsInput (not Working), so the tab
+    // shows "?" not the working spinner.  A brand-new directory also triggers
+    // claude's trust dialog ("Do you trust the files in this folder?"); we
+    // detect that text and accept it with Enter before continuing to wait.
+    //
+    // We detect readiness via claude's own banner text ("Claude Code") that
+    // appears in the mirrored pane content.  Watching the tab-bar glyph is
+    // unreliable: ratatui diff-renders only write the changed glyph cell, so
+    // "? session" never appears as a contiguous substring in the accumulated
+    // raw bytes after the first full frame.
+    let ready_deadline = Instant::now() + Duration::from_secs(90);
+    let mut trust_pressed = false;
+    loop {
+        let stripped = strip_ansi(&raw.lock().unwrap());
+        // Accept the trust dialog if it appears (Enter selects the default Yes).
+        if !trust_pressed && stripped.contains("Do you trust") {
+            write_bytes(&mut writer, ENTER);
+            trust_pressed = true;
+            thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        // Claude's banner header ("Claude Code") appears in the pane once the
+        // session is fully started and ready for input.
+        if stripped.contains("Claude Code") {
+            break;
+        }
+        if Instant::now() >= ready_deadline {
+            eprintln!("[e2e] timeout waiting for claude's banner; proceeding anyway");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    // Short settle so claude's event loop has processed any preceding output.
     thread::sleep(Duration::from_millis(500));
+
+    // ── 4. Send the prompt via bracketed paste, then Enter separately. ────────
+    write_bytes(&mut writer, b"\x1b[200~");
     write_bytes(&mut writer, b"Reply with exactly: TUI_E2E_OK");
+    write_bytes(&mut writer, b"\x1b[201~");
+    thread::sleep(Duration::from_millis(200));
     write_bytes(&mut writer, ENTER);
 
-    // Assert the answer appears.
-    assert!(wait_for("TUI_E2E_OK", Duration::from_secs(60)), "claude didn't answer");
+    // ── 5. Wait for the expected answer (generous timeout for haiku). ─────────
+    assert!(
+        wait_for("TUI_E2E_OK", Duration::from_secs(90)),
+        "claude never replied with TUI_E2E_OK"
+    );
 
-    // Assert the session goes idle again (✓ glyph, possibly already in buffer).
-    assert!(wait_for("✓", Duration::from_secs(30)), "session didn't return to idle");
+    // ── 6. After the response the session should return to Idle (✓ glyph). ────
+    assert!(
+        wait_for("✓", Duration::from_secs(30)),
+        "session didn't return to idle after reply"
+    );
 
-    // Quit.
+    // ── 7. Quit cleanly. ──────────────────────────────────────────────────────
     write_bytes(&mut writer, ALT_Q);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let quit_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(Some(_)) = child.try_wait() {
             break;
         }
-        assert!(Instant::now() < deadline, "TUI did not exit after Alt+q");
+        assert!(Instant::now() < quit_deadline, "TUI did not exit after Alt+q");
         thread::sleep(Duration::from_millis(100));
     }
 }
