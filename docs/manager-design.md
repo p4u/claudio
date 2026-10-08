@@ -325,8 +325,14 @@ the proxy directly. Quota signals come from `/me/stats` (`blocked_until`).
 Keyboard-first, fuzzy, with smart defaults. Enter accepts the default at each
 step.
 
-1. **Where:** `local`, the remembered hosts, hosts from `~/.ssh/config`, or
-   "new host…". The default is the current session's host.
+1. **Where:** `local` comes first, then the remembered hosts **most recently
+   used first** (from `~/.config/claudio/hosts.json`), then every other `Host`
+   alias in `~/.ssh/config`. Aliases from `Include`d files count; wildcard
+   patterns (`*`, `?`, `!`) are skipped. Typing filters the list fuzzily, and a
+   free-form `user@host` is accepted too.
+   - The default is the current session's host.
+   - claudio needs only the alias. The system `ssh` resolves User, Port,
+     ProxyJump and keys from the user's config.
 2. **Directory:** a fuzzy list seeded from:
    - the current dir
    - recent dirs
