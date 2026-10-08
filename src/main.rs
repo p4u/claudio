@@ -13,6 +13,7 @@
 mod api;
 mod claude;
 mod cli;
+mod daemon;
 mod msglog;
 mod paths;
 mod print;
@@ -52,6 +53,11 @@ fn main() -> std::process::ExitCode {
     if argv.len() >= 3 && argv[1] == "__hook" {
         print::hooks::run_relay(&argv[2]);
         return std::process::ExitCode::SUCCESS;
+    }
+
+    // Session daemon: `claudio --daemon` owns the PTYs of the manager sessions.
+    if argv.get(1).map(String::as_str) == Some("--daemon") {
+        return daemon::run();
     }
 
     let args = &argv[1..];
