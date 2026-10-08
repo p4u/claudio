@@ -197,6 +197,13 @@ fn apply_env(cmd: &mut CommandBuilder, env: &[(String, String)]) {
     }
 }
 
+/// claude animates its terminal title with a leading status glyph
+/// (`✳ Claude Code`, `◐ Fix the parser`); strip it so the title only changes
+/// — and is only broadcast — when the actual text does.
+fn clean_title(title: &str) -> &str {
+    title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim()
+}
+
 fn size_or_default(rows: u16, cols: u16) -> (u16, u16) {
     if rows == 0 || cols == 0 {
         DEFAULT_SIZE
@@ -413,7 +420,7 @@ impl Actor {
     }
 
     fn update_title(&mut self) {
-        let title = self.screen.title();
+        let title = self.screen.title().map(|t| clean_title(&t).to_owned());
         if title != self.title {
             self.title = title.clone();
             let title = title.unwrap_or_default();
@@ -527,6 +534,14 @@ impl Actor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn title_glyphs_are_stripped() {
+        assert_eq!(clean_title("◐ Claude Code"), "Claude Code");
+        assert_eq!(clean_title("✳ Fix the parser"), "Fix the parser");
+        assert_eq!(clean_title("plain"), "plain");
+        assert_eq!(clean_title("◑ "), "");
+    }
+
     use super::*;
     use std::ffi::OsStr;
 
