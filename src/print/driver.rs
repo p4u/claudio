@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::cli::{Parsed, WrapperEnv};
-use crate::hooks::{self, HookEvent, Listener};
-use crate::session::{self, Summary};
-use crate::vt::ProbeResponder;
+use crate::print::hooks::{self, HookEvent, Listener};
+use crate::print::session::{self, Summary};
+use crate::term::probe::ProbeResponder;
 
 #[derive(Debug)]
 pub enum DriverError {

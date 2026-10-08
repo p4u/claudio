@@ -12,17 +12,16 @@
 
 mod api;
 mod cli;
-mod driver;
-mod emit;
-mod hooks;
 mod msglog;
-mod session;
-mod vt;
+mod paths;
+mod print;
+mod proto;
+mod term;
 
 use std::io::{IsTerminal, Read, Write};
 
 use cli::{OutputFormat, WrapperEnv};
-use emit::Outcome;
+use print::emit::Outcome;
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
@@ -36,7 +35,7 @@ fn main() -> std::process::ExitCode {
                 "SessionStart" | "Stop" | "PreToolUse" | "PostToolUse"
                 | "PreCompact" | "PostCompact" | "Notification"
             ) {
-                hooks::relay_to_port(&argv[1], port);
+                print::hooks::relay_to_port(&argv[1], port);
                 return std::process::ExitCode::SUCCESS;
             }
         }
@@ -44,7 +43,7 @@ fn main() -> std::process::ExitCode {
 
     // Legacy relay mode, invoked as `claudio __hook <Event>`.
     if argv.len() >= 3 && argv[1] == "__hook" {
-        hooks::run_relay(&argv[2]);
+        print::hooks::run_relay(&argv[2]);
         return std::process::ExitCode::SUCCESS;
     }
 
@@ -109,7 +108,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match driver::run(&parsed, &env, &prompt) {
+    match print::driver::run(&parsed, &env, &prompt) {
         Ok(result) => {
             let outcome = Outcome {
                 summary: &result.summary,
@@ -117,7 +116,7 @@ fn main() -> std::process::ExitCode {
                 failure: result.failure.as_deref(),
             };
             let mut stdout = std::io::stdout();
-            if let Err(e) = emit::emit(&mut stdout, parsed.output_format, &outcome) {
+            if let Err(e) = print::emit::emit(&mut stdout, parsed.output_format, &outcome) {
                 eprintln!("{e}");
                 return std::process::ExitCode::from(2);
             }

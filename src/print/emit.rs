@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use crate::cli::OutputFormat;
-use crate::session::Summary;
+use crate::print::session::Summary;
 
 pub struct Outcome<'a> {
     pub summary: &'a Summary,

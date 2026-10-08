@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cli::WrapperEnv;
-use crate::driver::PtySession;
+use crate::print::driver::PtySession;
 
 use super::backend::RawResult;
 use super::error::{AppError, AppResult};
@@ -81,7 +81,7 @@ impl Slot {
         env: &WrapperEnv,
         base_forward: &[String],
         prompt: &str,
-    ) -> Result<(crate::session::Summary, Option<String>), crate::driver::DriverError> {
+    ) -> Result<(crate::print::session::Summary, Option<String>), crate::print::driver::DriverError> {
         if !self.is_live() {
             self.live = None; // drop any dead session
             let mut forward = vec![
@@ -383,8 +383,8 @@ impl SessionPool {
     }
 }
 
-/// Convert a driver [`crate::session::Summary`] into a [`RawResult`].
-fn shape(summary: crate::session::Summary, failure: Option<String>) -> AppResult<RawResult> {
+/// Convert a driver [`crate::print::session::Summary`] into a [`RawResult`].
+fn shape(summary: crate::print::session::Summary, failure: Option<String>) -> AppResult<RawResult> {
     if let Some(reason) = failure.as_deref() {
         if summary.final_text.is_empty() {
             return Err(AppError::Upstream(format!("claude turn failed ({reason})")));
@@ -408,7 +408,7 @@ fn short(id: &str) -> String {
 }
 
 /// Map a driver turn error to an HTTP-shaped error: timeouts → 504, else 502.
-fn map_turn_err(e: crate::driver::DriverError) -> AppError {
+fn map_turn_err(e: crate::print::driver::DriverError) -> AppError {
     let msg = e.to_string();
     if msg.contains("timed out") {
         AppError::Timeout(msg)

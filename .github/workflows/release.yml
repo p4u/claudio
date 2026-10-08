@@ -4,8 +4,15 @@ name: release
 #
 # Trigger by pushing a version tag:
 #     git tag v0.1.0 && git push origin v0.1.0
-# `workflow_dispatch` also builds the binary (and uploads it as a run artifact)
+# `workflow_dispatch` also builds binaries (and uploads them as run artifacts)
 # without publishing a release — handy for testing the pipeline.
+#
+# Build matrix:
+#   linux/x86_64  — ubuntu, rustup's self-contained musl (static)
+#   linux/aarch64 — native arm64 runner + musl toolchain (static)
+#   darwin/x86_64 — cross-compiled on the arm64 macos runner (Apple's toolchain
+#                   targets both archs); dynamically linked to libSystem
+#   darwin/aarch64 — macos-latest (M-series); dynamically linked to libSystem
 
 on:
   push:
@@ -17,47 +24,64 @@ permissions:
 
 env:
   BIN: claudio
-  # x86_64 musl links self-contained with rustup's bundled toolchain (no
-  # musl-gcc needed) — the same target `make static` uses. To add more targets,
-  # turn this into a matrix (e.g. aarch64-unknown-linux-musl via `cross`).
-  TARGET: x86_64-unknown-linux-musl
 
 jobs:
-  release:
-    name: static build + release
-    runs-on: ubuntu-latest
+  build:
+    name: build (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            os: darwin
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            os: darwin
+            arch: aarch64
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ env.TARGET }}
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.TARGET }}
+          key: ${{ matrix.target }}
 
-      - name: Build static binary
-        run: cargo build --release --locked --target "$TARGET"
+      - name: Build binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
 
-      - name: Verify it is statically linked
+      - name: Verify statically linked (Linux only)
+        if: matrix.os == 'linux'
         run: |
-          file "target/$TARGET/release/$BIN"
+          file "target/${{ matrix.target }}/release/${{ env.BIN }}"
           # musl static binaries report "not a dynamic executable".
-          ldd "target/$TARGET/release/$BIN" 2>&1 || true
+          ldd "target/${{ matrix.target }}/release/${{ env.BIN }}" 2>&1 || true
 
-      - name: Stage the binary as a release asset
+      - name: Stage release asset
         id: pkg
         run: |
-          # Publish the static binary under its plain name, `claudio`, so it can
-          # be downloaded and run directly (the version/target are in the release
-          # tag and notes). Plus a checksum.
-          asset="$BIN"
-          install -m755 "target/$TARGET/release/$BIN" "$asset"
-          sha256sum "$asset" > "$asset.sha256"
+          # Asset names encode the OS and architecture so release page is clear.
+          asset="${{ env.BIN }}-${{ matrix.os }}-${{ matrix.arch }}"
+          install -m755 "target/${{ matrix.target }}/release/${{ env.BIN }}" "$asset"
+          # shasum -a 256 works on both macOS and Linux.
+          shasum -a 256 "$asset" > "$asset.sha256"
           echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload run artifact (always)
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pkg.outputs.asset }}
@@ -66,12 +90,38 @@ jobs:
             ${{ steps.pkg.outputs.asset }}.sha256
           if-no-files-found: error
 
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Add backward-compatible asset name (claudio)
+        run: |
+          # Preserve the original plain `claudio` asset name so existing
+          # download links and scripts continue to work unchanged.
+          cp assets/claudio-linux-x86_64 assets/claudio
+          cd assets && sha256sum claudio > claudio.sha256
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ steps.pkg.outputs.asset }}
-            ${{ steps.pkg.outputs.asset }}.sha256
+            assets/claudio-linux-x86_64
+            assets/claudio-linux-x86_64.sha256
+            assets/claudio-linux-aarch64
+            assets/claudio-linux-aarch64.sha256
+            assets/claudio-darwin-x86_64
+            assets/claudio-darwin-x86_64.sha256
+            assets/claudio-darwin-aarch64
+            assets/claudio-darwin-aarch64.sha256
+            assets/claudio
+            assets/claudio.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -6,7 +6,7 @@
 #
 # Common targets:
 #   make            → native release build           (target/release/claudio)
-#   make static     → portable static musl binary    (dist/claudio)
+#   make static     → portable static musl binary    (dist/claudio; ARCH=aarch64 for arm64)
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
