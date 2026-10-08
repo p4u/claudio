@@ -743,6 +743,205 @@ fn test_e2e_real_claude() {
     }
 }
 
+// ── SSH TUI test ───────────────────────────────────────────────────────────────
+
+/// Gated by `CLAUDIO_SSH_TEST_HOST`. Drives the full TUI wizard against a real
+/// SSH host: host step → directory step → spawn claude. Then kills the session
+/// and verifies that `hosts.json` records the host as MRU.
+///
+/// The remote host must have `claude` installed and SSH key auth (BatchMode).
+#[test]
+fn test_ssh_remote_session() {
+    let host = match std::env::var("CLAUDIO_SSH_TEST_HOST") {
+        Ok(h) if !h.is_empty() => h,
+        _ => {
+            println!("SKIP test_ssh_remote_session: set CLAUDIO_SSH_TEST_HOST to run");
+            return;
+        }
+    };
+
+    // Isolate claudio state but keep real HOME so SSH credentials are available.
+    let id = Uuid::new_v4();
+    let root = std::env::temp_dir().join(format!("claudio-ssh-tui-test-{id}"));
+    let runtime_dir = root.join("run");
+    let config_home = root.join("config");
+    for p in [&runtime_dir, &config_home] {
+        fs::create_dir_all(p).expect("create test dir");
+    }
+    let hosts_json = config_home.join("claudio").join("hosts.json");
+
+    // PTY setup.
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .expect("open pty");
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    // Keep real HOME for SSH credentials and known_hosts.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("COLORTERM");
+
+    let mut child = pair.slave.spawn_command(cmd).expect("spawn claudio");
+    let child_pid = child.process_id();
+
+    // Drop guards: kill the TUI and the local daemon on exit.
+    let runtime_dir_g = runtime_dir.clone();
+    let cleanup_root = root.clone();
+    let _guard = scopeguard(move || {
+        if let Some(pid) = child_pid {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let lock = runtime_dir_g.join("claudio").join("daemon-v1.lock");
+        if let Some(pid) =
+            fs::read_to_string(&lock).ok().and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let _ = fs::remove_dir_all(&cleanup_root);
+    });
+
+    let mut writer = pair.master.take_writer().expect("pty writer");
+    let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let raw2 = Arc::clone(&raw);
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let _rd = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw2.lock().unwrap().extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+
+    let wait_for = |text: &str, timeout: Duration| -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let stripped = strip_ansi(&raw.lock().unwrap());
+            if stripped.contains(text) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "[ssh_tui] TIMEOUT waiting for {:?}\nlast output:\n{}",
+                    text,
+                    &stripped[stripped.len().saturating_sub(2000)..]
+                );
+                return false;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    };
+
+    // ── 1. Wait for TUI to start. ────────────────────────────────────────────
+    assert!(wait_for("Alt+q", Duration::from_secs(30)), "TUI never started");
+
+    // ── 2. Host step: type the host name and press Enter. ────────────────────
+    // The wizard opens with the host step. Type the remote hostname to filter
+    // the list; it will be pre-selected if it is in ~/.ssh/config, or accepted
+    // as a free-form target if not.
+    let _ = writer.write_all(host.as_bytes());
+    thread::sleep(Duration::from_millis(200));
+    let _ = writer.write_all(ENTER);
+
+    // Bootstrap may take several seconds on first run (binary upload).
+    // Wait for the directory step: the popup title includes "on {host}".
+    // (The full title is "New session on {host} (Tab complete…)" but ANSI
+    // stripping can split "New session" from "on {host}" at cell boundaries.)
+    let dir_step_text = format!("on {host}");
+    assert!(
+        wait_for(&dir_step_text, Duration::from_secs(90)),
+        "directory step never appeared (bootstrap or connect failed)"
+    );
+
+    // ── 3. Directory step: type /tmp and press Enter. ────────────────────────
+    let _ = writer.write_all(b"\x1b[200~");
+    let _ = writer.write_all(b"/tmp");
+    let _ = writer.write_all(b"\x1b[201~");
+    thread::sleep(Duration::from_millis(300));
+    let _ = writer.write_all(ENTER);
+
+    // ── 4. Resume step: pick "+ New session" (index 0, just press Enter). ───
+    // If /tmp has no claude sessions it auto-spawns; if it does the picker appears.
+    // Either way, pressing Enter is correct.
+    thread::sleep(Duration::from_millis(1500));
+    let _ = writer.write_all(ENTER);
+
+    // ── 5. Wait for claude's UI (or trust dialog). ───────────────────────────
+    let ready_deadline = Instant::now() + Duration::from_secs(90);
+    let mut trust_pressed = false;
+    loop {
+        let stripped = strip_ansi(&raw.lock().unwrap());
+        if !trust_pressed && stripped.contains("Do you trust") {
+            let _ = writer.write_all(ENTER);
+            trust_pressed = true;
+            thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        if stripped.contains("Claude Code") {
+            break;
+        }
+        if Instant::now() >= ready_deadline {
+            eprintln!("[ssh_tui] timeout waiting for claude banner, continuing");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    // ── 6. Assert tab label contains @host. ──────────────────────────────────
+    let stripped = strip_ansi(&raw.lock().unwrap());
+    assert!(
+        stripped.contains(&format!("@{host}")),
+        "tab bar should show @{host}\nstripped:\n{}",
+        &stripped[stripped.len().saturating_sub(2000)..]
+    );
+
+    // ── 7. Assert hosts.json lists the host first. ────────────────────────────
+    // Allow up to 2 s for the async write to complete.
+    let hosts_ok = {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut ok = false;
+        while Instant::now() < deadline {
+            if let Ok(content) = fs::read_to_string(&hosts_json) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let first = v["hosts"].as_array().and_then(|a| a.first()).and_then(|h| h.as_str());
+                    if first == Some(host.as_str()) {
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        ok
+    };
+    assert!(hosts_ok, "hosts.json should list {host} first after connecting");
+
+    // ── 8. Kill the session (Alt+x, y) so nothing is left running remotely. ──
+    let _ = writer.write_all(ALT_X);
+    thread::sleep(Duration::from_millis(300));
+    let _ = writer.write_all(b"y");
+    thread::sleep(Duration::from_millis(600));
+
+    // Dismiss the wizard that opens after the last session is closed.
+    let _ = writer.write_all(ESC);
+    thread::sleep(Duration::from_millis(200));
+
+    // ── 9. Quit cleanly. ──────────────────────────────────────────────────────
+    let _ = writer.write_all(ALT_Q);
+    let quit_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        assert!(Instant::now() < quit_deadline, "TUI did not exit after Alt+q");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 // ── Scope guard ───────────────────────────────────────────────────────────────
 
 /// Minimal scope guard: runs `f` when dropped (used in the E2E test).
