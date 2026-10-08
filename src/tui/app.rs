@@ -33,10 +33,14 @@ const PROJECTS_LIMIT: u32 = 50;
 /// Something for the event loop to do.
 #[derive(Debug)]
 pub enum Effect {
-    /// Send a request to the daemon; its reply goes to [`App::on_reply`].
-    Request(Msg, ReplyTo),
+    /// Send a request to this host's daemon; the reply goes to [`App::on_reply`].
+    Request { host: String, msg: Msg, to: ReplyTo },
     /// Forward input bytes to a session's PTY.
     Input(SessionId, Vec<u8>),
+    /// Bootstrap and connect to a remote host (bootstrap + connect_ssh).
+    /// When done, the event loop calls [`App::on_host_connected`] or
+    /// [`App::on_host_error`].
+    Connect(String),
     /// Write state.json.
     Save,
 }
@@ -50,6 +54,12 @@ pub enum ReplyTo {
     DirEntries,
     ClaudeSessions(String),
     Projects,
+    /// Wizard directory listing for a remote host (host, path).
+    RemoteDirEntries,
+    /// Wizard claude sessions for a remote host.
+    RemoteClaudeSessions(String),
+    /// Wizard recent projects for a remote host.
+    RemoteProjects,
 }
 
 /// The client-side view of one session.
@@ -207,7 +217,12 @@ impl App {
                     rows,
                     cols,
                 };
-                self.effects.push(Effect::Request(Msg::Spawn(spec), ReplyTo::Spawned(r.saved.id)));
+                let host = r.saved.host.clone();
+                self.effects.push(Effect::Request {
+                    host,
+                    msg: Msg::Spawn(spec),
+                    to: ReplyTo::Spawned(r.saved.id),
+                });
             }
             self.sessions.push(SessionView {
                 id: r.saved.id,
@@ -260,8 +275,27 @@ impl App {
         }
     }
 
-    fn request(&mut self, msg: Msg, to: ReplyTo) {
-        self.effects.push(Effect::Request(msg, to));
+    /// Send a request to `host`'s daemon.
+    fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
+        self.effects.push(Effect::Request { host: host.to_owned(), msg, to });
+    }
+
+    /// Send a request to the local daemon.
+    fn request_local(&mut self, msg: Msg, to: ReplyTo) {
+        self.request("local", msg, to);
+    }
+
+    /// The host of the active session (or "local" when none is active).
+    fn active_host(&self) -> String {
+        self.active_view().map(|v| v.host.clone()).unwrap_or_else(|| "local".to_owned())
+    }
+
+    /// The host the wizard is currently targeting (or "local").
+    fn wizard_host(&self) -> String {
+        match &self.modal {
+            Some(Modal::Wizard(w)) => w.host.clone(),
+            _ => "local".to_owned(),
+        }
     }
 
     /// Make session `i` the active one: detach the old, attach the new.
@@ -276,7 +310,8 @@ impl App {
             if let Some(v) = self.sessions.get_mut(old).filter(|v| v.attached) {
                 v.attached = false;
                 let id = v.id;
-                self.request(Msg::Detach { id }, ReplyTo::Ack("detach"));
+                let host = v.host.clone();
+                self.request(&host, Msg::Detach { id }, ReplyTo::Ack("detach"));
             }
         }
         self.active = Some(i);
@@ -286,7 +321,8 @@ impl App {
         // Blank until the daemon's `Attached` + snapshot arrive.
         view.mirror = Screen::new(rows, cols);
         let id = view.id;
-        self.request(Msg::Attach { id, rows, cols }, ReplyTo::Ack("attach"));
+        let host = view.host.clone();
+        self.request(&host, Msg::Attach { id, rows, cols }, ReplyTo::Ack("attach"));
         self.redraw = true;
         self.save();
     }
@@ -314,18 +350,18 @@ impl App {
         self.save();
     }
 
-    /// Spawn claude in `cwd` (optionally resuming) and switch to it.
-    fn spawn(&mut self, cwd: String, resume: Option<String>) {
+    /// Spawn claude in `cwd` on `host` (optionally resuming) and switch to it.
+    fn spawn(&mut self, host: String, cwd: String, resume: Option<String>) {
         let (rows, cols) = self.pane_size();
         let id = Uuid::new_v4();
         let args = resume.map(|r| vec!["--resume".to_owned(), r]).unwrap_or_default();
         let spec = SpawnSpec { id, cwd: cwd.clone(), name: None, args, env: Vec::new(), rows, cols };
-        self.request(Msg::Spawn(spec), ReplyTo::Spawned(id));
+        self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
         self.sessions.push(SessionView {
             id,
             name: None,
             cwd: cwd.clone(),
-            host: "local".to_owned(),
+            host: host.clone(),
             state: SessionState::Starting,
             title: None,
             claude_session_id: None,
@@ -339,27 +375,83 @@ impl App {
 
     fn open_wizard(&mut self) {
         let active_cwd = self.active_view().map(|v| v.cwd.clone());
+        let active_host = self.active_host();
         let seeds = wizard::assemble(active_cwd.as_deref(), &self.recent_dirs, &self.projects);
-        self.modal = Some(Modal::Wizard(Wizard::new(seeds, self.home.clone())));
-        self.request(Msg::RecentProjects { limit: PROJECTS_LIMIT }, ReplyTo::Projects);
+        let host_candidates = crate::remote::hosts::candidates();
+        self.modal = Some(Modal::Wizard(Wizard::new(
+            seeds,
+            self.home.clone(),
+            &active_host,
+            &host_candidates,
+        )));
+        self.request_local(Msg::RecentProjects { limit: PROJECTS_LIMIT }, ReplyTo::Projects);
         self.redraw = true;
     }
 
     /// Act on what the wizard decided.
     fn wizard_outcome(&mut self, outcome: Outcome) {
+        let wizard_host = self.wizard_host();
         match outcome {
             Outcome::None => {}
             Outcome::Cancel => self.modal = None,
-            Outcome::ListDir(path) => self.request(Msg::ListDir { path }, ReplyTo::DirEntries),
+            Outcome::ConnectHost(host) => {
+                if host == "local" {
+                    // Local: advance immediately.
+                    if let Some(Modal::Wizard(w)) = &mut self.modal {
+                        w.on_host_connected("local", &self.home);
+                    }
+                    // Refresh recent projects for local.
+                    self.request_local(
+                        Msg::RecentProjects { limit: PROJECTS_LIMIT },
+                        ReplyTo::Projects,
+                    );
+                } else {
+                    // Remote: kick off bootstrap + connect_ssh.
+                    self.effects.push(Effect::Connect(host));
+                }
+            }
+            Outcome::ListDir(path) => {
+                self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
+            }
             Outcome::ChooseDir(cwd) => {
-                self.request(Msg::ListClaudeSessions { cwd: cwd.clone() }, ReplyTo::ClaudeSessions(cwd))
+                self.request(
+                    &wizard_host,
+                    Msg::ListClaudeSessions { cwd: cwd.clone() },
+                    ReplyTo::ClaudeSessions(cwd),
+                )
             }
             Outcome::Spawn { cwd, resume } => {
                 self.modal = None;
-                self.spawn(cwd, resume);
+                self.spawn(wizard_host, cwd, resume);
             }
         }
         self.redraw = true;
+    }
+
+    /// Called by the event loop when a remote host connection succeeds.
+    pub fn on_host_connected(&mut self, host: &str, home: &str) {
+        if let Some(Modal::Wizard(w)) = &mut self.modal {
+            w.on_host_connected(host, home);
+            // Fetch recent projects from the remote daemon.
+            let h = host.to_owned();
+            self.effects.push(Effect::Request {
+                host: h,
+                msg: Msg::RecentProjects { limit: PROJECTS_LIMIT },
+                to: ReplyTo::Projects,
+            });
+        }
+        self.redraw = true;
+    }
+
+    /// Called by the event loop when a remote host connection fails.
+    pub fn on_host_error(&mut self, host: &str, error: &str) {
+        // Clear the "connecting" state from the wizard.
+        if let Some(Modal::Wizard(w)) = &mut self.modal {
+            if let Some(hs) = &mut w.host_step {
+                hs.connecting = None;
+            }
+        }
+        self.notify(format!("cannot connect to {host}: {error}"));
     }
 
     fn wizard_mut(&mut self) -> Option<&mut Wizard> {
@@ -470,9 +562,10 @@ impl App {
                     if let Some(i) = self.index_of(id) {
                         // Persist the kill intent before sending `Kill`, so
                         // recovery never resurrects a closed session.
+                        let host = self.sessions[i].host.clone();
                         self.remove(i);
                         self.save();
-                        self.request(Msg::Kill { id }, ReplyTo::Ack("kill"));
+                        self.request(&host, Msg::Kill { id }, ReplyTo::Ack("kill"));
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
@@ -540,7 +633,8 @@ impl App {
             // Resize locally right away; the child repaints after SIGWINCH.
             v.mirror.resize(rows, cols);
             let id = v.id;
-            self.request(Msg::Resize { id, rows, cols }, ReplyTo::Ack("resize"));
+            let host = v.host.clone();
+            self.request(&host, Msg::Resize { id, rows, cols }, ReplyTo::Ack("resize"));
         }
     }
 
@@ -648,12 +742,39 @@ impl App {
                 }
                 self.notify(format!("could not start claude: {e}"));
             }
+            // Remote variants route to the same wizard handlers.
+            (ReplyTo::RemoteProjects, Ok(Msg::Projects { dirs })) => {
+                self.projects = dirs.into_iter().map(|d| d.path).collect();
+                let projects = self.projects.clone();
+                if let Some(w) = self.wizard_mut() {
+                    w.add_seeds(&projects);
+                }
+            }
+            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries })) => {
+                if let Some(w) = self.wizard_mut() {
+                    w.set_dir_entries(&path, &entries);
+                }
+            }
+            (ReplyTo::RemoteClaudeSessions(cwd), reply) => {
+                let sessions = match reply {
+                    Ok(Msg::ClaudeSessions { sessions, .. }) => sessions,
+                    Ok(_) => Vec::new(),
+                    Err(e) => {
+                        self.notify(format!("could not list remote claude sessions: {e}"));
+                        Vec::new()
+                    }
+                };
+                if let Some(w) = self.wizard_mut() {
+                    let outcome = w.set_claude_sessions(&cwd, sessions);
+                    self.wizard_outcome(outcome);
+                }
+            }
             // Typing a path that doesn't exist (yet) is not an error.
-            (ReplyTo::DirEntries, Err(_)) => {}
+            (ReplyTo::DirEntries | ReplyTo::RemoteDirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {
                 let what = match to {
                     ReplyTo::Ack(what) => what,
-                    ReplyTo::Projects => "recent projects",
+                    ReplyTo::Projects | ReplyTo::RemoteProjects => "recent projects",
                     _ => "request",
                 };
                 self.notify(format!("{what} failed: {e}"));
@@ -713,7 +834,7 @@ mod tests {
     }
 
     fn requests(effects: &[Effect]) -> Vec<&Msg> {
-        effects.iter().filter_map(|e| if let Effect::Request(m, _) = e { Some(m) } else { None }).collect()
+        effects.iter().filter_map(|e| if let Effect::Request { msg: m, .. } = e { Some(m) } else { None }).collect()
     }
 
     #[test]
@@ -801,7 +922,7 @@ mod tests {
         let save = effects.iter().position(|e| matches!(e, Effect::Save)).unwrap();
         let kill = effects
             .iter()
-            .position(|e| matches!(e, Effect::Request(Msg::Kill { id }, _) if *id == live[0].id))
+            .position(|e| matches!(e, Effect::Request { msg: Msg::Kill { id }, .. } if *id == live[0].id))
             .unwrap();
         assert!(save < kill);
         assert_eq!(app.sessions.len(), 2);
@@ -827,7 +948,11 @@ mod tests {
     #[test]
     fn wizard_spawns_into_the_chosen_dir_and_records_it() {
         let mut app = app_with(&[]);
+        // Step 0: paste the target directory, then press Enter to confirm "local" host.
         app.on_terminal(Event::Paste("/w".into()));
+        app.on_terminal(plain(KeyCode::Enter)); // selects local → advances to directory step
+        app.take_effects(); // consume ListDir + RecentProjects requests
+        // Step 1: press Enter again to confirm the pre-filled directory "/w".
         app.on_terminal(plain(KeyCode::Enter));
         let effects = app.take_effects();
         assert!(requests(&effects).contains(&&Msg::ListClaudeSessions { cwd: "/w".into() }));

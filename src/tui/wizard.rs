@@ -1,9 +1,10 @@
-//! The new-session wizard: pick a directory, then optionally a claude
-//! conversation to resume.
+//! The new-session wizard: pick a host (step 0), then a directory (step 1),
+//! then optionally a claude conversation to resume (step 2).
 //!
 //! The wizard is a pure state machine. Key handling returns an [`Outcome`]
-//! telling the app what to ask the daemon (`ListDir`, `ListClaudeSessions`)
-//! or what to spawn; replies are fed back through the `set_*` methods.
+//! telling the app what to do next (connect to a host, ask the daemon for
+//! directory or session data, or spawn a new session). Replies are fed back
+//! through the `set_*` and `on_host_connected` methods.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -16,12 +17,115 @@ use super::ui::{abbreviate_home, fmt_age};
 pub enum Outcome {
     None,
     Cancel,
+    /// Connect to this host before proceeding to the directory step.
+    ConnectHost(String),
     /// Request `ListDir` of this absolute path (path completion).
     ListDir(String),
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
     /// Start claude in `cwd`, resuming `resume` if set.
     Spawn { cwd: String, resume: Option<String> },
+}
+
+// ── Step 0: host selection ────────────────────────────────────────────────────
+
+/// State for the "Where" (host selection) step of the wizard.
+#[derive(Debug, Clone)]
+pub struct HostStep {
+    /// The typed filter string.
+    pub input: String,
+    /// Filtered candidate list (always starts with `"local"`).
+    pub items: Vec<String>,
+    pub selected: usize,
+    /// `Some(host)` while bootstrap + connect_ssh is running.
+    pub connecting: Option<String>,
+    /// The full unfiltered candidate list.
+    candidates: Vec<String>,
+}
+
+impl HostStep {
+    /// Build a host step. `active_host` pre-selects the current session's host.
+    pub fn new(active_host: &str, extra: &[String]) -> HostStep {
+        let mut candidates = vec!["local".to_owned()];
+        for h in extra {
+            if h != "local" {
+                candidates.push(h.clone());
+            }
+        }
+        let selected = candidates.iter().position(|h| h == active_host).unwrap_or(0);
+        let items = candidates.clone();
+        HostStep { input: String::new(), items, selected, connecting: None, candidates }
+    }
+
+    /// Handle a key press on the host step.
+    pub fn on_key(&mut self, key: &KeyEvent) -> Outcome {
+        if key.kind == KeyEventKind::Release {
+            return Outcome::None;
+        }
+        if self.connecting.is_some() {
+            // Waiting for connection: only allow backing out.
+            if key.code == KeyCode::Esc {
+                self.connecting = None;
+            }
+            return Outcome::None;
+        }
+        let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        match key.code {
+            KeyCode::Esc => Outcome::Cancel,
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                Outcome::None
+            }
+            KeyCode::Down => {
+                self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+                Outcome::None
+            }
+            KeyCode::Enter => {
+                let host = match self.items.get(self.selected) {
+                    Some(h) => h.clone(),
+                    None if !self.input.trim().is_empty() => self.input.trim().to_owned(),
+                    None => return Outcome::None,
+                };
+                if host == "local" {
+                    // Local needs no connection step.
+                    Outcome::ConnectHost(host)
+                } else {
+                    self.connecting = Some(host.clone());
+                    Outcome::ConnectHost(host)
+                }
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                self.refilter();
+                Outcome::None
+            }
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                self.input.clear();
+                self.refilter();
+                Outcome::None
+            }
+            KeyCode::Char(c) if plain => {
+                self.input.push(c);
+                self.refilter();
+                Outcome::None
+            }
+            _ => Outcome::None,
+        }
+    }
+
+    fn refilter(&mut self) {
+        let input = self.input.to_lowercase();
+        if input.is_empty() {
+            self.items = self.candidates.clone();
+        } else {
+            self.items = self.candidates
+                .iter()
+                .filter(|h| h.to_lowercase().contains(&input))
+                .cloned()
+                .collect();
+        }
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+    }
 }
 
 /// Step 2: the resume picker.
@@ -33,9 +137,14 @@ pub struct ResumeStep {
     pub selected: usize,
 }
 
-/// The wizard's state.
+/// The wizard's state (three steps: host → directory → resume).
 #[derive(Debug, Clone)]
 pub struct Wizard {
+    /// Step 0: host selection. `None` once a host is confirmed and we have
+    /// moved to the directory step.
+    pub host_step: Option<HostStep>,
+    /// The chosen host (always set; `"local"` by default).
+    pub host: String,
     /// The directory input line.
     pub input: String,
     /// Filtered candidates (absolute paths), best first.
@@ -114,9 +223,22 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
 }
 
 impl Wizard {
-    /// A wizard over `seeds` (see [`assemble`]); `home` expands `~`.
-    pub fn new(seeds: Vec<String>, home: String) -> Wizard {
+    /// A wizard over `seeds` (see [`assemble`]) with a host-selection step.
+    ///
+    /// - `active_host` pre-selects the active session's host in step 0.
+    /// - `host_candidates` is `hosts::candidates()` (MRU + ssh config).
+    /// - `home` expands `~` on the chosen host.
+    pub fn new(
+        seeds: Vec<String>,
+        home: String,
+        active_host: &str,
+        host_candidates: &[String],
+    ) -> Wizard {
+        let host_step = HostStep::new(active_host, host_candidates);
+        let host = active_host.to_owned();
         let mut w = Wizard {
+            host_step: Some(host_step),
+            host,
             input: String::new(),
             items: Vec::new(),
             selected: 0,
@@ -129,6 +251,15 @@ impl Wizard {
         };
         w.refilter();
         w
+    }
+
+    /// The host was chosen and the connection is ready. Advance to step 1
+    /// (directory) and update `home` for the target host.
+    pub fn on_host_connected(&mut self, host: &str, home: &str) {
+        self.host_step = None;
+        self.host = host.to_owned();
+        self.home = home.to_owned();
+        self.refilter();
     }
 
     /// Add late-arriving seeds (the `RecentProjects` reply), keeping order.
@@ -166,6 +297,11 @@ impl Wizard {
         if key.kind == KeyEventKind::Release {
             return Outcome::None;
         }
+        // Step 0: host selection.
+        if let Some(step) = &mut self.host_step {
+            return step.on_key(key);
+        }
+        // Step 2: resume picker.
         if let Some(step) = &mut self.resume {
             return match key.code {
                 KeyCode::Esc => {
@@ -355,6 +491,16 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Create a wizard that has already completed the host step (starts on
+    /// the directory step). Convenience wrapper for tests that don't care
+    /// about the host step.
+    fn wizard_local(seeds: Vec<String>, home: &str) -> Wizard {
+        let mut w = Wizard::new(seeds, home.into(), "local", &[]);
+        // Advance past the host step by picking "local".
+        w.on_host_connected("local", home);
+        w
+    }
+
     #[test]
     fn fuzzy_requires_subsequence() {
         assert!(fuzzy_score("clo", "claudio").is_some());
@@ -388,7 +534,7 @@ mod tests {
 
     #[test]
     fn typing_filters_and_enter_chooses_highlighted() {
-        let mut w = Wizard::new(strings(&["/home/u/repos/claudio", "/srv/app", "/home/u/docs"]), "/home/u".into());
+        let mut w = wizard_local(strings(&["/home/u/repos/claudio", "/srv/app", "/home/u/docs"]), "/home/u");
         assert_eq!(w.items.len(), 3);
         type_str(&mut w, "app");
         assert_eq!(w.items, strings(&["/srv/app"]));
@@ -398,7 +544,7 @@ mod tests {
 
     #[test]
     fn enter_with_no_match_takes_the_literal_input() {
-        let mut w = Wizard::new(vec![], "/home/u".into());
+        let mut w = wizard_local(vec![], "/home/u");
         type_str(&mut w, "zzz");
         assert!(w.items.is_empty());
         assert_eq!(w.on_key(&press(KeyCode::Enter)), Outcome::ChooseDir("zzz".into()));
@@ -406,7 +552,7 @@ mod tests {
 
     #[test]
     fn path_input_requests_listdir_and_offers_matching_subdirs() {
-        let mut w = Wizard::new(strings(&["/srv/app"]), "/home/u".into());
+        let mut w = wizard_local(strings(&["/srv/app"]), "/home/u");
         let outcomes = type_str(&mut w, "~/re");
         assert_eq!(outcomes[0], Outcome::ListDir("/home/u".into()));
         assert!(outcomes[1..].iter().all(|o| *o == Outcome::None), "listed once per parent");
@@ -431,7 +577,7 @@ mod tests {
 
     #[test]
     fn stale_dir_entries_are_ignored() {
-        let mut w = Wizard::new(vec![], "/h".into());
+        let mut w = wizard_local(vec![], "/h");
         type_str(&mut w, "/a/");
         w.set_dir_entries("/b", &[DirEntry { name: "x".into(), dir: true }]);
         assert!(w.items.is_empty());
@@ -439,7 +585,7 @@ mod tests {
 
     #[test]
     fn resume_step_lists_newest_first_and_picks() {
-        let mut w = Wizard::new(strings(&["/w"]), "/h".into());
+        let mut w = wizard_local(strings(&["/w"]), "/h");
         w.on_key(&press(KeyCode::Enter));
         let s = |id: &str, modified| ClaudeSession {
             id: id.into(),
@@ -471,7 +617,7 @@ mod tests {
 
     #[test]
     fn no_sessions_spawns_directly() {
-        let mut w = Wizard::new(strings(&["/w"]), "/h".into());
+        let mut w = wizard_local(strings(&["/w"]), "/h");
         w.on_key(&press(KeyCode::Enter));
         assert_eq!(w.set_claude_sessions("/w", vec![]), Outcome::Spawn { cwd: "/w".into(), resume: None });
     }

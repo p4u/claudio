@@ -16,6 +16,8 @@ use super::keymap;
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Glyph shown when a remote session's connection has dropped.
+const RECONNECTING: &str = "⇄";
 
 /// Draw the whole UI.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -39,8 +41,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 // ── Tab bar ───────────────────────────────────────────────────────────────────
 
 /// The state glyph for a tab, animated by `tick` while working.
-pub fn glyph(state: SessionState, tick: usize) -> (&'static str, Style) {
+///
+/// `reconnecting` is `true` when the session's host connection has dropped —
+/// shown as `⇄` (dim) regardless of the last known session state.
+pub fn glyph(state: SessionState, tick: usize, reconnecting: bool) -> (&'static str, Style) {
     let s = Style::default();
+    if reconnecting {
+        return (RECONNECTING, s.add_modifier(Modifier::DIM));
+    }
     match state {
         SessionState::Working => (SPINNER[tick % SPINNER.len()], s.fg(Color::Cyan)),
         SessionState::NeedsApproval => ("◆", s.fg(Color::Red)),
@@ -102,9 +110,19 @@ pub fn fit_tabs(labels: &[usize], active: Option<usize>, width: usize) -> Vec<us
     caps
 }
 
+/// The tab label for a session: `label@host` for remote sessions.
+pub fn tab_label(view: &SessionView) -> String {
+    let base = view.label();
+    if view.host == "local" {
+        base
+    } else {
+        format!("{base}@{}", view.host)
+    }
+}
+
 /// The tab texts as laid out for a bar `width` columns wide.
 pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16) -> Vec<(String, String)> {
-    let labels: Vec<String> = sessions.iter().map(SessionView::label).collect();
+    let labels: Vec<String> = sessions.iter().map(tab_label).collect();
     let widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
     let caps = fit_tabs(&widths, active, width as usize);
     labels.iter().zip(caps).enumerate().map(|(i, (l, cap))| tab_parts(i + 1, l, cap)).collect()
@@ -131,7 +149,10 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
         if i > 0 {
             spans.push(Span::styled("│", Style::default().add_modifier(Modifier::DIM)));
         }
-        let (g, gstyle) = glyph(view.state, app.tick);
+        // Show reconnecting glyph when the session's host is offline.
+        let reconnecting = view.host != "local" && !view.attached
+            && matches!(view.state, crate::proto::SessionState::Unknown);
+        let (g, gstyle) = glyph(view.state, app.tick, reconnecting);
         let base = if Some(i) == app.active {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else if view.state.wants_attention() {
@@ -189,7 +210,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(notice) = &app.notice {
         (notice.text.clone(), Style::default().fg(Color::Yellow))
     } else if let Some(v) = app.active_view() {
-        let mut parts = vec![abbreviate_home(&v.cwd, &app.home), state_name(v.state).to_owned()];
+        // Show `host:cwd` for remote sessions, `cwd` for local.
+        let cwd = abbreviate_home(&v.cwd, &app.home);
+        let location = if v.host == "local" {
+            cwd
+        } else {
+            format!("{}:{}", v.host, cwd)
+        };
+        let mut parts = vec![location, state_name(v.state).to_owned()];
         if let Some(csid) = &v.claude_session_id {
             parts.push(csid.chars().take(8).collect());
         }
@@ -293,6 +321,24 @@ fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
 fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
     let area = frame.area();
     let rect = centered(area, 90.min(area.width.saturating_sub(4)), 22.min(area.height.saturating_sub(2)));
+
+    // Step 0: host selection.
+    if let Some(hs) = &w.host_step {
+        let inner = popup(frame, rect, "New session: where? (Enter pick · Esc cancel)");
+        let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        if let Some(host) = &hs.connecting {
+            frame.render_widget(
+                Paragraph::new(format!("Connecting to {host}…")).style(Style::default().fg(Color::Cyan)),
+                head,
+            );
+            return;
+        }
+        draw_input(frame, head, "host> ", &hs.input);
+        draw_list(frame, list, &hs.items, hs.selected);
+        return;
+    }
+
+    // Step 2: resume picker.
     if let Some(step) = &w.resume {
         let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back)");
         let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
@@ -304,7 +350,14 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
         draw_list(frame, list, &rows, step.selected);
         return;
     }
-    let inner = popup(frame, rect, "New session: directory (Tab complete · Enter pick · Esc cancel)");
+
+    // Step 1: directory picker.
+    let title = if w.host == "local" {
+        "New session: directory (Tab complete · Enter pick · Esc cancel)".to_owned()
+    } else {
+        format!("New session on {} (Tab complete · Enter pick · Esc cancel)", w.host)
+    };
+    let inner = popup(frame, rect, &title);
     let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     if let Some(dir) = &w.pending {
         frame.render_widget(Paragraph::new(format!("Looking for sessions in {}…", w.display(dir))), head);
