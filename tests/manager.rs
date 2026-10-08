@@ -317,8 +317,16 @@ fn start_tui(env: &Env) -> TuiSession {
 /// Send a directory path through the wizard input (bracketed paste) and
 /// confirm with Enter. Waits for `ListClaudeSessions` to resolve (the empty
 /// temp dir causes an immediate spawn).
+///
+/// The wizard now has a host-selection step (step 0). We first press Enter to
+/// confirm "local" (always pre-selected), then paste the path and press Enter
+/// again to confirm the directory.
 fn wizard_pick_dir(tui: &mut TuiSession, dir: &PathBuf) {
     let path = dir.to_str().unwrap();
+    // Step 0: confirm "local" host (pre-selected) and advance to directory step.
+    tui.key(ENTER);
+    thread::sleep(Duration::from_millis(150));
+    // Step 1: type directory path and confirm.
     tui.paste(path);
     thread::sleep(Duration::from_millis(200));
     tui.key(ENTER);
