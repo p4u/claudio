@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "bbbbbbbb-0000-0000-0000-000000000002",
+  "transcript_path": "/home/p4u/.claude/projects/-volumes-repos-claudio/bbbbbbbb-0000-0000-0000-000000000002.jsonl",
+  "cwd": "/volumes/repos/claudio",
+  "source": "clear"
+}

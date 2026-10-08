@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "StopFailure",
+  "session_id": "a1b2c3d4-0000-0000-0000-000000000001",
+  "transcript_path": "/home/p4u/.claude/projects/-volumes-repos-claudio/a1b2c3d4-0000-0000-0000-000000000001.jsonl",
+  "cwd": "/volumes/repos/claudio"
+}

@@ -11,6 +11,7 @@
 //!     JSONL, and emit text/json/stream-json.
 
 mod api;
+mod claude;
 mod cli;
 mod msglog;
 mod paths;
@@ -39,6 +40,12 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::SUCCESS;
             }
         }
+    }
+
+    // Manager hook relay: `claudio __hook <Event> <socket> <token>` ships the
+    // hook payload to the daemon's Unix socket.
+    if argv.len() == 5 && argv[1] == "__hook" {
+        return claude::hooks::relay(&argv[2], std::path::Path::new(&argv[3]), &argv[4]);
     }
 
     // Legacy relay mode, invoked as `claudio __hook <Event>`.
