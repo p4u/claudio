@@ -67,6 +67,10 @@ test: test-unit
 test-unit:
 	$(CARGO) test --locked --bin claudio
 
+## Session-manager integration tests (fake claude, no API needed).
+test-manager:
+	$(CARGO) test --locked --test manager -- --test-threads=1
+
 ## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
 	CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 $(CARGO) test --locked --test integration \

@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions, Permissions, TryLockError};
-use std::io;
+use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     {
         paths::ensure_private_dir(dir)?;
     }
-    let lock = OpenOptions::new()
+    let mut lock = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
@@ -69,6 +69,12 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
         Err(TryLockError::WouldBlock) => return Ok(None),
         Err(TryLockError::Error(e)) => return Err(e),
     }
+    // Write our PID into the lock file so tests and `claudio daemon stop` can
+    // find this daemon. Truncate first so an old (longer) pid doesn't linger.
+    lock.set_len(0)?;
+    lock.seek(SeekFrom::Start(0))?;
+    writeln!(lock, "{}", std::process::id())?;
+    lock.flush()?;
     let listener = bind(&config.socket)?;
     tracing::info!(socket = %config.socket.display(), "daemon listening");
 
