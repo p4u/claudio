@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::paths;
@@ -70,10 +71,90 @@ pub struct Client {
     shared: Arc<Shared>,
 }
 
-/// Connect to the daemon at `socket` and perform the handshake.
+/// Connect to the local daemon at `socket` and perform the handshake.
 pub async fn connect(socket: &Path) -> io::Result<Client> {
     let stream = UnixStream::connect(socket).await?;
     Client::handshake(stream).await
+}
+
+/// Connect to a remote daemon over SSH and perform the handshake.
+///
+/// Spawns `ssh -T -o BatchMode=yes -o ServerAliveInterval=15
+/// -o ServerAliveCountMax=3 HOST '$HOME/.local/bin/claudio --slave'` with
+/// stdin/stdout piped. The child is killed when the [`Client`] is dropped
+/// (via the writer-task's implicit `Arc` drop).
+pub async fn connect_ssh(host: &str) -> io::Result<Client> {
+    let mut child = TokioCommand::new("ssh")
+        .args([
+            "-T",
+            "-o", "BatchMode=yes",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
+            host,
+            "$HOME/.local/bin/claudio --slave",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no ssh stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no ssh stdout"))?;
+
+    // Capture stderr into a small buffer for diagnostics and reap the child.
+    let host_owned = host.to_owned();
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(host = %host_owned, "ssh stderr: {line}");
+        }
+        let _ = child.wait().await;
+    });
+
+    let pair = SshPair { rd: stdout, wr: stdin };
+    Client::handshake(pair).await
+}
+
+/// An `AsyncRead + AsyncWrite` pair over an ssh process's stdout/stdin.
+struct SshPair {
+    rd: tokio::process::ChildStdout,
+    wr: tokio::process::ChildStdin,
+}
+
+impl AsyncRead for SshPair {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().rd).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for SshPair {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().wr).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().wr).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().wr).poll_shutdown(cx)
+    }
 }
 
 fn lock(m: &Mutex<Pending>) -> MutexGuard<'_, Pending> {

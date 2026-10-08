@@ -19,6 +19,7 @@ mod msglog;
 mod paths;
 mod print;
 mod proto;
+mod remote;
 mod term;
 mod tui;
 
@@ -29,6 +30,58 @@ use print::emit::Outcome;
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+
+    // Remote probe: `claudio __probe` prints one JSON line describing this
+    // binary (version, proto, os, arch, sha256 of the exe). Must run before
+    // cli::parse so it never accidentally enters passthrough mode.
+    if argv.get(1).map(String::as_str) == Some("__probe") {
+        return remote::probe::run();
+    }
+
+    // Slave bridge: `claudio --slave` is the remote end of an SSH transport.
+    // Started by the local client as `ssh HOST '$HOME/.local/bin/claudio --slave'`.
+    if argv.get(1).map(String::as_str) == Some("--slave") {
+        return remote::bridge::run();
+    }
+
+    // Test-harness / diagnostic subcommands (undocumented `__` prefix).
+    //
+    // `claudio __bootstrap HOST` – run ensure_remote and print the result.
+    if argv.get(1).map(String::as_str) == Some("__bootstrap") {
+        if let Some(host) = argv.get(2) {
+            return remote::diag::bootstrap_cmd(host);
+        }
+        eprintln!("usage: claudio __bootstrap <host>");
+        return std::process::ExitCode::FAILURE;
+    }
+
+    // `claudio __connect-check HOST` – connect via SSH, print the Welcome JSON.
+    if argv.get(1).map(String::as_str) == Some("__connect-check") {
+        if let Some(host) = argv.get(2) {
+            return remote::diag::connect_check_cmd(host);
+        }
+        eprintln!("usage: claudio __connect-check <host>");
+        return std::process::ExitCode::FAILURE;
+    }
+
+    // `claudio __remote-session HOST CWD` – spawn a session on HOST in CWD,
+    // attach, wait for a snapshot, kill and exit.
+    if argv.get(1).map(String::as_str) == Some("__remote-session") {
+        if let (Some(host), Some(cwd)) = (argv.get(2), argv.get(3)) {
+            return remote::diag::remote_session_cmd(host, cwd);
+        }
+        eprintln!("usage: claudio __remote-session <host> <cwd>");
+        return std::process::ExitCode::FAILURE;
+    }
+
+    // `claudio __ssh-hosts` – print all known SSH host aliases, one per line.
+    if argv.get(1).map(String::as_str) == Some("__ssh-hosts") {
+        let hosts = remote::hosts::candidates();
+        for h in &hosts {
+            println!("{h}");
+        }
+        return std::process::ExitCode::SUCCESS;
+    }
 
     // §4.9.2 concealed relay: invoked as `<neutral-binary> <EventName> <port>`.
     // The binary is a copy of ourselves with a random hex name in /tmp; the hook
