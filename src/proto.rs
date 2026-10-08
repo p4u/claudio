@@ -73,8 +73,9 @@ pub enum Msg {
     /// Start claude in a new PTY. Idempotent by `spec.id`: re-sending a spawn
     /// for a live session just answers `Spawned` again.
     Spawn(SpawnSpec),
-    /// Subscribe to a session's output. Answered by `Attached`, immediately
-    /// followed by a `D` frame carrying the screen snapshot.
+    /// Subscribe to a session's output (and resize it to the client's pane).
+    /// Answered by `Attached`, immediately followed by `D` frames carrying the
+    /// screen snapshot.
     Attach { id: SessionId, rows: u16, cols: u16 },
     Detach { id: SessionId },
     Resize { id: SessionId, rows: u16, cols: u16 },
@@ -94,7 +95,10 @@ pub enum Msg {
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions { sessions: Vec<SessionInfo> },
     Spawned { id: SessionId, pid: Option<u32> },
-    Attached { id: SessionId },
+    /// The subscriber must reset its mirror to `rows`×`cols` and apply the
+    /// snapshot that follows. Also re-sent unprompted when the session is
+    /// resized by another client or the subscriber fell behind.
+    Attached { id: SessionId, rows: u16, cols: u16 },
     DirEntries { path: String, entries: Vec<DirEntry> },
     ClaudeSessions { cwd: String, sessions: Vec<ClaudeSession> },
     Projects { dirs: Vec<ProjectDir> },
@@ -223,9 +227,15 @@ impl SessionState {
     }
 }
 
+/// Session changes, broadcast to every connected client (attached or not), so
+/// tab bars stay current.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
+    /// A session was spawned (possibly by another client).
+    Created { info: SessionInfo },
+    /// A session was killed and forgotten.
+    Removed,
     State { state: SessionState },
     ClaudeSession { claude_session_id: String },
     Title { title: String },
