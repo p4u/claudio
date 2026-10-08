@@ -81,6 +81,9 @@ pub enum Msg {
     Kill { id: SessionId },
     ListDir { path: String },
     ListClaudeSessions { cwd: String },
+    /// Directories with claude history on this host, newest first (seeds the
+    /// new-session directory picker).
+    RecentProjects { limit: u32 },
     Ping,
 
     // ── hook relay (`claudio __hook`) → daemon ───────────────────────────
@@ -94,6 +97,7 @@ pub enum Msg {
     Attached { id: SessionId },
     DirEntries { path: String, entries: Vec<DirEntry> },
     ClaudeSessions { cwd: String, sessions: Vec<ClaudeSession> },
+    Projects { dirs: Vec<ProjectDir> },
     Ok,
     Error { message: String },
     Pong,
@@ -232,6 +236,14 @@ pub enum SessionEvent {
 pub struct DirEntry {
     pub name: String,
     pub dir: bool,
+}
+
+/// A directory with claude history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectDir {
+    pub path: String,
+    /// Unix seconds of the newest transcript there.
+    pub modified: u64,
 }
 
 /// A resumable claude conversation found under `~/.claude/projects`.
