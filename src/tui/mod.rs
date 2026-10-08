@@ -155,10 +155,6 @@ impl HostConn {
     fn connected(client: Client) -> Self {
         HostConn { client: Some(client), reconnect_delay: RECONNECT_INIT }
     }
-
-    fn disconnected() -> Self {
-        HostConn { client: None, reconnect_delay: RECONNECT_INIT }
-    }
 }
 
 /// All-hosts connection map. "local" is always present.
@@ -175,10 +171,6 @@ impl Connections {
 
     fn client(&self, host: &str) -> Option<&Client> {
         self.map.get(host).and_then(|c| c.client.as_ref())
-    }
-
-    fn is_connected(&self, host: &str) -> bool {
-        self.map.get(host).is_some_and(|c| c.client.is_some())
     }
 
     fn add(&mut self, host: String, client: Client) {
@@ -338,6 +330,8 @@ async fn event_loop(
                         spawn_reader(host.clone(), rx, ev_tx.clone());
                     }
                     conns.add(host.clone(), client);
+                    // Record this host in the MRU so it appears first next time.
+                    crate::remote::hosts::touch(&host);
                     app.on_host_connected(&host, &home);
                     // Recover remote sessions.
                     let saved_for_host = ClientState {

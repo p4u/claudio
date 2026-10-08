@@ -54,7 +54,7 @@ pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
     let target_os = remote_probe.as_ref().map_or_else(|| local.os.clone(), |r| r.os.clone());
     let target_arch = remote_probe.as_ref().map_or_else(|| local.arch.clone(), |r| r.arch.clone());
 
-    let same_platform = target_os == local.os && target_arch == local.arch;
+    let same_platform = remote_probe.as_ref().map_or(true, |r| r.same_platform(&local));
 
     if same_platform {
         upload_self(host).await?;

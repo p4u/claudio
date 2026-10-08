@@ -411,14 +411,20 @@ impl App {
                 }
             }
             Outcome::ListDir(path) => {
-                self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
+                let reply_to = if wizard_host == "local" {
+                    ReplyTo::DirEntries
+                } else {
+                    ReplyTo::RemoteDirEntries
+                };
+                self.request(&wizard_host, Msg::ListDir { path }, reply_to)
             }
             Outcome::ChooseDir(cwd) => {
-                self.request(
-                    &wizard_host,
-                    Msg::ListClaudeSessions { cwd: cwd.clone() },
-                    ReplyTo::ClaudeSessions(cwd),
-                )
+                let reply_to = if wizard_host == "local" {
+                    ReplyTo::ClaudeSessions(cwd.clone())
+                } else {
+                    ReplyTo::RemoteClaudeSessions(cwd.clone())
+                };
+                self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, reply_to)
             }
             Outcome::Spawn { cwd, resume } => {
                 self.modal = None;
@@ -432,12 +438,12 @@ impl App {
     pub fn on_host_connected(&mut self, host: &str, home: &str) {
         if let Some(Modal::Wizard(w)) = &mut self.modal {
             w.on_host_connected(host, home);
-            // Fetch recent projects from the remote daemon.
+            // Fetch recent projects from the remote daemon to seed the directory step.
             let h = host.to_owned();
             self.effects.push(Effect::Request {
                 host: h,
                 msg: Msg::RecentProjects { limit: PROJECTS_LIMIT },
-                to: ReplyTo::Projects,
+                to: ReplyTo::RemoteProjects,
             });
         }
         self.redraw = true;
