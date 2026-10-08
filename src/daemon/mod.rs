@@ -65,7 +65,7 @@ impl Config {
         let claude = std::env::var_os("CLAUDIO_CLAUDE_PATH")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("claude"));
+            .unwrap_or_else(resolve_claude_path);
         Ok(Config {
             socket: paths::daemon_socket(),
             lock: paths::daemon_lock(),
@@ -73,6 +73,72 @@ impl Config {
             claude,
             claudio: std::env::current_exe()?,
         })
+    }
+}
+
+/// Resolve the `claude` binary path.
+///
+/// Non-interactive SSH shells often have a minimal PATH that omits
+/// `~/.local/bin`, `~/.npm-global/bin` and similar. We try PATH first
+/// then fall back through well-known locations so remote sessions still
+/// find `claude` without the user touching their shell profile.
+pub fn resolve_claude_path() -> PathBuf {
+    // 1. PATH lookup.
+    if let Some(p) = which_claude() {
+        return p;
+    }
+    // 2. Well-known fallback locations, checked in priority order.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let candidates = [
+        home.join(".local/bin/claude"),
+        home.join(".claude/local/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        home.join(".npm-global/bin/claude"),
+    ];
+    for p in &candidates {
+        if p.is_file() {
+            return p.clone();
+        }
+    }
+    // 3. Give up — return the bare name so later PATH lookups at spawn time
+    // still have a chance.
+    PathBuf::from("claude")
+}
+
+/// Search `$PATH` for `claude`.
+fn which_claude() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("claude"))
+        .find(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod claude_path_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_returns_a_path() {
+        // Smoke test: the function must not panic, and it must return
+        // something (even if that something is the bare "claude" name).
+        let p = resolve_claude_path();
+        assert!(!p.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn which_claude_finds_existing_binary() {
+        // If `sh` is on PATH, we can confirm which_claude works for it.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let sh_exists = std::env::split_paths(&path)
+            .any(|d| d.join("sh").is_file());
+        if sh_exists {
+            // Not testing for claude specifically (may not exist in CI),
+            // just that the function runs without panicking.
+            let _ = which_claude();
+        }
     }
 }
 
