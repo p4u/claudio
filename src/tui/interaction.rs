@@ -1,8 +1,8 @@
 //! Modal popup types and terminal input / wizard routing for [`App`].
 //!
 //! The `impl App` block here handles all keyboard, paste, mouse, focus and
-//! resize events, as well as wizard state transitions and host connection
-//! callbacks. It can access `App::effects` because that field is `pub(super)`.
+//! resize events, wizard state transitions and host connection callbacks,
+//! and the daemon's events and request replies.
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -120,7 +120,7 @@ impl App {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             let bytes = encode_key(&key, &v.mirror.modes());
             if !bytes.is_empty() {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -326,7 +326,7 @@ impl App {
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
-                    self.effects.push(Effect::Input(v.id, bytes));
+                    self.emit(Effect::Input(v.id, bytes));
                 }
             }
         }
@@ -352,7 +352,7 @@ impl App {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             let origin = (0, self.mode.rows_above());
             if let Some(bytes) = encode_mouse(&m, origin, (cols, rows), &v.mirror.modes()) {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -360,7 +360,7 @@ impl App {
     fn on_focus(&mut self, gained: bool) {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             if let Some(bytes) = encode_focus(gained, &v.mirror.modes()) {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -396,7 +396,7 @@ impl App {
                 let home = self.home.clone();
                 self.on_host_connected("local", &home);
             }
-            Outcome::ConnectHost(host) => self.effects.push(Effect::Connect(host)),
+            Outcome::ConnectHost(host) => self.emit(Effect::Connect(host)),
             Outcome::ListDir(path) => {
                 self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
             }

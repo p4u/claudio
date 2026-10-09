@@ -1,9 +1,8 @@
 //! Session view type, sanitization helpers, and session lifecycle methods.
 //!
-//! `SessionView` and `sanitize_label` are the shared types.
-//! The `impl App` block at the bottom adds session lifecycle methods to `App`;
-//! it lives here (a sibling of `app.rs`) to keep each file focused. It can
-//! access `App::effects` because that field is `pub(super)`.
+//! `SessionView` and `sanitize_label` are the shared types. The `impl App`
+//! block adds the session lifecycle to `App`: spawning, activation, reset,
+//! kill and recovery.
 
 use uuid::Uuid;
 
@@ -12,8 +11,11 @@ use crate::proto::{
 };
 use crate::term::screen::Screen;
 
+use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
+use super::interaction::Modal;
 use super::state::{self, ClientState, KillTombstone, SavedSession};
+use super::wizard::{self, Wizard};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 
@@ -171,13 +173,6 @@ pub(super) struct SpawnRequest {
 }
 
 // ── Session lifecycle (impl App) ──────────────────────────────────────────────
-//
-// These methods are spread into sessions.rs to keep app.rs focused on the
-// App struct, constructors, and proxy/persistence logic.
-
-use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
-use super::interaction::Modal;
-use super::wizard::{self, Wizard};
 
 impl App {
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -207,27 +202,6 @@ impl App {
             Some(Modal::Wizard(w)) => w.generation,
             _ => 0,
         }
-    }
-
-    // ── Effects helpers ───────────────────────────────────────────────────────
-
-    /// Enqueue a Save effect (deduped: only one at a time at the tail).
-    pub(super) fn save(&mut self) {
-        if !self.mode.persists() {
-            return;
-        }
-        if !matches!(self.effects.last(), Some(Effect::Save)) {
-            self.effects.push(Effect::Save);
-        }
-    }
-
-    /// Send a request to `host`'s daemon.
-    pub(super) fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
-        self.effects.push(Effect::Request {
-            host: host.to_owned(),
-            msg,
-            to,
-        });
     }
 
     /// Ask `host` for its recent projects, to seed the open wizard.
@@ -425,7 +399,7 @@ impl App {
     ) -> Result<(), String> {
         match proxy {
             Some(name) if self.proxy_config_cached(name).is_none() => {
-                self.effects.push(Effect::SpawnWithProxy {
+                self.emit(Effect::SpawnWithProxy {
                     host: host.to_owned(),
                     msg,
                     proxy_name: name.to_owned(),
@@ -564,12 +538,20 @@ impl App {
             proxy_default,
         )));
         // `~/.ssh/config` may have changed since the list was read.
-        self.effects.push(Effect::LoadSshHosts);
+        self.emit(Effect::LoadSshHosts);
         self.request_projects("local");
         self.redraw = true;
     }
 
     // ── Recovery ─────────────────────────────────────────────────────────────
+
+    /// Begin as the manager: recover the tabs, and subscribe to the local
+    /// host's CPU and memory samples for the status bar (an old daemon
+    /// refuses; the sparklines then stay empty).
+    pub fn start_manager(&mut self, saved: &ClientState, live: &[SessionInfo]) {
+        self.recover(saved, live);
+        self.request("local", Msg::SubscribeHostStats, ReplyTo::Ack("host_stats"));
+    }
 
     /// Full recovery: rebuild the entire session list from `saved` and the
     /// daemon's `live` sessions (initial local startup).
@@ -631,18 +613,9 @@ impl App {
         let merged = state::merge_for_host(host, saved, live);
 
         // Re-send Kill for tombstoned sessions that are still live.
-        for live_info in live {
-            if self
-                .killed
-                .iter()
-                .any(|t| t.id == live_info.id && t.host == host)
-            {
-                let id = live_info.id;
-                self.effects.push(Effect::Request {
-                    host: host.to_owned(),
-                    msg: Msg::Kill { id },
-                    to: ReplyTo::Kill(id),
-                });
+        for id in live.iter().map(|info| info.id) {
+            if self.killed.iter().any(|t| t.id == id && t.host == host) {
+                self.request(host, Msg::Kill { id }, ReplyTo::Kill(id));
             }
         }
 

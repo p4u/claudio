@@ -199,9 +199,9 @@ pub struct App {
     pub quit: bool,
     /// Set when the screen needs repainting.
     pub redraw: bool,
-    /// Effect queue; drained by `take_effects`. `pub(super)` so sibling
-    /// modules (`sessions`, `interaction`) can push effects via `impl App`.
-    pub(super) effects: Vec<Effect>,
+    /// What the event loop is to do next: queued by [`App::emit`], drained
+    /// by [`App::take_effects`].
+    effects: Vec<Effect>,
     /// Cached proxy config (env vars) per profile name, with fetch time.
     pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
@@ -337,6 +337,27 @@ impl App {
     /// Drain the queued effects, in order.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
+    }
+
+    /// Queue `effect` for the event loop.
+    pub(super) fn emit(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+
+    /// Send a request to `host`'s daemon.
+    pub(super) fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
+        self.emit(Effect::Request {
+            host: host.to_owned(),
+            msg,
+            to,
+        });
+    }
+
+    /// Queue a write of state.json; back-to-back saves are one write.
+    pub(super) fn save(&mut self) {
+        if self.mode.persists() && !matches!(self.effects.last(), Some(Effect::Save)) {
+            self.emit(Effect::Save);
+        }
     }
 
     // ── Proxy ─────────────────────────────────────────────────────────────────

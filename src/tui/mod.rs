@@ -407,16 +407,7 @@ async fn event_loop(
             Vec::new()
         }
         Start::Manager { saved, live } => {
-            app.recover(&saved, &live);
-
-            // Subscribe to host stats pushes (CPU/mem sparklines).
-            // Old daemons reply Error; we treat that as "unsupported" and the
-            // sparklines just stay empty.
-            app.effects.push(Effect::Request {
-                host: "local".to_owned(),
-                msg: Msg::SubscribeHostStats,
-                to: ReplyTo::Ack("host_stats"),
-            });
+            app.start_manager(&saved, &live);
             // Every remote host a saved tab lives on.
             let hosts: std::collections::BTreeSet<String> = saved
                 .sessions
@@ -516,48 +507,22 @@ async fn event_loop(
                     if gen < conns.current_generation(&host) {
                         continue;
                     }
-                    if host == "local" {
-                        match inc {
-                            Incoming::Disconnected => {
-                                conns.disconnect("local");
-                                app.on_disconnected_local();
-                                let delay = conns.reconnect_delay("local");
-                                conns.bump_delay("local");
-                                let new_gen = conns.next_generation("local");
-                                let tx = ev_tx.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(delay).await;
-                                    match connect_local().await {
-                                        Ok((client, sessions)) => {
-                                            let _ = tx.send(HostEvent::LocalReconnected { client, sessions, generation: new_gen }).await;
-                                        }
-                                        Err(_) => {
-                                            let _ = tx.send(HostEvent::LocalReconnectFailed { generation: new_gen }).await;
-                                        }
-                                    }
-                                });
+                    match inc {
+                        // Reconnect with backoff.
+                        Incoming::Disconnected => {
+                            conns.disconnect(&host);
+                            app.on_incoming_from(&host, Incoming::Disconnected);
+                            let (delay, gen) = conns.next_attempt(&host);
+                            if host == "local" {
+                                spawn_reconnect_local(delay, gen, ev_tx.clone());
+                            } else {
+                                spawn_connect_after(host, gen, delay, ev_tx.clone(), true);
                             }
-                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
-                                app.on_host_stats("local".to_owned(), cpu_pct, mem_used, mem_total);
-                            }
-                            inc => app.on_incoming_from("local", inc),
                         }
-                    } else {
-                        match inc {
-                            Incoming::Disconnected => {
-                                conns.disconnect(&host);
-                                app.on_disconnected_remote(&host);
-                                // Reconnect with backoff.
-                                let delay = conns.reconnect_delay(&host);
-                                conns.bump_delay(&host);
-                                let new_gen = conns.next_generation(&host);
-                                spawn_connect_after(host, new_gen, delay, ev_tx.clone(), true);
-                            }
-                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
-                                app.on_host_stats(host, cpu_pct, mem_used, mem_total);
-                            }
-                            inc => app.on_incoming_from(&host, inc),
+                        Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
+                            app.on_host_stats(host, cpu_pct, mem_used, mem_total);
                         }
+                        inc => app.on_incoming_from(&host, inc),
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
@@ -590,13 +555,11 @@ async fn event_loop(
                     }
                     app.on_host_error(&host, &error);
                     conns.set_bootstrap_failed(&host, error.contains("bootstrap") || error.contains("install"));
-                    // Retry with backoff.
-                    let delay = conns.reconnect_delay(&host);
-                    conns.bump_delay(&host);
-                    let new_gen = conns.next_generation(&host);
-                    // On retry: skip bootstrap only if the last attempt did NOT fail in bootstrap.
+                    // Retry with backoff, bootstrapping again only if that
+                    // is what failed.
+                    let (delay, gen) = conns.next_attempt(&host);
                     let skip_bootstrap = !conns.bootstrap_failed(&host);
-                    spawn_connect_after(host, new_gen, delay, ev_tx.clone(), skip_bootstrap);
+                    spawn_connect_after(host, gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
                     // A newer attempt is already in flight.
@@ -617,21 +580,8 @@ async fn event_loop(
                     if generation < conns.current_generation("local") {
                         continue;
                     }
-                    let delay = conns.reconnect_delay("local");
-                    conns.bump_delay("local");
-                    let new_gen = conns.next_generation("local");
-                    let tx = ev_tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        match connect_local().await {
-                            Ok((client, sessions)) => {
-                                let _ = tx.send(HostEvent::LocalReconnected { client, sessions, generation: new_gen }).await;
-                            }
-                            Err(_) => {
-                                let _ = tx.send(HostEvent::LocalReconnectFailed { generation: new_gen }).await;
-                            }
-                        }
-                    });
+                    let (delay, gen) = conns.next_attempt("local");
+                    spawn_reconnect_local(delay, gen, ev_tx.clone());
                 }
                 Some(HostEvent::ProxyConfig { profile_name, config }) => {
                     if let Some(cfg) = config {
@@ -918,6 +868,23 @@ fn spawn_reader(
                 break;
             }
         }
+    });
+}
+
+/// Spawn a task that reconnects to the local daemon (starting it if needed)
+/// after `delay`; the outcome comes back tagged with `generation`.
+fn spawn_reconnect_local(delay: Duration, generation: u64, tx: mpsc::Sender<HostEvent>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let event = match connect_local().await {
+            Ok((client, sessions)) => HostEvent::LocalReconnected {
+                client,
+                sessions,
+                generation,
+            },
+            Err(_) => HostEvent::LocalReconnectFailed { generation },
+        };
+        let _ = tx.send(event).await;
     });
 }
 
