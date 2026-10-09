@@ -13,6 +13,10 @@ name = "remote"
 path = "tests/remote.rs"
 required-features = ["diag"]
 
+[[test]]
+name = "screenshots"
+path = "tests/screenshots.rs"
+
 [features]
 # Enables diagnostic / test-harness CLI subcommands (`__bootstrap`,
 # `__connect-check`, `__remote-session`, `__ssh-hosts`).  Not included in

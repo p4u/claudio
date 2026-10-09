@@ -27,6 +27,7 @@ use std::{fs, os::unix::fs::PermissionsExt, thread};
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as AlacConfig, Term};
 use alacritty_terminal::vte::ansi;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -176,6 +177,218 @@ impl ScreenModel {
     pub fn contains(&self, text: &str, region: Region) -> bool {
         self.region_text(region).contains(text)
     }
+
+    /// Export the current cell grid as an SVG string.
+    ///
+    /// Renders all cells with their colours (Catppuccin Mocha palette), bold,
+    /// italic, and inverse attributes.  Wide-char spacer cells are skipped.
+    /// The SVG is wrapped in a rounded window frame with a macOS-style title
+    /// bar and three traffic-light dots.
+    ///
+    /// Convert to PNG with:
+    ///   `inkscape --export-type=png --export-dpi=192 -o out.png in.svg`
+    pub fn export_svg(&self) -> String {
+        // ── Geometry ──────────────────────────────────────────────────────────
+        const CHAR_W: f64 = 7.8;
+        const LINE_H: f64 = 19.0;
+        const TITLE_H: f64 = 44.0; // title-bar height (traffic lights)
+        const PAD_L: f64 = 8.0;    // left padding inside window
+        const PAD_R: f64 = 8.0;    // right padding inside window
+        const PAD_B: f64 = 8.0;    // bottom padding inside window
+        const SHADOW: f64 = 8.0;   // drop-shadow offset (right+down)
+
+        const DEFAULT_BG: &str = "#1e1e2e";
+        const DEFAULT_FG: &str = "#cdd6f4";
+        const TITLE_BG: &str = "#181825";
+
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        let term_w = cols as f64 * CHAR_W;
+        let term_h = rows as f64 * LINE_H;
+        let win_w = term_w + PAD_L + PAD_R;
+        let win_h = term_h + TITLE_H + PAD_B;
+        let svg_w = win_w + SHADOW;
+        let svg_h = win_h + SHADOW;
+
+        let grid = self.term.grid();
+        let offset = grid.display_offset() as i32;
+
+        let mut bg_rects = String::new();
+        let mut text_rows = String::new();
+
+        for row in 0..rows {
+            let line = Line(row as i32 - offset);
+
+            // ── Background-colour runs ─────────────────────────────────────
+            let mut col = 0usize;
+            while col < cols {
+                let cell = &grid[line][Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    col += 1;
+                    continue;
+                }
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+                let span = if wide { 2 } else { 1 };
+
+                let (mut fg, mut bg) = (cell.fg, cell.bg);
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let bg_hex = svg_color(bg, DEFAULT_FG, DEFAULT_BG, false, false);
+
+                // Extend the run while BG colour is the same.
+                let run_start = col;
+                let mut run_end = col + span;
+                while run_end < cols {
+                    let c2 = &grid[line][Column(run_end)];
+                    if c2.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        run_end += 1;
+                        continue;
+                    }
+                    let (mut f2, mut b2) = (c2.fg, c2.bg);
+                    if c2.flags.contains(Flags::INVERSE) {
+                        std::mem::swap(&mut f2, &mut b2);
+                    }
+                    if svg_color(b2, DEFAULT_FG, DEFAULT_BG, false, false) != bg_hex {
+                        break;
+                    }
+                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                }
+
+                if bg_hex != DEFAULT_BG {
+                    let x = PAD_L + run_start as f64 * CHAR_W;
+                    let y = TITLE_H + row as f64 * LINE_H;
+                    let w = (run_end - run_start) as f64 * CHAR_W;
+                    bg_rects.push_str(&format!(
+                        "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{LINE_H:.1}\" fill=\"{bg_hex}\"/>\n"
+                    ));
+                }
+                col = run_end;
+            }
+
+            // ── Text runs ─────────────────────────────────────────────────
+            let ty = TITLE_H + row as f64 * LINE_H + LINE_H * 0.78;
+            text_rows.push_str(&format!("<text y=\"{ty:.1}\" class=\"t\">"));
+
+            col = 0;
+            while col < cols {
+                let cell = &grid[line][Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    col += 1;
+                    continue;
+                }
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+                let span = if wide { 2 } else { 1 };
+
+                let (mut fg, mut bg) = (cell.fg, cell.bg);
+                let flags = cell.flags;
+                if flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let fg_hex =
+                    svg_color(fg, DEFAULT_FG, DEFAULT_BG, flags.contains(Flags::BOLD), flags.contains(Flags::DIM));
+                let bold = flags.contains(Flags::BOLD);
+                let italic = flags.contains(Flags::ITALIC);
+
+                // Extend run while same fg + style.
+                let run_start = col;
+                let mut run_end = col + span;
+                while run_end < cols {
+                    let c2 = &grid[line][Column(run_end)];
+                    if c2.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        run_end += 1;
+                        continue;
+                    }
+                    let f2 = c2.flags;
+                    let (mut fg2, mut bg2) = (c2.fg, c2.bg);
+                    if f2.contains(Flags::INVERSE) {
+                        std::mem::swap(&mut fg2, &mut bg2);
+                    }
+                    let fg2_hex = svg_color(
+                        fg2,
+                        DEFAULT_FG,
+                        DEFAULT_BG,
+                        f2.contains(Flags::BOLD),
+                        f2.contains(Flags::DIM),
+                    );
+                    if fg2_hex != fg_hex
+                        || f2.contains(Flags::BOLD) != bold
+                        || f2.contains(Flags::ITALIC) != italic
+                    {
+                        break;
+                    }
+                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                }
+
+                // Collect text, escaping XML specials.
+                let mut run_text = String::new();
+                for c in run_start..run_end {
+                    if c >= cols { break; }
+                    let ch = grid[line][Column(c)].c;
+                    if grid[line][Column(c)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    let ch = if ch == '\0' { ' ' } else { ch };
+                    match ch {
+                        '&' => run_text.push_str("&amp;"),
+                        '<' => run_text.push_str("&lt;"),
+                        '>' => run_text.push_str("&gt;"),
+                        '"' => run_text.push_str("&quot;"),
+                        c => run_text.push(c),
+                    }
+                }
+
+                if !run_text.trim().is_empty() {
+                    let x = PAD_L + run_start as f64 * CHAR_W;
+                    let mut style = format!("fill:{fg_hex}");
+                    if bold { style.push_str(";font-weight:bold"); }
+                    if italic { style.push_str(";font-style:italic"); }
+                    text_rows.push_str(&format!(
+                        "<tspan x=\"{x:.1}\" style=\"{style}\">{run_text}</tspan>"
+                    ));
+                }
+
+                col = run_end;
+            }
+
+            text_rows.push_str("</text>\n");
+        }
+
+        // Build SVG using explicit string concat to avoid raw-string "#color" delimiter issues.
+        let mut svg = String::with_capacity(512 * 1024);
+        svg.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        svg.push_str(&format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{svg_w:.0}\" height=\"{svg_h:.0}\" viewBox=\"0 0 {svg_w:.0} {svg_h:.0}\">\n"
+        ));
+        svg.push_str("  <defs>\n");
+        svg.push_str("    <style>.t { font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Source Code Pro', 'Consolas', 'Courier New', monospace; font-size: 13px; font-feature-settings: 'liga' 0; }</style>\n");
+        svg.push_str(&format!(
+            "    <clipPath id=\"wc\"><rect width=\"{win_w:.0}\" height=\"{win_h:.0}\" rx=\"12\" ry=\"12\"/></clipPath>\n"
+        ));
+        svg.push_str("  </defs>\n");
+        // Drop shadow
+        svg.push_str(&format!(
+            "  <rect x=\"{SHADOW:.0}\" y=\"{SHADOW:.0}\" width=\"{win_w:.0}\" height=\"{win_h:.0}\" rx=\"12\" ry=\"12\" fill=\"rgba(0,0,0,0.40)\"/>\n"
+        ));
+        // Window background (title bar colour)
+        svg.push_str(&format!(
+            "  <rect width=\"{win_w:.0}\" height=\"{win_h:.0}\" rx=\"12\" ry=\"12\" fill=\"{TITLE_BG}\"/>\n"
+        ));
+        // Traffic lights
+        svg.push_str("  <circle cx=\"20\" cy=\"22\" r=\"6\" fill=\"#ff5f57\"/>\n");
+        svg.push_str("  <circle cx=\"40\" cy=\"22\" r=\"6\" fill=\"#febc2e\"/>\n");
+        svg.push_str("  <circle cx=\"60\" cy=\"22\" r=\"6\" fill=\"#28c840\"/>\n");
+        // Terminal area (clipped to window frame)
+        svg.push_str("  <g clip-path=\"url(#wc)\">\n");
+        svg.push_str(&format!(
+            "    <rect y=\"{TITLE_H:.0}\" width=\"{win_w:.0}\" height=\"{term_h:.0}\" fill=\"{DEFAULT_BG}\"/>\n"
+        ));
+        svg.push_str(&bg_rects);
+        svg.push_str(&text_rows);
+        svg.push_str("  </g>\n");
+        svg.push_str("</svg>\n");
+        svg
+    }
 }
 
 // ── TuiProcess ───────────────────────────────────────────────────────────────
@@ -192,6 +405,50 @@ pub struct TuiProcess {
 }
 
 impl TuiProcess {
+    /// Spawn `claudio` in a PTY at a custom size.
+    ///
+    /// Used by the screenshot test which needs a wider terminal (140 cols).
+    /// Prefer [`Self::spawn`] for regular tests that use `PTY_ROWS`/`PTY_COLS`.
+    pub fn spawn_sized(cmd: CommandBuilder, rows: u16, cols: u16) -> Self {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+
+        let child = pair.slave.spawn_command(cmd).expect("spawn claudio");
+        let writer = pair.master.take_writer().expect("pty writer");
+
+        let screen = Arc::new(Mutex::new(ScreenModel::new(rows, cols)));
+        let screen_clone = Arc::clone(&screen);
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut s) = screen_clone.lock() {
+                            s.feed(&buf[..n]);
+                        }
+                    }
+                }
+            }
+        });
+
+        TuiProcess {
+            writer,
+            child,
+            screen,
+            _reader: reader_thread,
+        }
+    }
+
     /// Spawn `claudio` in a PTY with the given environment.
     pub fn spawn(cmd: CommandBuilder) -> Self {
         let pty_system = native_pty_system();
@@ -249,6 +506,13 @@ impl TuiProcess {
     /// Current rendered text for a region.
     pub fn screen_text(&self, region: Region) -> String {
         self.screen.lock().expect("screen lock").region_text(region)
+    }
+
+    /// Export the current screen state as an SVG string.
+    ///
+    /// See [`ScreenModel::export_svg`] for details.
+    pub fn screen_svg(&self) -> String {
+        self.screen.lock().expect("screen lock").export_svg()
     }
 
     /// Wait until `pattern` appears in `region`, panicking on timeout.
@@ -624,6 +888,111 @@ impl Drop for ClaudeProjectGuard {
             let _ = fs::remove_dir_all(&self.project_dir);
         }
     }
+}
+
+// ── SVG colour helpers ────────────────────────────────────────────────────────
+
+/// Map an alacritty `Color` to an SVG hex string (`#rrggbb`).
+///
+/// `default_fg` / `default_bg` are the terminal's default colours (hex).
+/// When `dim` is true the colour is blended 50% toward the default background.
+fn svg_color(
+    color: ansi::Color,
+    default_fg: &str,
+    default_bg: &str,
+    bold: bool,
+    dim: bool,
+) -> String {
+    use ansi::NamedColor as NC;
+    let (r, g, b) = match color {
+        ansi::Color::Named(nc) => match nc {
+            NC::Black        => (0x45, 0x47, 0x5a),
+            NC::Red          => (0xf3, 0x8b, 0xa8),
+            NC::Green        => (0xa6, 0xe3, 0xa1),
+            NC::Yellow       => (0xf9, 0xe2, 0xaf),
+            NC::Blue         => (0x89, 0xb4, 0xfa),
+            NC::Magenta      => (0xcb, 0xa6, 0xf7),
+            NC::Cyan         => (0x89, 0xdc, 0xeb),
+            NC::White        => (0xba, 0xc2, 0xde),
+            NC::BrightBlack  => (0x58, 0x5b, 0x70),
+            NC::BrightRed    => (0xf3, 0x8b, 0xa8),
+            NC::BrightGreen  => (0xa6, 0xe3, 0xa1),
+            NC::BrightYellow => (0xf9, 0xe2, 0xaf),
+            NC::BrightBlue   => (0x89, 0xb4, 0xfa),
+            NC::BrightMagenta => (0xcb, 0xa6, 0xf7),
+            NC::BrightCyan   => (0x94, 0xe2, 0xd5),
+            NC::BrightWhite  => (0xa6, 0xad, 0xc8),
+            NC::Foreground | NC::BrightForeground => {
+                if bold { (0xff, 0xff, 0xff) } else { hex_to_rgb(default_fg) }
+            }
+            NC::Background   => hex_to_rgb(default_bg),
+            NC::Cursor       => hex_to_rgb(default_fg),
+            // Dim variants — map to normal colour (dim applied below).
+            NC::DimBlack     => (0x45, 0x47, 0x5a),
+            NC::DimRed       => (0xf3, 0x8b, 0xa8),
+            NC::DimGreen     => (0xa6, 0xe3, 0xa1),
+            NC::DimYellow    => (0xf9, 0xe2, 0xaf),
+            NC::DimBlue      => (0x89, 0xb4, 0xfa),
+            NC::DimMagenta   => (0xcb, 0xa6, 0xf7),
+            NC::DimCyan      => (0x89, 0xdc, 0xeb),
+            NC::DimWhite     => (0xba, 0xc2, 0xde),
+            NC::DimForeground => hex_to_rgb(default_fg),
+        },
+        ansi::Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
+        ansi::Color::Indexed(idx) => indexed_rgb(idx),
+    };
+    if dim {
+        let (br, bg, bb) = hex_to_rgb(default_bg);
+        let r = ((r as u16 + br as u16) / 2) as u8;
+        let g = ((g as u16 + bg as u16) / 2) as u8;
+        let b = ((b as u16 + bb as u16) / 2) as u8;
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+}
+
+/// Convert an xterm-256 colour index to `(r, g, b)`.
+fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
+    match idx {
+        0  => (0x45, 0x47, 0x5a),
+        1  => (0xf3, 0x8b, 0xa8),
+        2  => (0xa6, 0xe3, 0xa1),
+        3  => (0xf9, 0xe2, 0xaf),
+        4  => (0x89, 0xb4, 0xfa),
+        5  => (0xcb, 0xa6, 0xf7),
+        6  => (0x89, 0xdc, 0xeb),
+        7  => (0xba, 0xc2, 0xde),
+        8  => (0x58, 0x5b, 0x70),
+        9  => (0xf3, 0x8b, 0xa8),
+        10 => (0xa6, 0xe3, 0xa1),
+        11 => (0xf9, 0xe2, 0xaf),
+        12 => (0x89, 0xb4, 0xfa),
+        13 => (0xcb, 0xa6, 0xf7),
+        14 => (0x94, 0xe2, 0xd5),
+        15 => (0xa6, 0xad, 0xc8),
+        n @ 16..=231 => {
+            let n = n - 16;
+            let ri = n / 36;
+            let gi = (n % 36) / 6;
+            let bi = n % 6;
+            let c = |x: u8| -> u8 { if x == 0 { 0 } else { 55u8.saturating_add(x.saturating_mul(40)) } };
+            (c(ri), c(gi), c(bi))
+        }
+        n => {
+            let v = 8u8.saturating_add((n - 232).saturating_mul(10));
+            (v, v, v)
+        }
+    }
+}
+
+/// Parse a `#rrggbb` hex colour to `(r, g, b)`.
+fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
+    let h = hex.trim_start_matches('#');
+    let r = u8::from_str_radix(h.get(0..2).unwrap_or("cc"), 16).unwrap_or(0xcc);
+    let g = u8::from_str_radix(h.get(2..4).unwrap_or("dd"), 16).unwrap_or(0xdd);
+    let b = u8::from_str_radix(h.get(4..6).unwrap_or("f4"), 16).unwrap_or(0xf4);
+    (r, g, b)
 }
 
 // ── Short tmp root ────────────────────────────────────────────────────────────

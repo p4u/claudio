@@ -6,6 +6,8 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 
 ## Screenshots
 
+<!-- Regenerate: CLAUDIO_SCREENSHOTS=/tmp/shots cargo test --test screenshots -->
+
 ![Sessions view — active session, tab states, status bar](screenshots/sessions.png)
 
 *Active session showing Claude Code output. Tab bar displays all sessions with state glyphs; amber and red tabs flag sessions that need attention.*

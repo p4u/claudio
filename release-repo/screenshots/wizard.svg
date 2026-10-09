@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1116" height="820" viewBox="0 0 1116 820">
+  <defs>
+    <style>.t { font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Source Code Pro', 'Consolas', 'Courier New', monospace; font-size: 13px; font-feature-settings: 'liga' 0; }</style>
+    <clipPath id="wc"><rect width="1108" height="812" rx="12" ry="12"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="1108" height="812" rx="12" ry="12" fill="rgba(0,0,0,0.40)"/>
+  <rect width="1108" height="812" rx="12" ry="12" fill="#181825"/>
+  <circle cx="20" cy="22" r="6" fill="#ff5f57"/>
+  <circle cx="40" cy="22" r="6" fill="#febc2e"/>
+  <circle cx="60" cy="22" r="6" fill="#28c840"/>
+  <g clip-path="url(#wc)">
+    <rect y="44" width="1108" height="760" fill="#1e1e2e"/>
+<rect x="210.8" y="291.0" width="163.8" height="19.0" fill="#cdd6f4"/>
+<rect x="8.0" y="785.0" width="1092.0" height="19.0" fill="#cdd6f4"/>
+<text y="58.8" class="t"></text>
+<text y="77.8" class="t"></text>
+<text y="96.8" class="t"></text>
+<text y="115.8" class="t"></text>
+<text y="134.8" class="t"></text>
+<text y="153.8" class="t"></text>
+<text y="172.8" class="t"></text>
+<text y="191.8" class="t"></text>
+<text y="210.8" class="t"></text>
+<text y="229.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         ┌ New session (↑/↓ move · Tab switch section · Enter pick · Esc cancel) ─────────────────┐                         </tspan></text>
+<text y="248.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │filter&gt;                                                                                 │                         </tspan></text>
+<text y="267.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="286.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │</tspan><tspan x="210.8" style="fill:#89dceb;font-weight:bold">── LOCAL ──────────────────────────────────────────────────                             </tspan><tspan x="897.2" style="fill:#cdd6f4">│                         </tspan></text>
+<text y="305.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │</tspan><tspan x="210.8" style="fill:#1e1e2e">  Explore local dirs…</tspan><tspan x="374.6" style="fill:#cdd6f4">                                                                   │                         </tspan></text>
+<text y="324.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │</tspan><tspan x="210.8" style="fill:#757a91">── REMOTE ─────────────────────────────────────────────────                             </tspan><tspan x="897.2" style="fill:#cdd6f4">│                         </tspan></text>
+<text y="343.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="362.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="381.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="400.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="419.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="438.8" class="t"><tspan x="203.0" style="fill:#cdd6f4">│                                                                                        │</tspan></text>
+<text y="457.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="476.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="495.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="514.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="533.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="552.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="571.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="590.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="609.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         │                                                                                        │                         </tspan></text>
+<text y="628.8" class="t"><tspan x="8.0" style="fill:#cdd6f4">                         └────────────────────────────────────────────────────────────────────────────────────────┘                         </tspan></text>
+<text y="647.8" class="t"></text>
+<text y="666.8" class="t"></text>
+<text y="685.8" class="t"></text>
+<text y="704.8" class="t"></text>
+<text y="723.8" class="t"></text>
+<text y="742.8" class="t"></text>
+<text y="761.8" class="t"></text>
+<text y="780.8" class="t"></text>
+<text y="799.8" class="t"><tspan x="8.0" style="fill:#1e1e2e">   … jump to next session needing attention · Alt+s proxy stats popup · Alt+g overview of all sessions · Alt+h this help popup · Alt+q quit </tspan></text>
+  </g>
+</svg>
