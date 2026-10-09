@@ -126,13 +126,7 @@ fn t1_probe_local() {
 /// 1. First call may upload the binary.
 /// 2. After a successful upload, `claudio __probe` on the remote should work.
 /// 3. Running bootstrap a second time should detect the binary is up-to-date.
-///
-/// **Ignored** because this test is flaky due to review finding M10: the
-/// freshness check in `src/remote/bootstrap.rs` compares the remote hash
-/// against the local-platform binary, which causes spurious re-uploads when the
-/// test is run consecutively.  Unignore once M10 is fixed.
 #[test]
-#[ignore = "blocked on M10: bootstrap freshness check is non-deterministic — consecutive runs may re-upload"]
 fn t2_bootstrap_idempotent() {
     let host = match test_host() {
         Some(h) => h,
