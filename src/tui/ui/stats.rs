@@ -9,7 +9,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
@@ -24,8 +24,6 @@ use super::{centered, fmt_age, popup, str_width, truncate};
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;
-/// Header, rule and footer rows inside the popup border.
-const CHROME_ROWS: u16 = 3;
 const BAR_W: usize = 20;
 
 // ── Entry points ──────────────────────────────────────────────────────────────
@@ -54,22 +52,18 @@ pub(super) fn draw_proxy_stats(frame: &mut Frame, app: &App, view: &StatsView) {
         rule,
     );
     let lines = body_lines(app, view, inner.width as usize);
-    let max = max_scroll_for(lines.len(), body.height);
-    let scroll = view.scroll.min(max);
+    let max = lines
+        .len()
+        .saturating_sub(usize::from(body.height))
+        .min(usize::from(u16::MAX)) as u16;
+    // Only here is the page's length known: the view scrolls within it.
+    view.set_max_scroll(max);
+    let scroll = view.scroll();
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
     frame.render_widget(
         Paragraph::new(footer_line(app, view, inner.width as usize, scroll, max)),
         footer,
     );
-}
-
-/// The largest useful scroll offset of the view's current page, computed from
-/// the same lines the renderer draws. Used by the app to clamp scrolling.
-pub fn stats_max_scroll(app: &App, view: &StatsView) -> u16 {
-    let rect = popup_rect(Rect::new(0, 0, app.width, app.height));
-    let inner = Block::bordered().inner(rect);
-    let lines = body_lines(app, view, inner.width as usize);
-    max_scroll_for(lines.len(), inner.height.saturating_sub(CHROME_ROWS))
 }
 
 fn popup_rect(area: Rect) -> Rect {
@@ -78,12 +72,6 @@ fn popup_rect(area: Rect) -> Rect {
         POPUP_W.min(area.width.saturating_sub(2)),
         POPUP_H.min(area.height.saturating_sub(2)),
     )
-}
-
-fn max_scroll_for(lines: usize, body_height: u16) -> u16 {
-    lines
-        .saturating_sub(body_height as usize)
-        .min(u16::MAX as usize) as u16
 }
 
 // ── Chrome ────────────────────────────────────────────────────────────────────
@@ -1220,25 +1208,27 @@ mod tests {
 
     #[test]
     fn scroll_is_clamped_to_page_content() {
+        let scroll = |app: &App| match &app.modal {
+            Some(Modal::ProxyStats(v)) => v.scroll(),
+            _ => panic!("popup not open"),
+        };
         let mut app = app_with_stats();
         goto(&mut app, '3'); // Trends: 5 metrics × 5 lines, taller than the body.
         app.take_effects();
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        let max = stats_max_scroll(&app, v);
-        assert!(max > 0);
+        render(&app);
         goto(&mut app, 'G');
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        assert_eq!(v.scroll, max);
+        let bottom = scroll(&app);
+        assert!(bottom > 0);
+        goto(&mut app, 'j');
+        assert_eq!(scroll(&app), bottom, "the end of the page");
+        assert!(render(&app).contains("↑ "), "the footer says there is more above");
+        goto(&mut app, 'k');
+        assert_eq!(scroll(&app), bottom - 1);
         goto(&mut app, '1'); // Overview fits: scroll resets.
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        assert_eq!(v.scroll, 0);
-        assert_eq!(stats_max_scroll(&app, v), 0);
+        render(&app);
+        assert_eq!(scroll(&app), 0);
+        goto(&mut app, 'G');
+        assert_eq!(scroll(&app), 0);
     }
 
     /// Renders every page; prints the snapshots with `--nocapture`.

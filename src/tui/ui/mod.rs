@@ -16,7 +16,6 @@ mod git;
 mod stats;
 mod status;
 
-pub use stats::stats_max_scroll;
 use confirm::draw_confirm;
 use git::draw_git;
 use stats::draw_proxy_stats;

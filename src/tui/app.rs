@@ -478,8 +478,7 @@ impl App {
             .and_then(|p| self.proxy_status.get(p))
             .map(|s| s.cached_windows())
             .unwrap_or_default();
-        let max_scroll = super::ui::stats_max_scroll(self, &view);
-        let outcome = view.on_key(&key, &cached, max_scroll);
+        let outcome = view.on_key(&key, &cached);
         self.stats_outcome(view, outcome);
         self.redraw = true;
     }
