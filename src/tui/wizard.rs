@@ -5,6 +5,9 @@
 //! telling the app what to do next (connect to a host, ask the daemon for
 //! directory or session data, or spawn a new session). Replies are fed back
 //! through the `set_*` and `on_host_connected` methods.
+//!
+//! Each wizard instance carries a `generation` counter so that async replies
+//! from a cancelled wizard are discarded (S7 fix).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -113,16 +116,31 @@ impl HostStep {
         }
     }
 
+    /// Paste handler for the host step: set input to the first pasted line.
+    pub fn on_paste(&mut self, text: &str) {
+        let first = text.lines().next().unwrap_or("").trim();
+        if !first.is_empty() {
+            self.input = first.to_owned();
+            self.refilter();
+        }
+    }
+
     fn refilter(&mut self) {
-        let input = self.input.to_lowercase();
+        let input = self.input.trim().to_lowercase();
         if input.is_empty() {
             self.items = self.candidates.clone();
         } else {
-            self.items = self.candidates
+            // Use the fuzzy scorer so host filtering matches the design spec.
+            let mut scored: Vec<(i64, &String)> = self
+                .candidates
                 .iter()
-                .filter(|h| h.to_lowercase().contains(&input))
-                .cloned()
+                .filter_map(|h| {
+                    let score = fuzzy_score(&input, h)?;
+                    Some((score, h))
+                })
                 .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            self.items = scored.into_iter().map(|(_, h)| h.clone()).collect();
         }
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
     }
@@ -166,6 +184,10 @@ pub struct Wizard {
     pub proxy_options: Vec<String>,
     /// Currently selected index in `proxy_options` (0 = none).
     pub proxy_selected: usize,
+    /// Generation counter (S7): incremented on `new()`.
+    /// Carried in reply tags so stale replies from a cancelled wizard are
+    /// discarded.
+    pub generation: u64,
 }
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
@@ -226,6 +248,9 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     Some(score)
 }
 
+/// Global wizard generation counter (S7): each new Wizard gets a unique id.
+static WIZARD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl Wizard {
     /// A wizard over `seeds` (see [`assemble`]) with a host-selection step.
     ///
@@ -251,6 +276,7 @@ impl Wizard {
         let proxy_selected = proxy_default
             .and_then(|d| proxy_options.iter().position(|o| o == d))
             .unwrap_or(0);
+        let generation = WIZARD_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut w = Wizard {
             host_step: Some(host_step),
             host,
@@ -265,6 +291,7 @@ impl Wizard {
             home,
             proxy_options,
             proxy_selected,
+            generation,
         };
         w.refilter();
         w
@@ -303,6 +330,8 @@ impl Wizard {
 
     /// A `ListClaudeSessions` reply for `cwd`. With no sessions there is
     /// nothing to pick, so the outcome is to spawn a fresh one.
+    ///
+    /// Returns `Outcome::None` if the reply is for a different cwd (stale).
     pub fn set_claude_sessions(&mut self, cwd: &str, mut sessions: Vec<ClaudeSession>) -> Outcome {
         if self.pending.as_deref() != Some(cwd) {
             return Outcome::None;
@@ -318,6 +347,16 @@ impl Wizard {
         sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
         self.resume = Some(ResumeStep { cwd: cwd.to_owned(), sessions, selected: 0 });
         Outcome::None
+    }
+
+    /// A `ListClaudeSessions` request failed (M12 fix).
+    ///
+    /// Clears `pending` so the user can retry or choose a different directory.
+    /// Does NOT spawn fresh — the caller must show an error notice.
+    pub fn set_claude_sessions_error(&mut self, cwd: &str) {
+        if self.pending.as_deref() == Some(cwd) {
+            self.pending = None;
+        }
     }
 
     /// Handle a key press.
@@ -344,7 +383,7 @@ impl Wizard {
                     step.selected = (step.selected + 1).min(step.sessions.len());
                     Outcome::None
                 }
-                KeyCode::Left if !self.proxy_options.is_empty() => {
+                KeyCode::Left if self.proxy_options.len() > 1 => {
                     if self.proxy_selected > 0 {
                         self.proxy_selected -= 1;
                     } else {
@@ -352,7 +391,7 @@ impl Wizard {
                     }
                     Outcome::None
                 }
-                KeyCode::Right if !self.proxy_options.is_empty() => {
+                KeyCode::Right if self.proxy_options.len() > 1 => {
                     self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
                     Outcome::None
                 }
@@ -380,6 +419,20 @@ impl Wizard {
             }
             KeyCode::Down => {
                 self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+                Outcome::None
+            }
+            // Proxy toggle is also available in the directory step (S7 fix):
+            // when the input box is empty, Left/Right cycle the proxy profile.
+            KeyCode::Left if self.proxy_options.len() > 1 && self.input.is_empty() => {
+                if self.proxy_selected > 0 {
+                    self.proxy_selected -= 1;
+                } else {
+                    self.proxy_selected = self.proxy_options.len().saturating_sub(1);
+                }
+                Outcome::None
+            }
+            KeyCode::Right if self.proxy_options.len() > 1 && self.input.is_empty() => {
+                self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
                 Outcome::None
             }
             KeyCode::Tab => match self.items.get(self.selected) {
@@ -414,8 +467,16 @@ impl Wizard {
         }
     }
 
-    /// Insert pasted text into the input line (first line only).
+    /// Insert pasted text into the active step's input.
+    ///
+    /// S7 fix: if the host step is active, paste sets the host input;
+    /// otherwise paste into the directory input.
     pub fn on_paste(&mut self, text: &str) -> Outcome {
+        // Step 0: paste into host filter.
+        if let Some(step) = &mut self.host_step {
+            step.on_paste(text);
+            return Outcome::None;
+        }
         if self.resume.is_some() || self.pending.is_some() {
             return Outcome::None;
         }
@@ -678,5 +739,76 @@ mod tests {
         s.title = None;
         s.last_prompt = None;
         assert!(resume_label(&s, 400).starts_with("abc  ·"));
+    }
+
+    #[test]
+    fn set_claude_sessions_error_clears_pending_without_spawning() {
+        let mut w = wizard_local(strings(&["/w"]), "/h");
+        w.on_key(&press(KeyCode::Enter));
+        // Simulate a pending request.
+        assert_eq!(w.pending.as_deref(), Some("/w"));
+        // An error should clear pending but not spawn.
+        w.set_claude_sessions_error("/w");
+        assert!(w.pending.is_none());
+        assert!(w.resume.is_none());
+    }
+
+    #[test]
+    fn set_claude_sessions_error_ignores_stale_cwd() {
+        let mut w = wizard_local(strings(&["/w"]), "/h");
+        w.on_key(&press(KeyCode::Enter));
+        // Error for a different cwd is ignored.
+        w.set_claude_sessions_error("/other");
+        assert_eq!(w.pending.as_deref(), Some("/w"), "pending should remain");
+    }
+
+    #[test]
+    fn proxy_toggle_available_in_directory_step() {
+        let mut w = Wizard::new(strings(&["/w"]), "/h".into(), "local", &[], &["myproxy".to_owned()], None);
+        w.on_host_connected("local", "/h");
+        // proxy_options = ["none", "myproxy"], selected = 0 initially
+        assert_eq!(w.proxy_selected, 0);
+        // Left/Right should cycle the proxy when input is empty.
+        w.on_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(w.proxy_selected, 1);
+        w.on_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(w.proxy_selected, 0);
+    }
+
+    #[test]
+    fn host_paste_sets_host_input() {
+        let mut w = Wizard::new(vec![], "/h".into(), "local", &["server.example.com".to_owned()], &[], None);
+        // Host step is active; paste should go to it.
+        assert!(w.host_step.is_some());
+        w.on_paste("server.example.com");
+        let hs = w.host_step.as_ref().unwrap();
+        assert_eq!(hs.input, "server.example.com");
+    }
+
+    #[test]
+    fn host_filtering_uses_fuzzy_scorer() {
+        // Fuzzy: "srv" matches "my-server" (subsequence).
+        let mut w = Wizard::new(
+            vec![],
+            "/h".into(),
+            "local",
+            &["my-server".to_owned(), "production".to_owned()],
+            &[],
+            None,
+        );
+        let hs = w.host_step.as_mut().unwrap();
+        // Type a fuzzy query that matches "my-server" but not "production".
+        hs.input = "msr".to_owned();
+        hs.refilter();
+        // "my-server" should appear (m-s-r is a subsequence of my-server).
+        // Note: "local" is always first in candidates.
+        assert!(hs.items.iter().any(|h| h == "my-server"), "expected my-server in items: {:?}", hs.items);
+    }
+
+    #[test]
+    fn each_wizard_gets_unique_generation() {
+        let w1 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
+        let w2 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
+        assert_ne!(w1.generation, w2.generation);
     }
 }
