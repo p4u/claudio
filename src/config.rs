@@ -8,6 +8,11 @@
 //! [ui]
 //! notify = true   # desktop notifications for background sessions
 //!
+//! [claude]
+//! allow_skip_permissions = true   # pass --allow-dangerously-skip-permissions
+//! update_check = "ask"            # local claude vs its release channel
+//! remote_check = "ask"            # remote claude vs the local version
+//!
 //! [keys]
 //! overview    = "alt+g"
 //! help        = "alt+h"
@@ -63,6 +68,49 @@ impl Default for UpdateSection {
     }
 }
 
+/// What to do when a claude install is out of date.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdatePolicy {
+    /// Ask before updating.
+    #[default]
+    Ask,
+    /// Update without asking (a notice says so).
+    Auto,
+    /// Never check.
+    Off,
+}
+
+/// The `[claude]` section of `config.toml`: how claudio launches and maintains
+/// the claude CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeSection {
+    /// Start claude with `--allow-dangerously-skip-permissions`, so bypass
+    /// mode is selectable with Shift+Tab (it does not start in it).
+    #[serde(default = "default_true")]
+    pub allow_skip_permissions: bool,
+    /// Compare the local claude with its release channel (once a day).
+    #[serde(default)]
+    pub update_check: UpdatePolicy,
+    /// Compare a remote host's claude with the local version on connect.
+    #[serde(default)]
+    pub remote_check: UpdatePolicy,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ClaudeSection {
+    fn default() -> Self {
+        ClaudeSection {
+            allow_skip_permissions: true,
+            update_check: UpdatePolicy::Ask,
+            remote_check: UpdatePolicy::Ask,
+        }
+    }
+}
+
 /// The `[keys]` section of `config.toml`: action name → key spec string.
 ///
 /// Each entry overrides the default binding for that action. Unknown action
@@ -79,6 +127,8 @@ struct ConfigFile {
     pub keys: Option<KeysSection>,
     #[serde(default)]
     pub update: Option<UpdateSection>,
+    #[serde(default)]
+    pub claude: Option<ClaudeSection>,
     /// All other TOML keys — preserved on write.
     #[serde(flatten)]
     extra: toml::Table,
@@ -92,6 +142,7 @@ pub struct Config {
     /// `keymap::apply_overrides`.
     pub keys: KeysSection,
     pub update: UpdateSection,
+    pub claude: ClaudeSection,
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -144,6 +195,7 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
         ui: file.ui.unwrap_or_default(),
         keys: file.keys.unwrap_or_default(),
         update: file.update.unwrap_or_default(),
+        claude: file.claude.unwrap_or_default(),
     })
 }
 
@@ -162,6 +214,25 @@ mod tests {
         let cfg = load_from(&path);
         assert!(cfg.ui.notify);
         assert!(cfg.keys.is_empty());
+        assert!(cfg.claude.allow_skip_permissions);
+        assert_eq!(cfg.claude.update_check, UpdatePolicy::Ask);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_claude_section() {
+        let dir = std::env::temp_dir().join(format!("claudio-cfg-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[claude]\nallow_skip_permissions = false\nupdate_check = \"auto\"\nremote_check = \"off\"\n",
+        )
+        .unwrap();
+        let cfg = load_from(&path);
+        assert!(!cfg.claude.allow_skip_permissions);
+        assert_eq!(cfg.claude.update_check, UpdatePolicy::Auto);
+        assert_eq!(cfg.claude.remote_check, UpdatePolicy::Off);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
