@@ -236,7 +236,7 @@ impl App {
                 host: host.clone(),
                 spec,
                 proxy_name,
-                to: ReplyTo::Spawned(id),
+                to: ReplyTo::SpawnedDeferred(id),
             });
         } else {
             // Cache is warm (or no proxy) — build env synchronously.
@@ -396,7 +396,7 @@ impl App {
                         host: r.saved.host.clone(),
                         spec,
                         proxy_name: proxy_name.unwrap(),
-                        to: ReplyTo::Spawned(r.saved.id),
+                        to: ReplyTo::SpawnedDeferred(r.saved.id),
                     });
                 } else {
                     // Cache is warm (or no proxy) — build env now.

@@ -72,6 +72,9 @@ pub enum ReplyTo {
     /// Only errors matter; they are shown as a notice prefixed with this.
     Ack(&'static str),
     Spawned(SessionId),
+    /// A spawn sent after an async proxy-config fetch: any `Attach` issued
+    /// meanwhile reached the daemon first and failed, so attach on success.
+    SpawnedDeferred(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
     DirEntries,

@@ -507,7 +507,14 @@ impl App {
                     }
                 }
             }
-            (ReplyTo::Spawned(id), Err(e)) => {
+            (ReplyTo::SpawnedDeferred(id), Ok(_)) => {
+                // Re-attach the active view: its first Attach raced the Spawn.
+                if let Some(i) = self.index_of(id).filter(|&i| self.active == Some(i)) {
+                    self.sessions[i].attached = false;
+                    self.activate(i);
+                }
+            }
+            (ReplyTo::Spawned(id) | ReplyTo::SpawnedDeferred(id), Err(e)) => {
                 if let Some(i) = self.index_of(id) {
                     self.sessions[i].state = SessionState::Exited;
                 }
