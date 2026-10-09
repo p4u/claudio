@@ -157,6 +157,9 @@ pub struct App {
     /// The effective keymap (defaults + config.toml overrides).
     /// Owned here so rendering always reflects the current bindings.
     pub keymap: Keymap,
+    /// Set by the background upgrade-check task when a newer release is found.
+    /// Rendered as a dim `↑ vX.Y.Z` indicator at the right of the status bar.
+    pub upgrade_notice: Option<String>,
 }
 
 impl App {
@@ -220,6 +223,7 @@ impl App {
             pending_notifs: Vec::new(),
             killed: Vec::new(),
             keymap,
+            upgrade_notice: None,
         }
     }
 

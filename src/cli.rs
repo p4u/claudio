@@ -371,6 +371,15 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  claudio daemon restart            Stop then start the daemon (use after installing a new binary).\n\
 \x20  claudio sessions                  List sessions as a table (id, state, name, cwd) for scripting.\n\
 \n\
+\x20Upgrade commands:\n\
+\x20  claudio upgrade                   Download and install the latest release, then restart the daemon.\n\
+\x20  claudio upgrade --check           Check for a newer release without installing it.\n\
+\x20\n\
+\x20  When a newer version is available, a quiet `↑ vX.Y.Z` indicator appears at the\n\
+\x20  right of the TUI status bar. It is also mentioned in the help popup (Alt+h).\n\
+\x20  The check is anonymous, at most once per 24 h, and skipped when\n\
+\x20  CLAUDIO_NO_UPDATE_CHECK=1 or `[update] check = false` is set in config.toml.\n\
+\n\
 \x20Proxy commands (optional claude-proxy integration):\n\
 \x20  claudio proxy login [URL]         Add or update a proxy profile (prompts for token).\n\
 \x20  claudio proxy status              Show profiles, live stats and pool health.\n\

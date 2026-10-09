@@ -120,6 +120,7 @@ async fn main(proxy_override: app::ProxyChoice) -> ExitCode {
         local_client,
         live,
         cfg.ui.notify,
+        cfg.update.check,
         km,
         key_notices,
         proxy_override,
@@ -238,6 +239,9 @@ enum HostEvent {
         stats: Option<crate::proxy::api::StatsResponse>,
         pool: Option<crate::proxy::api::PoolHealthResponse>,
     },
+    /// Background upgrade check completed. `Some(tag)` means a newer version is
+    /// available; `None` means we are up to date (or the check failed silently).
+    UpgradeAvailable(Option<String>),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -248,6 +252,7 @@ async fn event_loop(
     local_client: Client,
     live: Vec<SessionInfo>,
     notify_enabled: bool,
+    update_check_enabled: bool,
     km: keymap::Keymap,
     key_notices: Vec<String>,
     proxy_override: app::ProxyChoice,
@@ -300,6 +305,16 @@ async fn event_loop(
             let gen = conns.next_generation(&host);
             spawn_connect(host, gen, ev_tx.clone(), false);
         }
+    }
+
+    // Kick off a non-blocking upgrade check. The result arrives as
+    // HostEvent::UpgradeAvailable, which sets app.upgrade_notice.
+    {
+        let tx = ev_tx.clone();
+        tokio::spawn(async move {
+            let result = crate::upgrade::check_once(update_check_enabled).await;
+            let _ = tx.send(HostEvent::UpgradeAvailable(result)).await;
+        });
     }
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(ReplyTo, io::Result<Msg>)>();
@@ -461,6 +476,12 @@ async fn event_loop(
                 }
                 Some(HostEvent::ProxyStats { profile_name, stats, pool }) => {
                     app.on_proxy_stats(profile_name, stats, pool);
+                }
+                Some(HostEvent::UpgradeAvailable(tag)) => {
+                    if let Some(t) = tag {
+                        app.upgrade_notice = Some(t);
+                        app.redraw = true;
+                    }
                 }
                 None => return Ok(()),
             },

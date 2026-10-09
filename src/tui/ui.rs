@@ -304,9 +304,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
     let left = truncate(&format!(" {left}"), width);
     let mut spans = vec![Span::styled(left.clone(), left_style)];
+    // Optional upgrade indicator: `↑ vX.Y.Z ` shown dim-cyan before the key hints.
+    let upgrade = app
+        .upgrade_notice
+        .as_deref()
+        .map(|t| format!("↑ {t} "))
+        .unwrap_or_default();
     // Hints fill what's left, losing their head first so `Alt+q quit` stays.
     let hints = format!("{} ", app.keymap.hints());
-    let room = width.saturating_sub(str_width(&left) + 2);
+    let used = str_width(&left) + str_width(&upgrade);
+    let room = width.saturating_sub(used + 2);
     let hints = if str_width(&hints) <= room {
         hints
     } else if room >= 12 {
@@ -314,8 +321,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
-    let pad = width.saturating_sub(str_width(&left) + str_width(&hints));
+    let pad = width.saturating_sub(used + str_width(&hints));
     spans.push(Span::raw(" ".repeat(pad)));
+    if !upgrade.is_empty() {
+        spans.push(Span::styled(
+            upgrade,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
     spans.push(Span::styled(
         hints,
         Style::default().add_modifier(Modifier::DIM),
@@ -795,12 +810,13 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
 /// Render the help popup listing all key bindings.
 pub fn draw_help(frame: &mut Frame, app: &App) {
     let entries = app.keymap.help_entries();
-    let height = (entries.len() as u16 + 4).min(frame.area().height.saturating_sub(2));
+    let extra = if app.upgrade_notice.is_some() { 2 } else { 0 };
+    let height = (entries.len() as u16 + 4 + extra).min(frame.area().height.saturating_sub(2));
     let area = frame.area();
     let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);
     let inner = popup(frame, rect, "Manager keys (any key closes)");
 
-    let lines: Vec<Line> = entries
+    let mut lines: Vec<Line> = entries
         .iter()
         .map(|(k, desc)| {
             Line::from(vec![
@@ -812,6 +828,19 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
             ])
         })
         .collect();
+    // Show upgrade notice at the bottom of the help popup when available.
+    if let Some(tag) = &app.upgrade_notice {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ↑ newer claudio is available: {tag}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::raw("  — run `claudio upgrade`"),
+        ]));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
