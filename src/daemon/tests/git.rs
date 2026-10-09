@@ -116,10 +116,40 @@ impl Repo {
         Msg::GitDiff {
             cwd: self.cwd(),
             id: id.into(),
+            file: None,
             path: path.map(Into::into),
             old_path: old_path.map(Into::into),
         }
     }
+}
+
+/// A request for the `index`th file of commit `id`, run from `cwd`.
+fn diff_file(cwd: &Path, id: &str, index: u32) -> Msg {
+    Msg::GitDiff {
+        cwd: cwd.to_string_lossy().into_owned(),
+        id: id.into(),
+        file: Some(index),
+        path: None,
+        old_path: None,
+    }
+}
+
+/// An empty repository in `parent/name`.
+fn init_repo(parent: &Path, name: &str) -> PathBuf {
+    let dir = parent.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    dir
+}
+
+/// Commit everything with a message taken from a file: it can exceed the
+/// size of one argument.
+fn commit_all_with_message_file(dir: &Path, message: &str) -> String {
+    let file = dir.join(".git/MESSAGE");
+    std::fs::write(&file, message).unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-F", file.to_str().unwrap()]);
+    git(dir, &["rev-parse", "HEAD"])
 }
 
 async fn log_page(c: &mut Client, request: Msg) -> GitLogPage {
@@ -416,6 +446,7 @@ async fn configured_diff_drivers_never_execute() {
     let request = Msg::GitDiff {
         cwd: cwd.clone(),
         id: id.clone(),
+        file: None,
         path: None,
         old_path: None,
     };
@@ -530,4 +561,137 @@ async fn a_client_that_leaves_does_not_wedge_the_daemon() {
     let mut c = d.client().await;
     let page = log_page(&mut c, repo.log(false, 0, 5)).await;
     assert_eq!(page.commits.len(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_log_entry_is_an_error_not_an_endless_page() {
+    let d = TestDaemon::start().await;
+    let dir = init_repo(&d.dir, "huge-subject");
+    std::fs::write(dir.join("f"), "1\n").unwrap();
+    commit_all(&dir, "first");
+    std::fs::write(dir.join("f"), "2\n").unwrap();
+    // One line over the 256 KiB capture all by itself.
+    let huge = commit_all_with_message_file(&dir, &"s".repeat(300 * 1024));
+    std::fs::write(dir.join("f"), "3\n").unwrap();
+    commit_all(&dir, "tip");
+    let mut c = d.client().await;
+    let cwd = dir.to_string_lossy().into_owned();
+    let log = |skip| Msg::GitLog {
+        cwd: cwd.clone(),
+        all: false,
+        skip,
+        limit: 10,
+    };
+
+    // The entries before the big one come through, flagged as having more.
+    let page = log_page(&mut c, log(0)).await;
+    assert_eq!(page.commits.len(), 1);
+    assert_eq!(page.commits[0].subject, "tip");
+    assert!(page.more);
+    // From the big one on, no page can be built: a bounded error, which the
+    // client treats as final instead of asking again.
+    let message = error_text(&mut c, log(1)).await;
+    assert!(message.contains("cannot be shown"), "{message}");
+    assert!(message.len() < 200);
+    // The commit itself still opens, with its message capped.
+    let request = Msg::GitCommit {
+        cwd: cwd.clone(),
+        id: huge,
+    };
+    let info = commit_info(&mut c, request).await;
+    assert!(info.message.len() <= 64 * 1024 + '…'.len_utf8());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_diffs_work_from_a_directory_below_the_repository_root() {
+    let d = TestDaemon::start().await;
+    let dir = init_repo(&d.dir, "nested");
+    let deep = dir.join("sub/deep");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(deep.join("x.txt"), "inside\n").unwrap();
+    std::fs::write(dir.join("other/y.txt"), "outside\n").unwrap();
+    let id = commit_all(&dir, "both");
+    let mut c = d.client().await;
+
+    // The session's directory is `sub/deep`; one changed file is outside it.
+    let cwd = deep.to_string_lossy().into_owned();
+    let request = Msg::GitCommit {
+        cwd: cwd.clone(),
+        id: id.clone(),
+    };
+    let info = commit_info(&mut c, request).await;
+    let paths: Vec<_> = info.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["other/y.txt", "sub/deep/x.txt"]);
+    for (index, expect) in [(0, "+outside"), (1, "+inside")] {
+        let reply = patch(&mut c, diff_file(&deep, &id, index)).await;
+        assert!(reply.patch.contains(expect), "{index}: {}", reply.patch);
+        assert_eq!(reply.path.as_deref(), Some(paths[index as usize]));
+        // Only that file.
+        assert_eq!(reply.patch.matches("diff --git").count(), 1);
+    }
+    // A client that names the file by text gets the same from the subdirectory.
+    for (path, expect) in [("other/y.txt", "+outside"), ("sub/deep/x.txt", "+inside")] {
+        let request = Msg::GitDiff {
+            cwd: cwd.clone(),
+            id: id.clone(),
+            file: None,
+            path: Some(path.into()),
+            old_path: None,
+        };
+        let reply = patch(&mut c, request).await;
+        assert!(reply.patch.contains(expect), "{path}: {}", reply.patch);
+    }
+    let missing = error_text(&mut c, diff_file(&deep, &id, 9)).await;
+    assert!(missing.contains("no such file"), "{missing}");
+}
+
+/// Names that cannot survive display (a tab, a control byte, invalid UTF-8)
+/// or that look identical once sanitized still select their own patch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_are_selected_by_position_not_by_display_name() {
+    let d = TestDaemon::start().await;
+    let dir = init_repo(&d.dir, "odd-names");
+    let names: [(&[u8], &str); 5] = [
+        (b"a\tb.txt", "TAB"),
+        (b"a   b.txt", "SPACES"),
+        (b"caf\xe9.txt", "LATIN1"),
+        (b"ctl\x01.txt", "CONTROL"),
+        (b"ctl.txt", "PLAIN"),
+    ];
+    for (name, content) in names {
+        let name = OsString::from_vec(name.to_vec());
+        std::fs::write(dir.join(name), format!("{content}\n")).unwrap();
+    }
+    let id = commit_all(&dir, "odd names");
+    let mut c = d.client().await;
+
+    let request = Msg::GitCommit {
+        cwd: dir.to_string_lossy().into_owned(),
+        id: id.clone(),
+    };
+    let info = commit_info(&mut c, request).await;
+    assert_eq!(info.files.len(), names.len());
+    let labels: Vec<_> = info.files.iter().map(|f| f.path.as_str()).collect();
+    for shared in ["a   b.txt", "ctl.txt"] {
+        let count = labels.iter().filter(|l| **l == shared).count();
+        assert_eq!(count, 2, "two files share the label {shared:?}: {labels:?}");
+    }
+
+    let mut seen = Vec::new();
+    for index in 0..info.files.len() as u32 {
+        let reply = patch(&mut c, diff_file(&dir, &id, index)).await;
+        let found: Vec<_> = names
+            .iter()
+            .map(|(_, content)| *content)
+            .filter(|content| reply.patch.contains(&format!("+{content}\n")))
+            .collect();
+        assert_eq!(found.len(), 1, "index {index}: {}", reply.patch);
+        assert_eq!(reply.path.as_deref(), Some(labels[index as usize]));
+        seen.push(found[0]);
+    }
+    seen.sort_unstable();
+    let mut expect: Vec<_> = names.iter().map(|(_, content)| *content).collect();
+    expect.sort_unstable();
+    assert_eq!(seen, expect, "every file once");
 }

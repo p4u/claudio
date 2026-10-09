@@ -168,11 +168,17 @@ pub enum Msg {
         cwd: String,
         id: String,
     },
-    /// A patch: one file of a commit, or the whole commit when `path` is
-    /// `None`. `old_path` is the pre-rename name. Answered by `GitPatch`.
+    /// A patch: one file of a commit, or the whole commit when neither `file`
+    /// nor `path` is set. `file` is a position in the `files` of that commit's
+    /// `GitCommitInfo`; the daemon resolves it to the exact name, which the
+    /// display text in `GitFile` cannot carry. `path` and `old_path` (the
+    /// pre-rename name) select by plain text and apply only without `file`.
+    /// Answered by `GitPatch`.
     GitDiff {
         cwd: String,
         id: String,
+        #[serde(default)]
+        file: Option<u32>,
         #[serde(default)]
         path: Option<String>,
         #[serde(default)]

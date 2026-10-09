@@ -19,8 +19,9 @@
 //! Execution (`run`) is kept apart from the pure parsers, which carry the unit
 //! tests.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -118,7 +119,8 @@ pub async fn handle(request: Msg) -> Msg {
                 id,
                 path,
                 old_path,
-            } => diff(&cwd, &id, path, old_path).await,
+                file,
+            } => diff(&cwd, &id, file, path, old_path).await,
             _ => Err("not a git request".to_owned()),
         }
     };
@@ -149,6 +151,14 @@ async fn log(cwd: &str, all: bool, skip: u32, limit: u32) -> Result<Msg, String>
     );
     let log = log?;
     let mut commits = parse_log(&log.stdout);
+    if log.truncated && commits.is_empty() {
+        // The first record alone overflows the capture: asking again with the
+        // same `skip` can never get further.
+        return Err(format!(
+            "a log entry is larger than {} KiB and cannot be shown",
+            META_CAP / 1024
+        ));
+    }
     let more = log.truncated || commits.len() > limit;
     commits.truncate(limit);
     Ok(Msg::GitLogPage(GitLogPage {
@@ -187,22 +197,35 @@ async fn commit(cwd: &str, id: &str) -> Result<Msg, String> {
 async fn diff(
     cwd: &str,
     id: &str,
+    file: Option<u32>,
     path: Option<String>,
     old_path: Option<String>,
 ) -> Result<Msg, String> {
     let cwd = work_dir(cwd).await?;
     check_id(id)?;
-    let paths: Vec<&str> = path.iter().chain(&old_path).map(String::as_str).collect();
-    // `old_path` alone is meaningless: the pair exists to show a rename.
-    let paths = if path.is_some() { &paths[..] } else { &[] };
-    paths.iter().try_for_each(|p| check_path(p))?;
+    // File names from `--numstat` are relative to the repository root, so every
+    // command that selects files by name runs there, whatever the session's cwd.
+    let root = repo_root(&cwd).await?;
+    let (label, pathspecs) = match file {
+        Some(index) => {
+            let entry = stat_entry(&root, id, index).await?;
+            let label = clean_line(&entry.path, MAX_PATH);
+            let names = std::iter::once(entry.path).chain(entry.old_path);
+            (Some(label), names.map(os_string).collect())
+        }
+        None => legacy_pathspecs(path, old_path)?,
+    };
 
-    let mut args = diff_args(&["show", "--format=", "--patch"], id).await?;
-    if !paths.is_empty() {
-        args.push("--");
-        args.extend(paths);
+    let mut args: Vec<OsString> = diff_args(&["show", "--format=", "--patch"], id)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    if !pathspecs.is_empty() {
+        args.push("--".into());
+        args.extend(pathspecs);
     }
-    let out = run(&cwd, &args, PATCH_CAP).await?;
+    let out = run(&root, &args, PATCH_CAP).await?;
 
     let mut text = sanitize(&String::from_utf8_lossy(&out.stdout), true);
     let mut truncated = out.truncated;
@@ -212,7 +235,7 @@ async fn diff(
     }
     let mut reply = GitPatch {
         id: id.to_owned(),
-        path: path.map(|p| clip(p, MAX_PATH)),
+        path: label,
         patch: String::new(),
         truncated: true,
     };
@@ -222,6 +245,42 @@ async fn diff(
     reply.patch = fitted.to_owned();
     reply.truncated = truncated;
     Ok(Msg::GitPatch(reply))
+}
+
+/// The label and pathspecs for a request that names its file by text, as
+/// clients without `file` do. Such names cannot carry control characters or
+/// invalid UTF-8.
+fn legacy_pathspecs(
+    path: Option<String>,
+    old_path: Option<String>,
+) -> Result<(Option<String>, Vec<OsString>), String> {
+    // `old_path` alone is meaningless: the pair exists to show a rename.
+    let Some(path) = path else {
+        return Ok((None, Vec::new()));
+    };
+    let names: Vec<&String> = std::iter::once(&path).chain(&old_path).collect();
+    names.iter().try_for_each(|p| check_path(p))?;
+    let pathspecs = names.iter().map(|p| OsString::from(p.as_str())).collect();
+    Ok((Some(clip(path, MAX_PATH)), pathspecs))
+}
+
+/// The top-level directory of the repository `cwd` is in.
+async fn repo_root(cwd: &Path) -> Result<PathBuf, String> {
+    let out = run(cwd, &["rev-parse", "--show-toplevel"], META_CAP).await?;
+    let name = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+    Ok(PathBuf::from(os_string(name.to_vec())))
+}
+
+/// The `index`th file of commit `id`, with its name exactly as git has it.
+/// The listing is derived the same way as the one `commit` sends, so the
+/// client's position in that list identifies the file.
+async fn stat_entry(root: &Path, id: &str, index: u32) -> Result<StatEntry, String> {
+    let args = diff_args(&["show", "--format=", "--numstat", "-z"], id).await?;
+    let stat = run(root, &args, META_CAP).await?;
+    parse_stat_entries(&stat.stdout)
+        .into_iter()
+        .nth(index as usize)
+        .ok_or_else(|| "no such file in this commit".to_owned())
 }
 
 /// `show`-style arguments for `id`'s diff against its first parent.
@@ -281,6 +340,19 @@ async fn work_dir(cwd: &str) -> Result<std::path::PathBuf, String> {
     }
 }
 
+/// A file name from git's raw output. Names are arbitrary bytes on Unix;
+/// elsewhere the non-UTF-8 ones are approximated.
+fn os_string(bytes: Vec<u8>) -> OsString {
+    #[cfg(unix)]
+    {
+        std::os::unix::ffi::OsStringExt::from_vec(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8_lossy(&bytes).into_owned().into()
+    }
+}
+
 fn command(cwd: &Path) -> Command {
     let mut cmd = Command::new("git");
     for var in SCRUBBED_ENV {
@@ -299,7 +371,7 @@ fn command(cwd: &Path) -> Command {
 }
 
 /// Run `git <args>` in `cwd`, keeping at most `cap` bytes of stdout.
-async fn run(cwd: &Path, args: &[&str], cap: usize) -> Result<Captured, String> {
+async fn run<S: AsRef<OsStr>>(cwd: &Path, args: &[S], cap: usize) -> Result<Captured, String> {
     let mut child = command(cwd)
         .args(args)
         .spawn()
@@ -564,23 +636,47 @@ fn parse_commit(data: &[u8], files: Vec<GitFile>) -> Option<GitCommitInfo> {
     })
 }
 
-/// Parse `--numstat -z`: `added\tremoved\tpath\0`, or for a rename
-/// `added\tremoved\t\0old\0new\0`. Binary files count `-`.
-fn parse_numstat(data: &[u8]) -> Vec<GitFile> {
-    let mut fields = nul_fields(data).into_iter();
-    let mut files = Vec::new();
-    while let Some(record) = fields.next() {
-        if files.len() == MAX_FILES {
-            break;
-        }
-        if let Some(file) = numstat_file(record, &mut fields) {
-            files.push(file);
-        }
-    }
-    files
+/// A file of `--numstat -z` output, its names as git printed them.
+struct StatEntry {
+    path: Vec<u8>,
+    old_path: Option<Vec<u8>>,
+    added: Option<u32>,
+    removed: Option<u32>,
 }
 
-fn numstat_file<'a>(record: &[u8], rest: &mut impl Iterator<Item = &'a [u8]>) -> Option<GitFile> {
+/// Parse `--numstat -z` for the client: names sanitized for display.
+fn parse_numstat(data: &[u8]) -> Vec<GitFile> {
+    parse_stat_entries(data)
+        .into_iter()
+        .map(|e| GitFile {
+            path: clean_line(&e.path, MAX_PATH),
+            old_path: e.old_path.map(|p| clean_line(&p, MAX_PATH)),
+            added: e.added,
+            removed: e.removed,
+        })
+        .collect()
+}
+
+/// Parse `--numstat -z`: `added\tremoved\tpath\0`, or for a rename
+/// `added\tremoved\t\0old\0new\0`. Binary files count `-`.
+fn parse_stat_entries(data: &[u8]) -> Vec<StatEntry> {
+    let mut fields = nul_fields(data).into_iter();
+    let mut entries = Vec::new();
+    while let Some(record) = fields.next() {
+        if entries.len() == MAX_FILES {
+            break;
+        }
+        if let Some(entry) = stat_entry_of(record, &mut fields) {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+fn stat_entry_of<'a>(
+    record: &[u8],
+    rest: &mut impl Iterator<Item = &'a [u8]>,
+) -> Option<StatEntry> {
     let mut parts = record.splitn(3, |&b| b == b'\t');
     let (added, removed, path) = (parts.next()?, parts.next()?, parts.next()?);
     let (path, old_path) = if path.is_empty() {
@@ -590,9 +686,9 @@ fn numstat_file<'a>(record: &[u8], rest: &mut impl Iterator<Item = &'a [u8]>) ->
         (path, None)
     };
     let count = |field: &[u8]| std::str::from_utf8(field).ok()?.parse().ok();
-    Some(GitFile {
-        path: clean_line(path, MAX_PATH),
-        old_path: old_path.map(|p| clean_line(p, MAX_PATH)),
+    Some(StatEntry {
+        path: path.to_vec(),
+        old_path: old_path.map(<[u8]>::to_vec),
         added: count(added),
         removed: count(removed),
     })
@@ -712,6 +808,20 @@ mod tests {
         assert_eq!(files[2].old_path.as_deref(), Some("old name.txt"));
         assert_eq!(files[2].path, "new name.txt", "tab expanded");
         assert_eq!(files[3].path, "gone.txt");
+    }
+
+    #[test]
+    fn stat_entries_keep_the_exact_names_the_labels_lose() {
+        let data = b"1\t1\ta\tb\x01\xe9\0-\t-\t\0old\tname\0new\xff\0";
+        let entries = parse_stat_entries(data);
+        assert_eq!(entries[0].path, b"a\tb\x01\xe9");
+        assert_eq!(entries[1].old_path.as_deref(), Some(&b"old\tname"[..]));
+        assert_eq!(entries[1].path, b"new\xff");
+        // The client's list is these entries, one to one, in order.
+        let files = parse_numstat(data);
+        assert_eq!(files.len(), entries.len());
+        assert_eq!(files[0].path, "a   b\u{fffd}");
+        assert_eq!(os_string(entries[1].path.clone()).len(), 4);
     }
 
     #[test]
