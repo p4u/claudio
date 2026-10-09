@@ -31,6 +31,8 @@ pub enum Action {
     Overview,
     /// Open the help popup.
     Help,
+    /// Show/hide dot-directories in the new-session wizard (wizard scope).
+    ToggleHidden,
 }
 
 impl Action {
@@ -47,8 +49,18 @@ impl Action {
             Action::ProxyStats => "proxy_stats",
             Action::Overview => "overview",
             Action::Help => "help",
+            Action::ToggleHidden => "toggle_hidden",
         }
     }
+}
+
+/// Where a binding is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Intercepted anywhere in the manager (never forwarded to claude).
+    Global,
+    /// Only consulted while the new-session wizard is open.
+    Wizard,
 }
 
 /// A single binding in the effective table: key + description + action.
@@ -59,6 +71,7 @@ pub struct Binding {
     /// Short description shown in the help popup.
     pub label: &'static str,
     pub action: Action,
+    pub scope: Scope,
 }
 
 /// The default binding table. The help popup is generated from this, so it
@@ -69,36 +82,42 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "previous session",
         action: Action::PrevSession,
+        scope: Scope::Global,
     },
     Binding {
         code: KeyCode::Right,
         mods: KeyModifiers::ALT,
         label: "next session",
         action: Action::NextSession,
+        scope: Scope::Global,
     },
     Binding {
         code: KeyCode::Char('n'),
         mods: KeyModifiers::ALT,
         label: "new session (wizard)",
         action: Action::NewSession,
+        scope: Scope::Global,
     },
     Binding {
         code: KeyCode::Char('r'),
         mods: KeyModifiers::ALT,
         label: "rename session",
         action: Action::Rename,
+        scope: Scope::Global,
     },
     Binding {
         code: KeyCode::Char('x'),
         mods: KeyModifiers::ALT,
         label: "close / kill session",
         action: Action::Close,
+        scope: Scope::Global,
     },
     Binding {
         code: KeyCode::Char('a'),
         mods: KeyModifiers::ALT,
         label: "jump to next session needing attention",
         action: Action::NextAttention,
+        scope: Scope::Global,
     },
     // Alt+s: proxy stats. Verified not used by claude (bundle grep: empty).
     Binding {
@@ -106,6 +125,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "proxy stats popup",
         action: Action::ProxyStats,
+        scope: Scope::Global,
     },
     // Alt+g: "glance" / overview. Verified free: not in claude bundle,
     // not a readline binding, not a Ghostty default.
@@ -114,6 +134,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "overview of all sessions",
         action: Action::Overview,
+        scope: Scope::Global,
     },
     // Alt+h: help. Verified free: not in claude bundle, not in Ghostty defaults.
     Binding {
@@ -121,6 +142,17 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "this help popup",
         action: Action::Help,
+        scope: Scope::Global,
+    },
+    // Alt+.: show/hide dot-directories in the wizard's directory step. Wizard
+    // scoped: only consulted while the wizard is open, so it is never swallowed
+    // from claude. Plain letters can't be used: they type into the search box.
+    Binding {
+        code: KeyCode::Char('.'),
+        mods: KeyModifiers::ALT,
+        label: "wizard: show/hide hidden dirs",
+        action: Action::ToggleHidden,
+        scope: Scope::Wizard,
     },
     // Quit is last so it's always visible in the status bar even when truncated.
     Binding {
@@ -128,6 +160,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "quit",
         action: Action::Quit,
+        scope: Scope::Global,
     },
 ];
 
@@ -160,6 +193,7 @@ impl Keymap {
                 mods: b.mods,
                 label: b.label,
                 action: b.action,
+                scope: b.scope,
             })
             .collect();
 
@@ -201,15 +235,32 @@ impl Keymap {
         Keymap { bindings }
     }
 
-    /// The action bound to `key`, if any. Releases never trigger actions.
+    /// The global action bound to `key`, if any. Releases never trigger actions.
     pub fn lookup(&self, key: &KeyEvent) -> Option<Action> {
+        self.lookup_scope(key, Scope::Global)
+    }
+
+    /// The wizard-scoped action bound to `key`, if any.
+    pub fn lookup_wizard(&self, key: &KeyEvent) -> Option<Action> {
+        self.lookup_scope(key, Scope::Wizard)
+    }
+
+    fn lookup_scope(&self, key: &KeyEvent, scope: Scope) -> Option<Action> {
         if key.kind == KeyEventKind::Release {
             return None;
         }
         self.bindings
             .iter()
-            .find(|b| b.code == key.code && b.mods == key.modifiers)
+            .find(|b| b.scope == scope && b.code == key.code && b.mods == key.modifiers)
             .map(|b| b.action)
+    }
+
+    /// The human-readable key (`"Alt+."`) currently bound to `action`.
+    pub fn key_for(&self, action: Action) -> Option<String> {
+        self.bindings
+            .iter()
+            .find(|b| b.action == action)
+            .map(|b| key_str(b.code, b.mods))
     }
 
     /// Generate the help lines from the current effective bindings.
@@ -557,6 +608,17 @@ mod tests {
                 b.label
             );
         }
+    }
+
+    #[test]
+    fn toggle_hidden_is_wizard_scoped() {
+        let km = Keymap::default();
+        let alt_dot = key(KeyCode::Char('.'), KeyModifiers::ALT);
+        assert_eq!(km.lookup_wizard(&alt_dot), Some(Action::ToggleHidden));
+        // Never intercepted outside the wizard, so claude still receives it.
+        assert_eq!(km.lookup(&alt_dot), None);
+        assert_eq!(km.key_for(Action::ToggleHidden).as_deref(), Some("Alt+."));
+        assert!(km.help_entries().iter().any(|(k, _)| k == "Alt+."));
     }
 
     #[test]

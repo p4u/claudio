@@ -297,6 +297,9 @@ fn test_help_popup_opens_and_closes() {
     tui.send_keys(ALT_H);
     // The popup should show a binding description.
     tui.wait_for("previous session", Region::Screen, WAIT);
+    // Wizard-scoped bindings are listed too.
+    tui.wait_for("Alt+.", Region::Screen, WAIT);
+    tui.wait_for("hidden dirs", Region::Screen, WAIT);
     // The "any key closes" string appears in the popup title/footer.
     tui.wait_for("any key closes", Region::Screen, WAIT);
 
@@ -308,6 +311,45 @@ fn test_help_popup_opens_and_closes() {
 
     // Status bar hints should be back.
     tui.wait_for("Alt+h", Region::StatusBar, WAIT);
+
+    tui.quit(WAIT);
+}
+
+// ── Wizard: hidden directories ────────────────────────────────────────────────
+
+/// The directory explorer hides dot-directories by default; Alt+. reveals them.
+#[test]
+fn test_wizard_hidden_dirs_toggle() {
+    let harness = ManagerHarness::new();
+    let browse = harness.root.join("browse");
+    fs::create_dir_all(browse.join(".secret-dir")).expect("create hidden dir");
+    fs::create_dir_all(browse.join("visible-dir")).expect("create visible dir");
+    let mut tui = harness.start_tui();
+
+    // Host step: "Explore local dirs…" (pre-selected). Then browse `browse/`.
+    tui.send_keys(ENTER);
+    tui.wait_for("Tab complete", Region::Screen, WAIT);
+    tui.send_paste(&format!("{}/", browse.display()));
+
+    // Listing arrived: the visible dir is shown, the hidden one is not, and the
+    // state line says so.
+    tui.wait_for("visible-dir", Region::Screen, WAIT);
+    tui.wait_for("Alt+. hidden: off", Region::Screen, WAIT);
+    assert!(
+        !tui.screen_text(Region::Screen).contains(".secret-dir"),
+        "hidden dir must not be listed by default"
+    );
+
+    // Alt+. (ESC .) reveals it.
+    tui.send_keys(b"\x1b.");
+    tui.wait_for(".secret-dir", Region::Screen, WAIT);
+    tui.wait_for("Alt+. hidden: on", Region::Screen, WAIT);
+    tui.wait_for("visible-dir", Region::Screen, WAIT);
+
+    // Pressing it again hides it once more.
+    tui.send_keys(b"\x1b.");
+    tui.wait_until(|s| !s.contains(".secret-dir", Region::Screen), WAIT);
+    tui.wait_for("Alt+. hidden: off", Region::Screen, WAIT);
 
     tui.quit(WAIT);
 }

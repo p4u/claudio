@@ -467,6 +467,11 @@ pub struct Wizard {
     /// recently_used). Populated lazily from `ListDir` and `RecentProjects`
     /// replies.
     pub meta: HashMap<String, DirMeta>,
+    /// Whether dot-directories are listed in the directory step. Off by
+    /// default; toggled with the wizard-scoped `ToggleHidden` key and kept for
+    /// the lifetime of the wizard. A query that starts with `.` reveals them
+    /// regardless (see [`Wizard::refilter`]).
+    pub show_hidden: bool,
 }
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
@@ -596,6 +601,7 @@ impl Wizard {
             generation,
             meta,
             saved_host_step: None,
+            show_hidden: false,
         };
         w.refilter();
         w
@@ -740,6 +746,33 @@ impl Wizard {
     pub fn set_claude_sessions_error(&mut self, cwd: &str) {
         if self.pending.as_deref() == Some(cwd) {
             self.pending = None;
+        }
+    }
+
+    /// Show or hide dot-directories in the directory step. A no-op on the
+    /// other steps. The setting survives going back to the host step.
+    pub fn toggle_hidden(&mut self) -> Outcome {
+        if self.host_step.is_some() || self.resume.is_some() || self.pending.is_some() {
+            return Outcome::None;
+        }
+        self.show_hidden = !self.show_hidden;
+        self.refilter()
+    }
+
+    /// Whether hidden entries are currently listed: the toggle is on, or the
+    /// query (or the path segment being completed) starts with `.`.
+    pub fn hidden_visible(&self) -> bool {
+        self.show_hidden || self.query_base().starts_with('.')
+    }
+
+    /// The part of the input being completed: the last path segment for a
+    /// path query, otherwise the whole (trimmed) input.
+    fn query_base(&self) -> &str {
+        let input = self.input.trim();
+        if input.starts_with('/') || input.starts_with('~') {
+            input.rfind('/').map_or("", |i| &input[i + 1..])
+        } else {
+            input
         }
     }
 
@@ -924,6 +957,7 @@ impl Wizard {
         let mut outcome = Outcome::None;
         let mut items: Vec<String> = Vec::new();
         let input = self.input.trim().to_owned();
+        let reveal_hidden = self.hidden_visible();
 
         if input.starts_with('/') || input.starts_with('~') {
             let (parent, base) = match input.rfind('/') {
@@ -941,7 +975,7 @@ impl Wizard {
                 .iter()
                 .filter(|p| {
                     let name = p.rsplit('/').next().unwrap_or("").to_lowercase();
-                    name.starts_with(&base) && (base.starts_with('.') || !name.starts_with('.'))
+                    name.starts_with(&base) && (reveal_hidden || !name.starts_with('.'))
                 })
                 .collect();
             // Exact basename first, then alphabetical.
@@ -956,6 +990,9 @@ impl Wizard {
             .seeds
             .iter()
             .filter_map(|s| {
+                if !reveal_hidden && is_hidden_path(s) {
+                    return None;
+                }
                 let display = abbreviate_home(s, &self.home);
                 let fuzzy = fuzzy_score(&input, s).max(fuzzy_score(&input, &display))?;
                 // Layer frecency bonus on top of fuzzy score.  When the query
@@ -1012,6 +1049,14 @@ pub fn resume_label(s: &ClaudeSession, now: u64) -> String {
         fmt_age(now.saturating_sub(s.modified)),
         s.messages
     )
+}
+
+/// Whether the final component of `path` starts with `.`.
+fn is_hidden_path(path: &str) -> bool {
+    trim_slash(path)
+        .rsplit('/')
+        .next()
+        .is_some_and(|n| n.starts_with('.'))
 }
 
 fn trim_slash(path: &str) -> &str {
@@ -1508,5 +1553,92 @@ mod tests {
                 .any(|d| d == "/nonexistent_claudio_test_dir_xyzzy"),
             "non-existing dir should be dropped"
         );
+    }
+
+    // ── Hidden directories ────────────────────────────────────────────────────
+
+    fn names(w: &Wizard) -> Vec<&str> {
+        w.items
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(""))
+            .collect()
+    }
+
+    fn listed_home_wizard() -> Wizard {
+        let mut w = wizard_local(vec![], "/home/u");
+        type_str(&mut w, "~/");
+        w.set_dir_entries(
+            "/home/u",
+            &[
+                DirEntry::simple(".config", true),
+                DirEntry::simple(".secret", true),
+                DirEntry::simple("repos", true),
+            ],
+        );
+        w
+    }
+
+    #[test]
+    fn hidden_dirs_are_filtered_by_default() {
+        let w = listed_home_wizard();
+        assert!(!w.show_hidden);
+        assert_eq!(names(&w), vec!["repos"]);
+
+        // Seeds with a hidden final component are hidden too.
+        let w = wizard_local(strings(&["/w/app", "/w/.cache", "/home/u/.dotproj"]), "/home/u");
+        assert_eq!(w.items, strings(&["/w/app"]));
+    }
+
+    #[test]
+    fn toggle_shows_and_hides_hidden_dirs() {
+        let mut w = listed_home_wizard();
+        assert_eq!(w.toggle_hidden(), Outcome::None, "same dir: no new ListDir");
+        assert!(w.show_hidden);
+        assert_eq!(names(&w), vec![".config", ".secret", "repos"]);
+        w.toggle_hidden();
+        assert_eq!(names(&w), vec!["repos"]);
+
+        // Seeds appear after the toggle as well.
+        let mut w = wizard_local(strings(&["/w/app", "/w/.cache"]), "/h");
+        w.toggle_hidden();
+        assert_eq!(w.items, strings(&["/w/app", "/w/.cache"]));
+    }
+
+    #[test]
+    fn toggle_is_remembered_while_typing() {
+        let mut w = listed_home_wizard();
+        w.toggle_hidden();
+        type_str(&mut w, "r");
+        assert!(w.show_hidden);
+        w.on_key(&press(KeyCode::Backspace));
+        assert_eq!(names(&w), vec![".config", ".secret", "repos"]);
+    }
+
+    #[test]
+    fn dot_query_reveals_hidden_dirs_automatically() {
+        let mut w = listed_home_wizard();
+        assert!(!w.hidden_visible());
+        type_str(&mut w, ".con");
+        assert!(w.hidden_visible(), "auto-revealed");
+        assert!(!w.show_hidden, "the toggle itself is untouched");
+        assert_eq!(names(&w), vec![".config"]);
+        // Backspacing out of the dot segment hides them again.
+        for _ in 0..4 {
+            w.on_key(&press(KeyCode::Backspace));
+        }
+        assert_eq!(names(&w), vec!["repos"]);
+
+        // A bare (non-path) query starting with `.` reveals hidden seeds.
+        let mut w = wizard_local(strings(&["/w/app", "/w/.cache"]), "/h");
+        type_str(&mut w, ".ca");
+        assert_eq!(w.items, strings(&["/w/.cache"]));
+    }
+
+    #[test]
+    fn toggle_is_a_noop_outside_the_directory_step() {
+        let mut w = Wizard::new(strings(&["/w"]), "/h".into(), "local", &[], &[], None);
+        assert!(w.host_step.is_some());
+        w.toggle_hidden();
+        assert!(!w.show_hidden, "host step ignores the toggle");
     }
 }

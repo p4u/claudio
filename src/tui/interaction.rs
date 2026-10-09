@@ -152,7 +152,11 @@ impl App {
         let Some(modal) = &mut self.modal else { return };
         match modal {
             Modal::Wizard(w) => {
-                let outcome = w.on_key(&key);
+                let outcome = if self.keymap.lookup_wizard(&key) == Some(Action::ToggleHidden) {
+                    w.toggle_hidden()
+                } else {
+                    w.on_key(&key)
+                };
                 self.wizard_outcome(outcome);
             }
             Modal::Rename { id, input } => match key.code {

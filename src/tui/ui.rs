@@ -41,7 +41,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 draw_close(frame, &view.label());
             }
         }
-        Some(Modal::Wizard(w)) => draw_wizard(frame, w, app.now),
+        Some(Modal::Wizard(w)) => {
+            let toggle_key = app
+                .keymap
+                .key_for(super::keymap::Action::ToggleHidden)
+                .unwrap_or_default();
+            draw_wizard(frame, w, app.now, &toggle_key)
+        }
         Some(Modal::ProxyStats { profile_name }) => {
             let status = app.proxy_status.get(profile_name.as_str());
             draw_proxy_stats(frame, profile_name, status);
@@ -504,7 +510,7 @@ fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
+fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
     let area = frame.area();
     let rect = centered(
         area,
@@ -654,6 +660,15 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
         return;
     }
     draw_input(frame, head, "> ", &w.input);
+    // Second head row: the hidden-dirs toggle state.
+    if head.height > 1 {
+        let state = if w.hidden_visible() { "on" } else { "off" };
+        frame.render_widget(
+            Paragraph::new(format!("{toggle_key} hidden: {state}"))
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            Rect { y: head.y + 1, height: 1, ..head },
+        );
+    }
     draw_dir_list(frame, list, w, now);
 }
 
