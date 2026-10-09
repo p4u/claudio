@@ -90,6 +90,10 @@ pub struct HostStep {
     pub connecting: Option<String>,
     /// The full unfiltered SSH host list.
     candidates: Vec<String>,
+    /// `true` when the query looks like a bare hostname / `user@host` but matches no
+    /// known candidate.  A synthetic "connect to <query>" row is appended to the
+    /// REMOTE section and auto-selected so Enter immediately initiates the connection.
+    pub connect_raw: bool,
 }
 
 impl HostStep {
@@ -105,6 +109,9 @@ impl HostStep {
     }
 
     /// Like `new` but also populates the LOCAL section with recent dirs.
+    ///
+    /// Non-existing local dirs are silently dropped so stale test artifacts
+    /// don't pollute the list (see `claude::projects::recent_project_dirs`).
     pub fn with_local_dirs(
         active_host: &str,
         extra: &[String],
@@ -129,17 +136,25 @@ impl HostStep {
             HostSection::Local
         };
         let items = candidates.clone();
-        let local_items = local_dirs.to_vec();
+        // Drop local dirs that no longer exist on the filesystem so stale
+        // test temp dirs (e.g. /tmp/cl-e2e-*) don't appear in the list.
+        let local_dirs_existing: Vec<String> = local_dirs
+            .iter()
+            .filter(|d| std::path::Path::new(d.as_str()).exists())
+            .cloned()
+            .collect();
+        let local_items = local_dirs_existing.clone();
         HostStep {
             input: String::new(),
             focus,
             local_selected: 0,
             local_items,
-            local_dirs: local_dirs.to_vec(),
+            local_dirs: local_dirs_existing,
             selected: remote_selected,
             items,
             connecting: None,
             candidates,
+            connect_raw: false,
         }
     }
 
@@ -149,8 +164,10 @@ impl HostStep {
     }
 
     /// Total rows in the REMOTE section.
+    ///
+    /// Includes the synthetic "connect to <query>" row when `connect_raw` is set.
     pub fn remote_len(&self) -> usize {
-        self.items.len()
+        self.items.len() + if self.connect_raw { 1 } else { 0 }
     }
 
     /// Handle a key press on the host step.
@@ -235,6 +252,8 @@ impl HostStep {
                             self.connecting = Some(h.clone());
                             Outcome::ConnectHost(h.clone())
                         }
+                        // connect_raw row or any non-empty query with no list match
+                        // → treat the raw input as the hostname.
                         None if !self.input.trim().is_empty() => {
                             let h = self.input.trim().to_owned();
                             self.connecting = Some(h.clone());
@@ -275,37 +294,99 @@ impl HostStep {
     fn refilter(&mut self) {
         let input = self.input.trim().to_lowercase();
         if input.is_empty() {
+            // Empty query → restore unfiltered lists and default selection.
             self.items = self.candidates.clone();
             self.local_items = self.local_dirs.clone();
-        } else {
-            // Filter remote hosts.
-            let mut scored: Vec<(i64, &String)> = self
-                .candidates
-                .iter()
-                .filter_map(|h| {
-                    let score = fuzzy_score(&input, h)?;
-                    Some((score, h))
-                })
-                .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            self.items = scored.into_iter().map(|(_, h)| h.clone()).collect();
-            // Filter local dirs.
-            let mut lscored: Vec<(i64, &String)> = self
-                .local_dirs
-                .iter()
-                .filter_map(|d| {
-                    let score = fuzzy_score(&input, d)?;
-                    Some((score, d))
-                })
-                .collect();
-            lscored.sort_by(|a, b| b.0.cmp(&a.0));
-            self.local_items = lscored.into_iter().map(|(_, d)| d.clone()).collect();
+            self.focus = HostSection::Local;
+            self.local_selected = 0;
+            self.selected = 0;
+            self.connect_raw = false;
+            return;
         }
-        self.selected = self.selected.min(self.items.len().saturating_sub(1));
-        self.local_selected = self
-            .local_selected
-            .min(self.local_len().saturating_sub(1).max(0));
+
+        // ── Filter remote hosts (scored, best first). ──────────────────────────
+        let mut scored_remote: Vec<(i64, String)> = self
+            .candidates
+            .iter()
+            .filter_map(|h| Some((fuzzy_score(&input, h)?, h.clone())))
+            .collect();
+        scored_remote.sort_by(|a, b| b.0.cmp(&a.0));
+        self.items = scored_remote.iter().map(|(_, h)| h.clone()).collect();
+
+        // ── Filter local dirs (scored, best first). ────────────────────────────
+        let mut scored_local: Vec<(i64, String)> = self
+            .local_dirs
+            .iter()
+            .filter_map(|d| Some((fuzzy_score(&input, d)?, d.clone())))
+            .collect();
+        scored_local.sort_by(|a, b| b.0.cmp(&a.0));
+        self.local_items = scored_local.iter().map(|(_, d)| d.clone()).collect();
+
+        // ── Score the "Explore local dirs…" pseudo-entry. ─────────────────────
+        let explore_score: Option<i64> = fuzzy_score(&input, "explore local dirs");
+
+        // ── Decide whether to offer a "connect to <query>" synthetic row. ─────
+        // Only when nothing else matches and the query looks like a hostname.
+        let has_any_match =
+            !scored_remote.is_empty() || !scored_local.is_empty() || explore_score.is_some();
+        self.connect_raw = !has_any_match && looks_like_host(self.input.trim());
+
+        // ── Auto-select the best-scoring visible row. ──────────────────────────
+        // Remote beats local on ties (typing a host name is more specific than
+        // a dir fragment, and we must not stay pinned on "Explore local dirs…").
+        let best_remote = scored_remote.first().map(|(s, _)| *s);
+        let best_local_dir = scored_local.first().map(|(s, _)| *s);
+
+        if let Some(rs) = best_remote {
+            let ls = best_local_dir.unwrap_or(i64::MIN);
+            let es = explore_score.unwrap_or(i64::MIN);
+            if rs >= ls && rs >= es {
+                self.focus = HostSection::Remote;
+                self.selected = 0;
+                // Clamp local too.
+                self.local_selected =
+                    self.local_selected.min(self.local_len().saturating_sub(1));
+                return;
+            }
+        }
+        if let Some(ls) = best_local_dir {
+            let es = explore_score.unwrap_or(i64::MIN);
+            if ls > es {
+                // A specific recent local dir beats "Explore local dirs…".
+                self.focus = HostSection::Local;
+                self.local_selected = 1; // index 1 = first local_items entry
+                self.selected = self.selected.min(self.remote_len().saturating_sub(1));
+                return;
+            }
+        }
+        if explore_score.is_some() {
+            // "Explore local dirs…" matched the query.
+            self.focus = HostSection::Local;
+            self.local_selected = 0;
+            self.selected = self.selected.min(self.remote_len().saturating_sub(1));
+            return;
+        }
+        // Nothing matched. If connect_raw, point Remote at the synthetic row.
+        if self.connect_raw {
+            self.focus = HostSection::Remote;
+            self.selected = 0; // remote_len() == 1 (only the connect_raw row)
+        }
+        // Clamp both indices within the new bounds.
+        let remote_cap = self.remote_len().saturating_sub(1);
+        self.selected = self.selected.min(remote_cap);
+        let local_cap = self.local_len().saturating_sub(1);
+        self.local_selected = self.local_selected.min(local_cap);
     }
+}
+
+/// Returns `true` if `s` looks like a hostname or `user@host` (no spaces,
+/// at least 2 chars, does not start with `/` or `~`).
+///
+/// Used by [`HostStep::refilter`] to decide whether to show a "connect to
+/// <query>" synthetic row in the REMOTE section.
+pub fn looks_like_host(s: &str) -> bool {
+    let s = s.trim();
+    s.len() >= 2 && !s.contains(' ') && !s.starts_with('/') && !s.starts_with('~')
 }
 
 /// Step 2: the resume picker.
@@ -1300,6 +1381,132 @@ mod tests {
         assert!(
             !w.meta.get("/a").map_or(false, |m| m.recently_used),
             "/a should not be recently_used"
+        );
+    }
+
+    // ── HostStep selection rules (Bug 1) ──────────────────────────────────────
+
+    fn make_host_step(hosts: &[&str], local_dirs: &[&str]) -> HostStep {
+        let hosts: Vec<String> = hosts.iter().map(|s| s.to_string()).collect();
+        let dirs: Vec<String> = local_dirs.iter().map(|s| s.to_string()).collect();
+        HostStep::with_local_dirs("local", &hosts, &dirs)
+    }
+
+    /// An empty query always restores the default: Local focus on "Explore".
+    #[test]
+    fn host_step_empty_query_selects_explore() {
+        let mut hs = make_host_step(&["z6", "prod"], &[]);
+        // Type something then clear.
+        hs.input = "z6".to_owned();
+        hs.refilter();
+        hs.input.clear();
+        hs.refilter();
+        assert_eq!(hs.focus, HostSection::Local);
+        assert_eq!(hs.local_selected, 0, "should be on Explore");
+        assert!(!hs.connect_raw);
+    }
+
+    /// Typing a known host switches focus to Remote and selects that host.
+    #[test]
+    fn host_step_typing_known_host_switches_to_remote() {
+        let mut hs = make_host_step(&["z6", "prod"], &[]);
+        hs.input = "z6".to_owned();
+        hs.refilter();
+        assert_eq!(hs.focus, HostSection::Remote, "should switch to Remote");
+        assert_eq!(hs.selected, 0, "top of REMOTE section");
+        assert!(hs.items.iter().any(|h| h == "z6"), "z6 should be visible");
+        assert!(!hs.connect_raw);
+    }
+
+    /// Typing a host-like token that matches no candidate shows connect_raw.
+    #[test]
+    fn host_step_unknown_host_shows_connect_raw() {
+        let mut hs = make_host_step(&["prod"], &[]);
+        hs.input = "newhost".to_owned();
+        hs.refilter();
+        assert!(hs.connect_raw, "connect_raw should be set for unknown host-like query");
+        assert_eq!(hs.focus, HostSection::Remote);
+        assert_eq!(hs.remote_len(), 1, "only the connect_raw row");
+        // Enter should use the raw input.
+        let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out, Outcome::ConnectHost("newhost".to_owned()));
+    }
+
+    /// "Explore local dirs…" must NOT stay selected when query doesn't match it.
+    #[test]
+    fn host_step_explore_not_selected_for_host_query() {
+        let mut hs = make_host_step(&["z6"], &[]);
+        hs.input = "z6".to_owned();
+        hs.refilter();
+        // Must not be on Local / Explore.
+        assert!(
+            hs.focus != HostSection::Local || hs.local_selected != 0,
+            "Explore must not be selected when query is 'z6'"
+        );
+    }
+
+    /// "Explore" IS selected when query matches its text.
+    #[test]
+    fn host_step_explore_selected_when_query_matches_its_text() {
+        let mut hs = make_host_step(&["z6"], &[]);
+        hs.input = "explore".to_owned();
+        hs.refilter();
+        assert_eq!(hs.focus, HostSection::Local);
+        assert_eq!(hs.local_selected, 0, "Explore should be selected");
+    }
+
+    /// When a local dir scores best, focus switches to Local dir (not Explore).
+    #[test]
+    fn host_step_local_dir_scores_best_selects_it() {
+        // No remote hosts, one local dir that exists and matches the query.
+        // /tmp always exists on Unix; query "tmp" fuzzy-matches it and doesn't
+        // look like a host (it's short and matches the dir), so focus goes Local.
+        let mut hs = make_host_step(&[], &["/tmp"]);
+        // Ensure the dir is in local_dirs (it exists, so it wasn't filtered).
+        assert!(
+            hs.local_items.contains(&"/tmp".to_owned()),
+            "/tmp should survive the existence filter"
+        );
+        hs.input = "tmp".to_owned();
+        hs.refilter();
+        // /tmp matches the query; there are no remote candidates.
+        // "tmp" does NOT match "explore local dirs", so the local dir row wins.
+        assert_eq!(hs.focus, HostSection::Local);
+        // local_selected=1 means the first local_items entry.
+        assert_eq!(hs.local_selected, 1);
+        assert!(!hs.connect_raw);
+    }
+
+    /// looks_like_host rejects paths and whitespace.
+    #[test]
+    fn looks_like_host_basic() {
+        assert!(super::looks_like_host("z6"));
+        assert!(super::looks_like_host("user@host"));
+        assert!(super::looks_like_host("my-server"));
+        assert!(!super::looks_like_host("/tmp"), "paths are not hosts");
+        assert!(!super::looks_like_host("~/foo"), "~ paths are not hosts");
+        assert!(!super::looks_like_host("a b"), "spaces disqualify");
+        assert!(!super::looks_like_host("x"), "single char too short");
+        assert!(!super::looks_like_host(""), "empty is not a host");
+    }
+
+    /// HostStep::with_local_dirs silently drops non-existing paths.
+    #[test]
+    fn host_step_drops_nonexistent_local_dirs() {
+        // /tmp always exists; /nonexistent_claudio_test_dir should not.
+        let hs = make_host_step(
+            &[],
+            &["/tmp", "/nonexistent_claudio_test_dir_xyzzy"],
+        );
+        assert!(
+            hs.local_items.iter().any(|d| d == "/tmp"),
+            "/tmp should be kept"
+        );
+        assert!(
+            !hs.local_items
+                .iter()
+                .any(|d| d == "/nonexistent_claudio_test_dir_xyzzy"),
+            "non-existing dir should be dropped"
         );
     }
 }

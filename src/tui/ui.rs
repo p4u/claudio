@@ -477,8 +477,11 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
                 .style(remote_hdr_style),
             sections[2],
         );
-        // REMOTE items.
-        let remote_rows: Vec<String> = hs.items.iter().map(|h| format!("  {h}")).collect();
+        // REMOTE items (plus optional synthetic "connect to <query>" row).
+        let mut remote_rows: Vec<String> = hs.items.iter().map(|h| format!("  {h}")).collect();
+        if hs.connect_raw {
+            remote_rows.push(format!("  connect to {}", hs.input.trim()));
+        }
         draw_list(
             frame,
             sections[3],
