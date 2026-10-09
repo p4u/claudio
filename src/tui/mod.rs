@@ -5,6 +5,8 @@
 //! logic live in [`app`], rendering in [`ui`].
 
 pub mod app;
+mod claude_update;
+mod confirm;
 mod connections;
 mod interaction;
 mod keymap;
@@ -121,6 +123,7 @@ async fn main(proxy_override: app::ProxyChoice) -> ExitCode {
         live,
         cfg.ui.notify,
         cfg.update.check,
+        cfg.claude,
         km,
         key_notices,
         proxy_override,
@@ -143,6 +146,11 @@ async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
         .map_err(io::Error::other)??;
     let client = client::connect(&paths::daemon_socket()).await?;
     list_sessions(&client).await.map(|s| (client, s))
+}
+
+/// The `claude --version` its daemon reported at connect, if claude is there.
+fn client_claude(client: &Client) -> Option<String> {
+    client.welcome().host.claude.as_ref().map(|c| c.version.clone())
 }
 
 async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
@@ -242,6 +250,8 @@ enum HostEvent {
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
+    /// The newest claude version on its release channel.
+    ClaudeLatest(String),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -253,6 +263,7 @@ async fn event_loop(
     live: Vec<SessionInfo>,
     notify_enabled: bool,
     update_check_enabled: bool,
+    claude_policy: crate::config::ClaudeSection,
     km: keymap::Keymap,
     key_notices: Vec<String>,
     proxy_override: app::ProxyChoice,
@@ -268,6 +279,8 @@ async fn event_loop(
         km,
         proxy_override,
     );
+    app.claude_skipped = saved.claude_skipped.clone();
+    app.set_local_claude(client_claude(&local_client));
     app.recover(&saved, &live);
 
     // Subscribe to host stats pushes (CPU/mem sparklines).
@@ -325,6 +338,18 @@ async fn event_loop(
             let _ = tx.send(HostEvent::UpgradeAvailable(result)).await;
         });
     }
+
+    // And, at most once a day, compare the local claude with its release
+    // channel. The result arrives as HostEvent::ClaudeLatest.
+    if claude_policy.update_check != crate::config::UpdatePolicy::Off {
+        let tx = ev_tx.clone();
+        tokio::spawn(async move {
+            if let Some(latest) = crate::claude::update::check_due().await {
+                let _ = tx.send(HostEvent::ClaudeLatest(latest)).await;
+            }
+        });
+    }
+    app.claude_policy = claude_policy;
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(ReplyTo, io::Result<Msg>)>();
     let mut events = EventStream::new();
@@ -420,6 +445,7 @@ async fn event_loop(
                         continue;
                     }
                     let home = client.welcome().host.home.clone();
+                    let remote_claude = client_claude(&client);
                     conns.reset_delay(&host);
                     // Start the reader tagged with the current generation.
                     let cur_gen = conns.current_generation(&host);
@@ -432,6 +458,7 @@ async fn event_loop(
                     app.on_host_connected(&host, &home);
                     // Recover remote sessions for this host only (M1 fix).
                     app.recover_host(&host, &sessions);
+                    app.check_remote_claude(&host, remote_claude.as_deref());
                     app.redraw = true;
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
@@ -460,6 +487,7 @@ async fn event_loop(
                     if let Some(rx) = client.take_incoming() {
                         spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
                     }
+                    app.set_local_claude(client_claude(&client));
                     conns.connected("local", client);
                     app.on_reconnected_local(&sessions, home);
                 }
@@ -498,6 +526,7 @@ async fn event_loop(
                         app.redraw = true;
                     }
                 }
+                Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 None => return Ok(()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),

@@ -204,7 +204,7 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
 /// session env applied.
 fn command(cfg: &super::Config, spec: &SpawnSpec, cwd: &Path, token: &str) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token);
-    let mut cmd = CommandBuilder::new(&cfg.claude);
+    let mut cmd = CommandBuilder::new(cfg.claude_bin());
     cmd.arg("--settings");
     cmd.arg(settings.to_string());
     for a in &spec.args {
@@ -250,7 +250,7 @@ fn clean_title(title: &str) -> &str {
 /// believes it is a child: it turns off transcript saving (breaking `--resume`)
 /// and talks to the parent's messaging socket. User settings such as
 /// `CLAUDE_CODE_USE_GATEWAY` are deliberately kept.
-const CLAUDE_SESSION_MARKERS: &[&str] = &[
+pub(super) const CLAUDE_SESSION_MARKERS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_CHILD_SESSION",

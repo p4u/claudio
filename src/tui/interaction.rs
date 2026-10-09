@@ -16,6 +16,7 @@ use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
 use super::app::{App, Effect, ReplyTo, PROJECTS_LIMIT};
+use super::confirm::ConfirmPrompt;
 use super::keymap::Action;
 use super::sessions::SessionView;
 use super::state::KillTombstone;
@@ -47,6 +48,8 @@ pub enum Modal {
     },
     /// Help popup: all key bindings.
     Help,
+    /// A yes / no / skip question (see [`super::confirm`]).
+    Confirm(ConfirmPrompt),
 }
 
 // ── Terminal input (impl App) ─────────────────────────────────────────────────
@@ -265,6 +268,7 @@ impl App {
                 }
             }
             Modal::Help => self.modal = None,
+            Modal::Confirm(_) => self.confirm_key(key),
         }
     }
 
@@ -281,7 +285,8 @@ impl App {
             Some(Modal::Close { .. })
             | Some(Modal::ProxyStats { .. })
             | Some(Modal::Overview { .. })
-            | Some(Modal::Help) => {}
+            | Some(Modal::Help)
+            | Some(Modal::Confirm(_)) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
@@ -702,6 +707,7 @@ impl App {
                     }
                 }
             }
+            (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
             // Typing a path that doesn't exist (yet) is not an error.
             (ReplyTo::DirEntries | ReplyTo::RemoteDirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {

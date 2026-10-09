@@ -18,12 +18,16 @@ const TAIL_READ_BYTES: u64 = 256 * 1024;
 const MAX_USER_SCAN: usize = 10_000;
 
 /// `~/.claude` (honours `$CLAUDE_CONFIG_DIR`).
-pub fn projects_root() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::paths::home().join(".claude"))
-        .join("projects")
+}
+
+/// `~/.claude/projects`.
+pub fn projects_root() -> PathBuf {
+    config_dir().join("projects")
 }
 
 /// The project directory for a given working directory.

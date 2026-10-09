@@ -11,10 +11,12 @@ use ratatui::Frame;
 
 use crate::proto::SessionState;
 
+mod confirm;
 mod stats;
 mod status;
 
 pub use status::state_name;
+use confirm::draw_confirm;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
@@ -59,6 +61,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
+        Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
         None => {}
     }
 }

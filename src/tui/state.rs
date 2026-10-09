@@ -42,6 +42,10 @@ pub struct ClientState {
     /// Sessions the user explicitly closed; Kill is retried until acknowledged.
     #[serde(default)]
     pub killed: Vec<KillTombstone>,
+    /// Per host, the claude version the user chose to skip updating to
+    /// ("skip this version" in the update prompt).
+    #[serde(default)]
+    pub claude_skipped: HashMap<String, String>,
 }
 
 /// Deserialise `recent_dirs` from either the new `{host: [dirs]}` map or the
@@ -263,6 +267,7 @@ mod tests {
             active: Some(a),
             recent_dirs: mk_recent("local", &["/srv", "/tmp"]),
             killed: vec![],
+            claude_skipped: HashMap::from([("devbox".to_owned(), "2.1.296".to_owned())]),
         };
         let dir = std::env::temp_dir().join(format!("claudio-state-test-{}", Uuid::new_v4()));
         let path = dir.join("state.json");
@@ -282,6 +287,7 @@ mod tests {
         assert_eq!(partial.sessions[0].host, "local");
         assert!(partial.recent_dirs.is_empty());
         assert!(partial.killed.is_empty());
+        assert!(partial.claude_skipped.is_empty());
     }
 
     #[test]
@@ -342,6 +348,7 @@ mod tests {
             active: Some(a),
             recent_dirs: HashMap::new(),
             killed: vec![],
+            ..Default::default()
         };
         let live = vec![
             info(a, Some(1), None),

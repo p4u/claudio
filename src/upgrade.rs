@@ -94,6 +94,15 @@ impl UpdateCache {
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// An HTTP client that identifies itself as claudio.
+pub fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(format!("claudio/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("cannot build HTTP client: {e}"))
+}
+
 /// Fetch the latest release tag from the GitHub API.
 ///
 /// Returns the tag name (e.g. `"v0.3.0"`) or an error string.
@@ -115,11 +124,7 @@ pub async fn latest_tag_from(url: &str) -> Result<String, String> {
         tag_name: String,
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(CHECK_TIMEOUT)
-        .user_agent(format!("claudio/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("cannot build HTTP client: {e}"))?;
+    let client = http_client(CHECK_TIMEOUT)?;
 
     let resp = client
         .get(url)
@@ -207,11 +212,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Download `url`, returning the raw bytes.
 async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_TIMEOUT)
-        .user_agent(format!("claudio/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("cannot build HTTP client: {e}"))?;
+    let client = http_client(DOWNLOAD_TIMEOUT)?;
 
     let resp = client
         .get(url)
