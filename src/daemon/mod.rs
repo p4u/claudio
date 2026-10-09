@@ -204,6 +204,9 @@ struct Registry {
     live: HashMap<SessionId, Handle>,
     /// IDs currently being spawned (outside the lock) for idempotency.
     in_flight: HashSet<SessionId>,
+    /// IDs that received a Kill while their spawn was still in-flight.
+    /// When the spawn commits, it checks this set and kills the actor.
+    to_kill: HashSet<SessionId>,
 }
 
 impl Daemon {
@@ -220,6 +223,7 @@ impl Daemon {
                 journal,
                 live: HashMap::new(),
                 in_flight: HashSet::new(),
+                to_kill: HashSet::new(),
             }),
             journal_write: Mutex::new(()),
             events,
@@ -302,9 +306,11 @@ impl Daemon {
 
         // Phase 3: commit or roll back under lock; snapshot journal entries
         // before releasing the lock (no disk I/O under the lock).
-        let (pid_result, journal_snapshot, broadcast_info) = {
+        // Also check whether this id was killed while in-flight.
+        let (pid_result, journal_snapshot, broadcast_info, kill_on_commit) = {
             let mut reg = self.registry();
             reg.in_flight.remove(&spec.id);
+            let was_killed = reg.to_kill.remove(&spec.id);
             match spawn_result {
                 Ok(handle) => {
                     let pid = handle.pid;
@@ -316,9 +322,9 @@ impl Daemon {
                         pid,
                         ..dormant_info(&entry)
                     };
-                    (Ok(pid), Some(snap), Some(info))
+                    (Ok(pid), Some(snap), Some(info), was_killed)
                 }
-                Err(e) => (Err(e), None, None),
+                Err(e) => (Err(e), None, None, false),
             }
         };
         // Registry lock released.
@@ -340,11 +346,21 @@ impl Daemon {
             self.broadcast(spec.id, SessionEvent::Created { info });
         }
 
+        // If a Kill arrived while we were in-flight, execute it now.
+        if kill_on_commit {
+            tracing::info!(id = %spec.id, "executing deferred kill (killed while in-flight)");
+            // Ignore errors (e.g. journal already clean).
+            let _ = self.kill(spec.id).await;
+        }
+
         pid_result
     }
 
     /// Kill a live session (or just forget a dormant one) and announce
     /// `Removed`. The journal removal is durable before returning `Ok`.
+    ///
+    /// If the id is in-flight (spawn not yet committed), the kill is deferred:
+    /// it is marked in `to_kill` and executed when the spawn commits.
     ///
     /// If the journal write fails, the live handle and the in-memory journal
     /// entry are re-inserted so the daemon stays consistent and the kill is
@@ -354,6 +370,17 @@ impl Daemon {
         // from the in-memory registry, before doing any disk I/O.
         let (live, saved_entry, was_known, journal_snapshot) = {
             let mut reg = self.registry();
+            // If the spawn is in-flight, defer the kill.
+            if reg.in_flight.contains(&id) && reg.live.get(&id).is_none() {
+                tracing::info!(%id, "kill deferred: spawn still in-flight");
+                reg.to_kill.insert(id);
+                // Announce Removed optimistically; the deferred kill will
+                // finalise it. The client should not try to send input to
+                // a session it just killed.
+                drop(reg);
+                self.broadcast(id, SessionEvent::Removed);
+                return Ok(());
+            }
             let live = reg.live.remove(&id);
             // Save a copy of the journal entry so we can re-insert on failure.
             let saved_entry = reg

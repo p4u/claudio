@@ -725,3 +725,45 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Kill a session while its spawn is still in-flight (i.e. before the daemon
+/// has committed the actor to the live registry). The kill must succeed (Ok)
+/// rather than returning "no such session", and the session must not appear
+/// live afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_in_flight_session_succeeds() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+
+    // Start the spawn and immediately issue a Kill — both are sent over c.
+    // We accept that the spawn may or may not have committed by the time Kill
+    // arrives; what matters is that Kill returns Ok in both cases.
+    c.request(Msg::Spawn(d.spec(id))).await;
+    let kill_result = c.call(Msg::Kill { id }).await;
+
+    // Kill must succeed (Ok), not "no such session", regardless of timing.
+    assert_eq!(
+        kill_result,
+        Msg::Ok,
+        "Kill of in-flight (or just-committed) session must return Ok; got {kill_result:?}"
+    );
+
+    // After all events settle, the session must not appear live in ListSessions.
+    // We poll until settled or timeout.
+    within(async {
+        loop {
+            let sessions = c.sessions().await;
+            let found = sessions.iter().find(|s| s.id == id);
+            match found {
+                // Session is gone — success.
+                None => return,
+                // Session is dormant/exited — acceptable (kill happened, actor finished).
+                Some(s) if s.pid.is_none() => return,
+                // Still live — wait a bit and retry.
+                Some(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await;
+}
