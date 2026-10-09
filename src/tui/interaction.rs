@@ -648,6 +648,12 @@ impl App {
                 v.claude_session_id = Some(claude_session_id);
                 self.save();
             }
+            // A fresh reset: recovery must not resume the old conversation
+            // from what we saved.
+            SessionEvent::ClaudeSessionCleared => {
+                v.claude_session_id = None;
+                self.save();
+            }
             SessionEvent::Title { title } => v.title = Some(title),
             SessionEvent::Exited { .. } => v.state = SessionState::Exited,
             SessionEvent::Notice { text } => self.notify(text),

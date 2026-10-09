@@ -458,6 +458,10 @@ pub enum SessionEvent {
     ClaudeSession {
         claude_session_id: String,
     },
+    /// The session no longer has a claude conversation to resume (it was
+    /// restarted with a new one): forget any saved id. Old clients map this
+    /// to `Unknown`.
+    ClaudeSessionCleared,
     Title {
         title: String,
     },
@@ -938,6 +942,22 @@ mod tests {
         let json = r#"{"kind":"future_event","data":42}"#;
         let event: SessionEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event, SessionEvent::Unknown);
+    }
+
+    #[test]
+    fn claude_session_cleared_is_unknown_to_older_clients() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Older {
+            Removed,
+            #[serde(other)]
+            Unknown,
+        }
+        let json = serde_json::to_string(&SessionEvent::ClaudeSessionCleared).unwrap();
+        assert_eq!(json, r#"{"kind":"claude_session_cleared"}"#);
+        assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
+        let back: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, SessionEvent::ClaudeSessionCleared);
     }
 
     #[test]

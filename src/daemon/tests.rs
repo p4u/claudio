@@ -3,13 +3,13 @@
 //! socket clients speaking the wire protocol. Every read has a timeout.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
-use super::{server, Config};
+use super::{server, Config, Daemon};
 use crate::proto::{
     self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SessionState, SpawnSpec, PROTO,
 };
@@ -95,6 +95,7 @@ fn fake_claude() -> &'static Path {
 struct TestDaemon {
     dir: PathBuf,
     config: Config,
+    daemon: Arc<Daemon>,
 }
 
 impl TestDaemon {
@@ -117,11 +118,20 @@ impl TestDaemon {
 
     async fn start_in(dir: PathBuf) -> TestDaemon {
         let config = Self::config(&dir);
+        Self::start_with_config(dir, config)
+    }
+
+    fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
         let listening = server::start(config.clone())
             .unwrap()
             .expect("lock is free");
+        let daemon = listening.daemon();
         tokio::spawn(listening.serve());
-        TestDaemon { dir, config }
+        TestDaemon {
+            dir,
+            config,
+            daemon,
+        }
     }
 
     async fn start() -> TestDaemon {
@@ -134,11 +144,7 @@ impl TestDaemon {
             claude,
             ..Self::config(&dir)
         };
-        let listening = server::start(config.clone())
-            .unwrap()
-            .expect("lock is free");
-        tokio::spawn(listening.serve());
-        TestDaemon { dir, config }
+        Self::start_with_config(dir, config)
     }
 
     fn work(&self) -> PathBuf {
@@ -1375,4 +1381,259 @@ async fn respawn_restarts_a_shell() {
     let journal = d.journal();
     assert_eq!(journal["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(journal["sessions"][0]["kind"], "shell");
+}
+
+// ── Respawn races ────────────────────────────────────────────────────────────
+
+/// A fake claude that ignores SIGHUP, so stopping it takes the actor's whole
+/// kill grace (3 s): a wide, deterministic window in the middle of a respawn.
+fn fake_claude_slow_to_stop() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ss-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
+             trap '' HUP\n\
+             printf '%s' \"$2\" > settings.json\n\
+             echo {BANNER}\n\
+             exec cat\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        bin
+    })
+}
+
+fn respawn_spec(id: SessionId, fresh: bool) -> proto::RespawnSpec {
+    proto::RespawnSpec {
+        id,
+        fresh,
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    }
+}
+
+impl Client {
+    /// Wait until `id` is listed without a process: a respawn has taken it
+    /// over and is stopping the old one.
+    async fn until_stopping(&mut self, id: SessionId) {
+        within(async {
+            while self
+                .sessions()
+                .await
+                .iter()
+                .any(|s| s.id == id && s.pid.is_some())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
+
+    /// The reply to request `req`.
+    async fn reply(&mut self, req: u64) -> Msg {
+        self.until(|f| match f {
+            Frame::Control(env) if env.req == Some(req) => Some(env.msg.clone()),
+            _ => None,
+        })
+        .await
+    }
+}
+
+/// A Kill from another client while a respawn is stopping the old process
+/// wins: it is acknowledged, the respawn gives up, and the session never
+/// comes back. A second respawn meanwhile is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kill_during_a_respawn_is_not_undone() {
+    let d = TestDaemon::start_with_claude(
+        TestDaemon::new_dir(),
+        fake_claude_slow_to_stop().to_path_buf(),
+    )
+    .await;
+    let mut a = d.client().await;
+    let mut b = d.client().await;
+    let id = Uuid::new_v4();
+    let old_pid = a.spawn(d.spec(id)).await.unwrap();
+    a.attach_until(id, BANNER).await;
+
+    let respawn = a.request(Msg::Respawn(respawn_spec(id, false))).await;
+    b.until_stopping(id).await;
+
+    let second = b.call(Msg::Respawn(respawn_spec(id, true))).await;
+    assert!(
+        matches!(&second, Msg::Error { message } if message.contains("in progress")),
+        "{second:?}"
+    );
+    assert_eq!(b.call(Msg::Kill { id }).await, Msg::Ok);
+
+    let reply = a.reply(respawn).await;
+    assert!(matches!(reply, Msg::Error { .. }), "{reply:?}");
+    assert!(b.sessions().await.is_empty(), "the killed session came back");
+    assert!(d.journal()["sessions"].as_array().unwrap().is_empty());
+    assert!(is_dead(old_pid));
+    assert!(d.daemon.registry().in_flight.is_empty());
+}
+
+/// The old process's clean-exit close, landing while a respawn has taken the
+/// id over (or after it committed), must leave the new process alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_clean_exit_close_spares_the_respawned_session() {
+    let d = TestDaemon::start_with_claude(
+        TestDaemon::new_dir(),
+        fake_claude_slow_to_stop().to_path_buf(),
+    )
+    .await;
+    let mut a = d.client().await;
+    let mut b = d.client().await;
+    let id = Uuid::new_v4();
+    a.spawn(d.spec(id)).await;
+
+    let respawn = a.request(Msg::Respawn(respawn_spec(id, false))).await;
+    b.until_stopping(id).await;
+    // What the old actor does after a clean exit, at the worst moment.
+    d.daemon.close_exited(id);
+    let pid = match a.reply(respawn).await {
+        Msg::Spawned { pid, .. } => pid,
+        other => panic!("respawn failed: {other:?}"),
+    };
+    // ...or once the new process is committed.
+    d.daemon.close_exited(id);
+
+    let sessions = b.sessions().await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].pid, pid);
+    assert_eq!(d.journal()["sessions"].as_array().unwrap().len(), 1);
+}
+
+/// A clean exit racing a respawn from another client, end to end: whichever
+/// wins, the outcome is consistent. A respawn that answers `Spawned` keeps
+/// its session; otherwise the session is closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clean_exit_racing_a_respawn_stays_consistent() {
+    let d = TestDaemon::start().await;
+    let mut a = d.client().await;
+    let mut b = d.client().await;
+    for _ in 0..5 {
+        let id = Uuid::new_v4();
+        a.spawn(d.spec(id)).await;
+        a.attach_until(id, BANNER).await;
+        a.send(Frame::Data {
+            session: id,
+            bytes: vec![4],
+        })
+        .await;
+        let reply = b.call(Msg::Respawn(respawn_spec(id, false))).await;
+        // Let a close, if one is coming, land.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listed = b.sessions().await.into_iter().find(|s| s.id == id);
+        match reply {
+            Msg::Spawned { pid, .. } => {
+                let s = listed.expect("a respawned session was closed");
+                assert_eq!(s.pid, pid);
+                b.call(Msg::Kill { id }).await;
+            }
+            other => assert!(listed.is_none(), "{other:?} but still listed"),
+        }
+    }
+}
+
+/// Every client attached to a session keeps receiving it after another
+/// client resets it: it gets `Attached` and the new snapshot unasked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawn_keeps_other_clients_attached() {
+    let d = TestDaemon::start().await;
+    let mut a = d.client().await;
+    let mut b = d.client().await;
+    let id = Uuid::new_v4();
+    a.spawn(d.spec(id)).await;
+    a.attach_until(id, BANNER).await;
+    b.attach_until(id, BANNER).await;
+
+    a.respawn(id, false).await;
+    // `Attached` (unrequested) comes before any of the new process's output.
+    b.until(|f| match f {
+        Frame::Control(Envelope {
+            req: None,
+            msg: Msg::Attached { id: i, .. },
+        }) if *i == id => Some(()),
+        _ => None,
+    })
+    .await;
+    b.output_until(id, BANNER).await;
+    b.type_line(id, "after-reset").await;
+    b.output_until(id, "after-reset").await;
+}
+
+/// A fresh reset drops the old conversation everywhere: the journal, the
+/// listing, and clients (told by `ClaudeSessionCleared`). So when the new
+/// process dies before its first `SessionStart`, bringing it back does not
+/// resume the conversation the user discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_reset_forgets_the_old_conversation() {
+    let d = TestDaemon::start_logging_argv().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    c.spawn(d.spec(id)).await;
+    c.attach_until(id, BANNER).await;
+    let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
+    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
+    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
+        .await;
+
+    let (_, seen) = c.respawn(id, true).await;
+    assert!(seen.contains(&SessionEvent::ClaudeSessionCleared), "{seen:?}");
+    let journal = d.journal();
+    assert_eq!(journal["sessions"][0]["claude_session_id"], serde_json::Value::Null);
+
+    // The new claude crashes before SessionStart.
+    c.attach_until(id, BANNER).await;
+    c.send(Frame::Data {
+        session: id,
+        bytes: vec![3],
+    })
+    .await;
+    c.event(id, |e| matches!(e, SessionEvent::Exited { .. }).then_some(()))
+        .await;
+    let s = &c.sessions().await[0];
+    assert_eq!((s.pid, s.claude_session_id.as_deref()), (None, None));
+
+    c.respawn(id, false).await;
+    d.runs_reach(3).await;
+    let runs = d.runs();
+    assert!(
+        !runs[2].iter().any(|a| a == "--resume"),
+        "resumed the discarded conversation: {:?}",
+        runs[2]
+    );
+}
+
+/// The `--allow-dangerously-skip-permissions` check is redone after a claude
+/// update: a claude missing at startup is not stuck without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skip_permissions_support_is_rechecked_after_an_update() {
+    let dir = TestDaemon::new_dir();
+    let claude = dir.join("bin/claude");
+    let d = TestDaemon::start_with_claude(dir.clone(), claude.clone()).await;
+    let check = |daemon: &Arc<Daemon>| {
+        let daemon = Arc::clone(daemon);
+        tokio::task::spawn_blocking(move || daemon.skip_permissions())
+    };
+    assert!(!check(&d.daemon).await.unwrap(), "no claude yet");
+
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    let script = "#!/bin/sh\n\
+         if [ \"$1\" = \"--help\" ]; then echo '  --allow-dangerously-skip-permissions'; fi\n\
+         exit 0\n";
+    std::fs::write(&claude, script).unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+    assert!(!check(&d.daemon).await.unwrap(), "cached until a refresh");
+    d.daemon.refresh_host().await;
+    assert!(check(&d.daemon).await.unwrap());
 }

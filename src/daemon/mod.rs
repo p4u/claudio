@@ -28,7 +28,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -220,8 +220,9 @@ pub(crate) struct Daemon {
     /// Held while `claude update` runs: one at a time.
     updating: tokio::sync::Mutex<()>,
     /// Whether this claude knows `--allow-dangerously-skip-permissions`
-    /// (it runs `claude --help`, once).
-    skip_permissions_supported: OnceLock<bool>,
+    /// (it runs `claude --help`). Probed on first use, and again after a
+    /// claude update or install, like `host`.
+    skip_permissions_supported: Mutex<Option<bool>>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
@@ -261,7 +262,7 @@ impl Daemon {
             events,
             host: tokio::sync::Mutex::new(None),
             updating: tokio::sync::Mutex::new(()),
-            skip_permissions_supported: OnceLock::new(),
+            skip_permissions_supported: Mutex::new(None),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
         }
@@ -284,7 +285,13 @@ impl Daemon {
     }
 
     /// Probe the host again (claude just changed on disk) and remember it.
+    /// The flag check is redone on the next spawn: a claude that was missing
+    /// or old before may know the flag now.
     async fn refresh_host(&self) -> HostInfo {
+        *self
+            .skip_permissions_supported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let host = self.probe_host().await;
         *self.host.lock().await = Some(host.clone());
         host
@@ -301,10 +308,17 @@ impl Daemon {
     /// enabled in the config and supported by this claude. Blocking the first
     /// time (it runs `claude --help`); call it off the async runtime.
     pub(crate) fn skip_permissions(&self) -> bool {
-        self.config.skip_permissions
-            && *self.skip_permissions_supported.get_or_init(|| {
-                host::claude_supports(&self.config.claude, host::ALLOW_SKIP_PERMISSIONS)
-            })
+        if !self.config.skip_permissions {
+            return false;
+        }
+        // Held while probing, so concurrent spawns wait for one probe.
+        let mut supported = self
+            .skip_permissions_supported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *supported.get_or_insert_with(|| {
+            host::claude_supports(&self.config.claude_bin(), host::ALLOW_SKIP_PERMISSIONS)
+        })
     }
 
     /// Send a session event to every connected client.
@@ -338,7 +352,7 @@ impl Daemon {
     /// happen outside the lock, serialized by `journal_write`.
     async fn spawn(
         self: &Arc<Self>,
-        mut spec: SpawnSpec,
+        spec: SpawnSpec,
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
         // Phase 1: idempotency check and reservation (fast, no I/O).
@@ -350,16 +364,24 @@ impl Daemon {
             if reg.in_flight.contains(&spec.id) {
                 // A concurrent spawn for this id is already in progress; the
                 // client will receive a Created event when it completes.
-                return Err(io::Error::other(format!(
-                    "spawn in progress for {}",
-                    spec.id
-                )));
+                return Err(in_progress(spec.id));
             }
             reg.in_flight.insert(spec.id);
             let journaled = reg.journal.entries().iter().find(|e| e.id == spec.id);
             journaled.map_or(requested, |e| e.kind)
         };
         // Registry lock released.
+        self.spawn_reserved(spec, kind).await
+    }
+
+    /// Phases 2–4 of [`Daemon::spawn`], for an id the caller has already
+    /// reserved in `in_flight`. Releases the reservation, and carries out a
+    /// Kill that arrived meanwhile.
+    async fn spawn_reserved(
+        self: &Arc<Self>,
+        mut spec: SpawnSpec,
+        kind: SessionKind,
+    ) -> io::Result<Option<u32>> {
         if kind == SessionKind::Shell {
             spec.args.clear();
             spec.env.clear();
@@ -410,15 +432,16 @@ impl Daemon {
                         Some(committed_tx),
                     )
                 }
-                Err(e) => (Err(e), None, None, false, None),
+                // A respawn's id is journaled already: a Kill that came
+                // meanwhile still has to remove it, spawned or not.
+                Err(e) => (Err(e), None, None, was_killed, None),
             }
         };
         // Registry lock released.
 
         // Phase 4: journal disk write outside the registry lock.
         if let Some(snap) = journal_snapshot {
-            let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
+            if let Err(e) = self.write_journal(&snap) {
                 tracing::error!(error = %e, "could not write journal after spawn");
             }
         }
@@ -466,8 +489,8 @@ impl Daemon {
     /// Kill a live session (or just forget a dormant one) and announce
     /// `Removed`. The journal removal is durable before returning `Ok`.
     ///
-    /// If the id is in-flight (spawn not yet committed), the kill is deferred:
-    /// it is marked in `to_kill` and executed when the spawn commits.
+    /// If the id is in-flight (a spawn or respawn not yet committed), the kill
+    /// is deferred: it is marked in `to_kill` and executed when that ends.
     ///
     /// If the journal write fails, the live handle and the in-memory journal
     /// entry are re-inserted so the daemon stays consistent and the kill is
@@ -686,21 +709,47 @@ impl Daemon {
     /// spawn the same id again with its journaled cwd, name and args, resuming
     /// the conversation unless `fresh` (or none was recorded yet). The journal
     /// entry stays, and the old actor leaves silently (it is no longer in
-    /// `live`, and `Kill` skips its exit handling), so clients see `Created`
-    /// but never `Removed`.
+    /// `live`, and `Stop` skips its exit handling), so clients see `Created`
+    /// but never `Removed`. Clients attached to the old process are attached
+    /// to the new one, each getting a fresh `Attached` + snapshot.
+    ///
+    /// The id is reserved in `in_flight` from before the old process is
+    /// stopped until the new one is committed, like a spawn's: a second
+    /// Respawn (or a Spawn) is refused meanwhile, and a Kill is deferred to
+    /// `to_kill` and wins, so a killed session is never brought back.
     async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
         let id = req.id;
         let (entry, old) = {
             let mut reg = self.registry();
             if reg.in_flight.contains(&id) {
-                return Err(io::Error::other(format!("spawn in progress for {id}")));
+                return Err(in_progress(id));
             }
             let entry = reg.journal.entries().iter().find(|e| e.id == id).cloned();
+            let entry = entry.ok_or_else(|| io::Error::other(format!("no such session: {id}")))?;
+            reg.in_flight.insert(id);
             (entry, reg.live.remove(&id))
         };
-        let entry = entry.ok_or_else(|| io::Error::other(format!("no such session: {id}")))?;
-        if let Some(old) = old {
-            session::stop(&old).await;
+        let subscribers = match old {
+            Some(old) => session::stop(&old).await,
+            None => Vec::new(),
+        };
+        // A Kill that came while the old process was stopping has been
+        // acknowledged: finish the removal instead of starting a new one.
+        let killed = {
+            let mut reg = self.registry();
+            let killed = reg.to_kill.remove(&id);
+            if killed {
+                reg.in_flight.remove(&id);
+            }
+            killed
+        };
+        if killed {
+            tracing::info!(%id, "respawn abandoned: the session was killed meanwhile");
+            let _ = self.kill(id).await;
+            return Err(io::Error::other(format!("session {id} was removed")));
+        }
+        if req.fresh {
+            self.forget_conversation(id);
         }
         let mut args = without_conversation(&entry.args);
         if let Some(conversation) = entry.claude_session_id.filter(|_| !req.fresh) {
@@ -715,13 +764,83 @@ impl Daemon {
             rows: req.rows,
             cols: req.cols,
         };
-        let spawned = self.spawn(spec, entry.kind).await;
-        if spawned.is_err() {
-            // The old process is gone: the tab is dormant until the next try.
-            self.broadcast(id, SessionEvent::State { state: SessionState::Exited });
-            self.broadcast(id, SessionEvent::Exited { code: None });
+        let spawned = self.spawn_reserved(spec, entry.kind).await;
+        match (&spawned, self.session(id)) {
+            (Ok(_), Some(tx)) => {
+                for (client, queue) in subscribers {
+                    // A zero size keeps the new process's size.
+                    let attach = Cmd::Attach {
+                        client,
+                        queue,
+                        req: None,
+                        rows: 0,
+                        cols: 0,
+                    };
+                    let _ = tx.send(attach).await;
+                }
+            }
+            // Spawned, then killed by a Kill that came meanwhile.
+            (Ok(_), None) => {}
+            (Err(_), _) => {
+                // The old process is gone: the tab is dormant until the next try.
+                self.broadcast(id, SessionEvent::State { state: SessionState::Exited });
+                self.broadcast(id, SessionEvent::Exited { code: None });
+            }
         }
         spawned
+    }
+
+    /// Forget session `id`'s claude conversation (a fresh reset), durably,
+    /// and tell clients to drop theirs too. Otherwise a new process that dies
+    /// before its first `SessionStart` would come back, from the journal or a
+    /// client's saved state, resuming the conversation the user discarded.
+    fn forget_conversation(&self, id: SessionId) {
+        let snap = {
+            let mut reg = self.registry();
+            if !reg.journal.clear_claude_session(id) {
+                return;
+            }
+            reg.journal.snapshot()
+        };
+        if let Err(e) = self.write_journal(&snap) {
+            tracing::error!(%id, error = %e, "could not write journal after a fresh reset");
+        }
+        self.broadcast(id, SessionEvent::ClaudeSessionCleared);
+    }
+
+    /// Close a session whose process exited for good (a clean exit): remove
+    /// its journal entry and announce `Removed`, like a Kill. Unless the id
+    /// has been taken over since the exit (a respawn or spawn has reserved or
+    /// committed it): then the new process owns it and nothing is closed.
+    /// The check and the removal are one step under the registry lock.
+    pub(crate) fn close_exited(&self, id: SessionId) {
+        let (entry, snap) = {
+            let mut reg = self.registry();
+            if reg.live.contains_key(&id) || reg.in_flight.contains(&id) {
+                tracing::info!(%id, "exited session was replaced; not closing it");
+                return;
+            }
+            let Some(entry) = reg.journal.entries().iter().find(|e| e.id == id).cloned() else {
+                return; // already killed
+            };
+            reg.journal.remove_in_memory(id);
+            (entry, reg.journal.snapshot())
+        };
+        if let Err(e) = self.write_journal(&snap) {
+            // Not removed on disk: keep it, dormant, rather than lie.
+            tracing::warn!(%id, error = %e, "could not close exited session");
+            self.registry().journal.reinsert(entry);
+            return;
+        }
+        tracing::info!(%id, "session closed after its process exited");
+        self.broadcast(id, SessionEvent::Removed);
+    }
+
+    /// Persist a journal snapshot taken under the registry lock. Called
+    /// without that lock held; `journal_write` orders the writes.
+    fn write_journal(&self, snap: &[Entry]) -> io::Result<()> {
+        let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
+        Journal::write_snapshot(&self.config.journal, snap)
     }
 
     /// Drop a session from the live set when its process exits — unless it
@@ -735,6 +854,12 @@ impl Daemon {
         }
         ours
     }
+}
+
+/// The refusal for a spawn or respawn of an id that is mid-(re)spawn; the
+/// client hears `Created` when that one completes.
+fn in_progress(id: SessionId) -> io::Error {
+    io::Error::other(format!("spawn in progress for {id}"))
 }
 
 /// `args` without the flags that pick a conversation (`--resume`,
