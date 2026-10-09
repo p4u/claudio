@@ -27,6 +27,7 @@ fn fake_claude_exits_immediately() -> &'static Path {
         let bin = dir.join("claude");
         let script = "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
              exit 3\n";
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -49,6 +50,7 @@ fn fake_claude_resume_fails() -> &'static Path {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
              # Check all args for --resume\n\
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--resume\" ]; then exit 1; fi\n\
@@ -77,6 +79,7 @@ fn fake_claude() -> &'static Path {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
              printf '%s' \"$2\" > settings.json\n\
              echo {BANNER}\n\
              exec cat\n"
@@ -1150,6 +1153,7 @@ fn fake_claude_logging_argv() -> &'static Path {
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
              printf '%s' \"$2\" > settings.json\n\
              {{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo ---; }} >> argv.log\n\
              echo {BANNER}\n\
