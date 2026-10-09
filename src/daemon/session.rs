@@ -583,11 +583,14 @@ impl Actor {
 
         if self.spawned_with_resume && quick_exit && no_session_start && nonzero_exit {
             tracing::info!(id = %self.id, "resume failed (conversation gone?); will retry fresh");
-            // Emit a notice so the client can show a message.
+            // Forget the stale live entry before retrying, so retry_spawn_fresh
+            // does not find a stale entry and return the old pid without spawning.
+            self.daemon.forget_live(self.id, &self.token);
+            // Emit a notice (not Title) so the TUI shows it in the status bar.
             self.daemon.broadcast(
                 self.id,
-                SessionEvent::Title {
-                    title: "conversation not found; started fresh".to_owned(),
+                SessionEvent::Notice {
+                    text: "conversation not found; started fresh".to_owned(),
                 },
             );
             // Attempt a fresh spawn (no --resume) via the daemon.

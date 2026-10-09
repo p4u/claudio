@@ -17,6 +17,38 @@ use crate::proto::{
 const BANNER: &str = "FAKE-CLAUDE-BANNER";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A variant of the fake claude that exits 1 immediately when given `--resume`
+/// (simulating a deleted conversation), and otherwise behaves like the normal
+/// fake claude (prints banner + echoes input).
+fn fake_claude_resume_fails() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "claudio-fake-claude-rf-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        // Exit 1 immediately if --resume is in the arguments, otherwise behave
+        // like the normal fake claude.
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             # Check all args for --resume\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--resume\" ]; then exit 1; fi\n\
+             done\n\
+             printf '%s' \"$2\" > settings.json\n\
+             echo {BANNER}\n\
+             exec cat\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        bin
+    })
+}
+
 /// The fake claude, shared by all tests (written once, so no exec races with
 /// a file still open for writing). It answers `--version`, saves its
 /// `--settings` JSON into its cwd (so tests can read the hook token), prints a
@@ -592,4 +624,104 @@ async fn bad_requests_get_errors_and_keep_the_connection() {
     spec.cwd = d.dir.join("missing").to_string_lossy().into_owned();
     assert!(matches!(c.call(Msg::Spawn(spec)).await, Msg::Error { .. }));
     assert_eq!(c.call(Msg::Ping).await, Msg::Pong);
+}
+
+/// When a session is spawned with `--resume` and claude exits immediately with
+/// a non-zero code before any SessionStart hook fires, the daemon should:
+/// 1. Broadcast a `Notice` event (not `Title`) with a descriptive message.
+/// 2. Spawn a fresh session (without `--resume`), which becomes live.
+/// 3. `ListSessions` shows one live session with a NEW pid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_retry_spawns_fresh_on_quick_exit() {
+    // Use a daemon backed by the fake claude that fails on --resume.
+    let dir = TestDaemon::new_dir();
+    let config = Config {
+        socket: dir.join("rt/d.sock"),
+        lock: dir.join("rt/d.lock"),
+        journal: dir.join("state/journal.json"),
+        claude: fake_claude_resume_fails().to_path_buf(),
+        claudio: PathBuf::from("/bin/true"),
+    };
+    // Pre-populate a journal entry with a claude_session_id so the spawn
+    // request carries --resume.
+    let journal_path = &config.journal;
+    std::fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+    let id = Uuid::new_v4();
+    let journal_entry = serde_json::json!({
+        "sessions": [{
+            "id": id,
+            "cwd": dir.join("work"),
+            "name": "resume-test",
+            "args": [],
+            "claude_session_id": "old-conv-id",
+            "created_at": 1700000000u64
+        }]
+    });
+    crate::paths::write_atomic(journal_path, journal_entry.to_string().as_bytes()).unwrap();
+
+    let listening = server::start(config).unwrap().expect("lock is free");
+    tokio::spawn(listening.serve());
+    let socket = dir.join("rt/d.sock");
+    // Wait for daemon to start.
+    within(async {
+        loop {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    let mut c = Client::connect(&socket).await;
+
+    // Spawn with --resume (the journal has a claude_session_id).
+    let spec = SpawnSpec {
+        id,
+        cwd: dir.join("work").to_string_lossy().into_owned(),
+        name: Some("resume-test".into()),
+        args: vec!["--resume".into(), "old-conv-id".into()],
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let initial_pid = c.spawn(spec).await;
+
+    // Wait for the Notice event (resume failed → retry fresh).
+    let notice_text = c
+        .event(id, |e| match e {
+            SessionEvent::Notice { text } => Some(text.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(
+        notice_text.contains("conversation not found"),
+        "expected conversation-not-found notice, got: {notice_text:?}"
+    );
+
+    // Wait for the new fresh session's Created event (different pid).
+    let new_info = c
+        .event(id, |e| match e {
+            SessionEvent::Created { info } => Some(info.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(
+        new_info.pid != initial_pid || new_info.pid.is_none(),
+        "fresh spawn should have a different pid; got {:?} vs initial {:?}",
+        new_info.pid,
+        initial_pid
+    );
+    assert_eq!(new_info.state, proto::SessionState::Starting);
+
+    // ListSessions must show exactly one live session.
+    let sessions = c.sessions().await;
+    assert_eq!(sessions.len(), 1, "should have exactly one session");
+    // The session must be live (Starting state from the fresh spawn).
+    assert!(
+        sessions[0].pid.is_some(),
+        "fresh session should be live (pid != None)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
