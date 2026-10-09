@@ -76,6 +76,10 @@ pub enum Msg {
     /// Start claude in a new PTY. Idempotent by `spec.id`: re-sending a spawn
     /// for a live session just answers `Spawned` again.
     Spawn(SpawnSpec),
+    /// Start the user's login shell in a new PTY (a terminal tab). Idempotent
+    /// by `spec.id`, answered by `Spawned`. An older daemon answers `Error
+    /// "unsupported op"`, so a terminal can never be mistaken for claude.
+    SpawnShell(ShellSpec),
     /// Subscribe to a session's output (and resize it to the client's pane).
     /// Answered by `Attached`, immediately followed by `D` frames carrying the
     /// screen snapshot.
@@ -264,6 +268,27 @@ pub struct SpawnSpec {
     pub cols: u16,
 }
 
+/// How to start a terminal tab: the login shell, in `cwd`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShellSpec {
+    pub id: SessionId,
+    pub cwd: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// What a session runs. The daemon journal's value is authoritative.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    #[default]
+    Claude,
+    /// A plain terminal: the user's login shell.
+    Shell,
+}
+
 impl std::fmt::Debug for SpawnSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
@@ -307,6 +332,9 @@ pub struct SessionInfo {
     /// Added in a later protocol version; old daemons omit this field.
     #[serde(default)]
     pub context_tokens: Option<u64>,
+    /// Absent from old daemons, which only run claude.
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 /// What a session is doing, derived from Claude Code hooks.
@@ -537,6 +565,41 @@ mod tests {
         let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         assert_eq!(len, bytes.len() - 4);
         Frame::decode(&bytes[4..]).unwrap()
+    }
+
+    #[test]
+    fn session_info_without_kind_is_claude() {
+        let old = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w",
+            "state":"idle","created_at":1}"#;
+        let info: SessionInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(info.kind, SessionKind::Claude);
+        let json = serde_json::to_value(SessionKind::Shell).unwrap();
+        assert_eq!(json, "shell");
+    }
+
+    #[test]
+    fn spawn_shell_is_unknown_to_a_daemon_or_client_that_lacks_it() {
+        // A frozen copy of the pre-terminal enum: the `#[serde(other)]`
+        // fallback is all that keeps the connection alive.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum V02 {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let shell = Msg::SpawnShell(ShellSpec {
+            id: Uuid::nil(),
+            cwd: "/w".into(),
+            name: None,
+            rows: 24,
+            cols: 80,
+        });
+        let json = serde_json::to_string(&Envelope::request(3, shell.clone())).unwrap();
+        assert!(json.contains(r#""op":"spawn_shell""#), "{json}");
+        assert_eq!(serde_json::from_str::<V02>(&json).unwrap(), V02::Unknown);
+        let back: Envelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.msg, shell);
     }
 
     #[test]

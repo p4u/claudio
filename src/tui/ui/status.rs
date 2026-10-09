@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::proto::SessionState;
+use crate::proto::{SessionKind, SessionState};
 
 use super::super::app::App;
 use super::super::sessions::SessionView;
@@ -101,6 +101,8 @@ pub(super) fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
         vec![bold_colored("daemon disconnected, reconnecting…", RED)]
     } else if let Some(notice) = &app.notice {
         vec![bold_colored(notice.text.clone(), YELLOW)]
+    } else if let Some(v) = app.active_view().filter(|v| v.kind == SessionKind::Shell) {
+        join_segments(terminal_segments(app, v))
     } else if let Some(v) = app.active_view() {
         join_segments(session_segments(app, v))
     } else {
@@ -152,6 +154,22 @@ fn join_segments(segments: Vec<Vec<Span<'static>>>) -> Vec<Span<'static>> {
         spans.extend(segment);
     }
     spans
+}
+
+/// Line 1 for a terminal tab: `$ terminal · host:cwd · uptime`. No model,
+/// context or proxy; the cwd is where it was launched, not tracked.
+fn terminal_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
+    let mut segments = vec![
+        vec![bold_colored("$ terminal", GREEN)],
+        vec![
+            bold_colored(format!("{}:", v.host), MAGENTA),
+            bold_colored(abbreviate_home(&v.cwd, &app.home), TEXT),
+        ],
+    ];
+    if v.created_at > 0 && app.now >= v.created_at {
+        segments.push(vec![dim(fmt_age(app.now - v.created_at))]);
+    }
+    segments
 }
 
 /// Line 2: machine stats — CPU/mem sparklines left, upgrade + "Alt+h help" right.

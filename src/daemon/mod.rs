@@ -34,7 +34,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::paths;
 use crate::proto::{
-    Envelope, Frame, HostInfo, Msg, SessionEvent, SessionId, SessionInfo, SessionState, SpawnSpec,
+    Envelope, Frame, HostInfo, Msg, SessionEvent, SessionId, SessionInfo, SessionKind, SessionState,
+    SpawnSpec,
 };
 use journal::{Entry, Journal};
 use session::{Cmd, Handle};
@@ -301,6 +302,11 @@ impl Daemon {
 
     /// Start `spec` unless it is already live or in-flight (idempotent by id).
     ///
+    /// `requested` is what the caller asked for; the journal wins when it knows
+    /// the id, so an old client re-spawning a dormant terminal with a plain
+    /// `Spawn` still gets a shell. A shell never carries claude args or proxy
+    /// env.
+    ///
     /// ## Locking discipline
     ///
     /// The registry mutex is held **only** for:
@@ -310,9 +316,13 @@ impl Daemon {
     /// PTY open, process spawn, and thread creation happen in a
     /// `spawn_blocking` task, outside the lock. Journal disk writes also
     /// happen outside the lock, serialized by `journal_write`.
-    async fn spawn(self: &Arc<Self>, spec: SpawnSpec) -> io::Result<Option<u32>> {
+    async fn spawn(
+        self: &Arc<Self>,
+        mut spec: SpawnSpec,
+        requested: SessionKind,
+    ) -> io::Result<Option<u32>> {
         // Phase 1: idempotency check and reservation (fast, no I/O).
-        {
+        let kind = {
             let mut reg = self.registry();
             if let Some(live) = reg.live.get(&spec.id) {
                 return Ok(live.pid);
@@ -326,15 +336,21 @@ impl Daemon {
                 )));
             }
             reg.in_flight.insert(spec.id);
-        }
+            let journaled = reg.journal.entries().iter().find(|e| e.id == spec.id);
+            journaled.map_or(requested, |e| e.kind)
+        };
         // Registry lock released.
+        if kind == SessionKind::Shell {
+            spec.args.clear();
+            spec.env.clear();
+        }
 
         // Phase 2: PTY open + process spawn + thread creation (blocking,
         // outside the registry lock).
         let daemon = Arc::clone(self);
         let spec_clone = spec.clone();
         let spawn_result =
-            tokio::task::spawn_blocking(move || session::spawn(&daemon, &spec_clone))
+            tokio::task::spawn_blocking(move || session::spawn(&daemon, &spec_clone, kind))
                 .await
                 .unwrap_or_else(|e| Err(io::Error::other(format!("spawn task panicked: {e}"))));
 
@@ -353,11 +369,16 @@ impl Daemon {
             match spawn_result {
                 Ok((handle, committed_tx)) => {
                     let pid = handle.pid;
-                    let entry = reg.journal.upsert_entry(&spec);
+                    let entry = reg.journal.upsert_entry(&spec, kind);
                     reg.live.insert(spec.id, handle);
                     let snap = reg.journal.snapshot();
+                    // A shell has no hooks to say otherwise: it is idle.
+                    let state = match kind {
+                        SessionKind::Claude => SessionState::Starting,
+                        SessionKind::Shell => SessionState::Idle,
+                    };
                     let info = SessionInfo {
-                        state: SessionState::Starting,
+                        state,
                         pid,
                         ..dormant_info(&entry)
                     };
@@ -383,6 +404,19 @@ impl Daemon {
                 args = spec.args.len(), "session spawned"
             );
             self.broadcast(spec.id, SessionEvent::Created { info });
+            // Branch for the tab's status line, for terminals as well as claude
+            // (which only learns it on its first hook).
+            let (daemon, id, cwd) = (Arc::clone(self), spec.id, host::expand_tilde(&spec.cwd));
+            tokio::task::spawn_blocking(move || {
+                if let Some(branch) = session::read_git_branch(&cwd) {
+                    let meta = SessionEvent::Meta {
+                        branch: Some(branch),
+                        model: None,
+                        context_tokens: None,
+                    };
+                    daemon.broadcast(id, meta);
+                }
+            });
         }
 
         // §Race fix: signal the actor that the handle is committed and Created
@@ -599,7 +633,7 @@ impl Daemon {
                     }
                     args.push(a.clone());
                 }
-                crate::proto::SpawnSpec {
+                let spec = crate::proto::SpawnSpec {
                     id,
                     cwd: e.cwd.clone(),
                     name: e.name.clone(),
@@ -607,10 +641,11 @@ impl Daemon {
                     env: vec![], // env is not stored in journal (by design)
                     rows: 24,
                     cols: 80,
-                }
+                };
+                (spec, e.kind)
             })
         };
-        let Some(spec) = spec_opt else {
+        let Some((spec, kind)) = spec_opt else {
             tracing::warn!(%id, "retry_spawn_fresh: no journal entry found");
             self.forget_live(id, ""); // ensure it's dormant
             self.broadcast(
@@ -623,7 +658,7 @@ impl Daemon {
             return;
         };
         tracing::info!(%id, "retrying spawn without --resume");
-        match self.spawn(spec).await {
+        match self.spawn(spec, kind).await {
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(%id, error = %e, "retry spawn failed; session stays dormant");
@@ -667,5 +702,6 @@ fn dormant_info(entry: &Entry) -> SessionInfo {
         branch: None,
         model: None,
         context_tokens: None,
+        kind: entry.kind,
     }
 }

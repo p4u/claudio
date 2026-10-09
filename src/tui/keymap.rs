@@ -31,6 +31,8 @@ pub enum Action {
     Overview,
     /// Open the help popup.
     Help,
+    /// Open a terminal tab next to the active session.
+    Terminal,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
 }
@@ -49,6 +51,7 @@ impl Action {
             Action::ProxyStats => "proxy_stats",
             Action::Overview => "overview",
             Action::Help => "help",
+            Action::Terminal => "terminal",
             Action::ToggleHidden => "toggle_hidden",
         }
     }
@@ -142,6 +145,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "this help popup",
         action: Action::Help,
+        scope: Scope::Global,
+    },
+    // Alt+c: terminal tab. Verified free in Claude Code 2.1.280 (Alt+t is its
+    // thinking toggle, hence not t). Inside terminal tabs this shadows
+    // readline's Alt+c (capitalize-word), like every other manager key.
+    Binding {
+        code: KeyCode::Char('c'),
+        mods: KeyModifiers::ALT,
+        label: "new terminal (shell) next to this tab",
+        action: Action::Terminal,
         scope: Scope::Global,
     },
     // Alt+.: show/hide dot-directories in the wizard's directory step. Wizard

@@ -57,6 +57,7 @@ pub const ALT_X: &[u8] = b"\x1bx";
 pub const ALT_Q: &[u8] = b"\x1bq";
 pub const ALT_G: &[u8] = b"\x1bg";
 pub const ALT_H: &[u8] = b"\x1bh";
+pub const ALT_C: &[u8] = b"\x1bc";
 pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
 pub const ESC: &[u8] = b"\x1b";
@@ -688,6 +689,27 @@ exec cat
             .expect("chmod fake claude");
     }
 
+    /// Write a fake claude that records every real launch (not `--version`)
+    /// by creating `marker`, then follows the same nonce+cat protocol. Lets a
+    /// test prove claude was never started.
+    pub fn write_marker_fake_claude(&self, marker: &std::path::Path) {
+        let marker = marker.display();
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "claude 0.0.0-fake"
+    exit 0
+fi
+touch "{marker}"
+echo "FAKE_CLAUDE_BANNER pid=$$"
+exec cat
+"#
+        );
+        fs::write(&self.fake_claude, &script).expect("write marker fake claude");
+        fs::set_permissions(&self.fake_claude, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake claude");
+    }
+
     /// Path to the daemon lock file (holds the daemon PID after startup).
     pub fn lock_file(&self) -> PathBuf {
         self.runtime_dir.join("claudio").join("daemon-v1.lock")
@@ -775,6 +797,9 @@ exec cat
         cmd.env("ANTHROPIC_API_KEY", "test-key-not-real");
         cmd.env("CLAUDIO_NO_UPDATE_CHECK", "1"); // never check for updates in tests
         cmd.env("TERM", "xterm-256color");
+        // Terminal tabs run $SHELL: pin a plain one (prompt "$ ") so tests do
+        // not depend on the developer's shell and rc files.
+        cmd.env("SHELL", "/bin/sh");
         cmd.env_remove("COLORTERM");
     }
 

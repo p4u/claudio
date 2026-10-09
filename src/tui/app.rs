@@ -363,6 +363,15 @@ impl App {
         self.redraw = true;
     }
 
+    /// The notice for a request an old daemon refused as an unknown op, or
+    /// `None` for any other error. Shared by every feature that needs a newer
+    /// daemon (terminals, git viewer, ...).
+    pub(super) fn older_daemon_notice(host: &str, err: &std::io::Error) -> Option<String> {
+        err.to_string()
+            .starts_with("unsupported op")
+            .then(|| format!("daemon on {host} is older: run `claudio daemon restart`"))
+    }
+
     // ── Notifications ─────────────────────────────────────────────────────────
 
     /// Check for background sessions that entered a notification-worthy state
@@ -411,8 +420,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::client::Incoming;
-    use crate::proto::{SessionEvent, SessionInfo};
+    use crate::proto::{SessionEvent, SessionInfo, SessionKind};
     use crate::term::screen::Screen;
+    use crate::tui::state::SavedSession;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
 
@@ -429,6 +439,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         }
     }
 
@@ -701,6 +712,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         }];
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&saved, &live);
@@ -735,6 +747,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         }];
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&ClientState::default(), &local_live);
@@ -757,6 +770,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         });
         assert_eq!(app.sessions.len(), 2);
 
@@ -938,6 +952,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         });
         app.sessions.push(SessionView {
             id: remote_id,
@@ -954,6 +969,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         });
         app.on_incoming_from("local", Incoming::Disconnected);
         // Local session detached.
@@ -1072,6 +1088,141 @@ mod tests {
         app.take_effects();
         app.check_notifications();
         assert!(app.pending_notifs.is_empty(), "notifications disabled");
+    }
+
+    // ── Terminal tabs ─────────────────────────────────────────────────────────
+
+    fn shell_info(pid: Option<u32>) -> SessionInfo {
+        SessionInfo {
+            kind: SessionKind::Shell,
+            ..info(pid, None)
+        }
+    }
+
+    #[test]
+    fn terminal_opens_right_after_the_active_tab_and_is_activated() {
+        let live = [info(Some(1), None), info(Some(2), None), info(Some(3), None)];
+        let mut app = app_with(&live);
+        app.on_terminal(alt('c'));
+        let effects = app.take_effects();
+        let spawn = requests(&effects)
+            .into_iter()
+            .find_map(|m| match m {
+                Msg::SpawnShell(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a SpawnShell request");
+        assert_eq!((spawn.cwd.as_str(), spawn.rows, spawn.cols), ("/srv/app", 27, 100));
+        assert_eq!(app.sessions.len(), 4);
+        assert_eq!(app.sessions[1].id, spawn.id, "inserted after tab 1");
+        assert_eq!(app.sessions[1].kind, SessionKind::Shell);
+        assert_eq!(app.active, Some(1));
+        assert!(requests(&effects).contains(&&Msg::Detach { id: live[0].id }));
+        assert!(requests(&effects).contains(&&Msg::Attach { id: spawn.id, rows: 27, cols: 100 }));
+
+        // From a terminal, the next one goes right after *it*, not at the end.
+        app.on_terminal(alt('c'));
+        assert_eq!(app.active, Some(2));
+        assert_eq!(app.sessions[2].kind, SessionKind::Shell);
+        assert_eq!(app.sessions[3].id, live[1].id);
+    }
+
+    #[test]
+    fn terminal_without_a_session_uses_local_home() {
+        let mut app = app_with(&[]);
+        app.modal = None;
+        app.on_terminal(alt('c'));
+        let effects = app.take_effects();
+        assert!(matches!(
+            &effects[0],
+            Effect::Request { host, msg: Msg::SpawnShell(s), .. } if host == "local" && s.cwd == "/home/u"
+        ));
+        assert_eq!((app.sessions.len(), app.active), (1, Some(0)));
+    }
+
+    #[test]
+    fn terminal_ignores_the_active_sessions_proxy() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.sessions[0].proxy = Some("work".into());
+        app.on_terminal(alt('c'));
+        let effects = app.take_effects();
+        assert!(!effects.iter().any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
+        assert_eq!(app.sessions[1].proxy, None);
+    }
+
+    #[test]
+    fn terminal_labels_ignore_the_title_and_keep_a_rename() {
+        let mut app = app_with(&[shell_info(Some(1)), info(Some(2), None)]);
+        assert_eq!(app.sessions[0].label(), "term");
+        app.sessions[0].title = Some("user@host: ~/src".into());
+        assert_eq!(app.sessions[0].label(), "term", "prompt titles do not rename it");
+        assert_eq!(crate::tui::ui::tab_label(&app.sessions[0]), "term@local");
+        assert_eq!(crate::tui::ui::tab_label(&app.sessions[1]), "app");
+        app.sessions[0].name = Some("build".into());
+        app.sessions[0].host = "devbox".into();
+        assert_eq!(crate::tui::ui::tab_label(&app.sessions[0]), "build@devbox");
+        assert_eq!(crate::tui::ui::view_glyph(&app.sessions[0], 0).0, "$");
+    }
+
+    #[test]
+    fn dormant_terminal_respawns_as_a_shell_without_resume_or_proxy() {
+        let mut live = [shell_info(None), info(None, Some("c2"))];
+        live[0].claude_session_id = Some("stale".into());
+        let saved = ClientState {
+            sessions: vec![SavedSession {
+                id: live[0].id,
+                name: None,
+                cwd: "/srv/app".into(),
+                host: "local".into(),
+                claude_session_id: None,
+                created_at: 1,
+                proxy: Some("work".into()),
+                kind: SessionKind::Shell,
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        app.proxy_default = None;
+        app.recover(&saved, &live);
+        let effects = app.take_effects();
+        assert!(
+            matches!(&effects[0], Effect::Request { msg: Msg::SpawnShell(s), .. } if s.id == live[0].id),
+            "{effects:?}"
+        );
+        assert!(matches!(&effects[1], Effect::Request { msg: Msg::Spawn(s), .. } if s.args == ["--resume", "c2"]));
+        assert_eq!(app.sessions[0].kind, SessionKind::Shell);
+        assert_eq!(app.to_state().sessions[0].kind, SessionKind::Shell);
+    }
+
+    #[test]
+    fn an_older_daemon_refusing_a_terminal_drops_the_tab_with_a_notice() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('c'));
+        let id = app.sessions[1].id;
+        app.take_effects();
+        let err = std::io::Error::other("unsupported op: spawn_shell");
+        app.on_reply(ReplyTo::Spawned(id), Err(err));
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.active, Some(0));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("daemon on local is older: run `claudio daemon restart`")
+        );
+        // Any other failure keeps the (dead) tab.
+        app.on_terminal(alt('c'));
+        let id = app.sessions[1].id;
+        app.on_reply(ReplyTo::Spawned(id), Err(std::io::Error::other("no such directory")));
+        assert_eq!(app.sessions[1].state, SessionState::Exited);
+    }
+
+    #[test]
+    fn terminals_are_never_picked_for_attention() {
+        let mut live = [info(Some(1), None), shell_info(Some(2)), info(Some(3), None)];
+        live[2].state = SessionState::NeedsInput;
+        let mut app = app_with(&live);
+        app.on_terminal(alt('a'));
+        assert_eq!(app.active, Some(2));
+        assert!(!app.sessions[1].state.wants_attention());
     }
 
     // ── Wizard generation / S7 ────────────────────────────────────────────────

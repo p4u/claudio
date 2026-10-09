@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::proto::{SessionId, SessionInfo, SessionState};
+use crate::proto::{SessionId, SessionInfo, SessionKind, SessionState};
 
 /// Most recently used directories kept for the new-session wizard.
 pub const MAX_RECENT_DIRS: usize = 20;
@@ -105,6 +105,9 @@ pub struct SavedSession {
     /// The proxy profile name used by this session (profile name only, never the token).
     #[serde(default)]
     pub proxy: Option<String>,
+    /// A terminal tab never resumes and never gets proxy env.
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 fn local() -> String {
@@ -155,7 +158,7 @@ pub struct Recovered {
     pub state: SessionState,
     pub title: Option<String>,
     /// `Some(args)` when the daemon knows the session but has no process for
-    /// it: re-spawn it with these claude arguments.
+    /// it: re-spawn it with these claude arguments (none for a terminal).
     pub respawn: Option<Vec<String>>,
 }
 
@@ -193,9 +196,9 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
         .claude_session_id
         .clone()
         .or_else(|| saved.and_then(|s| s.claude_session_id.clone()));
-    let respawn = info.pid.is_none().then(|| match &claude_session_id {
-        Some(csid) => vec!["--resume".to_owned(), csid.clone()],
-        None => Vec::new(),
+    let respawn = info.pid.is_none().then(|| match (info.kind, &claude_session_id) {
+        (SessionKind::Claude, Some(csid)) => vec!["--resume".to_owned(), csid.clone()],
+        _ => Vec::new(),
     });
     Recovered {
         saved: SavedSession {
@@ -213,6 +216,8 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
             claude_session_id,
             created_at: info.created_at,
             proxy: saved.and_then(|s| s.proxy.clone()),
+            // The daemon's journal is authoritative.
+            kind: info.kind,
         },
         state: info.state,
         title: info.title.clone(),
@@ -234,6 +239,7 @@ mod tests {
             claude_session_id: csid.map(Into::into),
             created_at: 1,
             proxy: None,
+            kind: SessionKind::Claude,
         }
     }
 
@@ -250,6 +256,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         }
     }
 
@@ -395,6 +402,34 @@ mod tests {
             Some(vec!["--resume".into(), "only-saved".into()])
         );
         assert_eq!(merged[2].respawn, Some(vec![]));
+    }
+
+    #[test]
+    fn dormant_terminals_respawn_without_resume_and_keep_their_kind() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let state = ClientState {
+            sessions: vec![saved(a, None, Some("stale"))],
+            ..Default::default()
+        };
+        let mut shell = info(a, None, Some("stale"));
+        shell.kind = SessionKind::Shell;
+        let mut unknown = info(b, None, None);
+        unknown.kind = SessionKind::Shell;
+        let merged = merge_for_host("local", &state, &[shell, unknown]);
+        // The daemon's kind wins over the (older) saved record, and a
+        // terminal never resumes a conversation.
+        for r in &merged {
+            assert_eq!(r.saved.kind, SessionKind::Shell);
+            assert_eq!(r.respawn, Some(vec![]));
+        }
+    }
+
+    #[test]
+    fn saved_sessions_without_kind_are_claude() {
+        let old: SavedSession =
+            serde_json::from_str(r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w"}"#)
+                .unwrap();
+        assert_eq!(old.kind, SessionKind::Claude);
     }
 
     #[test]

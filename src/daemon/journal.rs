@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::proto::{SessionId, SpawnSpec};
+use crate::proto::{SessionId, SessionKind, SpawnSpec};
 
 /// One journaled session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +40,10 @@ pub struct Entry {
     /// The client's extra claude arguments, verbatim.
     #[serde(default)]
     pub args: Vec<String>,
+    /// What the session runs. Authoritative: a `Spawn` for a journaled shell
+    /// starts a shell. Absent in journals from before terminal tabs.
+    #[serde(default)]
+    pub kind: SessionKind,
     #[serde(default)]
     pub claude_session_id: Option<String>,
     /// Unix seconds.
@@ -131,9 +135,10 @@ impl Journal {
     }
 
     /// Update in-memory only (no disk write). A re-spawn of a known id keeps
-    /// its `created_at` and last claude session id; cwd, name and args follow
-    /// the new spec. Returns the (possibly updated) entry.
-    pub fn upsert_entry(&mut self, spec: &SpawnSpec) -> Entry {
+    /// its `created_at`, last claude session id and `kind` (`kind` only applies
+    /// to a new entry); cwd, name and args follow the new spec. Returns the
+    /// (possibly updated) entry.
+    pub fn upsert_entry(&mut self, spec: &SpawnSpec, kind: SessionKind) -> Entry {
         match self.sessions.iter_mut().find(|e| e.id == spec.id) {
             Some(e) => {
                 e.cwd = spec.cwd.clone();
@@ -147,6 +152,7 @@ impl Journal {
                     cwd: spec.cwd.clone(),
                     name: spec.name.clone(),
                     args: spec.args.clone(),
+                    kind,
                     claude_session_id: None,
                     created_at: crate::paths::unix_now(),
                 };
@@ -160,8 +166,8 @@ impl Journal {
     /// non-hot paths). A failed write is returned; the caller decides whether
     /// to propagate or log. Hot paths should use the split protocol instead.
     #[allow(dead_code)] // used by unit tests; kept pub for future non-hot-path callers
-    pub fn record_spawn(&mut self, spec: &SpawnSpec) -> (Entry, io::Result<()>) {
-        let entry = self.upsert_entry(spec);
+    pub fn record_spawn(&mut self, spec: &SpawnSpec, kind: SessionKind) -> (Entry, io::Result<()>) {
+        let entry = self.upsert_entry(spec, kind);
         let snap = self.snapshot();
         let path = self.path.clone();
         let result = Self::write_snapshot(&path, &snap);
@@ -268,7 +274,7 @@ mod tests {
 
         let mut j = Journal::load(&path);
         assert!(j.entries().is_empty());
-        let (first, res) = j.record_spawn(&spec(id));
+        let (first, res) = j.record_spawn(&spec(id), SessionKind::Claude);
         res.unwrap();
         assert!(j.set_claude_session(id, "conv-1"));
 
@@ -282,7 +288,7 @@ mod tests {
         assert_eq!(e.args, vec!["--resume", "abc"]);
 
         // A re-spawn keeps created_at and the conversation id.
-        let (again, res) = j.record_spawn(&spec(id));
+        let (again, res) = j.record_spawn(&spec(id), SessionKind::Claude);
         res.unwrap();
         assert_eq!(again.created_at, first.created_at);
         assert_eq!(again.claude_session_id.as_deref(), Some("conv-1"));
@@ -292,6 +298,21 @@ mod tests {
         assert!(!j.remove(id).unwrap());
         assert!(Journal::load(&path).entries().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entries_without_kind_are_claude_and_kind_is_kept_on_respawn() {
+        let old = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w","created_at":1}"#;
+        assert_eq!(serde_json::from_str::<Entry>(old).unwrap().kind, SessionKind::Claude);
+
+        let mut j = Journal {
+            path: PathBuf::new(),
+            sessions: Vec::new(),
+        };
+        let id = Uuid::new_v4();
+        assert_eq!(j.upsert_entry(&spec(id), SessionKind::Shell).kind, SessionKind::Shell);
+        // The journal's kind is authoritative: a later claude respawn keeps it.
+        assert_eq!(j.upsert_entry(&spec(id), SessionKind::Claude).kind, SessionKind::Shell);
     }
 
     #[test]
@@ -380,7 +401,7 @@ mod tests {
         let path = dir.join("j.json");
         let id = Uuid::new_v4();
         let mut j = Journal::load(&path);
-        let _ = j.record_spawn(&spec(id));
+        let _ = j.record_spawn(&spec(id), SessionKind::Claude);
         // Make the parent directory unwritable so write_atomic fails.
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();

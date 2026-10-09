@@ -11,7 +11,7 @@ use crossterm::event::{
 use std::io;
 
 use crate::client::Incoming;
-use crate::proto::{Msg, SessionEvent, SessionId, SessionState};
+use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
@@ -111,6 +111,7 @@ impl App {
                 }
             }
             Action::NewSession => self.open_wizard(),
+            Action::Terminal => self.open_terminal(),
             Action::Rename => {
                 if let Some(v) = self.active_view() {
                     self.modal = Some(Modal::Rename {
@@ -537,6 +538,7 @@ impl App {
                     branch: info.branch.clone(),
                     model: info.model.clone(),
                     context_tokens: info.context_tokens,
+                    kind: info.kind,
                 });
                 self.save();
                 return;
@@ -661,10 +663,23 @@ impl App {
                 }
             }
             (ReplyTo::Spawned(id) | ReplyTo::SpawnedDeferred(id), Err(e)) => {
-                if let Some(i) = self.index_of(id) {
-                    self.sessions[i].state = SessionState::Exited;
+                let Some(i) = self.index_of(id) else { return };
+                let (kind, host) = (self.sessions[i].kind, self.sessions[i].host.clone());
+                match (kind, App::older_daemon_notice(&host, &e)) {
+                    // An old daemon cannot run terminals: no tab to keep.
+                    (SessionKind::Shell, Some(notice)) => {
+                        self.remove(i);
+                        self.notify(notice);
+                    }
+                    (SessionKind::Shell, None) => {
+                        self.sessions[i].state = SessionState::Exited;
+                        self.notify(format!("could not start terminal: {e}"));
+                    }
+                    (SessionKind::Claude, _) => {
+                        self.sessions[i].state = SessionState::Exited;
+                        self.notify(format!("could not start claude: {e}"));
+                    }
                 }
-                self.notify(format!("could not start claude: {e}"));
             }
             // Remote variants route to the same wizard handlers.
             (ReplyTo::RemoteProjects(host, gen), Ok(Msg::Projects { dirs })) => {

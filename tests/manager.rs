@@ -26,7 +26,7 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
-    TuiProcess, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
+    TuiProcess, ALT_C, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
     DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
@@ -1294,6 +1294,84 @@ fn test_tab_label_is_basename() {
     // Verify "Claude Code" does NOT appear in the tab bar.
     let tab_text = tui.screen_text(Region::TabBar);
     assert!(!tab_text.contains("Claude Code"), "tab should not say 'Claude Code', got: {tab_text:?}");
+    tui.quit(WAIT);
+}
+
+// ── Terminal tabs ─────────────────────────────────────────────────────────────
+
+/// Alt+c opens a `$ term@local` tab right after the active one (not at the
+/// end), and a real shell runs in it.
+#[test]
+fn test_terminal_tab_opens_next_to_active_and_runs_commands() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &harness.dirs[1]);
+    let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    let n1 = harness.dirs[1].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(n1, Region::TabBar, WAIT);
+
+    // Back to the first tab, so "next to the active tab" differs from "last".
+    tui.send_keys(ALT_LEFT);
+    tui.send_keys(ALT_C);
+    tui.wait_for("$ term@local", Region::TabBar, WAIT);
+    let tabs = tui.screen_text(Region::TabBar);
+    let at = |s: &str| tabs.find(s).unwrap_or_else(|| panic!("{s:?} not in {tabs:?}"));
+    assert!(
+        at(n0) < at("term@local") && at("term@local") < at(n1),
+        "terminal must sit between the two sessions: {tabs:?}"
+    );
+
+    // A terminal's status line is minimal: no state, model or proxy.
+    tui.wait_for("$ terminal", Region::StatusBar, WAIT);
+    let status = tui.screen_text(Region::StatusBar);
+    assert!(!status.contains("direct") && !status.contains("idle"), "{status:?}");
+
+    // The shell is live. 6*7 only appears in the output, never in the typed line.
+    tui.wait_for("$", Region::Pane, WAIT);
+    tui.send_keys(b"echo hi-from-term-$((6*7))\r");
+    tui.wait_for("hi-from-term-42", Region::Pane, WAIT);
+
+    // Alt+x confirms like for claude, then the tab is gone.
+    tui.send_keys(ALT_X);
+    tui.wait_for("Kill session", Region::Screen, WAIT);
+    tui.send_keys(b"y");
+    tui.wait_until(|s| !s.contains("term@local", Region::TabBar), WAIT);
+
+    tui.quit(WAIT);
+}
+
+/// A terminal survives a daemon restart as a *shell* (fresh process, same
+/// tab), and claude is never launched for it.
+#[test]
+fn test_terminal_survives_daemon_restart_as_a_shell() {
+    let harness = ManagerHarness::new();
+    let claude_ran = harness.root.join("claude-ran");
+    harness.write_marker_fake_claude(&claude_ran);
+    let mut tui = harness.start_tui();
+
+    // No claude session: dismiss the wizard, then Alt+c opens a terminal in $HOME.
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
+    tui.send_keys(ALT_C);
+    tui.wait_for("$ term@local", Region::TabBar, WAIT);
+    tui.wait_for("$", Region::Pane, WAIT);
+    tui.send_keys(b"echo before-$((6*7))\r");
+    tui.wait_for("before-42", Region::Pane, WAIT);
+
+    harness.kill_daemon();
+
+    // The new daemon respawns it: the old screen is gone, a new shell prompts.
+    tui.wait_until(|s| !s.contains("before-42", Region::Pane), RECONNECT_WAIT);
+    tui.wait_for("$", Region::Pane, RECONNECT_WAIT);
+    tui.send_keys(b"echo after-$((8*8))\r");
+    tui.wait_for("after-64", Region::Pane, WAIT);
+    tui.wait_for("$ term@local", Region::TabBar, WAIT);
+
+    assert!(!claude_ran.exists(), "claude must never run for a terminal");
     tui.quit(WAIT);
 }
 

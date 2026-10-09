@@ -1,4 +1,4 @@
-//! One live session: `claude` under a PTY, driven by a single actor task.
+//! One live session: `claude` (or a login shell) under a PTY, driven by a single actor task.
 //!
 //! The actor alone owns the PTY master, the child killer, the emulated
 //! [`Screen`], the [`ProbeResponder`], the hook [`Tracker`] and the list of
@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 use super::{host, Daemon};
 use crate::claude::hooks;
 use crate::claude::state::Tracker;
-use crate::proto::{Envelope, Frame, Msg, SessionEvent, SessionId, SessionState, SpawnSpec};
+use crate::proto::{
+    Envelope, Frame, Msg, SessionEvent, SessionId, SessionKind, SessionState, SpawnSpec,
+};
 use crate::proxy::env::env_diff;
 use crate::term::probe::ProbeResponder;
 use crate::term::screen::Screen;
@@ -123,14 +125,19 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
     tokio::time::timeout(wait, rx).await.ok()?.ok()
 }
 
-/// Start claude for `spec` under a new PTY and spawn its actor.
+/// Start claude (or, for `SessionKind::Shell`, the login shell) for `spec` under
+/// a new PTY and spawn its actor.
 /// Called from `spawn_blocking` — must not use tokio primitives.
 ///
 /// Returns the registry [`Handle`] and a oneshot sender the caller must use to
 /// signal that the handle has been committed to `registry.live`. The actor
 /// awaits this signal before acting on child exit, which prevents the
 /// commit-before-exit race described in §Race.
-pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, oneshot::Sender<()>)> {
+pub fn spawn(
+    daemon: &Arc<Daemon>,
+    spec: &SpawnSpec,
+    kind: SessionKind,
+) -> io::Result<(Handle, oneshot::Sender<()>)> {
     let cwd = host::expand_tilde(&spec.cwd);
     if !cwd.is_dir() {
         return Err(io::Error::other(format!(
@@ -139,7 +146,16 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
         )));
     }
     let token = hooks::new_token();
-    let cmd = command(&daemon.config, spec, &cwd, &token);
+    let (cmd, program) = match kind {
+        SessionKind::Claude => (
+            command(&daemon.config, spec, &cwd, &token),
+            daemon.config.claude.clone(),
+        ),
+        SessionKind::Shell => {
+            let shell = login_shell();
+            (shell_command(&shell, &cwd), shell)
+        }
+    };
     let (rows, cols) = size_or_default(spec.rows, spec.cols);
 
     let pair = native_pty_system()
@@ -151,10 +167,7 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
         })
         .map_err(|e| io::Error::other(format!("could not open a pty: {e}")))?;
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
-        io::Error::other(format!(
-            "could not start {}: {e}",
-            daemon.config.claude.display()
-        ))
+        io::Error::other(format!("could not start {}: {e}", program.display()))
     })?;
     drop(pair.slave);
 
@@ -171,8 +184,15 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
     };
 
     // Detect whether this spawn uses --resume (for retry logic, §2.3).
-    let spawned_with_resume = spec.args.iter().any(|a| a == "--resume");
+    let spawned_with_resume =
+        kind == SessionKind::Claude && spec.args.iter().any(|a| a == "--resume");
     let spawn_time = std::time::Instant::now();
+
+    // A shell has no hooks to report state: it is simply idle, forever.
+    let mut tracker = Tracker::new();
+    if kind == SessionKind::Shell {
+        tracker.state = SessionState::Idle;
+    }
 
     let (tx, cmds) = mpsc::channel(CMD_QUEUE);
     // The committed channel lets Daemon::spawn signal that the handle has been
@@ -190,11 +210,12 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
         pid,
         screen: Screen::new(rows, cols),
         probe: ProbeResponder::new(rows, cols),
-        tracker: Tracker::new(),
+        tracker,
         title: None,
         subs: HashMap::new(),
         spawned_with_resume,
         spawn_time,
+        kind,
         cwd: cwd.clone(),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
@@ -234,6 +255,54 @@ fn apply_env(cmd: &mut CommandBuilder, env: &[(String, String)]) {
     for (k, v) in diff.set {
         cmd.env(k, v);
     }
+}
+
+/// `<shell> -l` in `cwd`: a plain terminal. No hooks, no proxy env, and the
+/// claude session markers are scrubbed so a `claude` typed into it is a
+/// top-level session, not a child of whatever started the daemon.
+fn shell_command(shell: &Path, cwd: &Path) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.arg("-l");
+    cmd.cwd(cwd);
+    apply_env(&mut cmd, &[]);
+    cmd
+}
+
+/// The user's login shell: `$SHELL`, else the passwd entry's, else `/bin/sh`.
+fn login_shell() -> PathBuf {
+    std::env::var_os("SHELL")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(passwd_shell)
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+#[cfg(unix)]
+fn passwd_shell() -> Option<PathBuf> {
+    // SAFETY: `getpwuid_r` fills `pw` and `buf` and nothing else; `pw_shell`
+    // points into `buf`, which outlives the copy below.
+    let shell = unsafe {
+        let mut pw: libc::passwd = std::mem::zeroed();
+        let mut buf = [0 as libc::c_char; 2048];
+        let mut found = std::ptr::null_mut();
+        let rc = libc::getpwuid_r(
+            libc::getuid(),
+            &mut pw,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut found,
+        );
+        if rc != 0 || found.is_null() || pw.pw_shell.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(pw.pw_shell).to_str().ok()?.to_owned()
+    };
+    (!shell.is_empty()).then(|| PathBuf::from(shell))
+}
+
+#[cfg(not(unix))]
+fn passwd_shell() -> Option<PathBuf> {
+    None
 }
 
 /// claude animates its terminal title with a leading status glyph
@@ -391,6 +460,8 @@ struct Actor {
     spawned_with_resume: bool,
     /// When the child was spawned, for measuring quick-exit window.
     spawn_time: std::time::Instant,
+    /// What the child is: claude, or a plain login shell.
+    kind: SessionKind,
     /// Working directory of this session (for git branch detection).
     cwd: std::path::PathBuf,
 }
@@ -681,8 +752,10 @@ impl Actor {
 
         // A clean exit is the user ending the conversation (Ctrl+D twice,
         // `/exit`): close the session like a Kill would. A crash leaves it
-        // dormant so it can come back with `--resume`.
-        if ours && code == Some(0) {
+        // dormant so it can come back with `--resume`. A shell has nothing to
+        // resume, and exits with its last command's status (Ctrl+D after a
+        // failing command is still "I am done"), so any exit closes it.
+        if ours && (code == Some(0) || self.kind == SessionKind::Shell) {
             let id = self.id;
             let daemon = Arc::clone(&self.daemon);
             tokio::spawn(async move {
@@ -708,7 +781,7 @@ impl Actor {
 
 /// Read the current git branch from `cwd/.git/HEAD`.
 /// Returns `None` when the directory is not a git repo or HEAD is detached.
-fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
+pub(super) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
     let head_path = cwd.join(".git/HEAD");
     let content = std::fs::read_to_string(head_path).ok()?;
     let line = content.trim();
@@ -814,6 +887,20 @@ mod tests {
         assert_eq!(cmd.get_env("ANTHROPIC_AUTH_TOKEN"), Some(OsStr::new("tok")));
         assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(cmd.get_env("COLORTERM"), Some(OsStr::new("truecolor")));
+    }
+
+    #[test]
+    fn shell_command_is_a_plain_login_shell() {
+        let cmd = shell_command(Path::new("/bin/zsh"), Path::new("/tmp"));
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, ["/bin/zsh", "-l"], "no --settings, no hooks");
+        assert_eq!(cmd.get_cwd().map(|c| c.as_os_str()), Some(OsStr::new("/tmp")));
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
+        assert_eq!(cmd.get_env("CLAUDECODE"), None);
     }
 
     #[test]

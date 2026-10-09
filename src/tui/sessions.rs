@@ -7,7 +7,7 @@
 
 use uuid::Uuid;
 
-use crate::proto::{Msg, SessionId, SessionInfo, SessionState, SpawnSpec};
+use crate::proto::{Msg, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec, SpawnSpec};
 use crate::term::screen::Screen;
 
 use super::state::{self, ClientState, SavedSession};
@@ -50,31 +50,37 @@ pub struct SessionView {
     pub model: Option<String>,
     /// Total input+cache tokens of the last assistant turn.
     pub context_tokens: Option<u64>,
+    /// Claude, or a plain terminal tab.
+    pub kind: SessionKind,
 }
 
 impl SessionView {
     /// The tab label: the user's name, else a meaningful claude title (not
-    /// "Claude Code"), else the cwd's basename.
+    /// "Claude Code"), else the cwd's basename. A terminal is its name, else
+    /// `term`; its title is ignored so a shell prompt cannot rename the tab.
+    /// The renderer adds the `$` glyph and `@host`.
     /// Sanitized so it is safe to embed in escape sequences.
     pub fn label(&self) -> String {
+        let title = match self.kind {
+            SessionKind::Claude => self.title.as_ref(),
+            SessionKind::Shell => None,
+        };
         let raw = self
             .name
             .clone()
             .or_else(|| {
-                self.title.as_ref().and_then(|t| {
-                    if t == "Claude Code" || t.is_empty() {
-                        None
-                    } else {
-                        Some(t.clone())
-                    }
-                })
+                title
+                    .filter(|t| *t != "Claude Code" && !t.is_empty())
+                    .cloned()
             })
-            .unwrap_or_else(|| {
-                self.cwd
+            .unwrap_or_else(|| match self.kind {
+                SessionKind::Claude => self
+                    .cwd
                     .rsplit('/')
                     .find(|s| !s.is_empty())
                     .unwrap_or("/")
-                    .to_owned()
+                    .to_owned(),
+                SessionKind::Shell => "term".to_owned(),
             });
         sanitize_label(&raw, 200)
     }
@@ -88,8 +94,19 @@ impl SessionView {
             claude_session_id: self.claude_session_id.clone(),
             created_at: self.created_at,
             proxy: self.proxy.clone(),
+            kind: self.kind,
         }
     }
+}
+
+/// What to start: the part of a spawn that does not depend on the proxy.
+pub(super) struct SpawnRequest {
+    pub id: SessionId,
+    pub kind: SessionKind,
+    pub cwd: String,
+    pub name: Option<String>,
+    /// Extra claude arguments (`--resume …`); ignored for a terminal.
+    pub args: Vec<String>,
 }
 
 // ── Session lifecycle (impl App) ──────────────────────────────────────────────
@@ -215,11 +232,6 @@ impl App {
     // ── Spawn / wizard ────────────────────────────────────────────────────────
 
     /// Spawn claude in `cwd` on `host` (optionally resuming) and switch to it.
-    ///
-    /// When a proxy is selected and its config is cached, env is built
-    /// immediately. When the cache is cold (first spawn), the effect runner
-    /// fetches the config (5 s timeout) before building env so the proxy's
-    /// model/rate-limit overrides are applied even on the first session.
     pub(super) fn spawn(
         &mut self,
         host: String,
@@ -227,70 +239,134 @@ impl App {
         resume: Option<String>,
         proxy: Option<String>,
     ) {
-        let (rows, cols) = self.pane_size();
-        let id = Uuid::new_v4();
         let args = resume
             .map(|r| vec!["--resume".to_owned(), r])
             .unwrap_or_default();
-
-        // When a proxy is selected and the config cache is cold, defer env
-        // construction to the effect runner so it can await the fetch.
-        let cache_cold = proxy.as_deref().is_some_and(|n| self.proxy_config_cached(n).is_none());
-        if cache_cold {
-            let proxy_name = proxy.clone().unwrap();
-            let spec = SpawnSpec {
-                id,
-                cwd: cwd.clone(),
-                name: None,
-                args,
-                env: vec![], // runner fills this in
-                rows,
-                cols,
-            };
-            self.effects.push(Effect::SpawnWithProxy {
-                host: host.clone(),
-                spec,
-                proxy_name,
-                to: ReplyTo::SpawnedDeferred(id),
-            });
-        } else {
-            // Cache is warm (or no proxy) — build env synchronously.
-            let env = match self.proxy_env_for(proxy.as_deref()) {
-                Ok(e) => e,
-                Err(e) => {
-                    self.notify(format!("cannot spawn: {e}"));
-                    return;
-                }
-            };
-            let spec = SpawnSpec {
-                id,
-                cwd: cwd.clone(),
-                name: None,
-                args,
-                env,
-                rows,
-                cols,
-            };
-            self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
-        }
-        self.sessions.push(SessionView {
-            id,
-            name: None,
-            cwd: cwd.clone(),
-            host: host.clone(),
-            state: SessionState::Starting,
-            title: None,
-            claude_session_id: None,
-            created_at: self.now,
-            mirror: Screen::new(rows, cols),
-            attached: false,
-            proxy: proxy.clone(),
-            branch: None,
-            model: None,
-            context_tokens: None,
-        });
         state::push_recent(&mut self.recent_dirs, &host, &cwd);
-        self.activate(self.sessions.len() - 1);
+        let at = self.sessions.len();
+        self.start(host, cwd, SessionKind::Claude, args, proxy, at);
+    }
+
+    /// Open a terminal on the active session's host, in its launch directory
+    /// (the local home when nothing is active), right after the active tab.
+    pub(super) fn open_terminal(&mut self) {
+        let (host, cwd) = match self.active_view() {
+            Some(v) => (v.host.clone(), v.cwd.clone()),
+            None => ("local".to_owned(), self.home.clone()),
+        };
+        let at = self.active.map_or(self.sessions.len(), |a| a + 1);
+        self.start(host, cwd, SessionKind::Shell, Vec::new(), None, at);
+    }
+
+    /// Send the spawn, add its tab at `at` (never before the active tab) and
+    /// switch to it.
+    fn start(
+        &mut self,
+        host: String,
+        cwd: String,
+        kind: SessionKind,
+        args: Vec<String>,
+        proxy: Option<String>,
+        at: usize,
+    ) {
+        let id = Uuid::new_v4();
+        let req = SpawnRequest {
+            id,
+            kind,
+            cwd: cwd.clone(),
+            name: None,
+            args,
+        };
+        if let Err(e) = self.send_spawn(&host, req, proxy.as_deref()) {
+            self.notify(format!("cannot spawn: {e}"));
+            return;
+        }
+        let (rows, cols) = self.pane_size();
+        self.sessions.insert(
+            at,
+            SessionView {
+                id,
+                name: None,
+                cwd,
+                host,
+                state: match kind {
+                    SessionKind::Claude => SessionState::Starting,
+                    SessionKind::Shell => SessionState::Idle,
+                },
+                title: None,
+                claude_session_id: None,
+                created_at: self.now,
+                mirror: Screen::new(rows, cols),
+                attached: false,
+                proxy,
+                branch: None,
+                model: None,
+                context_tokens: None,
+                kind,
+            },
+        );
+        self.activate(at);
+    }
+
+    /// Queue the spawn request for `req` on `host`. The one place that knows
+    /// how a spawn is built:
+    ///
+    /// - a terminal is a `SpawnShell` with no `--resume` and no proxy env;
+    /// - claude with a proxy builds its env at once when the profile's config
+    ///   is cached. When the cache is cold (first spawn), the effect runner
+    ///   fetches it (5 s timeout) first, so the proxy's model/rate-limit
+    ///   overrides are applied even on the first session.
+    ///
+    /// Fails when the proxy profile cannot be resolved.
+    pub(super) fn send_spawn(
+        &mut self,
+        host: &str,
+        req: SpawnRequest,
+        proxy: Option<&str>,
+    ) -> Result<(), String> {
+        let (rows, cols) = self.pane_size();
+        let SpawnRequest {
+            id,
+            kind,
+            cwd,
+            name,
+            args,
+        } = req;
+        if kind == SessionKind::Shell {
+            let shell = ShellSpec {
+                id,
+                cwd,
+                name,
+                rows,
+                cols,
+            };
+            self.request(host, Msg::SpawnShell(shell), ReplyTo::Spawned(id));
+            return Ok(());
+        }
+        let mut spec = SpawnSpec {
+            id,
+            cwd,
+            name,
+            args,
+            env: vec![], // filled below, or by the effect runner
+            rows,
+            cols,
+        };
+        match proxy {
+            Some(name) if self.proxy_config_cached(name).is_none() => {
+                self.effects.push(Effect::SpawnWithProxy {
+                    host: host.to_owned(),
+                    spec,
+                    proxy_name: name.to_owned(),
+                    to: ReplyTo::SpawnedDeferred(id),
+                });
+            }
+            _ => {
+                spec.env = self.proxy_env_for(proxy)?;
+                self.request(host, Msg::Spawn(spec), ReplyTo::Spawned(id));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn open_wizard(&mut self) {
@@ -410,52 +486,16 @@ impl App {
         }
 
         for r in merged {
-            if let Some(ref args) = r.respawn {
-                let proxy_name = r.saved.proxy.clone();
-                let cache_cold = proxy_name
-                    .as_deref()
-                    .is_some_and(|n| self.proxy_config_cached(n).is_none());
-                if cache_cold {
-                    // Proxy config not cached — defer env construction.
-                    let spec = SpawnSpec {
-                        id: r.saved.id,
-                        cwd: r.saved.cwd.clone(),
-                        name: r.saved.name.clone(),
-                        args: args.clone(),
-                        env: vec![], // runner fills in
-                        rows,
-                        cols,
-                    };
-                    self.effects.push(Effect::SpawnWithProxy {
-                        host: r.saved.host.clone(),
-                        spec,
-                        proxy_name: proxy_name.unwrap(),
-                        to: ReplyTo::SpawnedDeferred(r.saved.id),
-                    });
-                } else {
-                    // Cache is warm (or no proxy) — build env now.
-                    match self.proxy_env_for(proxy_name.as_deref()) {
-                        Ok(env) => {
-                            let spec = SpawnSpec {
-                                id: r.saved.id,
-                                cwd: r.saved.cwd.clone(),
-                                name: r.saved.name.clone(),
-                                args: args.clone(),
-                                env,
-                                rows,
-                                cols,
-                            };
-                            let h = r.saved.host.clone();
-                            self.effects.push(Effect::Request {
-                                host: h,
-                                msg: Msg::Spawn(spec),
-                                to: ReplyTo::Spawned(r.saved.id),
-                            });
-                        }
-                        Err(e) => {
-                            self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
-                        }
-                    }
+            if let Some(args) = r.respawn {
+                let req = SpawnRequest {
+                    id: r.saved.id,
+                    kind: r.saved.kind,
+                    cwd: r.saved.cwd.clone(),
+                    name: r.saved.name.clone(),
+                    args,
+                };
+                if let Err(e) = self.send_spawn(&r.saved.host, req, r.saved.proxy.as_deref()) {
+                    self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
                 }
             }
             self.sessions.push(SessionView {
@@ -473,6 +513,7 @@ impl App {
                 branch: None,
                 model: None,
                 context_tokens: None,
+                kind: r.saved.kind,
             });
         }
 

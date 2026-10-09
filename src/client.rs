@@ -366,7 +366,7 @@ impl Client {
     /// and `UpdateClaude` 330.
     pub fn request(&self, msg: Msg) -> impl Future<Output = io::Result<Msg>> + Send + 'static {
         let timeout = match msg {
-            Msg::Spawn(_) => SPAWN_TIMEOUT,
+            Msg::Spawn(_) | Msg::SpawnShell(_) => SPAWN_TIMEOUT,
             Msg::UpdateClaude { .. } => UPDATE_TIMEOUT,
             _ => REQUEST_TIMEOUT,
         };
