@@ -23,8 +23,31 @@ use tokio::process::Command;
 use super::probe::{sha256_file, Probe};
 use super::{shell_quote, ssh_cmd, validate_host};
 
-/// GitHub release base URL.
-const RELEASE_BASE: &str = "https://github.com/p4u/claudio/releases/latest/download";
+/// The public GitHub repo where release assets are published.
+///
+/// Shared with `crate::upgrade` so both modules download from the same repo.
+pub const RELEASES_REPO: &str = "p4u/claudio-releases";
+
+/// GitHub release base URL for the binary's own version.
+///
+/// Uses the binary's own `CARGO_PKG_VERSION` tag so the remote asset exactly
+/// matches the local version.  If that tag does not exist on the releases repo,
+/// `upload_release` falls back to `latest` with a warning.
+fn release_base_versioned() -> String {
+    format!(
+        "https://github.com/{}/releases/download/v{}",
+        RELEASES_REPO,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Fallback: download the asset from whatever `latest` points at.
+fn release_base_latest() -> String {
+    format!(
+        "https://github.com/{}/releases/latest/download",
+        RELEASES_REPO
+    )
+}
 
 /// How long a single ssh command may run before we give up.
 const SSH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -236,9 +259,9 @@ async fn upload_release(host: &str, remote_os: &str, remote_arch: &str) -> Resul
     let expected_hash = if cache_path.exists() {
         sha256_file(&cache_path).map_err(|e| format!("cannot hash cached asset: {e}"))?
     } else {
-        // Download to cache.
-        let asset_url = format!("{RELEASE_BASE}/{asset_name}");
-        let hash_url = format!("{RELEASE_BASE}/{asset_name}.sha256");
+        // Download to cache. Try the exact version first; fall back to latest.
+        let base_versioned = release_base_versioned();
+        let base_latest = release_base_latest();
 
         let tmp_dir =
             std::env::temp_dir().join(format!("claudio-bootstrap-{}", uuid::Uuid::new_v4()));
@@ -248,16 +271,37 @@ async fn upload_release(host: &str, remote_os: &str, remote_arch: &str) -> Resul
         let asset_path = tmp_dir.join(&asset_name);
         let hash_path = tmp_dir.join(format!("{asset_name}.sha256"));
 
+        // Try versioned URL first.
+        let versioned_asset = format!("{base_versioned}/{asset_name}");
+        let versioned_hash = format!("{base_versioned}/{asset_name}.sha256");
         let dl_result: Result<(), String> = async {
-            download_asset(&asset_url, &asset_path).await?;
-            download_asset(&hash_url, &hash_path).await
+            download_asset(&versioned_asset, &asset_path).await?;
+            download_asset(&versioned_hash, &hash_path).await
         }
         .await;
+
+        let dl_result = if dl_result.is_err() {
+            // Fall back to latest with a warning.
+            eprintln!(
+                "claudio: versioned release asset for v{} not found; \
+                 falling back to latest (remote may not exactly match local version)",
+                env!("CARGO_PKG_VERSION")
+            );
+            let latest_asset = format!("{base_latest}/{asset_name}");
+            let latest_hash = format!("{base_latest}/{asset_name}.sha256");
+            async {
+                download_asset(&latest_asset, &asset_path).await?;
+                download_asset(&latest_hash, &hash_path).await
+            }
+            .await
+        } else {
+            dl_result
+        };
 
         if let Err(e) = dl_result {
             let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
             return Err(format!(
-                "could not download {asset_name} from GitHub: {e}. \
+                "could not download {asset_name} from {RELEASES_REPO}: {e}. \
                  Check that the release has this asset, or install claudio manually on {host}."
             ));
         }
