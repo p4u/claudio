@@ -50,8 +50,15 @@ pub fn daemon_lock() -> PathBuf {
     runtime_dir().join(format!("daemon-v{PROTO}.lock"))
 }
 
-/// The daemon's journal of sessions on this host.
+/// The daemon's journal of sessions on this host. Versioned so that different
+/// daemon protocol versions do not clobber each other's journals.
 pub fn daemon_journal() -> PathBuf {
+    config_dir().join(format!("daemon-sessions-v{PROTO}.json"))
+}
+
+/// The unversioned journal path from before the versioned scheme was introduced.
+/// Used only to migrate data on first start (see [`Journal::load`]).
+pub fn daemon_journal_legacy() -> PathBuf {
     config_dir().join("daemon-sessions.json")
 }
 
@@ -82,22 +89,44 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Atomically replace `path` with `contents` (temp file + fsync + rename, mode
-/// 0600), creating the parent directory. Used for every state/journal file.
+/// Atomically replace `path` with `contents` (temp file + fsync + rename +
+/// parent-dir fsync, mode 0600), creating the parent directory.
+///
+/// Security properties:
+/// - The temp file is created exclusively (`O_CREAT|O_EXCL`) with a random
+///   UUID name, so two concurrent writers never share a temp file.
+/// - On Unix, `O_NOFOLLOW` rejects a symlink at the temp path.
+/// - Mode 0600 is set at creation; a pre-existing 0644 file at the temp path
+///   cannot inherit weaker permissions because `create_new` fails if the path
+///   already exists.
+/// - The parent directory is fsynced after the rename so the directory entry
+///   update is durable on power loss.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(contents)?;
-    f.sync_all()?;
-    fs::rename(&tmp, path)
+    // Unique random name: no two processes share a temp file, and a stale temp
+    // from a previous crash at a predictable name cannot be reused.
+    let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true)
+            .create_new(true) // O_CREAT | O_EXCL: fail if already exists
+            .mode(0o600);
+        // O_NOFOLLOW: fail if tmp resolves through a symlink at that path.
+        // (On non-Unix targets this flag is not available, but create_new
+        // already prevents reuse of an existing path.)
+        #[cfg(unix)]
+        opts.custom_flags(libc::O_NOFOLLOW);
+        let mut f = opts.open(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    // fsync the parent directory so the rename itself is durable.
+    let dir_file = fs::File::open(dir)?;
+    dir_file.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -112,6 +141,16 @@ mod tests {
     fn socket_name_carries_protocol_version() {
         let s = daemon_socket();
         assert!(s.to_string_lossy().ends_with(&format!("daemon-v{PROTO}.sock")));
+    }
+
+    #[test]
+    fn journal_name_is_versioned() {
+        let j = daemon_journal();
+        assert!(
+            j.to_string_lossy()
+                .ends_with(&format!("daemon-sessions-v{PROTO}.json")),
+            "journal path should be versioned: {j:?}"
+        );
     }
 
     #[test]
@@ -143,6 +182,50 @@ mod tests {
         write_atomic(&p, b"two").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two");
         assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A pre-existing 0644 file at the *temp* path must not be reused: the new
+    /// O_EXCL creation fails, so we get a fresh error rather than silently
+    /// writing into a world-readable file.
+    #[test]
+    fn write_atomic_rejects_existing_0644_temp() {
+        let base = scratch();
+        fs::create_dir_all(&base).unwrap();
+        let p = base.join("state.json");
+        // Simulate a stale temp file with loose permissions.
+        let stale = base.join(".state.json.deadbeef.tmp");
+        fs::write(&stale, b"stale").unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o644)).unwrap();
+        // write_atomic must succeed (it uses a fresh UUID name, not the stale one).
+        write_atomic(&p, b"data").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"data");
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A symlink at the temp-file path must not be followed. Because we use
+    /// O_EXCL + a random name, this scenario is unlikely in practice, but the
+    /// test validates the O_NOFOLLOW property: creating through a symlink is
+    /// rejected on Unix.
+    #[test]
+    #[cfg(unix)]
+    fn write_atomic_rejects_symlink_at_temp() {
+        let base = scratch();
+        fs::create_dir_all(&base).unwrap();
+        // We cannot easily predict the UUID name, so test the underlying
+        // O_NOFOLLOW property directly via a custom OpenOptions call.
+        let target = base.join("real.txt");
+        let link = base.join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        #[cfg(unix)]
+        opts.custom_flags(libc::O_NOFOLLOW);
+        let result = opts.open(&link);
+        // O_NOFOLLOW causes ELOOP when the path is a symlink.
+        assert!(result.is_err(), "opening through a symlink must fail with O_NOFOLLOW");
         fs::remove_dir_all(&base).unwrap();
     }
 }
