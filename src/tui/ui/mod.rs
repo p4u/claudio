@@ -23,7 +23,7 @@ use git::draw_git;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
-use super::app::{App, Modal, SessionView};
+use super::app::{App, Modal, Mode, SessionView};
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -32,6 +32,13 @@ const RECONNECTING: &str = "⇄";
 
 /// Draw the whole UI.
 pub fn draw(frame: &mut Frame, app: &App) {
+    match app.mode {
+        Mode::Manager => draw_manager(frame, app),
+        Mode::Plain => draw_plain(frame, app),
+    }
+}
+
+fn draw_manager(frame: &mut Frame, app: &App) {
     let [tabs, pane, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -44,6 +51,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(status);
     draw_status_session(frame, app, status_session);
     draw_status_machine(frame, app, status_machine);
+    draw_modal(frame, app, pane);
+}
+
+/// `--plain`: the session fills the screen. A notice is a one-line overlay
+/// at the bottom right until it times out; popups cover it.
+fn draw_plain(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    draw_pane(frame, app, area);
+    if let Some(notice) = &app.notice {
+        let text = format!(" {} ", truncate(&notice.text, (area.width as usize).saturating_sub(2)));
+        let width = (str_width(&text) as u16).min(area.width);
+        if let Some(y) = area.bottom().checked_sub(1).filter(|_| width > 0) {
+            let rect = Rect {
+                x: area.right() - width,
+                y,
+                width,
+                height: 1,
+            };
+            frame.render_widget(Clear, rect);
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().add_modifier(Modifier::REVERSED)),
+                rect,
+            );
+        }
+    }
+    draw_modal(frame, app, area);
+}
+
+/// The open popup, if any, over `pane` (the area the history viewer fills).
+fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
     match &app.modal {
         Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
         Some(Modal::Close { id }) => {
@@ -791,7 +828,11 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
     let height = (entries.len() as u16 + 6 + extra).min(frame.area().height.saturating_sub(2));
     let area = frame.area();
     let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);
-    let inner = popup(frame, rect, "Manager keys (any key closes)");
+    let title = match app.mode {
+        Mode::Manager => "Manager keys (any key closes)",
+        Mode::Plain => "claudio keys (any key closes)",
+    };
+    let inner = popup(frame, rect, title);
 
     let mut lines: Vec<Line> = entries
         .iter()
@@ -807,16 +848,21 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
         .collect();
     // Claude Code's own key, not ours: listed because it closes the tab.
     lines.push(Line::from(""));
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let (ends, rest) = match app.mode {
+        Mode::Manager => ("exit claude; the tab closes", None),
+        Mode::Plain => (
+            "exit claude; claudio exits too",
+            Some("every other key goes to claude"),
+        ),
+    };
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {:>14}  ", "Ctrl+D twice"),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            "exit claude; the tab closes",
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled(format!("  {:>14}  ", "Ctrl+D twice"), dim),
+        Span::styled(ends, dim),
     ]));
+    if let Some(rest) = rest {
+        lines.push(Line::from(Span::styled(format!("  {rest}"), dim)));
+    }
     // Show upgrade notice at the bottom of the help popup when available.
     if let Some(tag) = &app.upgrade_notice {
         lines.push(Line::from(""));

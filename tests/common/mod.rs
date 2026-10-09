@@ -592,10 +592,15 @@ impl TuiProcess {
 
     /// Wait for the TUI process to exit, panicking on timeout.
     pub fn wait_exit(&mut self, timeout: Duration) {
+        self.wait_exit_code(timeout);
+    }
+
+    /// Like [`Self::wait_exit`], returning the process's exit code.
+    pub fn wait_exit_code(&mut self, timeout: Duration) -> u32 {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                return;
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return status.exit_code();
             }
             assert!(
                 Instant::now() < deadline,
@@ -827,6 +832,55 @@ exec cat
     /// status bar shows "Alt+h help" (the TUI is fully up).
     pub fn start_tui(&self) -> TuiProcess {
         self.start_tui_with(|_| {})
+    }
+
+    /// Start `claudio --plain <args>` in `dirs[0]` (as if from inside a claude
+    /// session: `CLAUDECODE` is set) and wait for the fake claude's banner.
+    /// `setup` runs after the default env vars.
+    pub fn start_plain_with<F: FnOnce(&mut CommandBuilder)>(
+        &self,
+        args: &[&str],
+        setup: F,
+    ) -> TuiProcess {
+        let mut cmd = CommandBuilder::new(BINARY);
+        cmd.arg("--plain");
+        cmd.args(args);
+        cmd.cwd(&self.dirs[0]);
+        self.apply(&mut cmd);
+        cmd.env("CLAUDECODE", "1");
+        // Never inherit the developer's own gateway settings.
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
+        setup(&mut cmd);
+        let tui = TuiProcess::spawn(cmd);
+        tui.wait_for("FAKE_CLAUDE_BANNER", Region::Screen, DAEMON_WAIT);
+        tui
+    }
+
+    /// Run `claudio <args>` to completion with the same isolated env and
+    /// return its stdout.
+    pub fn claudio_output(&self, args: &[&str]) -> String {
+        let out = std::process::Command::new(BINARY)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env("HOME", &self.home)
+            .env("CLAUDIO_CLAUDE_PATH", &self.fake_claude)
+            .output()
+            .expect("run claudio");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The sessions in the daemon's journal.
+    pub fn journal_sessions(&self) -> Vec<serde_json::Value> {
+        let path = self.config_home.join("claudio").join("daemon-sessions-v1.json");
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("sessions").and_then(|s| s.as_array()).cloned())
+            .unwrap_or_default()
     }
 
     /// Start a `claudio` TUI with a custom setup closure applied AFTER the

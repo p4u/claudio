@@ -13,6 +13,7 @@ mod git_view;
 mod interaction;
 mod keymap;
 mod notifications;
+mod plain;
 mod proxy_state;
 mod sessions;
 mod state;
@@ -34,7 +35,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{cursor, execute};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
@@ -44,8 +45,9 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
 
-use app::{App, Effect, ReplyTo};
+use app::{App, Effect, Mode, ReplyTo};
 use connections::Connections;
+use plain::PlainStart;
 use state::ClientState;
 
 /// Animation / clock tick.
@@ -71,6 +73,17 @@ fn emit_notification(label: &str) {
     let _ = std::io::stdout().flush();
 }
 
+/// What the UI is started as.
+enum Launch {
+    /// The session manager, with a startup proxy override for new sessions.
+    Manager(crate::proxy::ProxyChoice),
+    /// `claudio --plain`: one bare session; `args` go to claude.
+    Plain {
+        proxy: crate::proxy::ProxyChoice,
+        args: Vec<String>,
+    },
+}
+
 /// Run the manager until the user quits.
 pub fn run() -> ExitCode {
     run_with_proxy(crate::proxy::ProxyChoice::Default)
@@ -82,6 +95,17 @@ pub fn run() -> ExitCode {
 /// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
 /// - `Default` → wizard pre-selects the config.toml default, if any.
 pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
+    run_launch(Launch::Manager(proxy_override))
+}
+
+/// `claudio --plain`: run claude alone, full screen, with the proxy `proxy`
+/// picks, and exit with its status. The manager's help, proxy stats, history
+/// and reset keys work; the rest of the keyboard is claude's.
+pub fn run_plain(proxy: crate::proxy::ProxyChoice, args: Vec<String>) -> ExitCode {
+    run_launch(Launch::Plain { proxy, args })
+}
+
+fn run_launch(launch: Launch) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -92,18 +116,40 @@ pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = rt.block_on(main(proxy_override));
+    let code = rt.block_on(main(launch));
     rt.shutdown_background();
     code
 }
 
-async fn main(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
+async fn main(launch: Launch) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let cfg = crate::config::load();
     let mut key_notices = Vec::new();
-    let km = keymap::Keymap::build(&cfg.keys, &mut key_notices);
+    let (proxy_override, plain) = match launch {
+        Launch::Manager(proxy) => (proxy, None),
+        Launch::Plain { proxy, args } => {
+            let cwd = std::env::current_dir()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| ".".to_owned());
+            let start = PlainStart {
+                id: uuid::Uuid::new_v4(),
+                args,
+                cwd,
+            };
+            (proxy, Some(start))
+        }
+    };
+    let km = match plain {
+        Some(_) => keymap::Keymap::build_plain(&cfg.keys, &mut key_notices),
+        None => keymap::Keymap::build(&cfg.keys, &mut key_notices),
+    };
+    let plain_id = plain.as_ref().map(|p| p.id);
 
-    let saved = ClientState::load(&paths::client_state());
+    // The manager's session list; `--plain` neither reads nor writes it.
+    let saved = match plain {
+        Some(_) => ClientState::default(),
+        None => ClientState::load(&paths::client_state()),
+    };
     let (local_client, live) = match connect_local().await {
         Ok(conn) => conn,
         Err(e) => {
@@ -119,8 +165,11 @@ async fn main(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = event_loop(
+    let mut conns = Connections::with_local(local_client.clone());
+    // A panic must still reach the cleanup below, so catch it and re-raise.
+    let result = std::panic::AssertUnwindSafe(event_loop(
         &mut terminal,
+        &mut conns,
         saved,
         local_client,
         live,
@@ -130,12 +179,33 @@ async fn main(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
         km,
         key_notices,
         proxy_override,
-    )
+        plain,
+    ))
+    .catch_unwind()
     .await;
     restore_terminal();
+    // However the UI ended, a plain session dies with it: nothing lingers in
+    // the daemon, and a later manager has nothing to recover. (Killing an
+    // already closed session is a harmless "no such session".)
+    if let Some(id) = plain_id {
+        if let Some(client) = conns.client("local") {
+            let kill = client.request(Msg::Kill { id });
+            let _ = tokio::time::timeout(Duration::from_secs(3), kill).await;
+        }
+    }
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
+        Err(panic) => std::panic::resume_unwind(panic),
+        Ok(Ok(exit)) => {
+            if let Some(message) = &exit.message {
+                eprintln!("claudio: {message}");
+            }
+            if plain_id.is_some() {
+                exit.exit_code()
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Ok(Err(e)) => {
             eprintln!("claudio: {e}");
             ExitCode::FAILURE
         }
@@ -264,8 +334,32 @@ enum HostEvent {
 
 // ── Event loop ────────────────────────────────────────────────────────────────
 
+/// Resolves when the terminal's session is hung up or the process is asked to
+/// terminate (never, where there are no such signals).
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut hup), Ok(mut term)) = (
+        signal(SignalKind::hangup()),
+        signal(SignalKind::terminate()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = hup.recv() => {}
+        _ = term.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    std::future::pending::<()>().await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn event_loop(
     terminal: &mut Term,
+    conns: &mut Connections,
     saved: ClientState,
     local_client: Client,
     live: Vec<SessionInfo>,
@@ -275,7 +369,8 @@ async fn event_loop(
     km: keymap::Keymap,
     key_notices: Vec<String>,
     proxy_override: crate::proxy::ProxyChoice,
-) -> io::Result<()> {
+    plain: Option<PlainStart>,
+) -> io::Result<plain::Exit> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
     let mut app = App::new_with_proxy(
@@ -283,32 +378,37 @@ async fn event_loop(
         size.height,
         local_home,
         saved.recent_dirs.clone(),
-        notify_enabled,
+        notify_enabled && plain.is_none(),
         km,
         proxy_override,
     );
-    app.claude_skipped = saved.claude_skipped.clone();
-    app.set_local_claude(client_claude(&local_client));
-    app.recover(&saved, &live);
+    match plain {
+        Some(start) => app.start_plain(start),
+        None => {
+            app.claude_skipped = saved.claude_skipped.clone();
+            app.set_local_claude(client_claude(&local_client));
+            app.recover(&saved, &live);
 
-    // Subscribe to host stats pushes (CPU/mem sparklines).
-    // Old daemons reply Error; we treat that as "unsupported" and the sparklines
-    // just stay empty.
-    app.effects.push(Effect::Request {
-        host: "local".to_owned(),
-        msg: Msg::SubscribeHostStats,
-        to: ReplyTo::Ack("host_stats"),
-    });
+            // Subscribe to host stats pushes (CPU/mem sparklines).
+            // Old daemons reply Error; we treat that as "unsupported" and the
+            // sparklines just stay empty.
+            app.effects.push(Effect::Request {
+                host: "local".to_owned(),
+                msg: Msg::SubscribeHostStats,
+                to: ReplyTo::Ack("host_stats"),
+            });
+        }
+    }
+    let manager = app.mode == Mode::Manager;
 
     // Show any config parse notices in the status bar at startup.
     for notice in key_notices {
         app.notify(notice);
     }
 
-    // M6: Create Connections with local pre-created. The local entry always
+    // M6: `conns` has local pre-created (see `main`). The local entry always
     // exists before any connection attempt, so bump_delay/reconnect_delay work
     // even for the very first failure.
-    let mut conns = Connections::with_local(local_client.clone());
 
     // Merge all incoming streams into one tagged channel.
     let (ev_tx, mut ev_rx) = mpsc::channel::<HostEvent>(1024);
@@ -339,7 +439,7 @@ async fn event_loop(
 
     // Kick off a non-blocking upgrade check. The result arrives as
     // HostEvent::UpgradeAvailable, which sets app.upgrade_notice.
-    {
+    if manager {
         let tx = ev_tx.clone();
         tokio::spawn(async move {
             let result = crate::upgrade::check_once(update_check_enabled).await;
@@ -349,7 +449,7 @@ async fn event_loop(
 
     // And, at most once a day, compare the local claude with its release
     // channel. The result arrives as HostEvent::ClaudeLatest.
-    if claude_policy.update_check != crate::config::UpdatePolicy::Off {
+    if manager && claude_policy.update_check != crate::config::UpdatePolicy::Off {
         let tx = ev_tx.clone();
         tokio::spawn(async move {
             if let Some(latest) = crate::claude::update::check_due().await {
@@ -367,13 +467,15 @@ async fn event_loop(
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
     proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - FRAME;
+    // A plain session must not outlive its terminal.
+    let mut shutdown = Box::pin(shutdown_signal());
 
     loop {
         for effect in app.take_effects() {
-            run_effect(effect, &mut app, &mut conns, &reply_tx, &ev_tx);
+            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx);
         }
         if app.quit {
-            return Ok(());
+            return Ok(std::mem::take(&mut app.exit));
         }
         let wait = FRAME.saturating_sub(last_draw.elapsed());
         if app.redraw && wait.is_zero() {
@@ -392,8 +494,9 @@ async fn event_loop(
             ev = events.next() => match ev {
                 Some(Ok(ev)) => app.on_terminal(ev),
                 Some(Err(e)) => return Err(e),
-                None => return Ok(()),
+                None => return Ok(Default::default()),
             },
+            _ = &mut shutdown, if !manager => return Ok(Default::default()),
             ev = ev_rx.recv() => match ev {
                 Some(HostEvent::Incoming(host, gen, inc)) => {
                     // M6: drop stale events from replaced connections.
@@ -538,14 +641,15 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
-                None => return Ok(()),
+                None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
             _ = tick.tick() => app.on_tick(),
             _ = proxy_tick.tick() => {
-                // Refresh proxy stats for the active session's profile.
+                // Refresh proxy stats for the active session's profile (they
+                // feed the status bar, which `--plain` does not have).
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
-                if let Some(name) = proxy_name {
+                if let Some(name) = proxy_name.filter(|_| manager) {
                     app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
                 }
             }

@@ -15,7 +15,7 @@ use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
-use super::app::{App, Effect, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
@@ -331,7 +331,8 @@ impl App {
         let rows = self.pane_size().0 as usize;
         let Some(Modal::Git(view)) = &mut self.modal else { return };
         // Pane rows start below the tab bar; the status bar is not the pane.
-        let Some(row) = (m.row as usize).checked_sub(1).filter(|&r| r < rows) else {
+        let above = self.mode.rows_above() as usize;
+        let Some(row) = (m.row as usize).checked_sub(above).filter(|&r| r < rows) else {
             return;
         };
         let outcome = view.on_mouse(m.kind, row, rows);
@@ -373,7 +374,7 @@ impl App {
             }
             return;
         }
-        if m.row == 0 {
+        if self.mode == Mode::Manager && m.row == 0 {
             if m.kind == MouseEventKind::Down(MouseButton::Left) {
                 let titles = ui::tab_titles(&self.sessions, self.active, self.width, self.now);
                 if let Some(i) = ui::tab_at(&titles, m.column) {
@@ -384,7 +385,8 @@ impl App {
         }
         let (rows, cols) = self.pane_size();
         if let Some(v) = self.active_view().filter(|v| v.attached) {
-            if let Some(bytes) = encode_mouse(&m, (0, 1), (cols, rows), &v.mirror.modes()) {
+            let origin = (0, self.mode.rows_above());
+            if let Some(bytes) = encode_mouse(&m, origin, (cols, rows), &v.mirror.modes()) {
                 self.effects.push(Effect::Input(v.id, bytes));
             }
         }
@@ -598,6 +600,9 @@ impl App {
 
     fn on_event(&mut self, host: &str, id: SessionId, event: SessionEvent) {
         self.redraw = true;
+        if self.mode == Mode::Plain && self.plain_event(id, &event) {
+            return;
+        }
         if let SessionEvent::Created { info } = &event {
             if self.index_of(id).is_none() {
                 let (rows, cols) = self.pane_size();
@@ -743,6 +748,11 @@ impl App {
                     self.sessions[i].attached = false;
                     self.activate(i);
                 }
+            }
+            (ReplyTo::Spawned(_) | ReplyTo::SpawnedDeferred(_), Err(e))
+                if self.mode == Mode::Plain =>
+            {
+                self.plain_failed(format!("could not start claude: {e}"));
             }
             (ReplyTo::Spawned(id) | ReplyTo::SpawnedDeferred(id), Err(e)) => {
                 let Some(i) = self.index_of(id) else { return };

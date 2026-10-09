@@ -1635,101 +1635,269 @@ fn shell_quote_ssh(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+
 // ── `claudio --plain` ─────────────────────────────────────────────────────────
 
-/// A fake claude that records its argv and environment, then exits 7.
-fn write_recording_claude(harness: &ManagerHarness) -> std::path::PathBuf {
+/// A fake claude that waits for a line, then exits with `status`.
+fn write_exiting_claude(harness: &ManagerHarness, status: i32) {
     use std::os::unix::fs::PermissionsExt;
-    let out = harness.root.join("plain-out");
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.args'\nenv > '{0}.env'\nexit 7\n",
-        out.display()
+        "#!/bin/sh\n[ \"$1\" = \"--help\" ] && exit 0\n[ \"$1\" = \"--version\" ] && echo 'claude 0.0.0-fake' && exit 0\n\
+         echo FAKE_CLAUDE_BANNER\nread line\nexit {status}\n"
     );
-    fs::write(&harness.fake_claude, script).expect("write recording claude");
+    fs::write(&harness.fake_claude, script).expect("write exiting claude");
     fs::set_permissions(&harness.fake_claude, fs::Permissions::from_mode(0o755))
-        .expect("chmod recording claude");
-    out
+        .expect("chmod exiting claude");
 }
 
-/// `claudio --plain …` run to completion with the harness's isolated env,
-/// as if started from inside a claude session with an API key.
-fn run_plain(
-    harness: &ManagerHarness,
-    args: &[&str],
-    proxy_url: Option<&str>,
-) -> std::process::Output {
-    let mut cmd = std::process::Command::new(BINARY);
-    cmd.arg("--plain")
-        .args(args)
+/// A fake claude that prints the arguments the user gave (not the ones the
+/// daemon injects) as `ARG<..>`, then behaves like the default one.
+fn write_argv_claude(harness: &ManagerHarness) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = r#"#!/bin/sh
+[ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
+[ "$1" = "--help" ] && exit 0
+printf 'FAKE_CLAUDE_BANNER nonce=%s_%s' "$$" "$RANDOM"
+for a in "$@"; do
+    case "$a" in '{'*|--settings|--allow-dangerously-skip-permissions) ;; *) printf ' ARG<%s>' "$a" ;; esac
+done
+echo
+exec cat
+"#;
+    fs::write(&harness.fake_claude, script).expect("write argv claude");
+    fs::set_permissions(&harness.fake_claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod argv claude");
+}
+
+/// Wait (bounded) until the daemon has no session left.
+fn wait_no_sessions(harness: &ManagerHarness) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let listed = harness.claudio_output(&["sessions"]);
+        if listed.contains("no sessions") && harness.journal_sessions().is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a session is left in the daemon:\n{listed}\njournal: {:?}",
+            harness.journal_sessions()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The session fills the screen (no tab bar, no status bar), runs in the
+/// current directory with claude's args, and leaves no state.json behind.
+#[test]
+fn test_plain_is_the_bare_session_full_screen() {
+    let harness = ManagerHarness::new();
+    write_argv_claude(&harness);
+    let mut tui = harness.start_plain_with(&["--no-proxy", "-c", "hello"], |_| {});
+
+    // The banner is on the first row: nothing is drawn above the pane.
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::TabBar, WAIT);
+    let screen = tui.screen_text(Region::Screen);
+    assert!(screen.contains("ARG<-c> ARG<hello>"), "{screen}");
+    assert!(!screen.contains("Alt+h help"), "no status bar:\n{screen}");
+    assert!(!screen.contains("│"), "no tab bar:\n{screen}");
+
+    let listed = harness.claudio_output(&["sessions"]);
+    assert!(
+        listed.contains(harness.dirs[0].to_str().unwrap()),
+        "claude runs in the current directory:\n{listed}"
+    );
+    assert!(!harness.state_json().exists(), "plain mode never writes state.json");
+
+    // Input reaches claude.
+    tui.send_keys(b"typed\r");
+    tui.wait_for("typed", Region::Screen, WAIT);
+    assert!(!harness.state_json().exists());
+    drop(tui);
+}
+
+/// Alt+h lists exactly the four plain keys; any key closes it.
+#[test]
+fn test_plain_help_lists_only_the_plain_keys() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+
+    tui.send_keys(ALT_H);
+    tui.wait_for("claudio keys", Region::Screen, WAIT);
+    let screen = tui.screen_text(Region::Screen);
+    for key in ["Alt+h", "Alt+s", "Alt+l", "Alt+e"] {
+        assert!(screen.contains(key), "{key} missing:\n{screen}");
+    }
+    assert_eq!(screen.matches("Alt+").count(), 4, "exactly the plain keys:\n{screen}");
+
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("claudio keys", Region::Screen), WAIT);
+    tui.send_keys(b"after\r");
+    tui.wait_for("after", Region::Screen, WAIT);
+    drop(tui);
+}
+
+/// Manager keys are claude's here: Alt+n opens no wizard and Alt+q does not
+/// quit; what is typed next reaches the session.
+#[test]
+fn test_plain_forwards_manager_keys_to_claude() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+
+    tui.send_keys(ALT_N);
+    tui.send_keys(b"after-n\r");
+    tui.wait_for("after-n", Region::Screen, WAIT);
+    let screen = tui.screen_text(Region::Screen);
+    assert!(!screen.contains("New session"), "no wizard:\n{screen}");
+
+    tui.send_keys(ALT_Q);
+    tui.send_keys(b"after-q\r");
+    tui.wait_for("after-q", Region::Screen, WAIT);
+    assert!(
+        matches!(tui.child.try_wait(), Ok(None)),
+        "Alt+q must not quit"
+    );
+
+    // Alt+Shift+1 is not a tab switch either: it is just forwarded.
+    tui.send_keys(ALT_SHIFT_1);
+    tui.send_keys(b"after-1\r");
+    tui.wait_for("after-1", Region::Screen, WAIT);
+    drop(tui);
+}
+
+/// Alt+s (proxy stats) and Alt+e (reset) work as in the manager.
+#[test]
+fn test_plain_keeps_proxy_stats_and_reset() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+
+    tui.send_keys(b"\x1bs");
+    tui.wait_for("No proxy configured", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("No proxy configured", Region::Screen), WAIT);
+
+    let before = extract_nonce(&tui.screen_text(Region::Screen)).expect("banner nonce");
+    tui.send_keys(ALT_E);
+    tui.wait_for("new conversation", Region::Screen, WAIT);
+    tui.send_keys(b"n");
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Screen)).map_or(false, |n| n != before),
+        WAIT,
+    );
+    // Still the same single, full-screen session.
+    assert!(!tui.screen_text(Region::Screen).contains("Alt+h help"));
+    drop(tui);
+}
+
+/// With a proxy profile (an unreachable one, so the built-in model defaults
+/// apply) claude gets the gateway env, loses the parent-session marker and the
+/// API key, and keeps the user's args; the token never reaches argv.
+#[test]
+fn test_plain_injects_proxy_env() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("plain.env");
+    harness.write_env_dumping_fake_claude(&env_file);
+
+    let tui = harness.start_plain_with(&["-c", "hello"], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
+    });
+    let screen = tui.screen_text(Region::Screen);
+    assert!(screen.contains("-c hello"), "{screen}");
+    assert!(!screen.contains("sekret"), "the token must never reach argv:\n{screen}");
+
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    assert!(env.contains("ANTHROPIC_AUTH_TOKEN=sekret"), "{env}");
+    assert!(env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"), "{env}");
+    assert!(env.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus"), "{env}");
+    assert!(!env.contains("ANTHROPIC_API_KEY"), "api key must be removed: {env}");
+    assert!(!env.contains("CLAUDECODE"), "session marker must be scrubbed: {env}");
+    drop(tui);
+}
+
+/// `--no-proxy` ignores the configured proxy: the API key stays and no
+/// gateway env appears.
+#[test]
+fn test_plain_no_proxy_keeps_api_key() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("plain.env");
+    harness.write_env_dumping_fake_claude(&env_file);
+
+    let tui = harness.start_plain_with(&["--no-proxy"], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
+    });
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN"), "{env}");
+    assert!(!env.contains("CLAUDECODE"), "{env}");
+    drop(tui);
+}
+
+/// When claude ends (Ctrl+D), the UI exits with status 0 and no session
+/// remains in the daemon or its journal, and no state.json was written.
+#[test]
+fn test_plain_exits_when_claude_ends_and_leaves_nothing() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+
+    tui.send_keys(b"\x04");
+    assert_eq!(tui.wait_exit_code(WAIT), 0);
+    wait_no_sessions(&harness);
+    assert!(!harness.state_json().exists());
+
+    // A bare manager started afterwards has nothing to show but its wizard.
+    let mut manager = harness.start_tui();
+    manager.wait_for("New session", Region::Screen, WAIT);
+    manager.quit(WAIT);
+}
+
+/// Claude's non-zero status is the UI's, and the dormant session it leaves is
+/// killed rather than recovered later.
+#[test]
+fn test_plain_exit_status_is_claudes() {
+    let harness = ManagerHarness::new();
+    write_exiting_claude(&harness, 7);
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+
+    tui.send_keys(b"go\r");
+    assert_eq!(tui.wait_exit_code(WAIT), 7);
+    wait_no_sessions(&harness);
+}
+
+/// A closed terminal (SIGHUP) takes the session with it.
+#[test]
+fn test_plain_hangup_kills_the_session() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+
+    let pid = tui.child.process_id().expect("claudio pid");
+    // SAFETY: kill(2) has no preconditions.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
+    tui.wait_exit(WAIT);
+    wait_no_sessions(&harness);
+    assert!(!harness.state_json().exists());
+}
+
+/// `--plain -p` (and --print, --api) is rejected with a hint, without
+/// starting claude.
+#[test]
+fn test_plain_rejects_print_mode() {
+    let harness = ManagerHarness::new();
+    let marker = harness.root.join("claude-ran");
+    harness.write_marker_fake_claude(&marker);
+
+    let res = std::process::Command::new(BINARY)
+        .args(["--plain", "-p", "hi"])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("XDG_RUNTIME_DIR", &harness.runtime_dir)
         .env("XDG_CONFIG_HOME", &harness.config_home)
         .env("HOME", &harness.home)
         .env("CLAUDIO_CLAUDE_PATH", &harness.fake_claude)
-        .env("CLAUDECODE", "1")
-        .env("ANTHROPIC_API_KEY", "test-key-not-real");
-    if let Some(url) = proxy_url {
-        cmd.env("CLAUDIO_PROXY_URL", url);
-    }
-    cmd.output().expect("claudio --plain failed to spawn")
-}
-
-/// With a proxy profile (here an unreachable one, so the built-in model
-/// defaults apply), claude gets the gateway env, loses the parent-session
-/// marker and the API key, keeps the user's args, and its exit code is
-/// claudio's.
-#[test]
-fn test_plain_injects_proxy_env() {
-    let harness = ManagerHarness::new();
-    let out = write_recording_claude(&harness);
-
-    let res = run_plain(&harness, &["-c", "hello"], Some("sekret@127.0.0.1:1"));
-    assert_eq!(res.status.code(), Some(7), "exit code should be claude's");
-    let stderr = String::from_utf8_lossy(&res.stderr);
-    assert!(
-        stderr.contains("built-in model defaults"),
-        "fallback should be announced on stderr: {stderr}"
-    );
-
-    let args = fs::read_to_string(out.with_extension("args")).expect("argv recorded");
-    assert_eq!(args, "-c\nhello\n", "the token must never reach argv");
-    let env = fs::read_to_string(out.with_extension("env")).expect("env recorded");
-    assert!(env.contains("ANTHROPIC_AUTH_TOKEN=sekret"), "{env}");
-    assert!(env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"), "{env}");
-    assert!(env.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus"), "{env}");
-    assert!(!env.contains("ANTHROPIC_API_KEY"), "api key must be removed: {env}");
-    assert!(!env.contains("CLAUDECODE"), "session marker must be scrubbed: {env}");
-}
-
-/// `--no-proxy` is plain passthrough plus the marker scrub: the API key stays
-/// and no gateway env appears.
-#[test]
-fn test_plain_no_proxy_keeps_api_key() {
-    let harness = ManagerHarness::new();
-    let out = write_recording_claude(&harness);
-
-    let res = run_plain(&harness, &["--no-proxy", "-c"], Some("sekret@127.0.0.1:1"));
-    assert_eq!(res.status.code(), Some(7));
-    assert!(res.stderr.is_empty(), "no proxy, nothing to report");
-
-    let args = fs::read_to_string(out.with_extension("args")).expect("argv recorded");
-    assert_eq!(args, "-c\n");
-    let env = fs::read_to_string(out.with_extension("env")).expect("env recorded");
-    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
-    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN"), "{env}");
-    assert!(!env.contains("CLAUDECODE"), "{env}");
-}
-
-/// `--plain -p` is rejected with a hint, without starting claude.
-#[test]
-fn test_plain_rejects_print_mode() {
-    let harness = ManagerHarness::new();
-    let out = write_recording_claude(&harness);
-
-    let res = run_plain(&harness, &["-p", "hi"], None);
+        .output()
+        .expect("run claudio --plain -p");
     assert_eq!(res.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&res.stderr);
     assert!(stderr.contains("-p is not supported with --plain"), "{stderr}");
-    assert!(!out.with_extension("args").exists(), "claude must not run");
+    assert!(!marker.exists(), "claude must not run");
 }

@@ -120,6 +120,7 @@ Connects to the socket; if unavailable, starts the daemon (double-fork +
   (`state.json`).
 - `proxy_state.rs` — per-session proxy UI state (stats, badge).
 - `notifications.rs` — debounce logic for attention notifications.
+- `plain.rs` — `claudio --plain`: `Mode::Plain` is one local session full screen (no tab/status bar, wizard or state.json). `Keymap::build_plain` keeps only Alt+h/s/l/e; the session is killed when the UI exits, and the UI exits with claude.
 
 **`remote/`** — SSH bootstrap and bridge:
 - `bootstrap.rs` — `ensure_remote(host)`: runs `__probe` + `uname -sm` in one
