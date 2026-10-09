@@ -22,7 +22,9 @@ pub fn validate_host(host: &str) -> Result<(), String> {
         return Err("empty hostname".to_owned());
     }
     if host.starts_with('-') {
-        return Err(format!("invalid host {host:?}: hostnames must not start with '-'"));
+        return Err(format!(
+            "invalid host {host:?}: hostnames must not start with '-'"
+        ));
     }
     Ok(())
 }

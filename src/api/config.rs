@@ -61,16 +61,22 @@ impl Config {
             default_model: env_str(&["CLAUDIO_API_DEFAULT_MODEL", "OPENAI_PROXY_DEFAULT_MODEL"])
                 .unwrap_or_else(|| "sonnet".to_string()),
             cwd,
-            max_concurrency: env_parse(&["CLAUDIO_API_MAX_CONCURRENCY", "OPENAI_PROXY_MAX_CONCURRENCY"])
-                .unwrap_or(8),
+            max_concurrency: env_parse(&[
+                "CLAUDIO_API_MAX_CONCURRENCY",
+                "OPENAI_PROXY_MAX_CONCURRENCY",
+            ])
+            .unwrap_or(8),
             timeout_secs: env_parse(&["CLAUDIO_API_TIMEOUT_SECS", "OPENAI_PROXY_TIMEOUT_SECS"])
                 .unwrap_or(600),
             agentic: env_parse::<bool>(&["CLAUDIO_API_AGENTIC", "OPENAI_PROXY_AGENTIC"])
                 .unwrap_or(true),
             // Read raw so an explicit empty value means "omit the flag" (load CLI
             // defaults), distinct from unset (lean "project" default).
-            setting_sources: env_raw(&["CLAUDIO_API_SETTING_SOURCES", "OPENAI_PROXY_SETTING_SOURCES"])
-                .unwrap_or_else(|| "project".to_string()),
+            setting_sources: env_raw(&[
+                "CLAUDIO_API_SETTING_SOURCES",
+                "OPENAI_PROXY_SETTING_SOURCES",
+            ])
+            .unwrap_or_else(|| "project".to_string()),
         }
     }
 }

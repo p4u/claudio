@@ -38,10 +38,16 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
 
     // Fixed gateway knobs.
     env.push(("CLAUDE_CODE_USE_GATEWAY".into(), "1".into()));
-    env.push(("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".into(), "1".into()));
+    env.push((
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".into(),
+        "1".into(),
+    ));
     env.push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1000000".into()));
     env.push(("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()));
-    env.push(("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()));
+    env.push((
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+        "1".into(),
+    ));
     env.push(("API_TIMEOUT_MS".into(), "30000".into()));
 
     // Model defaults: start from built-in fallbacks, then let the proxy
@@ -79,7 +85,10 @@ mod tests {
     use crate::proxy::api::ConfigResponse;
 
     fn profile(url: &str, token: &str) -> Profile {
-        Profile { url: url.into(), token: token.into() }
+        Profile {
+            url: url.into(),
+            token: token.into(),
+        }
     }
 
     fn env_get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -90,28 +99,61 @@ mod tests {
     fn without_config_uses_fallbacks() {
         let p = profile("https://claude.example.net", "tok");
         let env = session_env(&p, None);
-        assert_eq!(env_get(&env, "ANTHROPIC_BASE_URL"), Some("https://claude.example.net"));
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_BASE_URL"),
+            Some("https://claude.example.net")
+        );
         assert_eq!(env_get(&env, "ANTHROPIC_AUTH_TOKEN"), Some("tok"));
         assert_eq!(env_get(&env, "CLAUDE_CODE_USE_GATEWAY"), Some("1"));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_FABLE_MODEL"), Some(DEFAULT_FABLE));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"), Some(DEFAULT_OPUS));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_SONNET_MODEL"), Some(DEFAULT_SONNET));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some(DEFAULT_HAIKU));
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            Some(DEFAULT_FABLE)
+        );
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(DEFAULT_OPUS)
+        );
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some(DEFAULT_SONNET)
+        );
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(DEFAULT_HAIKU)
+        );
     }
 
     #[test]
     fn with_config_overrides_model_defaults() {
         let p = profile("https://x.net", "tok");
         let mut cfg = ConfigResponse::default();
-        cfg.env.insert("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "claude-sonnet-99[1m]".into());
-        cfg.env.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "claude-haiku-99[1m]".into());
+        cfg.env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+            "claude-sonnet-99[1m]".into(),
+        );
+        cfg.env.insert(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+            "claude-haiku-99[1m]".into(),
+        );
         let env = session_env(&p, Some(&cfg));
         // Overridden.
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("claude-sonnet-99[1m]"));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("claude-haiku-99[1m]"));
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some("claude-sonnet-99[1m]")
+        );
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some("claude-haiku-99[1m]")
+        );
         // Not overridden: falls back.
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_FABLE_MODEL"), Some(DEFAULT_FABLE));
-        assert_eq!(env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"), Some(DEFAULT_OPUS));
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            Some(DEFAULT_FABLE)
+        );
+        assert_eq!(
+            env_get(&env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(DEFAULT_OPUS)
+        );
     }
 
     #[test]
@@ -137,10 +179,19 @@ mod tests {
     fn required_gateway_flags_present() {
         let p = profile("https://x.net", "tok");
         let env = session_env(&p, None);
-        assert_eq!(env_get(&env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"), Some("1"));
+        assert_eq!(
+            env_get(&env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
         assert_eq!(env_get(&env, "CLAUDE_CODE_GATEWAY_HINT_HEADERS"), Some("1"));
-        assert_eq!(env_get(&env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), Some("1"));
-        assert_eq!(env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some("1000000"));
+        assert_eq!(
+            env_get(&env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+            Some("1")
+        );
+        assert_eq!(
+            env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            Some("1000000")
+        );
         assert_eq!(env_get(&env, "API_TIMEOUT_MS"), Some("30000"));
     }
 }

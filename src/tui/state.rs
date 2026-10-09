@@ -110,7 +110,8 @@ pub struct Recovered {
 /// Used when reconciling a specific remote host's session list.
 pub fn merge_for_host(host: &str, saved: &ClientState, live: &[SessionInfo]) -> Vec<Recovered> {
     // Skip tombstoned sessions.
-    let live_non_killed: Vec<&SessionInfo> = live.iter().filter(|l| !saved.is_killed(l.id)).collect();
+    let live_non_killed: Vec<&SessionInfo> =
+        live.iter().filter(|l| !saved.is_killed(l.id)).collect();
 
     let known = saved.sessions.iter().filter_map(|s| {
         // Skip tombstoned.
@@ -151,7 +152,9 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
                 None => info.name.clone(),
             },
             cwd: info.cwd.clone(),
-            host: saved.map(|s| s.host.clone()).unwrap_or_else(|| host.to_owned()),
+            host: saved
+                .map(|s| s.host.clone())
+                .unwrap_or_else(|| host.to_owned()),
             claude_session_id,
             created_at: info.created_at,
             proxy: saved.and_then(|s| s.proxy.clone()),
@@ -236,14 +239,27 @@ mod tests {
 
     #[test]
     fn merge_keeps_saved_order_and_names_appends_unknown_drops_stale() {
-        let (a, b, c, stale) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (a, b, c, stale) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         let state = ClientState {
-            sessions: vec![saved(b, Some("bee"), None), saved(stale, None, None), saved(a, None, None)],
+            sessions: vec![
+                saved(b, Some("bee"), None),
+                saved(stale, None, None),
+                saved(a, None, None),
+            ],
             active: Some(a),
             recent_dirs: vec![],
             killed: vec![],
         };
-        let live = vec![info(a, Some(1), None), info(c, Some(2), None), info(b, Some(3), None)];
+        let live = vec![
+            info(a, Some(1), None),
+            info(c, Some(2), None),
+            info(b, Some(3), None),
+        ];
         let merged = merge_for_host("local", &state, &live);
         let ids: Vec<Uuid> = merged.iter().map(|r| r.saved.id).collect();
         assert_eq!(ids, vec![b, a, c]);
@@ -268,11 +284,21 @@ mod tests {
             ],
             ..Default::default()
         };
-        let live = vec![info(a, None, Some("new-a")), info(b, None, None), info(c, None, None)];
+        let live = vec![
+            info(a, None, Some("new-a")),
+            info(b, None, None),
+            info(c, None, None),
+        ];
         let merged = merge_for_host("local", &state, &live);
-        assert_eq!(merged[0].respawn, Some(vec!["--resume".into(), "new-a".into()]));
+        assert_eq!(
+            merged[0].respawn,
+            Some(vec!["--resume".into(), "new-a".into()])
+        );
         assert_eq!(merged[0].saved.claude_session_id.as_deref(), Some("new-a"));
-        assert_eq!(merged[1].respawn, Some(vec!["--resume".into(), "only-saved".into()]));
+        assert_eq!(
+            merged[1].respawn,
+            Some(vec!["--resume".into(), "only-saved".into()])
+        );
         assert_eq!(merged[2].respawn, Some(vec![]));
     }
 
@@ -281,7 +307,10 @@ mod tests {
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let state = ClientState {
             sessions: vec![saved(a, None, None), saved(b, None, None)],
-            killed: vec![KillTombstone { host: "local".into(), id: a }],
+            killed: vec![KillTombstone {
+                host: "local".into(),
+                id: a,
+            }],
             ..Default::default()
         };
         let live = vec![info(a, Some(1), None), info(b, Some(2), None)];

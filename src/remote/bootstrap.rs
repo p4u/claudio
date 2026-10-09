@@ -60,7 +60,10 @@ pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
     // Step 2: check freshness.
     if let Some(ref r) = remote_probe {
         if is_up_to_date(r, &local, &remote_os, &remote_arch).await {
-            return Ok(RemoteInfo { was_current: true, probe: r.clone() });
+            return Ok(RemoteInfo {
+                was_current: true,
+                probe: r.clone(),
+            });
         }
     }
 
@@ -77,7 +80,10 @@ pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
         .await
         .ok_or_else(|| format!("claudio was uploaded to {host} but __probe failed afterwards"))?;
 
-    Ok(RemoteInfo { was_current: false, probe: new_probe })
+    Ok(RemoteInfo {
+        was_current: false,
+        probe: new_probe,
+    })
 }
 
 /// Map probe OS name to release asset OS name.
@@ -105,7 +111,11 @@ pub fn release_arch(probe_arch: &str) -> Result<&str, String> {
 
 /// Build the release asset name, e.g. `claudio-linux-x86_64`.
 pub fn release_asset_name(probe_os: &str, probe_arch: &str) -> Result<String, String> {
-    Ok(format!("claudio-{}-{}", release_os(probe_os)?, release_arch(probe_arch)?))
+    Ok(format!(
+        "claudio-{}-{}",
+        release_os(probe_os)?,
+        release_arch(probe_arch)?
+    ))
 }
 
 /// Local cache dir for downloaded release assets.
@@ -126,12 +136,7 @@ fn cached_asset_path(version: &str, asset_name: &str) -> PathBuf {
 /// - Same-platform: compare `remote.build` vs sha256 of the local binary.
 /// - Cross-platform: compare `remote.build` vs sha256 of the cached release
 ///   asset (so a correct cross-platform install is not re-uploaded every time).
-async fn is_up_to_date(
-    remote: &Probe,
-    local: &Probe,
-    remote_os: &str,
-    remote_arch: &str,
-) -> bool {
+async fn is_up_to_date(remote: &Probe, local: &Probe, remote_os: &str, remote_arch: &str) -> bool {
     if remote.version != local.version || remote.proto != local.proto {
         return false;
     }
@@ -170,8 +175,9 @@ async fn probe_and_platform(host: &str) -> Result<(Option<Probe>, String, String
         .map_err(|e| format!("ssh failed: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let (probe_part, uname_part) =
-        stdout.split_once("---UNAME---").unwrap_or(("", stdout.as_ref()));
+    let (probe_part, uname_part) = stdout
+        .split_once("---UNAME---")
+        .unwrap_or(("", stdout.as_ref()));
 
     // Parse uname output: e.g. "Linux x86_64" or "Darwin arm64"
     let uname_line = uname_part.trim();
@@ -198,7 +204,10 @@ async fn probe_and_platform(host: &str) -> Result<(Option<Probe>, String, String
 /// Returns `None` when the binary is missing or the output is unparseable.
 async fn probe_remote(host: &str) -> Option<Probe> {
     let output = tokio::time::timeout(SSH_TIMEOUT, async {
-        ssh_cmd(host).arg(r#""$HOME"/.local/bin/claudio __probe 2>/dev/null"#).output().await
+        ssh_cmd(host)
+            .arg(r#""$HOME"/.local/bin/claudio __probe 2>/dev/null"#)
+            .output()
+            .await
     })
     .await
     .ok()?
@@ -211,8 +220,7 @@ async fn probe_remote(host: &str) -> Option<Probe> {
 async fn upload_self(host: &str, remote_os: &str, remote_arch: &str) -> Result<(), String> {
     let _ = (remote_os, remote_arch); // confirmed same-platform by caller
     let exe = std::env::current_exe().map_err(|e| format!("cannot find own binary: {e}"))?;
-    let expected_hash =
-        sha256_file(&exe).map_err(|e| format!("cannot hash own binary: {e}"))?;
+    let expected_hash = sha256_file(&exe).map_err(|e| format!("cannot hash own binary: {e}"))?;
     upload_bytes(host, &exe, &expected_hash).await
 }
 
@@ -232,8 +240,8 @@ async fn upload_release(host: &str, remote_os: &str, remote_arch: &str) -> Resul
         let asset_url = format!("{RELEASE_BASE}/{asset_name}");
         let hash_url = format!("{RELEASE_BASE}/{asset_name}.sha256");
 
-        let tmp_dir = std::env::temp_dir()
-            .join(format!("claudio-bootstrap-{}", uuid::Uuid::new_v4()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("claudio-bootstrap-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&tmp_dir)
             .await
             .map_err(|e| format!("cannot create temp dir: {e}"))?;
@@ -275,7 +283,9 @@ async fn upload_release(host: &str, remote_os: &str, remote_arch: &str) -> Resul
         }
 
         // Save to cache.
-        if let Ok(()) = tokio::fs::create_dir_all(cache_path.parent().unwrap_or(Path::new("."))).await {
+        if let Ok(()) =
+            tokio::fs::create_dir_all(cache_path.parent().unwrap_or(Path::new("."))).await
+        {
             let _ = tokio::fs::copy(&asset_path, &cache_path).await;
         }
 
@@ -296,7 +306,8 @@ async fn upload_bytes(
     expected_hash: &str,
 ) -> Result<(), String> {
     // Ensure the destination directory exists and get a unique temp path.
-    let mkdir_and_mktemp = r#"mkdir -p "$HOME/.local/bin" && mktemp "$HOME/.local/bin/.claudio.XXXXXX""#;
+    let mkdir_and_mktemp =
+        r#"mkdir -p "$HOME/.local/bin" && mktemp "$HOME/.local/bin/.claudio.XXXXXX""#;
     let tmp_remote = ssh_run(host, mkdir_and_mktemp)
         .await
         .map_err(|e| format!("remote mktemp failed: {e}"))?;
@@ -324,7 +335,10 @@ async fn upload_bytes(
             .map_err(|e| format!("ssh spawn failed: {e}"))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&bytes).await.map_err(|e| format!("ssh stdin write: {e}"))?;
+            stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|e| format!("ssh stdin write: {e}"))?;
             drop(stdin);
         }
         child.wait().await.map_err(|e| format!("ssh wait: {e}"))
@@ -349,7 +363,11 @@ async fn upload_bytes(
         let _ = ssh_run_sync(host, &format!("rm -f {tmp_quoted}"));
         format!("remote hash check failed: {e}")
     })?;
-    let remote_hash = hash_out.split_ascii_whitespace().next().unwrap_or("").to_owned();
+    let remote_hash = hash_out
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_owned();
     if remote_hash != expected_hash {
         let _ = ssh_run(host, &format!("rm -f {tmp_quoted} 2>/dev/null; true")).await;
         return Err(format!(
@@ -385,12 +403,10 @@ fi"#
 
 /// Run a shell command on `host` and return its trimmed stdout.
 async fn ssh_run(host: &str, cmd: &str) -> Result<String, String> {
-    let output = tokio::time::timeout(SSH_TIMEOUT, async {
-        ssh_cmd(host).arg(cmd).output().await
-    })
-    .await
-    .map_err(|_| format!("ssh command timed out on {host}"))?
-    .map_err(|e| format!("ssh command failed: {e}"))?;
+    let output = tokio::time::timeout(SSH_TIMEOUT, async { ssh_cmd(host).arg(cmd).output().await })
+        .await
+        .map_err(|_| format!("ssh command timed out on {host}"))?
+        .map_err(|e| format!("ssh command failed: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -410,7 +426,15 @@ async fn ssh_run(host: &str, cmd: &str) -> Result<String, String> {
 /// don't need the result.
 fn ssh_run_sync(host: &str, cmd: &str) {
     let _ = std::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", host, cmd])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "--",
+            host,
+            cmd,
+        ])
         .output();
 }
 
@@ -452,8 +476,14 @@ mod tests {
 
     #[test]
     fn release_asset_name_macos() {
-        assert_eq!(release_asset_name("macos", "aarch64").unwrap(), "claudio-darwin-aarch64");
-        assert_eq!(release_asset_name("linux", "x86_64").unwrap(), "claudio-linux-x86_64");
+        assert_eq!(
+            release_asset_name("macos", "aarch64").unwrap(),
+            "claudio-darwin-aarch64"
+        );
+        assert_eq!(
+            release_asset_name("linux", "x86_64").unwrap(),
+            "claudio-linux-x86_64"
+        );
     }
 
     #[test]
@@ -485,7 +515,10 @@ mod tests {
             arch: "x86_64".into(),
             build: "aabbcc".into(),
         };
-        let remote_old = Probe { version: "0.9.0".into(), ..local.clone() };
+        let remote_old = Probe {
+            version: "0.9.0".into(),
+            ..local.clone()
+        };
         assert!(!is_up_to_date(&remote_old, &local, "linux", "x86_64").await);
     }
 
@@ -511,7 +544,12 @@ mod tests {
             arch: "x86_64".into(),
             build: "locallinuxhash".into(),
         };
-        let remote = Probe { os: "macos".into(), arch: "aarch64".into(), build: "macoshash".into(), ..local.clone() };
+        let remote = Probe {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            build: "macoshash".into(),
+            ..local.clone()
+        };
         // No cache → stale
         assert!(!is_up_to_date(&remote, &local, "macos", "aarch64").await);
     }

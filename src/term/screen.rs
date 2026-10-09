@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as AlacConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, Color, NamedColor, Rgb};
-use alacritty_terminal::term::cell::Flags;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier, Style};
@@ -124,11 +124,23 @@ pub struct Screen {
 impl Screen {
     /// Create a new blank screen of the given dimensions.
     pub fn new(rows: u16, cols: u16) -> Self {
-        let state = Arc::new(Mutex::new(EventState { title: None, bell: false }));
+        let state = Arc::new(Mutex::new(EventState {
+            title: None,
+            bell: false,
+        }));
         let listener = Listener(Arc::clone(&state));
-        let size = TermSize { columns: cols as usize, screen_lines: rows as usize };
+        let size = TermSize {
+            columns: cols as usize,
+            screen_lines: rows as usize,
+        };
         let term = Term::new(AlacConfig::default(), &size, listener);
-        Self { term, processor: ansi::Processor::new(), state, rows, cols }
+        Self {
+            term,
+            processor: ansi::Processor::new(),
+            state,
+            rows,
+            cols,
+        }
     }
 
     /// Drive the VTE parser and advance the terminal state.
@@ -140,7 +152,10 @@ impl Screen {
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
-        self.term.resize(TermSize { columns: cols as usize, screen_lines: rows as usize });
+        self.term.resize(TermSize {
+            columns: cols as usize,
+            screen_lines: rows as usize,
+        });
     }
 
     /// Current `(rows, cols)`.
@@ -265,7 +280,10 @@ impl Screen {
                 }
 
                 let display_flags = cell.flags & DISPLAY_FLAGS;
-                if cell.fg != cur_fg || cell.bg != cur_bg || display_flags != cur_flags & DISPLAY_FLAGS {
+                if cell.fg != cur_fg
+                    || cell.bg != cur_bg
+                    || display_flags != cur_flags & DISPLAY_FLAGS
+                {
                     emit_sgr(&mut out, cell.fg, cell.bg, cell.flags);
                     cur_fg = cell.fg;
                     cur_bg = cell.bg;
@@ -294,9 +312,8 @@ impl Screen {
         let pen_fg = pen.fg;
         let pen_bg = pen.bg;
         let pen_flags = pen.flags;
-        let active_sgr_is_default = pen_fg == default_fg
-            && pen_bg == default_bg
-            && (pen_flags & DISPLAY_FLAGS).is_empty();
+        let active_sgr_is_default =
+            pen_fg == default_fg && pen_bg == default_bg && (pen_flags & DISPLAY_FLAGS).is_empty();
         if active_sgr_is_default {
             out.extend_from_slice(b"\x1b[0m");
         } else {
@@ -309,7 +326,10 @@ impl Screen {
         let cursor_pt = self.term.grid().cursor.point;
         let cursor_col = cursor_pt.column.0 as u16;
         let cursor_row = cursor_pt.line.0 as u16;
-        push_fmt(&mut out, format_args!("\x1b[{};{}H", cursor_row + 1, cursor_col + 1));
+        push_fmt(
+            &mut out,
+            format_args!("\x1b[{};{}H", cursor_row + 1, cursor_col + 1),
+        );
         if modes.cursor_visible {
             out.extend_from_slice(b"\x1b[?25h");
         } else {
@@ -329,9 +349,17 @@ impl Screen {
         let _ = scroll_top; // used only for future extension
 
         // 7. Emit mode sequences.
-        out.extend_from_slice(if modes.app_cursor { b"\x1b[?1h" } else { b"\x1b[?1l" });
+        out.extend_from_slice(if modes.app_cursor {
+            b"\x1b[?1h"
+        } else {
+            b"\x1b[?1l"
+        });
         out.extend_from_slice(if modes.app_keypad { b"\x1b=" } else { b"\x1b>" });
-        out.extend_from_slice(if modes.bracketed_paste { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+        out.extend_from_slice(if modes.bracketed_paste {
+            b"\x1b[?2004h"
+        } else {
+            b"\x1b[?2004l"
+        });
         // Reset all mouse modes, then enable the right one.
         out.extend_from_slice(b"\x1b[?1003l\x1b[?1002l\x1b[?1000l");
         match modes.mouse {
@@ -340,8 +368,16 @@ impl Screen {
             MouseMode::Drag => out.extend_from_slice(b"\x1b[?1002h"),
             MouseMode::Motion => out.extend_from_slice(b"\x1b[?1003h"),
         }
-        out.extend_from_slice(if modes.mouse_sgr { b"\x1b[?1006h" } else { b"\x1b[?1006l" });
-        out.extend_from_slice(if modes.focus_reporting { b"\x1b[?1004h" } else { b"\x1b[?1004l" });
+        out.extend_from_slice(if modes.mouse_sgr {
+            b"\x1b[?1006h"
+        } else {
+            b"\x1b[?1006l"
+        });
+        out.extend_from_slice(if modes.focus_reporting {
+            b"\x1b[?1004h"
+        } else {
+            b"\x1b[?1004l"
+        });
 
         out
     }
@@ -494,13 +530,27 @@ fn named_index(nc: NamedColor) -> Option<u8> {
 fn emit_sgr(out: &mut Vec<u8>, fg: Color, bg: Color, flags: Flags) {
     // Start with reset; attributes follow as additional params.
     out.extend_from_slice(b"\x1b[0");
-    if flags.contains(Flags::BOLD) { out.extend_from_slice(b";1"); }
-    if flags.contains(Flags::DIM) { out.extend_from_slice(b";2"); }
-    if flags.contains(Flags::ITALIC) { out.extend_from_slice(b";3"); }
-    if flags.contains(Flags::UNDERLINE) { out.extend_from_slice(b";4"); }
-    if flags.contains(Flags::INVERSE) { out.extend_from_slice(b";7"); }
-    if flags.contains(Flags::HIDDEN) { out.extend_from_slice(b";8"); }
-    if flags.contains(Flags::STRIKEOUT) { out.extend_from_slice(b";9"); }
+    if flags.contains(Flags::BOLD) {
+        out.extend_from_slice(b";1");
+    }
+    if flags.contains(Flags::DIM) {
+        out.extend_from_slice(b";2");
+    }
+    if flags.contains(Flags::ITALIC) {
+        out.extend_from_slice(b";3");
+    }
+    if flags.contains(Flags::UNDERLINE) {
+        out.extend_from_slice(b";4");
+    }
+    if flags.contains(Flags::INVERSE) {
+        out.extend_from_slice(b";7");
+    }
+    if flags.contains(Flags::HIDDEN) {
+        out.extend_from_slice(b";8");
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        out.extend_from_slice(b";9");
+    }
     append_color_sgr(out, fg, true);
     append_color_sgr(out, bg, false);
     out.push(b'm');
@@ -623,7 +673,11 @@ mod tests {
         let cell2 = buf.cell((2, 0)).unwrap();
         let cell3 = buf.cell((3, 0)).unwrap();
 
-        assert_eq!(cell0.symbol(), "\u{FF01}", "expected full-width ！ at col 0");
+        assert_eq!(
+            cell0.symbol(),
+            "\u{FF01}",
+            "expected full-width ！ at col 0"
+        );
         assert_eq!(cell1.symbol(), " ", "spacer at col 1 should be blank");
         assert_eq!(cell2.symbol(), "🦀", "expected crab at col 2");
         assert_eq!(cell3.symbol(), " ", "spacer at col 3 should be blank");
@@ -698,7 +752,10 @@ mod tests {
         assert_eq!(ga[1].0, 'B', "a: col 1 should be 'B'");
         assert_eq!(ga[1].1, red, "a: 'B' must be red (SGR continuation)");
         assert_eq!(gb[1].0, 'B', "b: col 1 should be 'B'");
-        assert_eq!(gb[1].1, red, "b: 'B' must be red (SGR continuation from snapshot)");
+        assert_eq!(
+            gb[1].1, red,
+            "b: 'B' must be red (SGR continuation from snapshot)"
+        );
     }
 
     /// **Fable M5 – cursor position always emitted.** Even with a hidden
@@ -725,6 +782,9 @@ mod tests {
         b.feed(b"X");
         let grid = b.cell_grid();
         // row=1, col=5 → index = 1*20 + 5 = 25
-        assert_eq!(grid[25].0, 'X', "X must land at row=1 col=5 after snapshot replay");
+        assert_eq!(
+            grid[25].0, 'X',
+            "X must land at row=1 col=5 after snapshot replay"
+        );
     }
 }

@@ -27,7 +27,11 @@ pub enum Outcome {
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
     /// Start claude in `cwd`, resuming `resume` if set, with optional proxy profile.
-    Spawn { cwd: String, resume: Option<String>, proxy: Option<String> },
+    Spawn {
+        cwd: String,
+        resume: Option<String>,
+        proxy: Option<String>,
+    },
 }
 
 // ── Step 0: host selection ────────────────────────────────────────────────────
@@ -55,9 +59,18 @@ impl HostStep {
                 candidates.push(h.clone());
             }
         }
-        let selected = candidates.iter().position(|h| h == active_host).unwrap_or(0);
+        let selected = candidates
+            .iter()
+            .position(|h| h == active_host)
+            .unwrap_or(0);
         let items = candidates.clone();
-        HostStep { input: String::new(), items, selected, connecting: None, candidates }
+        HostStep {
+            input: String::new(),
+            items,
+            selected,
+            connecting: None,
+            candidates,
+        }
     }
 
     /// Handle a key press on the host step.
@@ -300,7 +313,11 @@ impl Wizard {
     /// The currently selected proxy profile name, or `None` when "none".
     pub fn selected_proxy(&self) -> Option<&str> {
         self.proxy_options.get(self.proxy_selected).and_then(|s| {
-            if s == "none" { None } else { Some(s.as_str()) }
+            if s == "none" {
+                None
+            } else {
+                Some(s.as_str())
+            }
         })
     }
 
@@ -324,7 +341,11 @@ impl Wizard {
         if self.listed.as_deref() != Some(path) {
             return;
         }
-        self.completions = entries.iter().filter(|e| e.dir).map(|e| join(path, &e.name)).collect();
+        self.completions = entries
+            .iter()
+            .filter(|e| e.dir)
+            .map(|e| join(path, &e.name))
+            .collect();
         self.refilter();
     }
 
@@ -345,7 +366,11 @@ impl Wizard {
             };
         }
         sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
-        self.resume = Some(ResumeStep { cwd: cwd.to_owned(), sessions, selected: 0 });
+        self.resume = Some(ResumeStep {
+            cwd: cwd.to_owned(),
+            sessions,
+            selected: 0,
+        });
         Outcome::None
     }
 
@@ -392,12 +417,17 @@ impl Wizard {
                     Outcome::None
                 }
                 KeyCode::Right if self.proxy_options.len() > 1 => {
-                    self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
+                    self.proxy_selected =
+                        (self.proxy_selected + 1) % self.proxy_options.len().max(1);
                     Outcome::None
                 }
                 KeyCode::Enter => Outcome::Spawn {
                     cwd: step.cwd.clone(),
-                    resume: step.selected.checked_sub(1).and_then(|i| step.sessions.get(i)).map(|s| s.id.clone()),
+                    resume: step
+                        .selected
+                        .checked_sub(1)
+                        .and_then(|i| step.sessions.get(i))
+                        .map(|s| s.id.clone()),
                     proxy: self.selected_proxy().map(str::to_owned),
                 },
                 _ => Outcome::None,
@@ -548,7 +578,9 @@ impl Wizard {
     /// Expand `~` and drop a trailing slash.
     fn expand(&self, path: &str) -> String {
         let full = match path.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{}{rest}", self.home),
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                format!("{}{rest}", self.home)
+            }
             _ => path.to_owned(),
         };
         trim_slash(&full).to_owned()
@@ -557,9 +589,17 @@ impl Wizard {
 
 /// One resume-picker row for `s`: `{title or last prompt or id} · {age} · {n} msgs`.
 pub fn resume_label(s: &ClaudeSession, now: u64) -> String {
-    let what = s.title.as_deref().or(s.last_prompt.as_deref()).unwrap_or(&s.id);
+    let what = s
+        .title
+        .as_deref()
+        .or(s.last_prompt.as_deref())
+        .unwrap_or(&s.id);
     let what = what.lines().next().unwrap_or("");
-    format!("{what}  ·  {} ago  ·  {} msgs", fmt_age(now.saturating_sub(s.modified)), s.messages)
+    format!(
+        "{what}  ·  {} ago  ·  {} msgs",
+        fmt_age(now.saturating_sub(s.modified)),
+        s.messages
+    )
 }
 
 fn trim_slash(path: &str) -> &str {
@@ -586,7 +626,9 @@ mod tests {
     }
 
     fn type_str(w: &mut Wizard, s: &str) -> Vec<Outcome> {
-        s.chars().map(|c| w.on_key(&press(KeyCode::Char(c)))).collect()
+        s.chars()
+            .map(|c| w.on_key(&press(KeyCode::Char(c))))
+            .collect()
     }
 
     fn strings(v: &[&str]) -> Vec<String> {
@@ -636,11 +678,17 @@ mod tests {
 
     #[test]
     fn typing_filters_and_enter_chooses_highlighted() {
-        let mut w = wizard_local(strings(&["/home/u/repos/claudio", "/srv/app", "/home/u/docs"]), "/home/u");
+        let mut w = wizard_local(
+            strings(&["/home/u/repos/claudio", "/srv/app", "/home/u/docs"]),
+            "/home/u",
+        );
         assert_eq!(w.items.len(), 3);
         type_str(&mut w, "app");
         assert_eq!(w.items, strings(&["/srv/app"]));
-        assert_eq!(w.on_key(&press(KeyCode::Enter)), Outcome::ChooseDir("/srv/app".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/srv/app".into())
+        );
         assert_eq!(w.pending.as_deref(), Some("/srv/app"));
     }
 
@@ -649,7 +697,10 @@ mod tests {
         let mut w = wizard_local(vec![], "/home/u");
         type_str(&mut w, "zzz");
         assert!(w.items.is_empty());
-        assert_eq!(w.on_key(&press(KeyCode::Enter)), Outcome::ChooseDir("zzz".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("zzz".into())
+        );
     }
 
     #[test]
@@ -657,14 +708,29 @@ mod tests {
         let mut w = wizard_local(strings(&["/srv/app"]), "/home/u");
         let outcomes = type_str(&mut w, "~/re");
         assert_eq!(outcomes[0], Outcome::ListDir("/home/u".into()));
-        assert!(outcomes[1..].iter().all(|o| *o == Outcome::None), "listed once per parent");
+        assert!(
+            outcomes[1..].iter().all(|o| *o == Outcome::None),
+            "listed once per parent"
+        );
         w.set_dir_entries(
             "/home/u",
             &[
-                DirEntry { name: "repos".into(), dir: true },
-                DirEntry { name: "readme.md".into(), dir: false },
-                DirEntry { name: "Desktop".into(), dir: true },
-                DirEntry { name: "reports".into(), dir: true },
+                DirEntry {
+                    name: "repos".into(),
+                    dir: true,
+                },
+                DirEntry {
+                    name: "readme.md".into(),
+                    dir: false,
+                },
+                DirEntry {
+                    name: "Desktop".into(),
+                    dir: true,
+                },
+                DirEntry {
+                    name: "reports".into(),
+                    dir: true,
+                },
             ],
         );
         assert_eq!(w.items[..2], strings(&["/home/u/reports", "/home/u/repos"]));
@@ -674,14 +740,23 @@ mod tests {
         assert_eq!(w.input, "~/repos");
         assert_eq!(w.items[0], "/home/u/repos");
         // Descending lists the next directory.
-        assert_eq!(w.on_key(&press(KeyCode::Char('/'))), Outcome::ListDir("/home/u/repos".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Char('/'))),
+            Outcome::ListDir("/home/u/repos".into())
+        );
     }
 
     #[test]
     fn stale_dir_entries_are_ignored() {
         let mut w = wizard_local(vec![], "/h");
         type_str(&mut w, "/a/");
-        w.set_dir_entries("/b", &[DirEntry { name: "x".into(), dir: true }]);
+        w.set_dir_entries(
+            "/b",
+            &[DirEntry {
+                name: "x".into(),
+                dir: true,
+            }],
+        );
         assert!(w.items.is_empty());
     }
 
@@ -696,20 +771,35 @@ mod tests {
             modified,
             messages: 3,
         };
-        assert_eq!(w.set_claude_sessions("/other", vec![s("x", 1)]), Outcome::None, "stale reply");
-        assert_eq!(w.set_claude_sessions("/w", vec![s("old", 1), s("new", 9)]), Outcome::None);
+        assert_eq!(
+            w.set_claude_sessions("/other", vec![s("x", 1)]),
+            Outcome::None,
+            "stale reply"
+        );
+        assert_eq!(
+            w.set_claude_sessions("/w", vec![s("old", 1), s("new", 9)]),
+            Outcome::None
+        );
         let step = w.resume.as_ref().unwrap();
         assert_eq!(step.sessions[0].id, "new");
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
-            Outcome::Spawn { cwd: "/w".into(), resume: None, proxy: None },
+            Outcome::Spawn {
+                cwd: "/w".into(),
+                resume: None,
+                proxy: None
+            },
             "first row is `+ New session`"
         );
         w.on_key(&press(KeyCode::Down));
         w.on_key(&press(KeyCode::Down));
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
-            Outcome::Spawn { cwd: "/w".into(), resume: Some("old".into()), proxy: None }
+            Outcome::Spawn {
+                cwd: "/w".into(),
+                resume: Some("old".into()),
+                proxy: None
+            }
         );
         // Esc goes back to the directory step.
         w.on_key(&press(KeyCode::Esc));
@@ -721,7 +811,14 @@ mod tests {
     fn no_sessions_spawns_directly() {
         let mut w = wizard_local(strings(&["/w"]), "/h");
         w.on_key(&press(KeyCode::Enter));
-        assert_eq!(w.set_claude_sessions("/w", vec![]), Outcome::Spawn { cwd: "/w".into(), resume: None, proxy: None });
+        assert_eq!(
+            w.set_claude_sessions("/w", vec![]),
+            Outcome::Spawn {
+                cwd: "/w".into(),
+                resume: None,
+                proxy: None
+            }
+        );
     }
 
     #[test]
@@ -764,7 +861,14 @@ mod tests {
 
     #[test]
     fn proxy_toggle_available_in_directory_step() {
-        let mut w = Wizard::new(strings(&["/w"]), "/h".into(), "local", &[], &["myproxy".to_owned()], None);
+        let mut w = Wizard::new(
+            strings(&["/w"]),
+            "/h".into(),
+            "local",
+            &[],
+            &["myproxy".to_owned()],
+            None,
+        );
         w.on_host_connected("local", "/h");
         // proxy_options = ["none", "myproxy"], selected = 0 initially
         assert_eq!(w.proxy_selected, 0);
@@ -777,7 +881,14 @@ mod tests {
 
     #[test]
     fn host_paste_sets_host_input() {
-        let mut w = Wizard::new(vec![], "/h".into(), "local", &["server.example.com".to_owned()], &[], None);
+        let mut w = Wizard::new(
+            vec![],
+            "/h".into(),
+            "local",
+            &["server.example.com".to_owned()],
+            &[],
+            None,
+        );
         // Host step is active; paste should go to it.
         assert!(w.host_step.is_some());
         w.on_paste("server.example.com");
@@ -802,7 +913,11 @@ mod tests {
         hs.refilter();
         // "my-server" should appear (m-s-r is a subsequence of my-server).
         // Note: "local" is always first in candidates.
-        assert!(hs.items.iter().any(|h| h == "my-server"), "expected my-server in items: {:?}", hs.items);
+        assert!(
+            hs.items.iter().any(|h| h == "my-server"),
+            "expected my-server in items: {:?}",
+            hs.items
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! Error handling. Every error rendered to a client uses OpenAI's error
 //! envelope shape: `{"error": {"message", "type", "param", "code"}}`.
 
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 
 /// An error that can be returned to a client as an OpenAI-style error response.

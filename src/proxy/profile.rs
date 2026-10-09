@@ -318,7 +318,10 @@ mod tests {
 
     #[test]
     fn debug_redacts_token() {
-        let p = Profile { url: "https://x.net".into(), token: "supersecret".into() };
+        let p = Profile {
+            url: "https://x.net".into(),
+            token: "supersecret".into(),
+        };
         let dbg = format!("{p:?}");
         assert!(!dbg.contains("supersecret"));
         assert!(dbg.contains("[redacted]"));
@@ -329,8 +332,7 @@ mod tests {
 
     #[test]
     fn round_trip_and_file_mode() {
-        let dir = std::env::temp_dir()
-            .join(format!("claudio-proxy-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("claudio-proxy-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
@@ -338,7 +340,10 @@ mod tests {
         sec.default = Some("vocdoni".into());
         sec.profiles.insert(
             "vocdoni".into(),
-            Profile { url: "https://claude.vocdoni.net".into(), token: "topsecret".into() },
+            Profile {
+                url: "https://claude.vocdoni.net".into(),
+                token: "topsecret".into(),
+            },
         );
         save_to(&path, &sec).unwrap();
 
@@ -358,7 +363,10 @@ mod tests {
 
     #[test]
     fn masked_token_long_and_short() {
-        let p = |t: &str| Profile { url: "u".into(), token: t.into() };
+        let p = |t: &str| Profile {
+            url: "u".into(),
+            token: t.into(),
+        };
         assert_eq!(p("abcdefghwxyz").masked_token(), "abcd…wxyz");
         assert_eq!(p("ab").masked_token(), "**");
     }
@@ -367,12 +375,18 @@ mod tests {
     #[test]
     fn masked_token_unicode_no_panic() {
         // Token with multi-byte characters (e.g. emoji = 4 bytes each).
-        let p = Profile { url: "u".into(), token: "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑".into() };
+        let p = Profile {
+            url: "u".into(),
+            token: "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑".into(),
+        };
         // Should not panic; result length varies by char count.
         let masked = p.masked_token();
         assert!(!masked.is_empty());
         // Short token: all stars.
-        let p2 = Profile { url: "u".into(), token: "🔑🔑".into() };
+        let p2 = Profile {
+            url: "u".into(),
+            token: "🔑🔑".into(),
+        };
         assert_eq!(p2.masked_token(), "**");
     }
 
@@ -382,21 +396,28 @@ mod tests {
     /// value in the error message.
     #[test]
     fn toml_error_does_not_leak_token() {
-        let dir = std::env::temp_dir()
-            .join(format!("claudio-proxy-toml-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("claudio-proxy-toml-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
         // Write a malformed TOML where the token line is syntactically invalid.
-        let bad_toml = "[proxy.profiles.x]\nurl = \"https://x.net\"\ntoken = SUPERSECRETTOKEN_NO_QUOTES\n";
+        let bad_toml =
+            "[proxy.profiles.x]\nurl = \"https://x.net\"\ntoken = SUPERSECRETTOKEN_NO_QUOTES\n";
         std::fs::write(&path, bad_toml).unwrap();
 
         let err = load_from(&path).unwrap_err();
         let msg = err.to_string();
         // The error message must not contain the secret value.
-        assert!(!msg.contains("SUPERSECRETTOKEN_NO_QUOTES"), "error leaked token: {msg}");
+        assert!(
+            !msg.contains("SUPERSECRETTOKEN_NO_QUOTES"),
+            "error leaked token: {msg}"
+        );
         // But it should still say something useful (location).
-        assert!(msg.contains("config.toml") || msg.contains("TOML"), "error not useful: {msg}");
+        assert!(
+            msg.contains("config.toml") || msg.contains("TOML"),
+            "error not useful: {msg}"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

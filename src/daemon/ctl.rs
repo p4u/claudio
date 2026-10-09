@@ -12,7 +12,6 @@
 //!    Never signal an unverified PID.
 //! 3. Wait up to 10 s for the socket to disappear.
 
-
 use std::time::{Duration, Instant};
 
 use crate::{client, paths, proto};
@@ -75,7 +74,9 @@ pub fn daemon_status() -> std::process::ExitCode {
     println!("daemon: running (pid {pid_str})");
 
     // Connect and get session count + version.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
     let rt = match rt {
         Ok(rt) => rt,
         Err(e) => {
@@ -104,7 +105,9 @@ pub fn daemon_status() -> std::process::ExitCode {
 pub fn daemon_stop() -> std::process::ExitCode {
     // Strategy 1: authenticated IPC Shutdown.
     if daemon_socket_live() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
         let sent = rt.map(|rt| {
             rt.block_on(async {
                 match client::connect(&paths::daemon_socket()).await {

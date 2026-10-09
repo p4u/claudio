@@ -155,12 +155,20 @@ impl Keymap {
         // Start from defaults (clone the static slice into an owned Vec).
         let mut bindings: Vec<Binding> = DEFAULT_BINDINGS
             .iter()
-            .map(|b| Binding { code: b.code, mods: b.mods, label: b.label, action: b.action })
+            .map(|b| Binding {
+                code: b.code,
+                mods: b.mods,
+                label: b.label,
+                action: b.action,
+            })
             .collect();
 
         for (name, spec) in overrides {
             // Find the action by name.
-            let action = DEFAULT_BINDINGS.iter().find(|b| b.action.name() == name).map(|b| b.action);
+            let action = DEFAULT_BINDINGS
+                .iter()
+                .find(|b| b.action.name() == name)
+                .map(|b| b.action);
             let Some(action) = action else {
                 notices.push(format!("config.toml [keys]: unknown action '{name}'"));
                 continue;
@@ -173,7 +181,10 @@ impl Keymap {
                 }
             };
             // Collision check: reject if another action already claims this key.
-            if let Some(existing) = bindings.iter().find(|b| b.code == code && b.mods == mods && b.action != action) {
+            if let Some(existing) = bindings
+                .iter()
+                .find(|b| b.code == code && b.mods == mods && b.action != action)
+            {
                 notices.push(format!(
                     "config.toml [keys] '{name}': key {} already bound to '{}', skipping",
                     key_str(code, mods),
@@ -204,7 +215,10 @@ impl Keymap {
     /// Generate the help lines from the current effective bindings.
     /// Each entry is `(key_str, label)`.
     pub fn help_entries(&self) -> Vec<(String, &'static str)> {
-        self.bindings.iter().map(|b| (key_str(b.code, b.mods), b.label)).collect()
+        self.bindings
+            .iter()
+            .map(|b| (key_str(b.code, b.mods), b.label))
+            .collect()
     }
 
     /// Generate the status-bar hints line from the current effective bindings.
@@ -344,21 +358,51 @@ mod tests {
     #[test]
     fn default_bindings_match_expected_keys() {
         let km = Keymap::default();
-        assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::ALT)), Some(Action::PrevSession));
-        assert_eq!(km.lookup(&key(KeyCode::Right, KeyModifiers::ALT)), Some(Action::NextSession));
-        assert_eq!(km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), Some(Action::Quit));
-        assert_eq!(km.lookup(&key(KeyCode::Char('a'), KeyModifiers::ALT)), Some(Action::NextAttention));
-        assert_eq!(km.lookup(&key(KeyCode::Char('g'), KeyModifiers::ALT)), Some(Action::Overview));
-        assert_eq!(km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Action::Help));
+        assert_eq!(
+            km.lookup(&key(KeyCode::Left, KeyModifiers::ALT)),
+            Some(Action::PrevSession)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Right, KeyModifiers::ALT)),
+            Some(Action::NextSession)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)),
+            Some(Action::Quit)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('a'), KeyModifiers::ALT)),
+            Some(Action::NextAttention)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('g'), KeyModifiers::ALT)),
+            Some(Action::Overview)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)),
+            Some(Action::Help)
+        );
     }
 
     #[test]
     fn modifiers_must_match_exactly() {
         let km = Keymap::default();
-        assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)), None);
+        assert_eq!(
+            km.lookup(&key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)),
+            None
+        );
         assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::NONE)), None);
-        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)), None);
-        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT | KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            km.lookup(&key(
+                KeyCode::Char('n'),
+                KeyModifiers::ALT | KeyModifiers::CONTROL
+            )),
+            None
+        );
     }
 
     #[test]
@@ -415,23 +459,44 @@ mod tests {
 
     #[test]
     fn parse_special_keys() {
-        assert_eq!(parse_key_spec("esc").unwrap(), (KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(parse_key_spec("enter").unwrap(), (KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(parse_key_spec("tab").unwrap(), (KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(parse_key_spec("pageup").unwrap(), (KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(
+            parse_key_spec("esc").unwrap(),
+            (KeyCode::Esc, KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parse_key_spec("enter").unwrap(),
+            (KeyCode::Enter, KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parse_key_spec("tab").unwrap(),
+            (KeyCode::Tab, KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parse_key_spec("pageup").unwrap(),
+            (KeyCode::PageUp, KeyModifiers::NONE)
+        );
     }
 
     #[test]
     fn parse_shift_tab_becomes_backtab() {
         // shift+tab should canonicalize to BackTab (no SHIFT modifier).
-        assert_eq!(parse_key_spec("shift+tab").unwrap(), (KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(parse_key_spec("alt+shift+tab").unwrap(), (KeyCode::BackTab, KeyModifiers::ALT));
+        assert_eq!(
+            parse_key_spec("shift+tab").unwrap(),
+            (KeyCode::BackTab, KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parse_key_spec("alt+shift+tab").unwrap(),
+            (KeyCode::BackTab, KeyModifiers::ALT)
+        );
     }
 
     #[test]
     fn parse_alt_shift_letter_becomes_uppercase() {
         // alt+shift+g → Alt+G (uppercase, SHIFT removed)
-        assert_eq!(parse_key_spec("alt+shift+g").unwrap(), (KeyCode::Char('G'), KeyModifiers::ALT));
+        assert_eq!(
+            parse_key_spec("alt+shift+g").unwrap(),
+            (KeyCode::Char('G'), KeyModifiers::ALT)
+        );
     }
 
     #[test]
@@ -461,10 +526,20 @@ mod tests {
         let km = Keymap::build(&overrides, &mut notices);
         // Notice should mention the collision.
         assert!(!notices.is_empty(), "expected a collision notice");
-        assert!(notices[0].contains("already bound"), "notice should mention collision: {:?}", notices);
+        assert!(
+            notices[0].contains("already bound"),
+            "notice should mention collision: {:?}",
+            notices
+        );
         // The override must be rejected: alt+q still quits, alt+n still opens wizard.
-        assert_eq!(km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), Some(Action::Quit));
-        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT)), Some(Action::NewSession));
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)),
+            Some(Action::Quit)
+        );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT)),
+            Some(Action::NewSession)
+        );
     }
 
     // ── help_entries ──────────────────────────────────────────────────────────

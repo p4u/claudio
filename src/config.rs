@@ -110,7 +110,12 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
     let file: ConfigFile = toml::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| {
         // Keep only the first line of the TOML error (location), never the source
         // excerpt which could contain a token from the [proxy] section.
-        let loc = e.to_string().lines().next().unwrap_or("TOML parse error").to_owned();
+        let loc = e
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("TOML parse error")
+            .to_owned();
         io::Error::other(format!("{loc} (content redacted)"))
     })?;
     Ok(Config {
@@ -128,8 +133,7 @@ mod tests {
     /// Uses load_from with an explicit temp dir to avoid mutating XDG_CONFIG_HOME.
     #[test]
     fn missing_file_gives_defaults() {
-        let dir =
-            std::env::temp_dir().join(format!("claudio-cfg-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("claudio-cfg-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml"); // does not exist
         let cfg = load_from(&path);
@@ -175,13 +179,16 @@ default = "x"
         std::fs::write(&path, bad).unwrap();
 
         let cfg = load_from(&path); // falls back to defaults, logs to stderr
-        // The config returned is defaults (no panic).
+                                    // The config returned is defaults (no panic).
         assert!(cfg.ui.notify);
         // We can't easily capture stderr here, but we verify the
         // try_load_from error message via direct call.
         let err = try_load_from(&path).unwrap_err();
-        assert!(!err.to_string().contains("MYVERYSECRETTOKEN_UNQUOTED"),
-            "error leaked secret: {}", err);
+        assert!(
+            !err.to_string().contains("MYVERYSECRETTOKEN_UNQUOTED"),
+            "error leaked secret: {}",
+            err
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

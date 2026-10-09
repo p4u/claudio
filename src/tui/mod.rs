@@ -21,11 +21,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange,
-    EnableMouseCapture, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, EventStream, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::{cursor, execute};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -66,7 +68,10 @@ fn emit_notification(label: &str) {
 
 /// Run the manager until the user quits.
 pub fn run() -> ExitCode {
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("claudio: cannot start the async runtime: {e}");
@@ -100,7 +105,16 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = event_loop(&mut terminal, saved, local_client, live, cfg.ui.notify, km, key_notices).await;
+    let result = event_loop(
+        &mut terminal,
+        saved,
+        local_client,
+        live,
+        cfg.ui.notify,
+        km,
+        key_notices,
+    )
+    .await;
     restore_terminal();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -113,7 +127,9 @@ async fn main() -> ExitCode {
 
 /// Start the local daemon if needed, connect and list its sessions.
 async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
-    tokio::task::spawn_blocking(client::ensure_daemon).await.map_err(io::Error::other)??;
+    tokio::task::spawn_blocking(client::ensure_daemon)
+        .await
+        .map_err(io::Error::other)??;
     let client = client::connect(&paths::daemon_socket()).await?;
     list_sessions(&client).await.map(|s| (client, s))
 }
@@ -121,7 +137,9 @@ async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
 async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
     match client.request(Msg::ListSessions).await? {
         Msg::Sessions { sessions } => Ok(sessions),
-        other => Err(io::Error::other(format!("unexpected reply to ListSessions: {other:?}"))),
+        other => Err(io::Error::other(format!(
+            "unexpected reply to ListSessions: {other:?}"
+        ))),
     }
 }
 
@@ -135,9 +153,18 @@ fn enter_terminal() -> io::Result<Term> {
     }));
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
     if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
-        execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
         KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
     }
     Terminal::new(CrosstermBackend::new(out))
@@ -170,11 +197,24 @@ enum HostEvent {
     /// stale events (gen < current) are dropped.
     Incoming(String, u64, Incoming),
     /// A host connection was established (via bootstrap + connect_ssh).
-    Connected { host: String, client: Client, sessions: Vec<SessionInfo>, generation: u64 },
+    Connected {
+        host: String,
+        client: Client,
+        sessions: Vec<SessionInfo>,
+        generation: u64,
+    },
     /// A remote host connection attempt failed.
-    ConnectFailed { host: String, error: String, generation: u64 },
+    ConnectFailed {
+        host: String,
+        error: String,
+        generation: u64,
+    },
     /// A local reconnect completed.
-    LocalReconnected { client: Client, sessions: Vec<SessionInfo>, generation: u64 },
+    LocalReconnected {
+        client: Client,
+        sessions: Vec<SessionInfo>,
+        generation: u64,
+    },
     /// A local reconnect failed; retry after delay.
     LocalReconnectFailed { generation: u64 },
     /// Proxy config fetched (or failed).
@@ -203,7 +243,14 @@ async fn event_loop(
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
-    let mut app = App::new_with_config(size.width, size.height, local_home, saved.recent_dirs.clone(), notify_enabled, km);
+    let mut app = App::new_with_config(
+        size.width,
+        size.height,
+        local_home,
+        saved.recent_dirs.clone(),
+        notify_enabled,
+        km,
+    );
     app.recover(&saved, &live);
 
     // Show any config parse notices in the status bar at startup.
@@ -485,7 +532,12 @@ fn run_effect(
             let name = profile_name.clone();
             tokio::spawn(async move {
                 let config = fetch_proxy_config(&name).await;
-                let _ = tx.send(HostEvent::ProxyConfig { profile_name: name, config }).await;
+                let _ = tx
+                    .send(HostEvent::ProxyConfig {
+                        profile_name: name,
+                        config,
+                    })
+                    .await;
             });
         }
         Effect::FetchProxyStats { profile_name } => {
@@ -493,7 +545,13 @@ fn run_effect(
             let name = profile_name.clone();
             tokio::spawn(async move {
                 let (stats, pool) = fetch_proxy_stats(&name).await;
-                let _ = tx.send(HostEvent::ProxyStats { profile_name: name, stats, pool }).await;
+                let _ = tx
+                    .send(HostEvent::ProxyStats {
+                        profile_name: name,
+                        stats,
+                        pool,
+                    })
+                    .await;
             });
         }
     }
@@ -512,21 +570,37 @@ async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::Con
 /// Fetch proxy stats and pool health for a named profile.
 async fn fetch_proxy_stats(
     profile_name: &str,
-) -> (Option<crate::proxy::api::StatsResponse>, Option<crate::proxy::api::PoolHealthResponse>) {
+) -> (
+    Option<crate::proxy::api::StatsResponse>,
+    Option<crate::proxy::api::PoolHealthResponse>,
+) {
     let Some((url, token)) = proxy_state::resolve_profile(profile_name) else {
         return (None, None);
     };
-    let stats = crate::proxy::api::fetch_stats(&url, &token, "24h").await.ok();
-    let pool = crate::proxy::api::fetch_pool_health(&url, &token).await.ok();
+    let stats = crate::proxy::api::fetch_stats(&url, &token, "24h")
+        .await
+        .ok();
+    let pool = crate::proxy::api::fetch_pool_health(&url, &token)
+        .await
+        .ok();
     (stats, pool)
 }
 
 /// Spawn a task that reads incoming items from `rx` and forwards them,
 /// tagged with `host` and `gen`, to `tx`.
-fn spawn_reader(host: String, gen: u64, mut rx: mpsc::Receiver<Incoming>, tx: mpsc::Sender<HostEvent>) {
+fn spawn_reader(
+    host: String,
+    gen: u64,
+    mut rx: mpsc::Receiver<Incoming>,
+    tx: mpsc::Sender<HostEvent>,
+) {
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
-            if tx.send(HostEvent::Incoming(host.clone(), gen, item)).await.is_err() {
+            if tx
+                .send(HostEvent::Incoming(host.clone(), gen, item))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -541,7 +615,13 @@ fn spawn_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_boots
 }
 
 /// Spawn a task that sleeps `delay` then connects.
-fn spawn_connect_after(host: String, gen: u64, delay: Duration, tx: mpsc::Sender<HostEvent>, skip_bootstrap: bool) {
+fn spawn_connect_after(
+    host: String,
+    gen: u64,
+    delay: Duration,
+    tx: mpsc::Sender<HostEvent>,
+    skip_bootstrap: bool,
+) {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         do_connect(host, gen, tx, skip_bootstrap).await;
@@ -553,7 +633,13 @@ async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bo
     // failure was not a bootstrap failure.
     if !skip_bootstrap {
         if let Err(e) = ensure_remote(&host).await {
-            let _ = tx.send(HostEvent::ConnectFailed { host, error: e, generation: gen }).await;
+            let _ = tx
+                .send(HostEvent::ConnectFailed {
+                    host,
+                    error: e,
+                    generation: gen,
+                })
+                .await;
             return;
         }
     }
@@ -564,16 +650,31 @@ async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bo
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx
-                        .send(HostEvent::ConnectFailed { host, error: e.to_string(), generation: gen })
+                        .send(HostEvent::ConnectFailed {
+                            host,
+                            error: e.to_string(),
+                            generation: gen,
+                        })
                         .await;
                     return;
                 }
             };
-            let _ = tx.send(HostEvent::Connected { host, client, sessions, generation: gen }).await;
+            let _ = tx
+                .send(HostEvent::Connected {
+                    host,
+                    client,
+                    sessions,
+                    generation: gen,
+                })
+                .await;
         }
         Err(e) => {
             let _ = tx
-                .send(HostEvent::ConnectFailed { host, error: e.to_string(), generation: gen })
+                .send(HostEvent::ConnectFailed {
+                    host,
+                    error: e.to_string(),
+                    generation: gen,
+                })
                 .await;
         }
     }

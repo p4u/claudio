@@ -87,7 +87,10 @@ mod tests {
     #[test]
     fn claude_aliases_pass_through() {
         assert_eq!(map_model(Some("opus"), "sonnet"), "opus");
-        assert_eq!(map_model(Some("claude-opus-4-8"), "sonnet"), "claude-opus-4-8");
+        assert_eq!(
+            map_model(Some("claude-opus-4-8"), "sonnet"),
+            "claude-opus-4-8"
+        );
     }
 
     #[test]

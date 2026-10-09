@@ -26,8 +26,8 @@
 
 use std::env;
 use std::process::Command;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +40,9 @@ const BINARY: &str = env!("CARGO_BIN_EXE_claudio");
 
 /// Return the test host, or `None` to skip SSH tests.
 fn test_host() -> Option<String> {
-    env::var("CLAUDIO_SSH_TEST_HOST").ok().filter(|h| !h.is_empty())
+    env::var("CLAUDIO_SSH_TEST_HOST")
+        .ok()
+        .filter(|h| !h.is_empty())
 }
 
 /// Run `claudio <args>` and return (stdout, stderr, success).
@@ -62,7 +64,10 @@ fn ssh_run(host: &str, cmd: &str) -> (String, bool) {
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, cmd])
         .output()
         .unwrap_or_else(|e| panic!("ssh failed: {e}"));
-    (String::from_utf8_lossy(&out.stdout).trim().to_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        out.status.success(),
+    )
 }
 
 /// Read the remote claudio daemon's PID via SSH by reading its lock file.
@@ -71,7 +76,8 @@ fn ssh_run(host: &str, cmd: &str) -> (String, bool) {
 /// remote, falling back to `/tmp/claudio-<uid>/daemon-v1.lock` when
 /// `XDG_RUNTIME_DIR` is not set (macOS, non-systemd).
 fn remote_daemon_pid(host: &str) -> Option<u32> {
-    let cmd = r#"cat "${XDG_RUNTIME_DIR:-/tmp/claudio-$(id -u)}/claudio/daemon-v1.lock" 2>/dev/null"#;
+    let cmd =
+        r#"cat "${XDG_RUNTIME_DIR:-/tmp/claudio-$(id -u)}/claudio/daemon-v1.lock" 2>/dev/null"#;
     let (stdout, ok) = ssh_run(host, cmd);
     if ok || !stdout.is_empty() {
         stdout.trim().parse().ok()
@@ -93,10 +99,17 @@ fn t1_probe_local() {
         serde_json::from_str(line).expect("__probe output is not valid JSON");
 
     for field in &["version", "proto", "os", "arch", "build"] {
-        assert!(v.get(field).is_some(), "missing '{field}' in probe JSON: {line}");
+        assert!(
+            v.get(field).is_some(),
+            "missing '{field}' in probe JSON: {line}"
+        );
     }
     let build = v["build"].as_str().unwrap_or("");
-    assert_eq!(build.len(), 64, "build must be a 64-char SHA-256 hex string, got: {build}");
+    assert_eq!(
+        build.len(),
+        64,
+        "build must be a 64-char SHA-256 hex string, got: {build}"
+    );
 
     println!(
         "[t1] local probe OK: version={} os={} arch={} build={}…",
@@ -140,7 +153,10 @@ fn t2_bootstrap_idempotent() {
 
     // Run the bootstrap via `claudio __bootstrap HOST`.
     let (stdout1, stderr1, ok1) = run_claudio(&["__bootstrap", &host]);
-    assert!(ok1, "first __bootstrap failed:\nstdout: {stdout1}\nstderr: {stderr1}");
+    assert!(
+        ok1,
+        "first __bootstrap failed:\nstdout: {stdout1}\nstderr: {stderr1}"
+    );
     println!("[t2] first bootstrap:\n{stdout1}");
 
     // After bootstrap, `claudio __probe` must work on the remote.
@@ -152,8 +168,7 @@ fn t2_bootstrap_idempotent() {
     );
 
     let remote_json: serde_json::Value =
-        serde_json::from_str(remote_probe.lines().next().unwrap_or("{}"))
-            .unwrap_or_default();
+        serde_json::from_str(remote_probe.lines().next().unwrap_or("{}")).unwrap_or_default();
     let remote_build = remote_json["build"].as_str().unwrap_or("").to_owned();
     assert_eq!(
         remote_build, local_build,
@@ -166,7 +181,10 @@ fn t2_bootstrap_idempotent() {
 
     // Second bootstrap must report up-to-date (was_current=true).
     let (stdout2, stderr2, ok2) = run_claudio(&["__bootstrap", &host]);
-    assert!(ok2, "second __bootstrap failed:\nstdout: {stdout2}\nstderr: {stderr2}");
+    assert!(
+        ok2,
+        "second __bootstrap failed:\nstdout: {stdout2}\nstderr: {stderr2}"
+    );
     assert!(
         stdout2.contains("up-to-date") || stdout2.contains("was_current=true"),
         "second bootstrap should report up-to-date:\n{stdout2}"
@@ -193,12 +211,18 @@ fn t3_connect_ssh_welcome() {
 
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|_| panic!("__connect-check output is not JSON: {stdout}"));
-    assert!(!v["host"].as_str().unwrap_or("").is_empty(), "Welcome.host must be non-empty");
+    assert!(
+        !v["host"].as_str().unwrap_or("").is_empty(),
+        "Welcome.host must be non-empty"
+    );
     assert!(
         v["claude_ok"].as_bool().unwrap_or(false),
         "Welcome.claude_ok should be true if claude is installed on {host}"
     );
-    println!("[t3] welcome: host={} claude_ok={} ✓", v["host"], v["claude_ok"]);
+    println!(
+        "[t3] welcome: host={} claude_ok={} ✓",
+        v["host"], v["claude_ok"]
+    );
 }
 
 // ── t4: spawn, attach, snapshot ──────────────────────────────────────────────
@@ -281,7 +305,10 @@ fn t5_session_pid_survives_reconnect() {
         "remote daemon PID changed — daemon was restarted during the drop; \
          this means sessions were lost"
     );
-    println!("[t5] daemon PID unchanged ({:?}) — sessions survived ✓", pid_before);
+    println!(
+        "[t5] daemon PID unchanged ({:?}) — sessions survived ✓",
+        pid_before
+    );
 }
 
 // ── t6: clean disconnect ──────────────────────────────────────────────────────
@@ -303,7 +330,10 @@ fn t6_clean_disconnect_daemon_survives() {
     assert!(ok, "connect-check failed: {stderr}");
 
     let pid_mid = remote_daemon_pid(&host);
-    println!("[t6] daemon pid after first clean disconnect: {:?}", pid_mid);
+    println!(
+        "[t6] daemon pid after first clean disconnect: {:?}",
+        pid_mid
+    );
 
     // Daemon must still respond after a clean exit.
     thread::sleep(Duration::from_millis(200));
@@ -329,7 +359,10 @@ fn t6_clean_disconnect_daemon_survives() {
 fn t7_ssh_hosts_cli() {
     let (stdout, _stderr, _ok) = run_claudio(&["__ssh-hosts"]);
     // Output may be empty — that's fine.  We just check no panic.
-    println!("[t7] local SSH hosts ({} entries):\n{stdout}", stdout.lines().count());
+    println!(
+        "[t7] local SSH hosts ({} entries):\n{stdout}",
+        stdout.lines().count()
+    );
 }
 
 // ── t8: probe JSON parsing (no network) ──────────────────────────────────────
@@ -351,7 +384,14 @@ fn t8_probe_roundtrip() {
     // Build hash must be exactly 64 hex chars.
     let build = v["build"].as_str().unwrap_or("");
     assert_eq!(build.len(), 64, "build must be 64 hex chars");
-    assert!(build.chars().all(|c| c.is_ascii_hexdigit()), "build must be hex");
+    assert!(
+        build.chars().all(|c| c.is_ascii_hexdigit()),
+        "build must be hex"
+    );
 
-    println!("[t8] probe round-trip ✓ build={}…{}", &build[..4], &build[60..]);
+    println!(
+        "[t8] probe round-trip ✓ build={}…{}",
+        &build[..4],
+        &build[60..]
+    );
 }

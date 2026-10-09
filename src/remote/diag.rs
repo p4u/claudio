@@ -144,7 +144,14 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
         }
 
         // Attach to get terminal data.
-        match client.request(Msg::Attach { id: session_id, rows: 24, cols: 80 }).await {
+        match client
+            .request(Msg::Attach {
+                id: session_id,
+                rows: 24,
+                cols: 80,
+            })
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("Attach request failed: {e}");

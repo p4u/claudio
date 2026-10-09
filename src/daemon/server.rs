@@ -89,7 +89,11 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     tokio::spawn(async move {
         warm.host().await;
     });
-    Ok(Some(Listening { daemon, listener, _lock: lock }))
+    Ok(Some(Listening {
+        daemon,
+        listener,
+        _lock: lock,
+    }))
 }
 
 /// Bind `path`, replacing a stale socket left by a dead daemon (we hold the
@@ -190,7 +194,11 @@ async fn connection(daemon: Arc<Daemon>, mut stream: UnixStream, client: ClientI
         }
     };
     match first.msg {
-        Msg::Hook { token, event, payload } => daemon.hook(&token, event, payload).await,
+        Msg::Hook {
+            token,
+            event,
+            payload,
+        } => daemon.hook(&token, event, payload).await,
         Msg::Hello(hello) if hello.proto == PROTO => {
             tracing::debug!(client, version = %hello.claudio_version, "client connected");
             client_loop(daemon, stream, client, first.req).await;
@@ -210,7 +218,10 @@ async fn connection(daemon: Arc<Daemon>, mut stream: UnixStream, client: ClientI
 }
 
 async fn refuse(stream: &mut UnixStream, req: Option<u64>, message: String) -> io::Result<()> {
-    let reply = Envelope { req, msg: Msg::Error { message } };
+    let reply = Envelope {
+        req,
+        msg: Msg::Error { message },
+    };
     proto::write_frame(stream, &Frame::Control(reply)).await
 }
 
@@ -229,14 +240,23 @@ async fn client_loop(
 
     // Subscribe before Welcome so no event after it is missed.
     let events = daemon.events.subscribe();
-    let mut client = Client { id, daemon, queue, events, attached: HashSet::new() };
+    let mut client = Client {
+        id,
+        daemon,
+        queue,
+        events,
+        attached: HashSet::new(),
+    };
     let welcome = Welcome {
         claudio_version: env!("CARGO_PKG_VERSION").to_owned(),
         proto: PROTO,
         host: client.daemon.host().await,
     };
     // Queued directly (no event flush): Welcome is always the first frame.
-    let welcome = Envelope { req: hello_req, msg: Msg::Welcome(welcome) };
+    let welcome = Envelope {
+        req: hello_req,
+        msg: Msg::Welcome(welcome),
+    };
     let _ = client.queue.send(Frame::Control(welcome)).await;
 
     loop {
@@ -266,7 +286,10 @@ enum Inbound {
     Frame(Frame),
     /// A well-framed control message we could not decode (e.g. an op from a
     /// newer client). Answered with `Error`; the connection stays up.
-    Undecodable { req: Option<u64>, message: String },
+    Undecodable {
+        req: Option<u64>,
+        message: String,
+    },
 }
 
 async fn read_loop(mut rd: OwnedReadHalf, inbound: mpsc::Sender<Inbound>) {
@@ -319,7 +342,10 @@ fn undecodable(body: &[u8], error: io::Error) -> Option<Inbound> {
     let req = serde_json::from_slice::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.get("req").and_then(serde_json::Value::as_u64));
-    Some(Inbound::Undecodable { req, message: format!("unsupported request: {error}") })
+    Some(Inbound::Undecodable {
+        req,
+        message: format!("unsupported request: {error}"),
+    })
 }
 
 async fn write_loop(mut wr: OwnedWriteHalf, mut queue: mpsc::Receiver<Frame>) {
@@ -363,12 +389,16 @@ impl Client {
                 self.daemon.shutdown.notify_one();
                 Msg::Ok
             }
-            Msg::ListSessions => Msg::Sessions { sessions: self.daemon.sessions().await },
+            Msg::ListSessions => Msg::Sessions {
+                sessions: self.daemon.sessions().await,
+            },
             Msg::Spawn(spec) => {
                 let id = spec.id;
                 match self.daemon.spawn(spec).await {
                     Ok(pid) => Msg::Spawned { id, pid },
-                    Err(e) => Msg::Error { message: e.to_string() },
+                    Err(e) => Msg::Error {
+                        message: e.to_string(),
+                    },
                 }
             }
             Msg::Attach { id, rows, cols } => match self.attach(req, id, rows, cols).await {
@@ -381,19 +411,31 @@ impl Client {
                 self.to_session(id, Cmd::Detach { client: self.id }).await
             }
             Msg::Resize { id, rows, cols } => {
-                self.to_session(id, Cmd::Resize { client: self.id, rows, cols }).await
+                self.to_session(
+                    id,
+                    Cmd::Resize {
+                        client: self.id,
+                        rows,
+                        cols,
+                    },
+                )
+                .await
             }
             Msg::Kill { id } => {
                 self.attached.remove(&id);
                 match self.daemon.kill(id).await {
                     Ok(()) => Msg::Ok,
-                    Err(e) => Msg::Error { message: e.to_string() },
+                    Err(e) => Msg::Error {
+                        message: e.to_string(),
+                    },
                 }
             }
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
             Msg::RecentProjects { limit } => recent_projects(limit).await,
-            other => Msg::Error { message: format!("unsupported op: {}", op_name(&other)) },
+            other => Msg::Error {
+                message: format!("unsupported op: {}", op_name(&other)),
+            },
         };
         self.reply(req, reply).await;
     }
@@ -406,8 +448,13 @@ impl Client {
         cols: u16,
     ) -> Result<(), String> {
         let tx = self.daemon.session(id).ok_or_else(|| not_running(id))?;
-        let cmd =
-            Cmd::Attach { client: self.id, queue: self.queue.clone(), req, rows, cols };
+        let cmd = Cmd::Attach {
+            client: self.id,
+            queue: self.queue.clone(),
+            req,
+            rows,
+            cols,
+        };
         tx.send(cmd).await.map_err(|_| not_running(id))?;
         self.attached.insert(id);
         Ok(())
@@ -417,7 +464,9 @@ impl Client {
     async fn to_session(&self, id: SessionId, cmd: Cmd) -> Msg {
         match self.daemon.session(id) {
             Some(tx) if tx.send(cmd).await.is_ok() => Msg::Ok,
-            _ => Msg::Error { message: not_running(id) },
+            _ => Msg::Error {
+                message: not_running(id),
+            },
         }
     }
 
@@ -486,10 +535,16 @@ async fn list_dir(path: String) -> Msg {
                 used += sz;
                 capped.push(entry);
             }
-            Msg::DirEntries { path, entries: capped, truncated }
+            Msg::DirEntries {
+                path,
+                entries: capped,
+                truncated,
+            }
         }
         Ok(Err(message)) => Msg::Error { message },
-        Err(e) => Msg::Error { message: format!("list_dir failed: {e}") },
+        Err(e) => Msg::Error {
+            message: format!("list_dir failed: {e}"),
+        },
     }
 }
 
@@ -497,7 +552,9 @@ async fn list_claude_sessions(cwd: String) -> Msg {
     let dir = host::expand_tilde(&cwd);
     match tokio::task::spawn_blocking(move || projects::list_sessions(&dir)).await {
         Ok(sessions) => Msg::ClaudeSessions { cwd, sessions },
-        Err(e) => Msg::Error { message: format!("list_claude_sessions failed: {e}") },
+        Err(e) => Msg::Error {
+            message: format!("list_claude_sessions failed: {e}"),
+        },
     }
 }
 
@@ -513,7 +570,9 @@ async fn recent_projects(limit: u32) -> Msg {
                 })
                 .collect(),
         },
-        Err(e) => Msg::Error { message: format!("recent_projects failed: {e}") },
+        Err(e) => Msg::Error {
+            message: format!("recent_projects failed: {e}"),
+        },
     }
 }
 

@@ -51,7 +51,12 @@ impl Connections {
         let mut map = HashMap::new();
         map.insert(
             "local".to_owned(),
-            HostConn { client: Some(client), reconnect_delay: RECONNECT_INIT, generation: 0, bootstrap_failed: false },
+            HostConn {
+                client: Some(client),
+                reconnect_delay: RECONNECT_INIT,
+                generation: 0,
+                bootstrap_failed: false,
+            },
         );
         Connections { map }
     }
@@ -60,12 +65,17 @@ impl Connections {
     /// Call this before scheduling the first connection attempt to a host,
     /// so that backoff state is tracked even before first success.
     pub fn ensure_host(&mut self, host: &str) {
-        self.map.entry(host.to_owned()).or_insert_with(HostConn::new);
+        self.map
+            .entry(host.to_owned())
+            .or_insert_with(HostConn::new);
     }
 
     /// Increment and return the new generation for `host`.
     pub fn next_generation(&mut self, host: &str) -> u64 {
-        let conn = self.map.entry(host.to_owned()).or_insert_with(HostConn::new);
+        let conn = self
+            .map
+            .entry(host.to_owned())
+            .or_insert_with(HostConn::new);
         conn.generation += 1;
         conn.generation
     }
@@ -81,7 +91,10 @@ impl Connections {
 
     /// Record a successful connection.
     pub fn connected(&mut self, host: &str, client: Client) {
-        let conn = self.map.entry(host.to_owned()).or_insert_with(HostConn::new);
+        let conn = self
+            .map
+            .entry(host.to_owned())
+            .or_insert_with(HostConn::new);
         conn.client = Some(client);
         conn.reconnect_delay = RECONNECT_INIT;
         conn.bootstrap_failed = false;
@@ -101,7 +114,10 @@ impl Connections {
 
     /// The current reconnect delay for `host`.
     pub fn reconnect_delay(&self, host: &str) -> Duration {
-        self.map.get(host).map(|c| c.reconnect_delay).unwrap_or(RECONNECT_INIT)
+        self.map
+            .get(host)
+            .map(|c| c.reconnect_delay)
+            .unwrap_or(RECONNECT_INIT)
     }
 
     /// Double the reconnect delay with ±20% jitter, capped at `RECONNECT_MAX`.
@@ -133,7 +149,10 @@ impl Connections {
 
     /// Whether the last failure was a bootstrap failure.
     pub fn bootstrap_failed(&self, host: &str) -> bool {
-        self.map.get(host).map(|c| c.bootstrap_failed).unwrap_or(false)
+        self.map
+            .get(host)
+            .map(|c| c.bootstrap_failed)
+            .unwrap_or(false)
     }
 }
 

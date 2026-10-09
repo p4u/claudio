@@ -67,10 +67,20 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, PartialEq)]
 pub enum Incoming {
     /// Terminal output for an attached session.
-    Data { id: SessionId, bytes: Vec<u8> },
+    Data {
+        id: SessionId,
+        bytes: Vec<u8>,
+    },
     /// Reset the session's mirror to this size; a snapshot follows as `Data`.
-    Attached { id: SessionId, rows: u16, cols: u16 },
-    Event { id: SessionId, event: SessionEvent },
+    Attached {
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+    },
+    Event {
+        id: SessionId,
+        event: SessionEvent,
+    },
     /// The connection is gone; nothing else follows.
     Disconnected,
 }
@@ -135,9 +145,18 @@ pub async fn connect_ssh(host: &str) -> io::Result<Client> {
         .kill_on_drop(true)
         .spawn()?;
 
-    let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no ssh stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no ssh stdout"))?;
-    let stderr = child.stderr.take().ok_or_else(|| io::Error::other("no ssh stderr"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("no ssh stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("no ssh stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("no ssh stderr"))?;
 
     // Supervisor: owns the child, logs stderr, and reaps on exit.
     let host_owned = host.to_owned();
@@ -150,7 +169,10 @@ pub async fn connect_ssh(host: &str) -> io::Result<Client> {
         let _ = child.wait().await;
     });
 
-    let pair = SshPair { rd: stdout, wr: stdin };
+    let pair = SshPair {
+        rd: stdout,
+        wr: stdin,
+    };
     Client::handshake(pair).await
 }
 
@@ -222,19 +244,32 @@ impl Client {
             proto: PROTO,
             colors: None,
         };
-        write_frame(&mut wr, &Frame::Control(Envelope::request(0, Msg::Hello(hello)))).await?;
+        write_frame(
+            &mut wr,
+            &Frame::Control(Envelope::request(0, Msg::Hello(hello))),
+        )
+        .await?;
         let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut rd))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "daemon handshake timed out"))??;
         let welcome = match first {
-            Some(Frame::Control(Envelope { msg: Msg::Welcome(w), .. })) if w.proto == PROTO => w,
-            Some(Frame::Control(Envelope { msg: Msg::Welcome(w), .. })) => {
+            Some(Frame::Control(Envelope {
+                msg: Msg::Welcome(w),
+                ..
+            })) if w.proto == PROTO => w,
+            Some(Frame::Control(Envelope {
+                msg: Msg::Welcome(w),
+                ..
+            })) => {
                 return Err(io::Error::other(format!(
                     "daemon speaks protocol {}, this claudio speaks {PROTO}",
                     w.proto
                 )))
             }
-            Some(Frame::Control(Envelope { msg: Msg::Error { message }, .. })) => {
+            Some(Frame::Control(Envelope {
+                msg: Msg::Error { message },
+                ..
+            })) => {
                 return Err(io::Error::other(format!(
                     "daemon refused the connection: {message}"
                 )))
@@ -269,7 +304,12 @@ impl Client {
         });
 
         tokio::spawn(write_loop(wr, out_rx, Arc::clone(&write_died)));
-        tokio::spawn(read_loop(rd, Arc::clone(&pending), in_tx, Arc::clone(&write_died)));
+        tokio::spawn(read_loop(
+            rd,
+            Arc::clone(&pending),
+            in_tx,
+            Arc::clone(&write_died),
+        ));
 
         // Heartbeat task.
         let hb_shared = Arc::clone(&shared);
@@ -287,7 +327,11 @@ impl Client {
 
     /// The channel of unsolicited messages. It can be taken only once.
     pub fn take_incoming(&self) -> Option<mpsc::Receiver<Incoming>> {
-        self.shared.incoming.lock().unwrap_or_else(|p| p.into_inner()).take()
+        self.shared
+            .incoming
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
     }
 
     /// Send `msg` as a request and await the reply carrying its `req` id.
@@ -298,7 +342,11 @@ impl Client {
     ///
     /// A 30-second deadline applies to all requests; `Spawn` gets 60 seconds.
     pub fn request(&self, msg: Msg) -> impl Future<Output = io::Result<Msg>> + Send + 'static {
-        let timeout = if matches!(msg, Msg::Spawn(_)) { SPAWN_TIMEOUT } else { REQUEST_TIMEOUT };
+        let timeout = if matches!(msg, Msg::Spawn(_)) {
+            SPAWN_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        };
         let queued = self.enqueue(msg);
         async move {
             let recv = queued?;
@@ -322,7 +370,12 @@ impl Client {
             pending.waiting.insert(req, tx);
         }
         // Use `try_send` to avoid blocking; if the channel is full we fail fast.
-        if self.shared.out.try_send(Frame::Control(Envelope::request(req, msg))).is_err() {
+        if self
+            .shared
+            .out
+            .try_send(Frame::Control(Envelope::request(req, msg)))
+            .is_err()
+        {
             lock(&self.shared.pending).waiting.remove(&req);
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -335,7 +388,10 @@ impl Client {
     /// Send keyboard/mouse input to a session (fire and forget).
     pub fn send_input(&self, id: SessionId, bytes: &[u8]) {
         for chunk in bytes.chunks(INPUT_CHUNK) {
-            let _ = self.shared.out.try_send(Frame::Data { session: id, bytes: chunk.to_vec() });
+            let _ = self.shared.out.try_send(Frame::Data {
+                session: id,
+                bytes: chunk.to_vec(),
+            });
         }
     }
 }
@@ -442,7 +498,9 @@ async fn heartbeat_loop(shared: Arc<Shared>) {
             }
             p.waiting.insert(req, tx);
         }
-        let _ = shared.out.try_send(Frame::Control(Envelope::request(req, Msg::Ping)));
+        let _ = shared
+            .out
+            .try_send(Frame::Control(Envelope::request(req, Msg::Ping)));
     }
 }
 
@@ -451,12 +509,15 @@ async fn heartbeat_loop(shared: Arc<Shared>) {
 /// snapshot `Data` that follows it.
 fn route(env: Envelope, pending: &Mutex<Pending>) -> Option<Incoming> {
     let item = match &env.msg {
-        Msg::Attached { id, rows, cols } => {
-            Some(Incoming::Attached { id: *id, rows: *rows, cols: *cols })
-        }
-        Msg::Event { id, event } if env.req.is_none() => {
-            Some(Incoming::Event { id: *id, event: event.clone() })
-        }
+        Msg::Attached { id, rows, cols } => Some(Incoming::Attached {
+            id: *id,
+            rows: *rows,
+            cols: *cols,
+        }),
+        Msg::Event { id, event } if env.req.is_none() => Some(Incoming::Event {
+            id: *id,
+            event: event.clone(),
+        }),
         _ => None,
     };
     if let Some(req) = env.req {
@@ -479,9 +540,16 @@ pub fn ensure_daemon() -> io::Result<()> {
         return Ok(());
     }
     let log_path = dir.join("daemon.log");
-    let log = OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log_path)?;
     let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg("--daemon").stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
+    cmd.arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
     // SAFETY: setsid is async-signal-safe and touches no parent state.
     unsafe {
         cmd.pre_exec(|| {
@@ -510,7 +578,10 @@ pub fn ensure_daemon() -> io::Result<()> {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("daemon did not start within 5 s; see {}", log_path.display()),
+                format!(
+                    "daemon did not start within 5 s; see {}",
+                    log_path.display()
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -538,7 +609,11 @@ pub fn verify_peer_uid(stream: &UnixStream) -> io::Result<()> {
 fn peer_uid_fd(fd: std::os::unix::io::RawFd) -> io::Result<u32> {
     #[cfg(target_os = "linux")]
     {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let rc = unsafe {
             libc::getsockopt(
@@ -597,17 +672,24 @@ mod tests {
     /// Answer the handshake on the daemon side of `stream`.
     async fn accept<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, reply: Msg) {
         match read_frame(stream).await.unwrap() {
-            Some(Frame::Control(Envelope { msg: Msg::Hello(h), .. })) => {
+            Some(Frame::Control(Envelope {
+                msg: Msg::Hello(h), ..
+            })) => {
                 assert_eq!(h.proto, PROTO)
             }
             other => panic!("expected Hello, got {other:?}"),
         }
-        write_frame(stream, &Frame::Control(Envelope::event(reply))).await.unwrap();
+        write_frame(stream, &Frame::Control(Envelope::event(reply)))
+            .await
+            .unwrap();
     }
 
     async fn next_request<S: AsyncRead + Unpin>(stream: &mut S) -> (u64, Msg) {
         match read_frame(stream).await.unwrap() {
-            Some(Frame::Control(Envelope { req: Some(req), msg })) => (req, msg),
+            Some(Frame::Control(Envelope {
+                req: Some(req),
+                msg,
+            })) => (req, msg),
             other => panic!("expected a request, got {other:?}"),
         }
     }
@@ -625,27 +707,51 @@ mod tests {
             // Unsolicited traffic first, then the replies out of order.
             let ev = Msg::Event {
                 id,
-                event: SessionEvent::State { state: SessionState::Idle },
+                event: SessionEvent::State {
+                    state: SessionState::Idle,
+                },
             };
-            write_frame(&mut daemon, &Frame::Control(Envelope::event(ev))).await.unwrap();
-            write_frame(&mut daemon, &Frame::Data { session: id, bytes: b"hi".to_vec() })
+            write_frame(&mut daemon, &Frame::Control(Envelope::event(ev)))
                 .await
                 .unwrap();
+            write_frame(
+                &mut daemon,
+                &Frame::Data {
+                    session: id,
+                    bytes: b"hi".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
             let sessions = Msg::Sessions { sessions: vec![] };
-            write_frame(&mut daemon, &Frame::Control(Envelope::request(r2, sessions)))
-                .await
-                .unwrap();
-            write_frame(&mut daemon, &Frame::Control(Envelope::request(r1, Msg::Pong)))
-                .await
-                .unwrap();
+            write_frame(
+                &mut daemon,
+                &Frame::Control(Envelope::request(r2, sessions)),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut daemon,
+                &Frame::Control(Envelope::request(r1, Msg::Pong)),
+            )
+            .await
+            .unwrap();
             // An error reply and an input frame.
             let (r3, _) = next_request(&mut daemon).await;
-            let err = Msg::Error { message: "no such dir".into() };
+            let err = Msg::Error {
+                message: "no such dir".into(),
+            };
             write_frame(&mut daemon, &Frame::Control(Envelope::request(r3, err)))
                 .await
                 .unwrap();
             let input = read_frame(&mut daemon).await.unwrap();
-            assert_eq!(input, Some(Frame::Data { session: id, bytes: b"x".to_vec() }));
+            assert_eq!(
+                input,
+                Some(Frame::Data {
+                    session: id,
+                    bytes: b"x".to_vec()
+                })
+            );
             daemon
         });
 
@@ -660,7 +766,12 @@ mod tests {
         assert_eq!(ping.unwrap(), Msg::Pong);
         assert_eq!(list.unwrap(), Msg::Sessions { sessions: vec![] });
 
-        let err = client.request(Msg::ListDir { path: "/nope".into() }).await.unwrap_err();
+        let err = client
+            .request(Msg::ListDir {
+                path: "/nope".into(),
+            })
+            .await
+            .unwrap_err();
         assert_eq!(err.to_string(), "no such dir");
         client.send_input(Uuid::nil(), b"x");
 
@@ -668,12 +779,17 @@ mod tests {
             incoming.recv().await,
             Some(Incoming::Event {
                 id: Uuid::nil(),
-                event: SessionEvent::State { state: SessionState::Idle }
+                event: SessionEvent::State {
+                    state: SessionState::Idle
+                }
             })
         );
         assert_eq!(
             incoming.recv().await,
-            Some(Incoming::Data { id: Uuid::nil(), bytes: b"hi".to_vec() })
+            Some(Incoming::Data {
+                id: Uuid::nil(),
+                bytes: b"hi".to_vec()
+            })
         );
 
         // The daemon going away fails new requests and reports Disconnected.
@@ -689,30 +805,72 @@ mod tests {
         let fake = tokio::spawn(async move {
             accept(&mut daemon, welcome(PROTO)).await;
             let (req, _) = next_request(&mut daemon).await;
-            let attached = Msg::Attached { id, rows: 10, cols: 20 };
-            write_frame(&mut daemon, &Frame::Control(Envelope::request(req, attached)))
-                .await
-                .unwrap();
-            write_frame(&mut daemon, &Frame::Data { session: id, bytes: b"snap".to_vec() })
-                .await
-                .unwrap();
+            let attached = Msg::Attached {
+                id,
+                rows: 10,
+                cols: 20,
+            };
+            write_frame(
+                &mut daemon,
+                &Frame::Control(Envelope::request(req, attached)),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut daemon,
+                &Frame::Data {
+                    session: id,
+                    bytes: b"snap".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
             daemon
         });
         let client = Client::handshake(ours).await.unwrap();
         let mut incoming = client.take_incoming().unwrap();
-        let reply = client.request(Msg::Attach { id, rows: 10, cols: 20 }).await.unwrap();
-        assert_eq!(reply, Msg::Attached { id, rows: 10, cols: 20 });
-        assert_eq!(incoming.recv().await, Some(Incoming::Attached { id, rows: 10, cols: 20 }));
+        let reply = client
+            .request(Msg::Attach {
+                id,
+                rows: 10,
+                cols: 20,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reply,
+            Msg::Attached {
+                id,
+                rows: 10,
+                cols: 20
+            }
+        );
         assert_eq!(
             incoming.recv().await,
-            Some(Incoming::Data { id, bytes: b"snap".to_vec() })
+            Some(Incoming::Attached {
+                id,
+                rows: 10,
+                cols: 20
+            })
+        );
+        assert_eq!(
+            incoming.recv().await,
+            Some(Incoming::Data {
+                id,
+                bytes: b"snap".to_vec()
+            })
         );
         drop(fake.await.unwrap());
     }
 
     #[tokio::test]
     async fn handshake_rejects_protocol_mismatch_and_errors() {
-        for reply in [welcome(PROTO + 1), Msg::Error { message: "go away".into() }] {
+        for reply in [
+            welcome(PROTO + 1),
+            Msg::Error {
+                message: "go away".into(),
+            },
+        ] {
             let (ours, mut daemon) = tokio::io::duplex(4096);
             let fake = tokio::spawn(async move {
                 accept(&mut daemon, reply).await;
@@ -729,9 +887,12 @@ mod tests {
         let fake = tokio::spawn(async move {
             accept(&mut daemon, welcome(PROTO)).await;
             let (req, _) = next_request(&mut daemon).await;
-            write_frame(&mut daemon, &Frame::Control(Envelope::request(req, Msg::Pong)))
-                .await
-                .unwrap();
+            write_frame(
+                &mut daemon,
+                &Frame::Control(Envelope::request(req, Msg::Pong)),
+            )
+            .await
+            .unwrap();
             daemon
         });
         let client = Client::handshake(ours).await.unwrap();
@@ -772,8 +933,8 @@ mod tests {
     /// Verify that a dir with wrong permissions is rejected before connect.
     #[test]
     fn wrong_permissions_dir_is_rejected() {
-        let tmp = std::env::temp_dir()
-            .join(format!("claudio-client-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("claudio-client-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         // Set group-readable permissions (not 0700).
         use std::os::unix::fs::PermissionsExt;

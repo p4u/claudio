@@ -38,7 +38,10 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// Run the slave bridge. Errors are written to stderr; stdout stays clean.
 pub fn run() -> std::process::ExitCode {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("claudio --slave: runtime: {e}");
@@ -65,7 +68,10 @@ async fn async_run() -> io::Result<()> {
 
     // Connect to the daemon socket.
     let daemon = UnixStream::connect(&socket).await.map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot connect to daemon socket {}: {e}", socket.display()))
+        io::Error::new(
+            e.kind(),
+            format!("cannot connect to daemon socket {}: {e}", socket.display()),
+        )
     })?;
 
     // Verify that the daemon is owned by us (peer UID check).
@@ -78,12 +84,8 @@ async fn async_run() -> io::Result<()> {
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
-    let t_in = tokio::spawn(async move {
-        tokio::io::copy(&mut stdin, &mut daemon_wr).await
-    });
-    let t_out = tokio::spawn(async move {
-        tokio::io::copy(&mut daemon_rd, &mut stdout).await
-    });
+    let t_in = tokio::spawn(async move { tokio::io::copy(&mut stdin, &mut daemon_wr).await });
+    let t_out = tokio::spawn(async move { tokio::io::copy(&mut daemon_rd, &mut stdout).await });
 
     // Exit as soon as either direction is done.
     let result = tokio::select! {
@@ -115,7 +117,10 @@ async fn ensure_daemon_detached(socket: &std::path::Path) -> io::Result<()> {
     let dir = paths::runtime_dir();
     paths::ensure_private_dir(&dir)?;
     let log_path = dir.join("daemon.log");
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
 
     // Try systemd-run; fall back to setsid on failure.
     if try_systemd_run(&exe, log.try_clone()?).is_err() {
@@ -149,10 +154,16 @@ async fn ensure_daemon_detached(socket: &std::path::Path) -> io::Result<()> {
 fn try_systemd_run(exe: &PathBuf, log: std::fs::File) -> io::Result<()> {
     // Only try if systemd-run is on PATH and XDG_RUNTIME_DIR is set.
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "no XDG_RUNTIME_DIR"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no XDG_RUNTIME_DIR",
+        ));
     }
     if !systemd_run_available() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "systemd-run not found"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "systemd-run not found",
+        ));
     }
 
     let unit = format!("claudio-daemon-v{PROTO}");
@@ -234,7 +245,11 @@ fn verify_peer_uid(stream: &UnixStream) -> io::Result<()> {
 fn peer_uid(fd: std::os::unix::io::RawFd) -> io::Result<u32> {
     #[cfg(target_os = "linux")]
     {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let rc = unsafe {
             libc::getsockopt(

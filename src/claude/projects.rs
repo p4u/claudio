@@ -110,8 +110,8 @@ fn parse_session(path: &Path, session_id: &str, expected_cwd: &str) -> Option<Cl
     // for title and last-prompt. Since we already read the tail, we scan it
     // for cwd too — and fall back to reading the head if the cwd record isn't
     // in the tail.
-    let cwd_ok = verify_cwd_in_tail(&content, expected_cwd)
-        || verify_cwd_in_head(path, expected_cwd);
+    let cwd_ok =
+        verify_cwd_in_tail(&content, expected_cwd) || verify_cwd_in_head(path, expected_cwd);
     if !cwd_ok {
         return None;
     }
@@ -132,7 +132,13 @@ fn parse_session(path: &Path, session_id: &str, expected_cwd: &str) -> Option<Cl
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    Some(ClaudeSession { id: session_id.to_owned(), title, last_prompt, modified, messages })
+    Some(ClaudeSession {
+        id: session_id.to_owned(),
+        title,
+        last_prompt,
+        modified,
+        messages,
+    })
 }
 
 /// Read up to the last `TAIL_READ_BYTES` bytes of a file as a UTF-8 string.
@@ -259,7 +265,9 @@ fn count_user_messages(path: &Path) -> u32 {
 /// This correctly handles prompts that start with `<` (e.g. XML-tagged tasks)
 /// which were previously misclassified.
 fn is_real_prompt(record: &serde_json::Value) -> bool {
-    let Some(msg) = record.get("message") else { return false };
+    let Some(msg) = record.get("message") else {
+        return false;
+    };
     let content = match msg.get("content") {
         Some(c) => c,
         None => return false,
@@ -271,9 +279,10 @@ fn is_real_prompt(record: &serde_json::Value) -> bool {
         }
         serde_json::Value::Array(items) => {
             // If any item is a tool_result block, this is a tool-result wrapper.
-            if items.iter().any(|item| {
-                item.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-            }) {
+            if items
+                .iter()
+                .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            {
                 return false;
             }
             // Also check the toolUseResult field (alternative representation).
@@ -426,7 +435,10 @@ mod tests {
 
     #[test]
     fn encode_cwd_replaces_non_alnum() {
-        assert_eq!(encode_cwd(Path::new("/volumes/repos/claudio")), "-volumes-repos-claudio");
+        assert_eq!(
+            encode_cwd(Path::new("/volumes/repos/claudio")),
+            "-volumes-repos-claudio"
+        );
         assert_eq!(encode_cwd(Path::new("/home/p4u")), "-home-p4u");
         assert_eq!(encode_cwd(Path::new("/tmp")), "-tmp");
     }
@@ -478,7 +490,10 @@ mod tests {
                 ]
             }
         });
-        assert!(!is_real_prompt(&v), "tool_result array should not be a real prompt");
+        assert!(
+            !is_real_prompt(&v),
+            "tool_result array should not be a real prompt"
+        );
     }
 
     #[test]
@@ -498,7 +513,10 @@ mod tests {
                 "content": [{"type": "text", "text": "<task>do stuff</task>"}]
             }
         });
-        assert!(is_real_prompt(&v), "text block starting with < should be real");
+        assert!(
+            is_real_prompt(&v),
+            "text block starting with < should be real"
+        );
     }
 
     /// Fable M12: toolUseResult field marks a tool-result record.
@@ -511,7 +529,10 @@ mod tests {
                 "content": [{"type": "text", "text": "some text"}]
             }
         });
-        assert!(!is_real_prompt(&v), "toolUseResult field should mark as tool result");
+        assert!(
+            !is_real_prompt(&v),
+            "toolUseResult field should mark as tool result"
+        );
     }
 
     // ── read_file_tail ────────────────────────────────────────────────────────
@@ -521,8 +542,7 @@ mod tests {
     #[test]
     fn read_file_tail_multibyte_boundary() {
         use std::io::Write;
-        let dir = std::env::temp_dir()
-            .join(format!("claudio-tail-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("claudio-tail-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.jsonl");
 
@@ -537,12 +557,16 @@ mod tests {
             f.write_all(filler_line).unwrap();
         }
         // Add a line with multi-byte characters near the end.
-        f.write_all("{\"type\":\"user\",\"message\":{\"content\":\"café\"}}\n".as_bytes()).unwrap();
+        f.write_all("{\"type\":\"user\",\"message\":{\"content\":\"café\"}}\n".as_bytes())
+            .unwrap();
         drop(f);
 
         // Must return Some (not fail on UTF-8 boundary).
         let result = read_file_tail(&path);
-        assert!(result.is_some(), "read_file_tail should not fail at multibyte boundary");
+        assert!(
+            result.is_some(),
+            "read_file_tail should not fail at multibyte boundary"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

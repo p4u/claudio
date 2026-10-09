@@ -103,12 +103,7 @@ fn relay_from(input: impl Read, event: &str, socket: &Path, token: &str) {
 }
 
 /// Connect to the Unix socket and write the Hook frame.
-fn send_hook_frame(
-    event: &str,
-    socket: &Path,
-    token: &str,
-    payload: Value,
-) -> std::io::Result<()> {
+fn send_hook_frame(event: &str, socket: &Path, token: &str, payload: Value) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
@@ -135,7 +130,10 @@ mod tests {
 
     #[test]
     fn shell_quote_with_spaces() {
-        assert_eq!(shell_quote("/path with spaces/claudio"), "'/path with spaces/claudio'");
+        assert_eq!(
+            shell_quote("/path with spaces/claudio"),
+            "'/path with spaces/claudio'"
+        );
     }
 
     #[test]
@@ -147,7 +145,11 @@ mod tests {
 
     #[test]
     fn settings_registers_all_events() {
-        let v = settings(Path::new("/usr/bin/claudio"), Path::new("/run/claudio/d.sock"), "tok");
+        let v = settings(
+            Path::new("/usr/bin/claudio"),
+            Path::new("/run/claudio/d.sock"),
+            "tok",
+        );
         let hooks = v["hooks"].as_object().unwrap();
         for event in EVENTS {
             assert!(hooks.contains_key(*event), "missing event: {event}");
@@ -157,7 +159,9 @@ mod tests {
     #[test]
     fn settings_command_contains_socket_and_token() {
         let v = settings(Path::new("/bin/cl"), Path::new("/run/s.sock"), "mytoken");
-        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         assert!(cmd.contains("__hook Stop"), "cmd: {cmd}");
         assert!(cmd.contains("mytoken"), "cmd: {cmd}");
         assert!(cmd.contains("/run/s.sock"), "cmd: {cmd}");
@@ -170,7 +174,9 @@ mod tests {
             Path::new("/run/user data/s.sock"),
             "tok",
         );
-        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
         // Both paths must be single-quoted.
         assert!(cmd.contains("'/home/user name/bin/claudio'"), "cmd: {cmd}");
         assert!(cmd.contains("'/run/user data/s.sock'"), "cmd: {cmd}");
@@ -198,8 +204,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
         use uuid::Uuid;
 
-        let dir = std::env::temp_dir()
-            .join(format!("claudio-relay-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("claudio-relay-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let sock_path = dir.join("relay.sock");
 
@@ -235,7 +240,11 @@ mod tests {
         // Validate the frame.
         match frame {
             Frame::Control(env) => match env.msg {
-                Msg::Hook { token, event, payload } => {
+                Msg::Hook {
+                    token,
+                    event,
+                    payload,
+                } => {
                     assert_eq!(token, "secret");
                     assert_eq!(event, "Stop");
                     assert_eq!(payload["session_id"], "test-123");

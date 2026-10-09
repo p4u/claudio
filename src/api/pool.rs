@@ -42,7 +42,12 @@ struct PoolCfg {
 
 impl PoolCfg {
     fn from_env() -> Self {
-        let g = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let g = |k: &str, d: u64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
         PoolCfg {
             max_sessions: g("CLAUDIO_API_MAX_SESSIONS", 32) as usize,
             max_live: g("CLAUDIO_API_MAX_LIVE", 6) as usize,
@@ -81,7 +86,8 @@ impl Slot {
         env: &WrapperEnv,
         base_forward: &[String],
         prompt: &str,
-    ) -> Result<(crate::print::session::Summary, Option<String>), crate::print::driver::DriverError> {
+    ) -> Result<(crate::print::session::Summary, Option<String>), crate::print::driver::DriverError>
+    {
         if !self.is_live() {
             self.live = None; // drop any dead session
             let mut forward = vec![
@@ -91,7 +97,10 @@ impl Slot {
                 self.csid.clone(),
             ];
             forward.extend(base_forward.iter().cloned());
-            tracing::info!(session = short(&self.csid), "RESUME — reviving dormant session");
+            tracing::info!(
+                session = short(&self.csid),
+                "RESUME — reviving dormant session"
+            );
             let sess = PtySession::start(env, &forward, &self.csid, None)?;
             self.live = Some(sess);
         }
@@ -136,7 +145,9 @@ impl SessionPool {
             base_forward.push(setting_sources.to_string());
         }
         SessionPool {
-            inner: Mutex::new(Inner { handles: Vec::new() }),
+            inner: Mutex::new(Inner {
+                handles: Vec::new(),
+            }),
             cfg: PoolCfg::from_env(),
             base_forward,
         }
@@ -173,7 +184,9 @@ impl SessionPool {
                     continue;
                 }
                 if cum[h.served_len] == h.prefix_hash
-                    && best.map(|b| h.served_len > inner.handles[b].served_len).unwrap_or(true)
+                    && best
+                        .map(|b| h.served_len > inner.handles[b].served_len)
+                        .unwrap_or(true)
                 {
                     best = Some(i);
                 }
@@ -285,7 +298,13 @@ impl SessionPool {
                 inner.handles.push(handle);
                 let (n, live) = (inner.handles.len(), self.live_count(&inner));
                 drop(inner);
-                tracing::info!(session = short(&csid), pool = n, live, served = messages.len(), "NEW session registered");
+                tracing::info!(
+                    session = short(&csid),
+                    pool = n,
+                    live,
+                    served = messages.len(),
+                    "NEW session registered"
+                );
                 shape(summary, failure)
             }
             Err(e) => {
@@ -314,7 +333,13 @@ impl SessionPool {
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| h.csid != keep)
-                .filter_map(|(i, h)| h.slot.try_lock().ok().filter(|s| s.is_live()).map(|_| (i, h.last_used)))
+                .filter_map(|(i, h)| {
+                    h.slot
+                        .try_lock()
+                        .ok()
+                        .filter(|s| s.is_live())
+                        .map(|_| (i, h.last_used))
+                })
                 .collect();
             if live.len() < self.cfg.max_live {
                 break;
@@ -324,7 +349,10 @@ impl SessionPool {
             let csid = inner.handles[idx].csid.clone();
             if let Ok(mut s) = inner.handles[idx].slot.try_lock() {
                 s.demote();
-                tracing::info!(session = short(&csid), "demoting LRU live session (process killed, context kept on disk)");
+                tracing::info!(
+                    session = short(&csid),
+                    "demoting LRU live session (process killed, context kept on disk)"
+                );
             } else {
                 break;
             }
@@ -535,7 +563,12 @@ mod tests {
     #[test]
     fn cumulative_prefix_matches() {
         let a = vec![msg("system", "S"), msg("user", "hi")];
-        let b = vec![msg("system", "S"), msg("user", "hi"), msg("assistant", "yo"), msg("user", "again")];
+        let b = vec![
+            msg("system", "S"),
+            msg("user", "hi"),
+            msg("assistant", "yo"),
+            msg("user", "again"),
+        ];
         let ca = cumulative_hashes(&a);
         let cb = cumulative_hashes(&b);
         // a is a prefix of b: the cumulative hash at len(a) must agree.
@@ -557,7 +590,10 @@ mod tests {
         a.tool_calls = Some(vec![crate::api::types::ToolCall {
             id: "c1".into(),
             r#type: "function".into(),
-            function: crate::api::types::FunctionCall { name: "read".into(), arguments: "{}".into() },
+            function: crate::api::types::FunctionCall {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
         }]);
         let mut t = msg("tool", "file contents");
         t.tool_call_id = Some("c1".into());

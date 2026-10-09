@@ -25,7 +25,10 @@ pub struct Tracker {
 impl Tracker {
     /// Construct a tracker in the `Starting` state (no hook has fired yet).
     pub fn new() -> Self {
-        Self { state: SessionState::Starting, claude_session_id: None }
+        Self {
+            state: SessionState::Starting,
+            claude_session_id: None,
+        }
     }
 
     /// Apply one hook event and return the list of protocol events to broadcast.
@@ -71,9 +74,14 @@ impl Tracker {
     }
 
     fn handle_notification(&mut self, payload: &Value) -> Vec<SessionEvent> {
-        let ntype = payload.get("notification_type").and_then(|v| v.as_str()).unwrap_or("");
+        let ntype = payload
+            .get("notification_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         match ntype {
-            "permission_prompt" | "worker_permission_prompt" | "elicitation_dialog"
+            "permission_prompt"
+            | "worker_permission_prompt"
+            | "elicitation_dialog"
             | "elicitation_url_dialog" => self.transition(SessionState::NeedsApproval),
             "idle_prompt" | "agent_needs_input" => self.transition(SessionState::NeedsInput),
             // All other notification types produce no state change.
@@ -116,7 +124,12 @@ mod tests {
 
         // User submits a prompt → Working
         let evs = t.apply("UserPromptSubmit", &json!({"prompt": "do something"}));
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::Working }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::Working
+            }]
+        );
         assert_eq!(state(&t), SessionState::Working);
 
         // A permission prompt fires → NeedsApproval
@@ -124,16 +137,31 @@ mod tests {
             "Notification",
             &json!({"notification_type": "permission_prompt", "message": "Allow bash?"}),
         );
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::NeedsApproval }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::NeedsApproval
+            }]
+        );
         assert_eq!(state(&t), SessionState::NeedsApproval);
 
         // More work resumes → Working
         let evs = t.apply("PreToolUse", &json!({"tool_name": "Bash"}));
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::Working }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::Working
+            }]
+        );
 
         // Stop → Idle
         let evs = t.apply("Stop", &json!({"stop_hook_active": false}));
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::Idle }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::Idle
+            }]
+        );
         assert_eq!(state(&t), SessionState::Idle);
     }
 
@@ -152,7 +180,12 @@ mod tests {
             e,
             SessionEvent::ClaudeSession { claude_session_id } if claude_session_id == "aaaa"
         )));
-        assert!(evs.iter().any(|e| matches!(e, SessionEvent::State { state: SessionState::NeedsInput })));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            SessionEvent::State {
+                state: SessionState::NeedsInput
+            }
+        )));
         assert_eq!(t.claude_session_id.as_deref(), Some("aaaa"));
 
         // /clear → new session id (clear source)
@@ -171,7 +204,9 @@ mod tests {
             "SessionStart",
             &json!({"session_id": "bbbb", "source": "resume"}),
         );
-        assert!(!evs.iter().any(|e| matches!(e, SessionEvent::ClaudeSession { .. })));
+        assert!(!evs
+            .iter()
+            .any(|e| matches!(e, SessionEvent::ClaudeSession { .. })));
     }
 
     // ── blocked Stop followed by more work ───────────────────────────────────
@@ -186,12 +221,22 @@ mod tests {
 
         // Stop (provisional Idle — stop_hook_active may run more)
         let evs = t.apply("Stop", &json!({"stop_hook_active": true}));
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::Idle }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::Idle
+            }]
+        );
         assert_eq!(state(&t), SessionState::Idle);
 
         // A later PreToolUse means the stop hook continued the turn → Working
         let evs = t.apply("PreToolUse", &json!({"tool_name": "Bash"}));
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::Working }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::Working
+            }]
+        );
         assert_eq!(state(&t), SessionState::Working);
     }
 
@@ -243,7 +288,12 @@ mod tests {
             "Notification",
             &json!({"notification_type": "worker_permission_prompt"}),
         );
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::NeedsApproval }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::NeedsApproval
+            }]
+        );
     }
 
     #[test]
@@ -253,6 +303,11 @@ mod tests {
             "Notification",
             &json!({"notification_type": "elicitation_url_dialog"}),
         );
-        assert_eq!(evs, vec![SessionEvent::State { state: SessionState::NeedsApproval }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::State {
+                state: SessionState::NeedsApproval
+            }]
+        );
     }
 }

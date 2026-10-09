@@ -51,7 +51,10 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn request(req: u64, msg: Msg) -> Self {
-        Self { req: Some(req), msg }
+        Self {
+            req: Some(req),
+            msg,
+        }
     }
 
     pub fn event(msg: Msg) -> Self {
@@ -76,15 +79,33 @@ pub enum Msg {
     /// Subscribe to a session's output (and resize it to the client's pane).
     /// Answered by `Attached`, immediately followed by `D` frames carrying the
     /// screen snapshot.
-    Attach { id: SessionId, rows: u16, cols: u16 },
-    Detach { id: SessionId },
-    Resize { id: SessionId, rows: u16, cols: u16 },
-    Kill { id: SessionId },
-    ListDir { path: String },
-    ListClaudeSessions { cwd: String },
+    Attach {
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+    },
+    Detach {
+        id: SessionId,
+    },
+    Resize {
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+    },
+    Kill {
+        id: SessionId,
+    },
+    ListDir {
+        path: String,
+    },
+    ListClaudeSessions {
+        cwd: String,
+    },
     /// Directories with claude history on this host, newest first (seeds the
     /// new-session directory picker).
-    RecentProjects { limit: u32 },
+    RecentProjects {
+        limit: u32,
+    },
     Ping,
     /// Request a clean shutdown. Served only to our own uid; the daemon kills
     /// all live sessions and exits. Sessions remain journaled as dormant.
@@ -93,15 +114,28 @@ pub enum Msg {
     // ── hook relay (`claudio __hook`) → daemon ───────────────────────────
     /// A Claude Code hook fired. `token` identifies the session generation it
     /// belongs to; `payload` is the hook's stdin JSON, verbatim.
-    Hook { token: String, event: String, payload: serde_json::Value },
+    Hook {
+        token: String,
+        event: String,
+        payload: serde_json::Value,
+    },
 
     // ── daemon → client replies ──────────────────────────────────────────
-    Sessions { sessions: Vec<SessionInfo> },
-    Spawned { id: SessionId, pid: Option<u32> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
+    Spawned {
+        id: SessionId,
+        pid: Option<u32>,
+    },
     /// The subscriber must reset its mirror to `rows`×`cols` and apply the
     /// snapshot that follows. Also re-sent unprompted when the session is
     /// resized by another client or the subscriber fell behind.
-    Attached { id: SessionId, rows: u16, cols: u16 },
+    Attached {
+        id: SessionId,
+        rows: u16,
+        cols: u16,
+    },
     DirEntries {
         path: String,
         entries: Vec<DirEntry>,
@@ -109,14 +143,24 @@ pub enum Msg {
         #[serde(default)]
         truncated: bool,
     },
-    ClaudeSessions { cwd: String, sessions: Vec<ClaudeSession> },
-    Projects { dirs: Vec<ProjectDir> },
+    ClaudeSessions {
+        cwd: String,
+        sessions: Vec<ClaudeSession>,
+    },
+    Projects {
+        dirs: Vec<ProjectDir>,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Pong,
 
     // ── daemon → client pushed events ────────────────────────────────────
-    Event { id: SessionId, event: SessionEvent },
+    Event {
+        id: SessionId,
+        event: SessionEvent,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,15 +286,27 @@ impl SessionState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
     /// A session was spawned (possibly by another client).
-    Created { info: SessionInfo },
+    Created {
+        info: SessionInfo,
+    },
     /// A session was killed and forgotten.
     Removed,
-    State { state: SessionState },
-    ClaudeSession { claude_session_id: String },
-    Title { title: String },
-    Exited { code: Option<i32> },
+    State {
+        state: SessionState,
+    },
+    ClaudeSession {
+        claude_session_id: String,
+    },
+    Title {
+        title: String,
+    },
+    Exited {
+        code: Option<i32>,
+    },
     /// A transient user-visible notice (e.g. resume-fallback).
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
@@ -316,7 +372,10 @@ impl Frame {
             Some((&TAG_DATA, rest)) if rest.len() >= 16 => {
                 let (id, bytes) = rest.split_at(16);
                 let session = Uuid::from_slice(id).expect("16-byte slice");
-                Ok(Frame::Data { session, bytes: bytes.to_vec() })
+                Ok(Frame::Data {
+                    session,
+                    bytes: bytes.to_vec(),
+                })
             }
             Some((tag, _)) => Err(invalid(format!("unknown or short frame (tag {tag:#04x})"))),
             None => Err(invalid("empty frame".into())),
@@ -345,7 +404,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Fr
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> io::Result<()> {
     let bytes = frame.encode();
     if bytes.len() - 4 > MAX_FRAME {
-        return Err(invalid(format!("frame of {} bytes exceeds the cap", bytes.len() - 4)));
+        return Err(invalid(format!(
+            "frame of {} bytes exceeds the cap",
+            bytes.len() - 4
+        )));
     }
     w.write_all(&bytes).await?;
     w.flush().await
@@ -370,28 +432,48 @@ mod tests {
     fn control_roundtrip() {
         let f = Frame::Control(Envelope::request(
             7,
-            Msg::Attach { id: Uuid::new_v4(), rows: 40, cols: 120 },
+            Msg::Attach {
+                id: Uuid::new_v4(),
+                rows: 40,
+                cols: 120,
+            },
         ));
         assert_eq!(roundtrip(f.clone()), f);
     }
 
     #[test]
     fn data_roundtrip() {
-        let f = Frame::Data { session: Uuid::new_v4(), bytes: b"\x1b[?2026h hi".to_vec() };
+        let f = Frame::Data {
+            session: Uuid::new_v4(),
+            bytes: b"\x1b[?2026h hi".to_vec(),
+        };
         assert_eq!(roundtrip(f.clone()), f);
     }
 
     #[test]
     fn json_shape_is_flat_and_tagged() {
-        let env = Envelope::request(1, Msg::ListDir { path: "/srv".into() });
+        let env = Envelope::request(
+            1,
+            Msg::ListDir {
+                path: "/srv".into(),
+            },
+        );
         let v: serde_json::Value = serde_json::to_value(&env).unwrap();
-        assert_eq!(v, serde_json::json!({"req": 1, "op": "list_dir", "path": "/srv"}));
+        assert_eq!(
+            v,
+            serde_json::json!({"req": 1, "op": "list_dir", "path": "/srv"})
+        );
         let ev = Envelope::event(Msg::Event {
             id: Uuid::nil(),
-            event: SessionEvent::State { state: SessionState::NeedsApproval },
+            event: SessionEvent::State {
+                state: SessionState::NeedsApproval,
+            },
         });
         let v = serde_json::to_value(&ev).unwrap();
-        assert_eq!(v["event"], serde_json::json!({"kind": "state", "state": "needs_approval"}));
+        assert_eq!(
+            v["event"],
+            serde_json::json!({"kind": "state", "state": "needs_approval"})
+        );
         assert!(v.get("req").is_none());
     }
 
@@ -399,7 +481,10 @@ mod tests {
     fn unknown_fields_are_ignored() {
         let json = br#"J{"op":"kill","id":"00000000-0000-0000-0000-000000000000","future":true}"#;
         let f = Frame::decode(json).unwrap();
-        assert_eq!(f, Frame::Control(Envelope::event(Msg::Kill { id: Uuid::nil() })));
+        assert_eq!(
+            f,
+            Frame::Control(Envelope::event(Msg::Kill { id: Uuid::nil() }))
+        );
     }
 
     #[test]
@@ -430,7 +515,10 @@ mod tests {
     async fn async_stream_roundtrip_and_eof() {
         let (mut a, mut b) = tokio::io::duplex(64 * 1024);
         let f1 = Frame::Control(Envelope::request(1, Msg::Ping));
-        let f2 = Frame::Data { session: Uuid::new_v4(), bytes: vec![0u8; 50_000] };
+        let f2 = Frame::Data {
+            session: Uuid::new_v4(),
+            bytes: vec![0u8; 50_000],
+        };
         write_frame(&mut a, &f1).await.unwrap();
         write_frame(&mut a, &f2).await.unwrap();
         drop(a);
@@ -442,13 +530,17 @@ mod tests {
     #[tokio::test]
     async fn rejects_oversized_length() {
         let (mut a, mut b) = tokio::io::duplex(64);
-        a.write_all(&((MAX_FRAME as u32) + 1).to_be_bytes()).await.unwrap();
+        a.write_all(&((MAX_FRAME as u32) + 1).to_be_bytes())
+            .await
+            .unwrap();
         assert!(read_frame(&mut b).await.is_err());
     }
 
     #[test]
     fn session_event_notice_roundtrips() {
-        let event = SessionEvent::Notice { text: "resume fallback".into() };
+        let event = SessionEvent::Notice {
+            text: "resume fallback".into(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, event);

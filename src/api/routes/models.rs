@@ -1,9 +1,9 @@
 //! `GET /v1/models` and `GET /v1/models/{id}` — a static, curated list of the
 //! Claude models reachable through the backend.
 
-use axum::Json;
 use axum::extract::Path;
 use axum::response::IntoResponse;
+use axum::Json;
 
 use crate::api::error::AppError;
 use crate::api::types::{Model, ModelList};

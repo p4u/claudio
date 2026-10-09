@@ -14,7 +14,9 @@ use crate::proto::PROTO;
 
 /// The current user's home directory (honours `$HOME`).
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Current Unix time in seconds.
@@ -86,10 +88,16 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let meta = fs::symlink_metadata(dir)?;
     if !meta.file_type().is_dir() {
-        return Err(io::Error::other(format!("{} is not a directory", dir.display())));
+        return Err(io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
     }
     if meta.uid() != uid() {
-        return Err(io::Error::other(format!("{} is owned by another user", dir.display())));
+        return Err(io::Error::other(format!(
+            "{} is owned by another user",
+            dir.display()
+        )));
     }
     if meta.permissions().mode() & 0o077 != 0 {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
@@ -148,7 +156,9 @@ mod tests {
     #[test]
     fn socket_name_carries_protocol_version() {
         let s = daemon_socket();
-        assert!(s.to_string_lossy().ends_with(&format!("daemon-v{PROTO}.sock")));
+        assert!(s
+            .to_string_lossy()
+            .ends_with(&format!("daemon-v{PROTO}.sock")));
     }
 
     #[test]
@@ -166,10 +176,16 @@ mod tests {
         let base = scratch();
         let dir = base.join("rt");
         ensure_private_dir(&dir).unwrap();
-        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         ensure_private_dir(&dir).unwrap();
-        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -189,7 +205,10 @@ mod tests {
         write_atomic(&p, b"one").unwrap();
         write_atomic(&p, b"two").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two");
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -208,7 +227,10 @@ mod tests {
         // write_atomic must succeed (it uses a fresh UUID name, not the stale one).
         write_atomic(&p, b"data").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"data");
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -233,7 +255,10 @@ mod tests {
         opts.custom_flags(libc::O_NOFOLLOW);
         let result = opts.open(&link);
         // O_NOFOLLOW causes ELOOP when the path is a symlink.
-        assert!(result.is_err(), "opening through a symlink must fail with O_NOFOLLOW");
+        assert!(
+            result.is_err(),
+            "opening through a symlink must fail with O_NOFOLLOW"
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 }

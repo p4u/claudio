@@ -30,7 +30,11 @@ const FENCE: &str = "tool_calls";
 /// translating the client's `tools[]` into a clean, hand-written catalog (see
 /// [`tool_help`]). The conversation (user/assistant/tool turns) is rendered
 /// as-is.
-pub fn build_prompt(messages: &[Message], tools: &[Tool], tool_choice: Option<&Value>) -> FlatPrompt {
+pub fn build_prompt(
+    messages: &[Message],
+    tools: &[Tool],
+    tool_choice: Option<&Value>,
+) -> FlatPrompt {
     let (client_system, body) = render_transcript(messages);
     let env = ClientEnv::detect(&client_system);
     tracing::info!(
@@ -65,7 +69,14 @@ pub struct ClientEnv {
 const CLIENT_FINGERPRINTS: &[(&str, &[&str])] = &[
     ("pi", &["operating inside pi", "pi, a coding agent harness"]),
     ("opencode", &["you are opencode"]),
-    ("hermes", &["active hermes profile", "hermes agent persona", "you are a cli ai agent"]),
+    (
+        "hermes",
+        &[
+            "active hermes profile",
+            "hermes agent persona",
+            "you are a cli ai agent",
+        ],
+    ),
 ];
 
 impl ClientEnv {
@@ -172,7 +183,11 @@ pub fn tool_preamble(tools: &[Tool], tool_choice: Option<&Value>, env: &ClientEn
         }
         names.insert(f.name.as_str());
         s.push('\n');
-        s.push_str(&tool_help(&f.name, f.description.as_deref(), f.parameters.as_ref()));
+        s.push_str(&tool_help(
+            &f.name,
+            f.description.as_deref(),
+            f.parameters.as_ref(),
+        ));
         s.push('\n');
     }
 
@@ -239,7 +254,11 @@ fn arg_summary(parameters: &Value) -> String {
     props
         .iter()
         .map(|(name, spec)| {
-            let marker = if required.contains(name.as_str()) { "*" } else { "" };
+            let marker = if required.contains(name.as_str()) {
+                "*"
+            } else {
+                ""
+            };
             format!("{name}{marker} ({})", type_str(spec))
         })
         .collect::<Vec<_>>()
@@ -290,7 +309,9 @@ fn string_set(v: Option<&Value>) -> std::collections::HashSet<&str> {
 fn choice_instruction(tool_choice: Option<&Value>) -> Option<String> {
     match tool_choice {
         Some(Value::String(s)) => match s.as_str() {
-            "none" => Some("For this turn you MUST NOT call any tool; respond only with prose.".into()),
+            "none" => {
+                Some("For this turn you MUST NOT call any tool; respond only with prose.".into())
+            }
             "required" => Some("For this turn you MUST call at least one tool.".into()),
             _ => None, // "auto" or unknown → default behavior
         },
@@ -312,7 +333,8 @@ pub fn render_transcript(messages: &[Message]) -> (String, String) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut turns: Vec<String> = Vec::new();
     // Map tool_call_id -> tool name, to label tool results readably.
-    let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut call_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut last_was_tool_result = false;
 
     for msg in messages {
@@ -338,7 +360,8 @@ pub fn render_transcript(messages: &[Message]) -> (String, String) {
                             })
                         })
                         .collect();
-                    let json = serde_json::to_string(&rendered).unwrap_or_else(|_| "[]".to_string());
+                    let json =
+                        serde_json::to_string(&rendered).unwrap_or_else(|_| "[]".to_string());
                     let mut block = String::new();
                     if !text.is_empty() {
                         block.push_str(&format!("Assistant: {text}\n"));
@@ -402,7 +425,10 @@ pub fn parse_output(text: &str) -> ParsedOutput {
         .into_iter()
         .filter(|c| !c.name.is_empty())
         .map(|c| ToolCall {
-            id: format!("call_{}", util::completion_id().trim_start_matches("chatcmpl-")),
+            id: format!(
+                "call_{}",
+                util::completion_id().trim_start_matches("chatcmpl-")
+            ),
             r#type: "function".to_string(),
             function: FunctionCall {
                 // OpenAI wants `arguments` as a JSON-encoded string.
@@ -476,7 +502,11 @@ mod tests {
 
     #[test]
     fn preamble_lists_tools_and_protocol() {
-        let p = tool_preamble(&[tool("read_file", "Read a file")], None, &ClientEnv::default());
+        let p = tool_preamble(
+            &[tool("read_file", "Read a file")],
+            None,
+            &ClientEnv::default(),
+        );
         assert!(p.contains("```tool_calls"));
         assert!(p.contains("read_file"));
         assert!(p.contains("Read a file"));
@@ -535,7 +565,11 @@ mod tests {
 
     #[test]
     fn choice_required_and_named() {
-        let req = tool_preamble(&[tool("a", "")], Some(&Value::String("required".into())), &ClientEnv::default());
+        let req = tool_preamble(
+            &[tool("a", "")],
+            Some(&Value::String("required".into())),
+            &ClientEnv::default(),
+        );
         assert!(req.contains("MUST call at least one tool"));
         let named = tool_preamble(
             &[tool("a", "")],
@@ -547,7 +581,8 @@ mod tests {
 
     #[test]
     fn detect_pi_and_workspace() {
-        let sys = "You are an expert coding assistant operating inside pi, a coding agent harness.\n\
+        let sys =
+            "You are an expert coding assistant operating inside pi, a coding agent harness.\n\
                    Current date: 2026-06-01\n\
                    Current working directory: /home/p4u/repo";
         let env = ClientEnv::detect(sys);
@@ -600,7 +635,9 @@ mod tests {
 
     #[test]
     fn parse_single_tool_call() {
-        let out = parse_output("```tool_calls\n[{\"name\":\"read_file\",\"arguments\":{\"path\":\"x.py\"}}]\n```");
+        let out = parse_output(
+            "```tool_calls\n[{\"name\":\"read_file\",\"arguments\":{\"path\":\"x.py\"}}]\n```",
+        );
         match out {
             ParsedOutput::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1);

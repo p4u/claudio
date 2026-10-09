@@ -282,7 +282,10 @@ impl Daemon {
             if reg.in_flight.contains(&spec.id) {
                 // A concurrent spawn for this id is already in progress; the
                 // client will receive a Created event when it completes.
-                return Err(io::Error::other(format!("spawn in progress for {}", spec.id)));
+                return Err(io::Error::other(format!(
+                    "spawn in progress for {}",
+                    spec.id
+                )));
             }
             reg.in_flight.insert(spec.id);
         }
@@ -292,11 +295,10 @@ impl Daemon {
         // outside the registry lock).
         let daemon = Arc::clone(self);
         let spec_clone = spec.clone();
-        let spawn_result = tokio::task::spawn_blocking(move || {
-            session::spawn(&daemon, &spec_clone)
-        })
-        .await
-        .unwrap_or_else(|e| Err(io::Error::other(format!("spawn task panicked: {e}"))));
+        let spawn_result =
+            tokio::task::spawn_blocking(move || session::spawn(&daemon, &spec_clone))
+                .await
+                .unwrap_or_else(|e| Err(io::Error::other(format!("spawn task panicked: {e}"))));
 
         // Phase 3: commit or roll back under lock; snapshot journal entries
         // before releasing the lock (no disk I/O under the lock).
@@ -369,7 +371,9 @@ impl Daemon {
                 // We cannot un-kill the live session, but at least the journal
                 // stays consistent with what we're about to announce.
                 tracing::error!(%id, error = %e, "kill journal write failed; not acking");
-                return Err(io::Error::other(format!("could not durably remove session {id}: {e}")));
+                return Err(io::Error::other(format!(
+                    "could not durably remove session {id}: {e}"
+                )));
             }
         }
 
@@ -474,9 +478,12 @@ impl Daemon {
         let Some(spec) = spec_opt else {
             tracing::warn!(%id, "retry_spawn_fresh: no journal entry found");
             self.forget_live(id, ""); // ensure it's dormant
-            self.broadcast(id, crate::proto::SessionEvent::State {
-                state: crate::proto::SessionState::Exited,
-            });
+            self.broadcast(
+                id,
+                crate::proto::SessionEvent::State {
+                    state: crate::proto::SessionState::Exited,
+                },
+            );
             self.broadcast(id, crate::proto::SessionEvent::Exited { code: None });
             return;
         };
@@ -486,9 +493,12 @@ impl Daemon {
             Err(e) => {
                 tracing::warn!(%id, error = %e, "retry spawn failed; session stays dormant");
                 self.forget_live(id, "");
-                self.broadcast(id, crate::proto::SessionEvent::State {
-                    state: crate::proto::SessionState::Exited,
-                });
+                self.broadcast(
+                    id,
+                    crate::proto::SessionEvent::State {
+                        state: crate::proto::SessionState::Exited,
+                    },
+                );
                 self.broadcast(id, crate::proto::SessionEvent::Exited { code: Some(1) });
             }
         }
@@ -523,9 +533,7 @@ impl Daemon {
         let is_resume_only = {
             let args = &spec.args;
             args.is_empty()
-                || (args.len() == 2
-                    && args[0] == "--resume"
-                    && !args[1].is_empty())
+                || (args.len() == 2 && args[0] == "--resume" && !args[1].is_empty())
                 || (args.len() == 1 && args[0] == "--resume")
         };
 

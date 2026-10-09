@@ -117,9 +117,17 @@ pub struct ScreenModel {
 
 impl ScreenModel {
     pub fn new(rows: u16, cols: u16) -> Self {
-        let size = TermDims { rows: rows as usize, cols: cols as usize };
+        let size = TermDims {
+            rows: rows as usize,
+            cols: cols as usize,
+        };
         let term = Term::new(AlacConfig::default(), &size, NoopListener);
-        Self { term, processor: ansi::Processor::new(), rows, cols }
+        Self {
+            term,
+            processor: ansi::Processor::new(),
+            rows,
+            cols,
+        }
     }
 
     /// Feed raw PTY bytes into the VT state machine.
@@ -152,12 +160,14 @@ impl ScreenModel {
         match region {
             Region::TabBar => self.row_text(0),
             Region::StatusBar => self.row_text(rows.saturating_sub(1)),
-            Region::Pane => {
-                (1..rows.saturating_sub(1)).map(|r| self.row_text(r)).collect::<Vec<_>>().join("\n")
-            }
-            Region::Screen => {
-                (0..rows).map(|r| self.row_text(r)).collect::<Vec<_>>().join("\n")
-            }
+            Region::Pane => (1..rows.saturating_sub(1))
+                .map(|r| self.row_text(r))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Region::Screen => (0..rows)
+                .map(|r| self.row_text(r))
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -214,7 +224,12 @@ impl TuiProcess {
             }
         });
 
-        TuiProcess { writer, child, screen, _reader: reader_thread }
+        TuiProcess {
+            writer,
+            child,
+            screen,
+            _reader: reader_thread,
+        }
     }
 
     /// Send raw bytes to the PTY (keystrokes or escape sequences).
@@ -241,7 +256,12 @@ impl TuiProcess {
     pub fn wait_for(&self, pattern: &str, region: Region, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
-            if self.screen.lock().expect("screen lock").contains(pattern, region) {
+            if self
+                .screen
+                .lock()
+                .expect("screen lock")
+                .contains(pattern, region)
+            {
                 return;
             }
             assert!(
@@ -341,7 +361,14 @@ impl ManagerHarness {
             fs::create_dir_all(p).expect("create test dir");
         }
 
-        let h = ManagerHarness { root, runtime_dir, config_home, home, fake_claude, dirs };
+        let h = ManagerHarness {
+            root,
+            runtime_dir,
+            config_home,
+            home,
+            fake_claude,
+            dirs,
+        };
         h.write_default_fake_claude();
         h
     }
@@ -416,7 +443,9 @@ exec cat
             let deadline = Instant::now() + Duration::from_millis(400);
             loop {
                 // SAFETY: waitpid with WNOHANG.
-                let r = unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+                let r = unsafe {
+                    libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG)
+                };
                 if r != 0 {
                     break;
                 }

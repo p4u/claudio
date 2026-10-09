@@ -12,10 +12,10 @@
 //! Streaming responses are therefore "resolve then chunk": a role+payload chunk,
 //! a finish_reason chunk (with usage if requested), then `[DONE]`.
 
-use axum::Json;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 
 use crate::api::backend::{self, map_finish_reason, map_model};
 use crate::api::config::AppState;
@@ -81,7 +81,9 @@ pub async fn completions(
         if req.is_stream() {
             let events = agentic_sse_events(&model, parsed, raw.usage, req.include_usage());
             let body = futures::stream::iter(events);
-            return Ok(Sse::new(body).keep_alive(KeepAlive::default()).into_response());
+            return Ok(Sse::new(body)
+                .keep_alive(KeepAlive::default())
+                .into_response());
         } else {
             return Ok(Json(agentic_completion(&model, parsed, raw.usage)).into_response());
         }
@@ -104,16 +106,29 @@ pub async fn completions(
     }
 
     if req.is_stream() {
-        let events = text_sse_events(&model, raw.text, finish_reason, raw.usage, req.include_usage());
+        let events = text_sse_events(
+            &model,
+            raw.text,
+            finish_reason,
+            raw.usage,
+            req.include_usage(),
+        );
         let body = futures::stream::iter(events);
-        Ok(Sse::new(body).keep_alive(KeepAlive::default()).into_response())
+        Ok(Sse::new(body)
+            .keep_alive(KeepAlive::default())
+            .into_response())
     } else {
         Ok(Json(build_completion(model, raw.text, finish_reason, raw.usage)).into_response())
     }
 }
 
 /// Build a non-streaming `ChatCompletion` carrying plain assistant text.
-fn build_completion(model: String, content: String, finish_reason: String, usage: Usage) -> ChatCompletion {
+fn build_completion(
+    model: String,
+    content: String,
+    finish_reason: String,
+    usage: Usage,
+) -> ChatCompletion {
     ChatCompletion {
         id: util::completion_id(),
         object: "chat.completion",
@@ -258,7 +273,12 @@ fn log_client_request(corr: &str, req: &ChatRequest, model: &str) {
         tool_names.join(", "),
         if req.is_stream() { " · stream" } else { "" },
     );
-    msglog::record(msglog::Dir::CliToClaudio, corr, &head, &render_messages(&req.messages));
+    msglog::record(
+        msglog::Dir::CliToClaudio,
+        corr,
+        &head,
+        &render_messages(&req.messages),
+    );
 }
 
 /// Render an OpenAI message array into a readable transcript for the log body.
@@ -275,10 +295,9 @@ fn render_messages(messages: &[Message]) -> String {
                         .collect();
                     format!("[{}] {}{}", m.role, text, calls.join(" "))
                 }
-                ("tool", _) => format!(
-                    "[tool:{}] {text}",
-                    m.tool_call_id.as_deref().unwrap_or("?")
-                ),
+                ("tool", _) => {
+                    format!("[tool:{}] {text}", m.tool_call_id.as_deref().unwrap_or("?"))
+                }
                 _ => format!("[{}] {text}", m.role),
             }
         })
@@ -311,7 +330,12 @@ fn log_agentic_response(corr: &str, parsed: &agentic::ParsedOutput) {
             msglog::record(msglog::Dir::ClaudioToCli, corr, &head, &body);
         }
         agentic::ParsedOutput::Text(text) => {
-            msglog::record(msglog::Dir::ClaudioToCli, corr, "response · final text", text);
+            msglog::record(
+                msglog::Dir::ClaudioToCli,
+                corr,
+                "response · final text",
+                text,
+            );
         }
     }
 }

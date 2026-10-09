@@ -16,10 +16,9 @@ use std::collections::HashMap;
 use std::io;
 use std::time::Instant;
 
-
 use crate::client::Incoming;
-use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
 use crate::proto::{Msg, SessionEvent, SessionId, SessionState};
+use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
 use crate::term::screen::Screen;
 
 use super::keymap::Keymap;
@@ -184,7 +183,8 @@ impl App {
 
     /// Called when a `FetchProxyConfig` effect completes.
     pub fn on_proxy_config(&mut self, profile_name: String, cfg: ConfigResponse) {
-        self.proxy_config.insert(profile_name, (cfg, Instant::now()));
+        self.proxy_config
+            .insert(profile_name, (cfg, Instant::now()));
         self.redraw = true;
     }
 
@@ -220,13 +220,17 @@ impl App {
     /// Schedule a proxy config fetch if the cache is stale.
     pub fn maybe_fetch_proxy_config(&mut self, name: &str) {
         if self.proxy_config_cached(name).is_none() {
-            self.effects.push(Effect::FetchProxyConfig { profile_name: name.to_owned() });
+            self.effects.push(Effect::FetchProxyConfig {
+                profile_name: name.to_owned(),
+            });
         }
     }
 
     /// Schedule a proxy stats fetch for the named profile.
     pub fn schedule_proxy_stats(&mut self, name: &str) {
-        self.effects.push(Effect::FetchProxyStats { profile_name: name.to_owned() });
+        self.effects.push(Effect::FetchProxyStats {
+            profile_name: name.to_owned(),
+        });
     }
 
     /// The proxy status for the active session's profile, if any.
@@ -251,15 +255,24 @@ impl App {
     /// Build the `SpawnSpec.env` for a proxy profile name (M4 fix: fallible).
     ///
     /// Returns `Err(msg)` if a profile is selected but cannot be resolved.
-    pub(super) fn proxy_env_for(&self, proxy_name: Option<&str>) -> Result<Vec<(String, String)>, String> {
-        super::proxy_state::proxy_env_for(proxy_name, proxy_name.and_then(|n| self.proxy_config_cached(n)))
+    pub(super) fn proxy_env_for(
+        &self,
+        proxy_name: Option<&str>,
+    ) -> Result<Vec<(String, String)>, String> {
+        super::proxy_state::proxy_env_for(
+            proxy_name,
+            proxy_name.and_then(|n| self.proxy_config_cached(n)),
+        )
     }
 
     // ── Geometry ──────────────────────────────────────────────────────────────
 
     /// The pane size as `(rows, cols)`.
     pub fn pane_size(&self) -> (u16, u16) {
-        (self.height.saturating_sub(CHROME_ROWS).max(1), self.width.max(1))
+        (
+            self.height.saturating_sub(CHROME_ROWS).max(1),
+            self.width.max(1),
+        )
     }
 
     pub fn active_view(&self) -> Option<&SessionView> {
@@ -280,7 +293,10 @@ impl App {
 
     /// Show a transient notice in the status bar.
     pub fn notify(&mut self, text: impl Into<String>) {
-        self.notice = Some(Notice { text: text.into(), ticks_left: NOTICE_TICKS });
+        self.notice = Some(Notice {
+            text: text.into(),
+            ticks_left: NOTICE_TICKS,
+        });
         self.redraw = true;
     }
 
@@ -387,7 +403,9 @@ impl App {
         self.redraw = true;
         match (to, reply) {
             // M2: Kill acknowledged → clear tombstone.
-            (ReplyTo::Kill(id), Ok(Msg::Error { message })) if message.contains("no such session") => {
+            (ReplyTo::Kill(id), Ok(Msg::Error { message }))
+                if message.contains("no such session") =>
+            {
                 self.killed.retain(|t| t.id != id);
                 self.save();
             }
@@ -506,9 +524,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use crate::proto::SessionInfo;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use uuid::Uuid;
 
     fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
         SessionInfo {
@@ -543,21 +561,42 @@ mod tests {
     }
 
     fn requests(effects: &[Effect]) -> Vec<&Msg> {
-        effects.iter().filter_map(|e| if let Effect::Request { msg: m, .. } = e { Some(m) } else { None }).collect()
+        effects
+            .iter()
+            .filter_map(|e| {
+                if let Effect::Request { msg: m, .. } = e {
+                    Some(m)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[test]
     fn recovery_respawns_dormant_sessions_and_attaches_the_saved_active() {
         let live = [info(Some(1), None), info(None, Some("c2"))];
-        let saved = ClientState { active: Some(live[1].id), ..Default::default() };
+        let saved = ClientState {
+            active: Some(live[1].id),
+            ..Default::default()
+        };
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&saved, &live);
         let effects = app.take_effects();
         let reqs = requests(&effects);
-        let Msg::Spawn(spec) = reqs[0] else { panic!("expected Spawn, got {reqs:?}") };
+        let Msg::Spawn(spec) = reqs[0] else {
+            panic!("expected Spawn, got {reqs:?}")
+        };
         assert_eq!((spec.id, spec.rows), (live[1].id, 28));
         assert_eq!(spec.args, ["--resume", "c2"]);
-        assert_eq!(*reqs[1], Msg::Attach { id: live[1].id, rows: 28, cols: 100 });
+        assert_eq!(
+            *reqs[1],
+            Msg::Attach {
+                id: live[1].id,
+                rows: 28,
+                cols: 100
+            }
+        );
         assert!(matches!(effects.last(), Some(Effect::Save)));
         assert_eq!(app.active, Some(1));
         assert!(app.modal.is_none());
@@ -568,7 +607,11 @@ mod tests {
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&ClientState::default(), &[]);
         assert!(matches!(app.modal, Some(Modal::Wizard(_))));
-        assert!(requests(&app.take_effects()).contains(&&Msg::RecentProjects { limit: PROJECTS_LIMIT }));
+        assert!(
+            requests(&app.take_effects()).contains(&&Msg::RecentProjects {
+                limit: PROJECTS_LIMIT
+            })
+        );
     }
 
     #[test]
@@ -579,14 +622,35 @@ mod tests {
         let effects = app.take_effects();
         assert_eq!(
             requests(&effects),
-            vec![&Msg::Detach { id: live[0].id }, &Msg::Attach { id: live[1].id, rows: 28, cols: 100 }]
+            vec![
+                &Msg::Detach { id: live[0].id },
+                &Msg::Attach {
+                    id: live[1].id,
+                    rows: 28,
+                    cols: 100
+                }
+            ]
         );
         assert_eq!(app.active, Some(1), "wraps around");
         assert!(!app.sessions[0].attached && app.sessions[1].attached);
         // Attached resets the mirror, but only for the attached session.
-        app.on_incoming_from("local", Incoming::Attached { id: live[1].id, rows: 10, cols: 40 });
+        app.on_incoming_from(
+            "local",
+            Incoming::Attached {
+                id: live[1].id,
+                rows: 10,
+                cols: 40,
+            },
+        );
         assert_eq!(app.sessions[1].mirror.size(), (10, 40));
-        app.on_incoming_from("local", Incoming::Attached { id: live[0].id, rows: 5, cols: 5 });
+        app.on_incoming_from(
+            "local",
+            Incoming::Attached {
+                id: live[0].id,
+                rows: 5,
+                cols: 5,
+            },
+        );
         assert_eq!(app.sessions[0].mirror.size(), (28, 100));
     }
 
@@ -595,7 +659,9 @@ mod tests {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
         app.on_terminal(plain(KeyCode::Char('h')));
-        assert!(matches!(&app.take_effects()[..], [Effect::Input(id, b)] if *id == live[0].id && b == b"h"));
+        assert!(
+            matches!(&app.take_effects()[..], [Effect::Input(id, b)] if *id == live[0].id && b == b"h")
+        );
         app.on_terminal(alt('r'));
         app.on_terminal(plain(KeyCode::Char('h')));
         assert!(app.take_effects().is_empty());
@@ -620,7 +686,11 @@ mod tests {
 
     #[test]
     fn close_persists_intent_before_kill_and_moves_to_a_neighbour() {
-        let live = [info(Some(1), None), info(Some(2), None), info(Some(3), None)];
+        let live = [
+            info(Some(1), None),
+            info(Some(2), None),
+            info(Some(3), None),
+        ];
         let mut app = app_with(&live);
         app.on_terminal(alt('x'));
         app.on_terminal(plain(KeyCode::Char('n')));
@@ -628,10 +698,15 @@ mod tests {
         app.on_terminal(alt('x'));
         app.on_terminal(plain(KeyCode::Char('y')));
         let effects = app.take_effects();
-        let save = effects.iter().position(|e| matches!(e, Effect::Save)).unwrap();
+        let save = effects
+            .iter()
+            .position(|e| matches!(e, Effect::Save))
+            .unwrap();
         let kill = effects
             .iter()
-            .position(|e| matches!(e, Effect::Request { msg: Msg::Kill { id }, .. } if *id == live[0].id))
+            .position(
+                |e| matches!(e, Effect::Request { msg: Msg::Kill { id }, .. } if *id == live[0].id),
+            )
             .unwrap();
         assert!(save < kill, "Save must come before Kill");
         assert_eq!(app.sessions.len(), 2);
@@ -648,13 +723,19 @@ mod tests {
         app.on_terminal(plain(KeyCode::Char('y')));
         // The tombstone must be in to_state() before Kill is sent.
         let effects = app.take_effects();
-        let save_pos = effects.iter().position(|e| matches!(e, Effect::Save)).unwrap();
+        let save_pos = effects
+            .iter()
+            .position(|e| matches!(e, Effect::Save))
+            .unwrap();
         let kill_pos = effects
             .iter()
             .position(|e| matches!(e, Effect::Request { msg: Msg::Kill { id: k }, .. } if *k == id))
             .unwrap();
         assert!(save_pos < kill_pos, "tombstone must be saved before Kill");
-        assert!(app.killed.iter().any(|t| t.id == id), "tombstone must be in app.killed");
+        assert!(
+            app.killed.iter().any(|t| t.id == id),
+            "tombstone must be in app.killed"
+        );
     }
 
     #[test]
@@ -668,7 +749,10 @@ mod tests {
         assert!(!app.killed.is_empty());
         // Simulate a successful Kill reply.
         app.on_reply(ReplyTo::Kill(id), Ok(Msg::Pong));
-        assert!(app.killed.is_empty(), "tombstone must be cleared after Kill OK");
+        assert!(
+            app.killed.is_empty(),
+            "tombstone must be cleared after Kill OK"
+        );
     }
 
     #[test]
@@ -682,9 +766,14 @@ mod tests {
         // Simulate "no such session" error.
         app.on_reply(
             ReplyTo::Kill(id),
-            Ok(Msg::Error { message: "no such session".into() }),
+            Ok(Msg::Error {
+                message: "no such session".into(),
+            }),
         );
-        assert!(app.killed.is_empty(), "tombstone cleared on 'no such session'");
+        assert!(
+            app.killed.is_empty(),
+            "tombstone cleared on 'no such session'"
+        );
     }
 
     #[test]
@@ -692,7 +781,10 @@ mod tests {
         // Simulate: session was killed, tombstone saved, but Kill never delivered.
         let id = Uuid::new_v4();
         let mut saved = ClientState::default();
-        saved.killed.push(KillTombstone { host: "local".into(), id });
+        saved.killed.push(KillTombstone {
+            host: "local".into(),
+            id,
+        });
         // The daemon still lists the session as live.
         let live = [SessionInfo {
             id,
@@ -708,12 +800,15 @@ mod tests {
         app.recover(&saved, &live);
         let effects = app.take_effects();
         // Kill must be re-sent.
-        let kill_re_sent = effects.iter().any(|e| {
-            matches!(e, Effect::Request { msg: Msg::Kill { id: k }, .. } if *k == id)
-        });
+        let kill_re_sent = effects
+            .iter()
+            .any(|e| matches!(e, Effect::Request { msg: Msg::Kill { id: k }, .. } if *k == id));
         assert!(kill_re_sent, "dropped Kill must be re-sent on recovery");
         // The tombstoned session must NOT appear in the session list.
-        assert!(!app.sessions.iter().any(|v| v.id == id), "tombstoned session must not appear");
+        assert!(
+            !app.sessions.iter().any(|v| v.id == id),
+            "tombstoned session must not appear"
+        );
     }
 
     #[test]
@@ -771,15 +866,27 @@ mod tests {
 
     #[test]
     fn attention_cycles_over_sessions_that_want_it() {
-        let mut live = [info(Some(1), None), info(Some(2), None), info(Some(3), None)];
+        let mut live = [
+            info(Some(1), None),
+            info(Some(2), None),
+            info(Some(3), None),
+        ];
         live[2].state = SessionState::NeedsApproval;
         let mut app = app_with(&live);
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(2));
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(2), "nothing else wants attention");
-        let event = SessionEvent::State { state: SessionState::NeedsInput };
-        app.on_incoming_from("local", Incoming::Event { id: live[0].id, event });
+        let event = SessionEvent::State {
+            state: SessionState::NeedsInput,
+        };
+        app.on_incoming_from(
+            "local",
+            Incoming::Event {
+                id: live[0].id,
+                event,
+            },
+        );
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(0));
     }
@@ -790,21 +897,35 @@ mod tests {
         // Step 0: press Enter to select "local" host (empty host filter → picks local).
         app.on_terminal(plain(KeyCode::Enter));
         app.take_effects(); // consume RecentProjects request
-        // Step 1: type "/w" into the directory input, then press Enter.
+                            // Step 1: type "/w" into the directory input, then press Enter.
         for c in "/w".chars() {
             app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.on_terminal(plain(KeyCode::Enter));
         let effects = app.take_effects();
-        assert!(requests(&effects).iter().any(|m| **m == Msg::ListClaudeSessions { cwd: "/w".into() }));
+        assert!(requests(&effects)
+            .iter()
+            .any(|m| **m == Msg::ListClaudeSessions { cwd: "/w".into() }));
         let gen = app.wizard_generation();
-        let reply = Msg::ClaudeSessions { cwd: "/w".into(), sessions: vec![] };
+        let reply = Msg::ClaudeSessions {
+            cwd: "/w".into(),
+            sessions: vec![],
+        };
         app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
         let effects = app.take_effects();
         let reqs = requests(&effects);
-        let Msg::Spawn(spec) = reqs[0] else { panic!("expected Spawn, got {reqs:?}") };
+        let Msg::Spawn(spec) = reqs[0] else {
+            panic!("expected Spawn, got {reqs:?}")
+        };
         assert_eq!((spec.cwd.as_str(), spec.args.len()), ("/w", 0));
-        assert_eq!(*reqs[1], Msg::Attach { id: spec.id, rows: 28, cols: 100 });
+        assert_eq!(
+            *reqs[1],
+            Msg::Attach {
+                id: spec.id,
+                rows: 28,
+                cols: 100
+            }
+        );
         assert!(app.modal.is_none());
         assert_eq!(app.recent_dirs, vec!["/w".to_owned()]);
         assert_eq!(app.sessions[0].label(), "w");
@@ -817,22 +938,43 @@ mod tests {
         let id = live[0].id;
         app.on_incoming_from(
             "local",
-            Incoming::Event { id, event: SessionEvent::Title { title: "Refactor".into() } },
+            Incoming::Event {
+                id,
+                event: SessionEvent::Title {
+                    title: "Refactor".into(),
+                },
+            },
         );
-        let event = SessionEvent::ClaudeSession { claude_session_id: "c9".into() };
+        let event = SessionEvent::ClaudeSession {
+            claude_session_id: "c9".into(),
+        };
         app.on_incoming_from("local", Incoming::Event { id, event });
         assert_eq!(app.sessions[0].label(), "Refactor");
-        assert_eq!(app.to_state().sessions[0].claude_session_id.as_deref(), Some("c9"));
+        assert_eq!(
+            app.to_state().sessions[0].claude_session_id.as_deref(),
+            Some("c9")
+        );
         let other = info(Some(5), None);
         let other_id = other.id;
         app.on_incoming_from(
             "local",
-            Incoming::Event { id: other_id, event: SessionEvent::Created { info: other.clone() } },
+            Incoming::Event {
+                id: other_id,
+                event: SessionEvent::Created {
+                    info: other.clone(),
+                },
+            },
         );
         assert_eq!(app.sessions.len(), 2);
         // M1 fix: new unknown session must get host "local" (from on_incoming_from).
         assert_eq!(app.sessions[1].host, "local");
-        app.on_incoming_from("local", Incoming::Event { id: other_id, event: SessionEvent::Removed });
+        app.on_incoming_from(
+            "local",
+            Incoming::Event {
+                id: other_id,
+                event: SessionEvent::Removed,
+            },
+        );
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.active, Some(0));
     }
@@ -849,10 +991,16 @@ mod tests {
         let new_id = new_session.id;
         app.on_incoming_from(
             "myserver",
-            Incoming::Event { id: new_id, event: SessionEvent::Created { info: new_session } },
+            Incoming::Event {
+                id: new_id,
+                event: SessionEvent::Created { info: new_session },
+            },
         );
         let sv = app.sessions.iter().find(|v| v.id == new_id).unwrap();
-        assert_eq!(sv.host, "myserver", "remote session must have host=myserver");
+        assert_eq!(
+            sv.host, "myserver",
+            "remote session must have host=myserver"
+        );
     }
 
     #[test]
@@ -888,9 +1036,21 @@ mod tests {
         });
         app.on_incoming_from("local", Incoming::Disconnected);
         // Local session detached.
-        assert!(!app.sessions.iter().find(|v| v.id == local_id).unwrap().attached);
+        assert!(
+            !app.sessions
+                .iter()
+                .find(|v| v.id == local_id)
+                .unwrap()
+                .attached
+        );
         // Remote session NOT affected.
-        assert!(app.sessions.iter().find(|v| v.id == remote_id).unwrap().attached);
+        assert!(
+            app.sessions
+                .iter()
+                .find(|v| v.id == remote_id)
+                .unwrap()
+                .attached
+        );
     }
 
     // ── Overview ──────────────────────────────────────────────────────────────
@@ -953,8 +1113,16 @@ mod tests {
         assert!(app.pending_notifs.is_empty(), "debounced: no second notif");
 
         // State change: new notification.
-        let ev = SessionEvent::State { state: SessionState::NeedsInput };
-        app.on_incoming_from("local", Incoming::Event { id: live[1].id, event: ev });
+        let ev = SessionEvent::State {
+            state: SessionState::NeedsInput,
+        };
+        app.on_incoming_from(
+            "local",
+            Incoming::Event {
+                id: live[1].id,
+                event: ev,
+            },
+        );
         app.check_notifications();
         assert_eq!(app.pending_notifs.len(), 1, "new state → new notification");
     }
@@ -967,14 +1135,18 @@ mod tests {
         // Session 0 is both active and wants attention.
         assert_eq!(app.active, Some(0));
         app.check_notifications();
-        assert!(app.pending_notifs.is_empty(), "active session must not notify");
+        assert!(
+            app.pending_notifs.is_empty(),
+            "active session must not notify"
+        );
     }
 
     #[test]
     fn notifications_disabled_when_flag_is_off() {
         let mut live = [info(Some(1), None), info(Some(2), None)];
         live[1].state = SessionState::NeedsApproval;
-        let mut app = App::new_with_config(100, 30, "/home/u".into(), vec![], false, Keymap::default());
+        let mut app =
+            App::new_with_config(100, 30, "/home/u".into(), vec![], false, Keymap::default());
         app.recover(&ClientState::default(), &live);
         app.take_effects();
         app.check_notifications();
@@ -990,7 +1162,10 @@ mod tests {
         // Simulate wizard being cancelled.
         app.modal = None;
         // Now a reply with the old gen arrives; it must be silently dropped.
-        let reply = Msg::ClaudeSessions { cwd: "/w".into(), sessions: vec![] };
+        let reply = Msg::ClaudeSessions {
+            cwd: "/w".into(),
+            sessions: vec![],
+        };
         app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
         // No modal opened (wizard was closed).
         assert!(app.modal.is_none());

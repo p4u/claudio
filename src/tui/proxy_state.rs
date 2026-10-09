@@ -39,7 +39,9 @@ pub fn resolve_profile(name: &str) -> Option<(String, String)> {
         crate::proxy::profile::from_env().map(|(_, p)| (p.url, p.token))
     } else {
         crate::proxy::profile::load().ok().and_then(|sec| {
-            sec.profiles.get(name).map(|p| (p.url.clone(), p.token.clone()))
+            sec.profiles
+                .get(name)
+                .map(|p| (p.url.clone(), p.token.clone()))
         })
     }
 }
@@ -62,7 +64,9 @@ pub fn proxy_env_for(
     let profile = if name == "env" {
         crate::proxy::profile::from_env().map(|(_, p)| p)
     } else {
-        crate::proxy::profile::load().ok().and_then(|sec| sec.profiles.get(name).cloned())
+        crate::proxy::profile::load()
+            .ok()
+            .and_then(|sec| sec.profiles.get(name).cloned())
     };
     match profile {
         Some(p) => Ok(crate::proxy::env::session_env(&p, proxy_config)),
@@ -70,7 +74,9 @@ pub fn proxy_env_for(
             if name == "env" {
                 Err("proxy profile 'env' requires CLAUDIO_PROXY_URL to be set".to_owned())
             } else {
-                Err(format!("proxy profile '{name}' not found (was it deleted?)"))
+                Err(format!(
+                    "proxy profile '{name}' not found (was it deleted?)"
+                ))
             }
         }
     }

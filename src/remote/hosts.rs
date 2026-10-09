@@ -178,10 +178,19 @@ fn expand_glob(pattern: &Path) -> Vec<PathBuf> {
     };
     let file_pattern = match pattern.file_name().and_then(|n| n.to_str()) {
         Some(f) => f,
-        None => return pattern.exists().then(|| vec![pattern.to_path_buf()]).unwrap_or_default(),
+        None => {
+            return pattern
+                .exists()
+                .then(|| vec![pattern.to_path_buf()])
+                .unwrap_or_default()
+        }
     };
     if !pattern_str.contains('*') && !pattern_str.contains('?') {
-        return if pattern.exists() { vec![pattern.to_path_buf()] } else { Vec::new() };
+        return if pattern.exists() {
+            vec![pattern.to_path_buf()]
+        } else {
+            Vec::new()
+        };
     }
     let entries = match fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -247,8 +256,7 @@ mod tests {
     use std::fs;
 
     fn scratch() -> PathBuf {
-        let tmp = std::env::temp_dir()
-            .join(format!("claudio-hosts-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("claudio-hosts-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         tmp
     }
@@ -288,7 +296,11 @@ mod tests {
         fs::write(subdir.join("10-work.conf"), "Host work1\nHost work2\n").unwrap();
         fs::write(subdir.join("20-home.conf"), "Host home1\n").unwrap();
         let main_config = dir.join("config");
-        fs::write(&main_config, format!("Include conf.d/*.conf\nHost direct\n")).unwrap();
+        fs::write(
+            &main_config,
+            format!("Include conf.d/*.conf\nHost direct\n"),
+        )
+        .unwrap();
 
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -322,7 +334,9 @@ mod tests {
     #[test]
     fn mru_ordering() {
         // Test the MRU logic in isolation, without touching the real config dir.
-        let mut mru = HostsMru { hosts: vec!["a".into(), "b".into(), "c".into()] };
+        let mut mru = HostsMru {
+            hosts: vec!["a".into(), "b".into(), "c".into()],
+        };
         let host = "b";
         mru.hosts.retain(|h| h != host);
         mru.hosts.insert(0, host.to_owned());
@@ -336,7 +350,9 @@ mod tests {
         let config = ssh_dir.join("config");
         fs::write(&config, "Host alpha\nHost beta\nHost gamma\n").unwrap();
         // Simulate: alpha is in MRU (most recent first), beta is also in MRU.
-        let mru = HostsMru { hosts: vec!["alpha".into(), "delta".into()] };
+        let mru = HostsMru {
+            hosts: vec!["alpha".into(), "delta".into()],
+        };
         // Manually merge like candidates() does.
         let mru_set: HashSet<&str> = mru.hosts.iter().map(String::as_str).collect();
         let mut seen_files = HashSet::new();

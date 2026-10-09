@@ -44,7 +44,11 @@ impl ProbeResponder {
     pub fn new(rows: u16, cols: u16) -> Self {
         Self {
             parser: Parser::new(),
-            inner: Inner { out: Vec::new(), rows, cols },
+            inner: Inner {
+                out: Vec::new(),
+                rows,
+                cols,
+            },
         }
     }
 
@@ -68,7 +72,11 @@ impl ProbeResponder {
 impl Perform for Inner {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let private = intermediates.first().copied();
-        let first = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+        let first = params
+            .iter()
+            .next()
+            .and_then(|p| p.first().copied())
+            .unwrap_or(0);
 
         match action {
             // ── Device Attributes ──────────────────────────────────────────
@@ -141,34 +149,50 @@ impl Perform for Inner {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // OSC params are split on ';'. params[0] is the command number.
-        let cmd = params.first().and_then(|p| std::str::from_utf8(p).ok()).unwrap_or("");
+        let cmd = params
+            .first()
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .unwrap_or("");
         match cmd {
             // OSC 10 ; ? — foreground colour query
             "10" => {
-                let arg = params.get(1).and_then(|p| std::str::from_utf8(p).ok()).unwrap_or("");
+                let arg = params
+                    .get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("");
                 if arg.trim() == "?" {
                     // White foreground: rgb:ffff/ffff/ffff
-                    self.out.extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
+                    self.out
+                        .extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
                 }
             }
             // OSC 11 ; ? — background colour query
             "11" => {
-                let arg = params.get(1).and_then(|p| std::str::from_utf8(p).ok()).unwrap_or("");
+                let arg = params
+                    .get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("");
                 if arg.trim() == "?" {
                     // Black background: rgb:0000/0000/0000
-                    self.out.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+                    self.out
+                        .extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
                 }
             }
             // OSC 4 ; N ; ? — indexed colour query
             "4" => {
                 let slot_bytes = params.get(1).copied().unwrap_or(b"");
-                let query = params.get(2).and_then(|p| std::str::from_utf8(p).ok()).unwrap_or("");
+                let query = params
+                    .get(2)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .unwrap_or("");
                 if query.trim() == "?" {
                     if let Ok(slot_str) = std::str::from_utf8(slot_bytes) {
                         if let Ok(slot) = slot_str.trim().parse::<u8>() {
                             let rgb = ansi_palette(slot);
-                            let reply = format!("\x1b]4;{slot};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
-                                rgb.0, rgb.0, rgb.1, rgb.1, rgb.2, rgb.2);
+                            let reply = format!(
+                                "\x1b]4;{slot};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
+                                rgb.0, rgb.0, rgb.1, rgb.1, rgb.2, rgb.2
+                            );
                             self.out.extend_from_slice(reply.as_bytes());
                         }
                     }
@@ -183,21 +207,21 @@ impl Perform for Inner {
 /// Higher slots use 6x6x6 RGB cube + greyscale; this is exact for 0-15.
 fn ansi_palette(slot: u8) -> (u8, u8, u8) {
     const PALETTE: [(u8, u8, u8); 16] = [
-        (0,   0,   0),   // 0  black
-        (128, 0,   0),   // 1  red
-        (0,   128, 0),   // 2  green
+        (0, 0, 0),       // 0  black
+        (128, 0, 0),     // 1  red
+        (0, 128, 0),     // 2  green
         (128, 128, 0),   // 3  yellow
-        (0,   0,   128), // 4  blue
-        (128, 0,   128), // 5  magenta
-        (0,   128, 128), // 6  cyan
+        (0, 0, 128),     // 4  blue
+        (128, 0, 128),   // 5  magenta
+        (0, 128, 128),   // 6  cyan
         (192, 192, 192), // 7  white
         (128, 128, 128), // 8  bright black
-        (255, 0,   0),   // 9  bright red
-        (0,   255, 0),   // 10 bright green
+        (255, 0, 0),     // 9  bright red
+        (0, 255, 0),     // 10 bright green
         (255, 255, 0),   // 11 bright yellow
-        (0,   0,   255), // 12 bright blue
-        (255, 0,   255), // 13 bright magenta
-        (0,   255, 255), // 14 bright cyan
+        (0, 0, 255),     // 12 bright blue
+        (255, 0, 255),   // 13 bright magenta
+        (0, 255, 255),   // 14 bright cyan
         (255, 255, 255), // 15 bright white
     ];
     if (slot as usize) < PALETTE.len() {
@@ -337,6 +361,7 @@ mod tests {
     #[test]
     fn ansi_palette_greyscale() {
         let (r, g, b) = ansi_palette(232);
-        assert_eq!(r, g); assert_eq!(g, b); // neutral grey
+        assert_eq!(r, g);
+        assert_eq!(g, b); // neutral grey
     }
 }

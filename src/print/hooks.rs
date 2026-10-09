@@ -182,7 +182,9 @@ pub enum Listener {
         /// Signals the accept thread to stop so its socket is released on drop.
         stop: Arc<AtomicBool>,
     },
-    File { dir: PathBuf },
+    File {
+        dir: PathBuf,
+    },
 }
 
 impl Listener {
@@ -350,7 +352,9 @@ pub fn build_settings_merged(
                 match std::fs::read_to_string(s) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        warnings.push(format!("could not read --settings file '{s}': {e}; ignoring"));
+                        warnings.push(format!(
+                            "could not read --settings file '{s}': {e}; ignoring"
+                        ));
                         None
                     }
                 }
@@ -415,12 +419,17 @@ mod tests {
         assert!(warns.is_empty());
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         let stop_cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
-            .as_str().unwrap();
+            .as_str()
+            .unwrap();
         let session_cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-            .as_str().unwrap();
+            .as_str()
+            .unwrap();
         // Must not contain the wrapper name.
         assert!(!stop_cmd.contains("claudio"), "stop cmd: {stop_cmd}");
-        assert!(!session_cmd.contains("claudio"), "session cmd: {session_cmd}");
+        assert!(
+            !session_cmd.contains("claudio"),
+            "session cmd: {session_cmd}"
+        );
         // Must contain the port as a plain number.
         assert!(stop_cmd.contains("49152"), "port missing from: {stop_cmd}");
         // The relay binary must exist.
@@ -446,8 +455,14 @@ mod tests {
             assert!(bin.exists());
         } // Relay dropped here.
         assert!(!bin.exists(), "relay binary should be removed on drop");
-        assert!(!dir.exists() || dir.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false),
-            "relay dir should be cleaned up");
+        assert!(
+            !dir.exists()
+                || dir
+                    .read_dir()
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false),
+            "relay dir should be cleaned up"
+        );
     }
 
     #[test]
@@ -460,7 +475,10 @@ mod tests {
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], "echo mine");
-        assert!(stop[1]["hooks"][0]["command"].as_str().unwrap().ends_with("__hook Stop"));
+        assert!(stop[1]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("__hook Stop"));
     }
 
     #[test]
@@ -529,23 +547,28 @@ mod tests {
         // With the Relay approach, child_env() returns empty for TCP.
         use crate::cli::HookTransport;
         let listener = Listener::start(HookTransport::Tcp).unwrap();
-        assert!(listener.child_env().is_empty(),
-            "TCP child_env should be empty (port is in relay argv, not env)");
+        assert!(
+            listener.child_env().is_empty(),
+            "TCP child_env should be empty (port is in relay argv, not env)"
+        );
     }
 
     #[test]
     fn tcp_listener_roundtrip() {
-        use std::net::TcpStream;
         use crate::cli::HookTransport;
+        use std::net::TcpStream;
 
         let listener = Listener::start(HookTransport::Tcp).unwrap();
         let port = listener.port().unwrap();
 
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(b"Stop\n{\"last_assistant_message\":\"TCP_OK\"}").unwrap();
+        s.write_all(b"Stop\n{\"last_assistant_message\":\"TCP_OK\"}")
+            .unwrap();
         drop(s);
 
-        let hook = listener.poll(std::time::Duration::from_secs(2)).expect("hook");
+        let hook = listener
+            .poll(std::time::Duration::from_secs(2))
+            .expect("hook");
         assert_eq!(hook.event, HookEvent::Stop);
         assert!(hook.payload.contains("TCP_OK"));
     }
@@ -554,7 +577,9 @@ mod tests {
     fn tcp_listener_poll_timeout_returns_none() {
         use crate::cli::HookTransport;
         let listener = Listener::start(HookTransport::Tcp).unwrap();
-        assert!(listener.poll(std::time::Duration::from_millis(50)).is_none());
+        assert!(listener
+            .poll(std::time::Duration::from_millis(50))
+            .is_none());
     }
 
     #[test]
@@ -572,11 +597,14 @@ mod tests {
         let tmp = dir.join(format!("{id}.tmp"));
         let done = dir.join(format!("{id}.hook"));
         let mut f = std::fs::File::create(&tmp).unwrap();
-        f.write_all(b"SessionStart\n{\"session_id\":\"file-sid\"}").unwrap();
+        f.write_all(b"SessionStart\n{\"session_id\":\"file-sid\"}")
+            .unwrap();
         drop(f);
         std::fs::rename(&tmp, &done).unwrap();
 
-        let hook = listener.poll(std::time::Duration::from_secs(2)).expect("hook");
+        let hook = listener
+            .poll(std::time::Duration::from_secs(2))
+            .expect("hook");
         assert_eq!(hook.event, HookEvent::SessionStart);
         assert!(hook.payload.contains("file-sid"));
     }

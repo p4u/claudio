@@ -91,9 +91,15 @@ fn main() -> std::process::ExitCode {
     // command is `<copy> Stop 49152` — no wrapper name, no env var.
     if argv.len() == 3 {
         if let Ok(port) = argv[2].parse::<u16>() {
-            if matches!(argv[1].as_str(),
-                "SessionStart" | "Stop" | "PreToolUse" | "PostToolUse"
-                | "PreCompact" | "PostCompact" | "Notification"
+            if matches!(
+                argv[1].as_str(),
+                "SessionStart"
+                    | "Stop"
+                    | "PreToolUse"
+                    | "PostToolUse"
+                    | "PreCompact"
+                    | "PostCompact"
+                    | "Notification"
             ) {
                 print::hooks::relay_to_port(&argv[1], port);
                 return std::process::ExitCode::SUCCESS;
@@ -151,11 +157,14 @@ fn main() -> std::process::ExitCode {
     // a file path also enables the raw JSONL sink. Init before any turn runs.
     {
         let pretty = parsed.log_messages
-            || std::env::var("CLAUDIO_LOG_MESSAGES").map(|v| v == "1" || v == "true").unwrap_or(false);
-        let file = parsed
-            .log_messages_file
-            .clone()
-            .or_else(|| std::env::var("CLAUDIO_LOG_MESSAGES_FILE").ok().filter(|s| !s.is_empty()));
+            || std::env::var("CLAUDIO_LOG_MESSAGES")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false);
+        let file = parsed.log_messages_file.clone().or_else(|| {
+            std::env::var("CLAUDIO_LOG_MESSAGES_FILE")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
         if pretty || file.is_some() {
             msglog::init(pretty, file.as_deref());
         }
@@ -187,7 +196,9 @@ fn main() -> std::process::ExitCode {
         Some(p) => p.clone(),
         None => {
             if std::io::stdin().is_terminal() {
-                eprintln!("claudio: a prompt is required (positional arg, `-- <prompt>`, or stdin)");
+                eprintln!(
+                    "claudio: a prompt is required (positional arg, `-- <prompt>`, or stdin)"
+                );
                 return std::process::ExitCode::from(2);
             }
             let mut buf = String::new();
@@ -219,7 +230,10 @@ fn main() -> std::process::ExitCode {
         }
         Err(e) => {
             eprintln!("claudio: {e}");
-            if matches!(parsed.output_format, OutputFormat::Json | OutputFormat::StreamJson) {
+            if matches!(
+                parsed.output_format,
+                OutputFormat::Json | OutputFormat::StreamJson
+            ) {
                 let obj = serde_json::json!({
                     "type": "result", "subtype": "error", "is_error": true,
                     "result": "", "terminal_reason": e.to_string(),
@@ -259,7 +273,9 @@ fn print_help_with_appendix(args: &[String]) -> std::process::ExitCode {
 // ── `claudio sessions` ────────────────────────────────────────────────────────
 
 fn sessions_cmd() -> std::process::ExitCode {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
     let rt = match rt {
         Ok(rt) => rt,
         Err(e) => {
@@ -269,26 +285,25 @@ fn sessions_cmd() -> std::process::ExitCode {
     };
     rt.block_on(async {
         match client::connect(&paths::daemon_socket()).await {
-            Ok(c) => {
-                match c.request(proto::Msg::ListSessions).await {
-                    Ok(proto::Msg::Sessions { sessions }) => {
-                        if sessions.is_empty() {
-                            println!("no sessions");
-                            return;
-                        }
-                        println!("{:<10} {:<14} {:<20} {}", "ID", "STATE", "NAME/TITLE", "CWD");
-                        for s in &sessions {
-                            let id_prefix: String = s.id.to_string().chars().take(8).collect();
-                            let state = format!("{:?}", s.state).to_ascii_lowercase();
-                            let name = s.name.as_deref()
-                                .or(s.title.as_deref())
-                                .unwrap_or("-");
-                            println!("{:<10} {:<14} {:<20} {}", id_prefix, state, name, s.cwd);
-                        }
+            Ok(c) => match c.request(proto::Msg::ListSessions).await {
+                Ok(proto::Msg::Sessions { sessions }) => {
+                    if sessions.is_empty() {
+                        println!("no sessions");
+                        return;
                     }
-                    _ => eprintln!("claudio sessions: unexpected reply"),
+                    println!(
+                        "{:<10} {:<14} {:<20} {}",
+                        "ID", "STATE", "NAME/TITLE", "CWD"
+                    );
+                    for s in &sessions {
+                        let id_prefix: String = s.id.to_string().chars().take(8).collect();
+                        let state = format!("{:?}", s.state).to_ascii_lowercase();
+                        let name = s.name.as_deref().or(s.title.as_deref()).unwrap_or("-");
+                        println!("{:<10} {:<14} {:<20} {}", id_prefix, state, name, s.cwd);
+                    }
                 }
-            }
+                _ => eprintln!("claudio sessions: unexpected reply"),
+            },
             Err(e) => eprintln!("claudio sessions: {e}"),
         }
     });

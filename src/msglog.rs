@@ -74,7 +74,11 @@ static SINK: OnceLock<Sink> = OnceLock::new();
 /// and openable) enables the raw JSONL sink. Safe to call when both are off.
 pub fn init(pretty: bool, file: Option<&str>) {
     let file = file.and_then(|p| {
-        match std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
             Ok(f) => Some(Mutex::new(f)),
             Err(e) => {
                 eprintln!("claudio: --log-messages-file: cannot open {p}: {e}");
@@ -93,7 +97,9 @@ pub fn init(pretty: bool, file: Option<&str>) {
 
 /// True if any sink is active. Callers can gate body construction on this.
 pub fn enabled() -> bool {
-    SINK.get().map(|s| s.pretty || s.file.is_some()).unwrap_or(false)
+    SINK.get()
+        .map(|s| s.pretty || s.file.is_some())
+        .unwrap_or(false)
 }
 
 /// Generate a short correlation id tying one turn's hops together.

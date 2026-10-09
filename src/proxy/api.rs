@@ -224,7 +224,10 @@ pub async fn fetch_stats(
 }
 
 /// `GET /v1/claudio/pool/health` — pool availability.
-pub async fn fetch_pool_health(base_url: &str, token: &str) -> Result<PoolHealthResponse, ApiError> {
+pub async fn fetch_pool_health(
+    base_url: &str,
+    token: &str,
+) -> Result<PoolHealthResponse, ApiError> {
     let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/claudio/pool/health"))
@@ -273,7 +276,12 @@ mod tests {
         );
         let base = serve(router).await;
         let cfg = fetch_config(&base, "tok").await.unwrap().unwrap();
-        assert_eq!(cfg.env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").map(String::as_str), Some("claude-sonnet-5-5[1m]"));
+        assert_eq!(
+            cfg.env
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5-5[1m]")
+        );
     }
 
     #[tokio::test]
@@ -302,8 +310,14 @@ mod tests {
         let ok = PoolHealthResponse {
             version: 1,
             providers: vec![
-                ProviderHealth { name: "anthropic".into(), status: "ok".into() },
-                ProviderHealth { name: "google".into(), status: "ok".into() },
+                ProviderHealth {
+                    name: "anthropic".into(),
+                    status: "ok".into(),
+                },
+                ProviderHealth {
+                    name: "google".into(),
+                    status: "ok".into(),
+                },
             ],
         };
         assert_eq!(ok.overall(), PoolStatus::Ok);
@@ -311,15 +325,24 @@ mod tests {
         let busy = PoolHealthResponse {
             version: 1,
             providers: vec![
-                ProviderHealth { name: "anthropic".into(), status: "busy".into() },
-                ProviderHealth { name: "google".into(), status: "ok".into() },
+                ProviderHealth {
+                    name: "anthropic".into(),
+                    status: "busy".into(),
+                },
+                ProviderHealth {
+                    name: "google".into(),
+                    status: "ok".into(),
+                },
             ],
         };
         assert_eq!(busy.overall(), PoolStatus::Busy);
 
         let saturated = PoolHealthResponse {
             version: 1,
-            providers: vec![ProviderHealth { name: "anthropic".into(), status: "saturated".into() }],
+            providers: vec![ProviderHealth {
+                name: "anthropic".into(),
+                status: "saturated".into(),
+            }],
         };
         assert_eq!(saturated.overall(), PoolStatus::Saturated);
     }
@@ -331,7 +354,10 @@ mod tests {
         let router = Router::new();
         let base = serve(router).await;
         let result = check_models_fallback(&base, "tok").await;
-        assert!(result.is_err(), "404 from /v1/models must not count as auth success");
+        assert!(
+            result.is_err(),
+            "404 from /v1/models must not count as auth success"
+        );
     }
 
     #[tokio::test]

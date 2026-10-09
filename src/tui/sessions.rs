@@ -55,7 +55,11 @@ impl SessionView {
             .clone()
             .or_else(|| self.title.clone())
             .unwrap_or_else(|| {
-                self.cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/").to_owned()
+                self.cwd
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("/")
+                    .to_owned()
             });
         sanitize_label(&raw, 200)
     }
@@ -91,7 +95,9 @@ impl App {
 
     /// The host of the active session (or "local" when none is active).
     pub(super) fn active_host(&self) -> String {
-        self.active_view().map(|v| v.host.clone()).unwrap_or_else(|| "local".to_owned())
+        self.active_view()
+            .map(|v| v.host.clone())
+            .unwrap_or_else(|| "local".to_owned())
     }
 
     /// The host the wizard is currently targeting (or "local").
@@ -121,7 +127,11 @@ impl App {
 
     /// Send a request to `host`'s daemon.
     pub(super) fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
-        self.effects.push(Effect::Request { host: host.to_owned(), msg, to });
+        self.effects.push(Effect::Request {
+            host: host.to_owned(),
+            msg,
+            to,
+        });
     }
 
     /// Send a request to the local daemon.
@@ -155,7 +165,11 @@ impl App {
         view.mirror = Screen::new(rows, cols);
         let id = view.id;
         let host = view.host.clone();
-        self.request(&host, Msg::Attach { id, rows, cols }, ReplyTo::Ack("attach"));
+        self.request(
+            &host,
+            Msg::Attach { id, rows, cols },
+            ReplyTo::Ack("attach"),
+        );
         self.redraw = true;
         self.save();
     }
@@ -195,7 +209,9 @@ impl App {
     ) {
         let (rows, cols) = self.pane_size();
         let id = Uuid::new_v4();
-        let args = resume.map(|r| vec!["--resume".to_owned(), r]).unwrap_or_default();
+        let args = resume
+            .map(|r| vec!["--resume".to_owned(), r])
+            .unwrap_or_default();
         // Build proxy env; if it fails, notify and abort (M4 fix).
         let env = match self.proxy_env_for(proxy.as_deref()) {
             Ok(e) => e,
@@ -204,7 +220,15 @@ impl App {
                 return;
             }
         };
-        let spec = SpawnSpec { id, cwd: cwd.clone(), name: None, args, env, rows, cols };
+        let spec = SpawnSpec {
+            id,
+            cwd: cwd.clone(),
+            name: None,
+            args,
+            env,
+            rows,
+            cols,
+        };
         self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
         self.sessions.push(SessionView {
             id,
@@ -238,7 +262,12 @@ impl App {
             &self.proxy_profiles.clone(),
             proxy_default,
         )));
-        self.request_local(Msg::RecentProjects { limit: PROJECTS_LIMIT }, ReplyTo::Projects);
+        self.request_local(
+            Msg::RecentProjects {
+                limit: PROJECTS_LIMIT,
+            },
+            ReplyTo::Projects,
+        );
         self.redraw = true;
     }
 
@@ -304,7 +333,11 @@ impl App {
 
         // Re-send Kill for tombstoned sessions that are still live.
         for live_info in live {
-            if self.killed.iter().any(|t| t.id == live_info.id && t.host == host) {
+            if self
+                .killed
+                .iter()
+                .any(|t| t.id == live_info.id && t.host == host)
+            {
                 let id = live_info.id;
                 self.effects.push(Effect::Request {
                     host: host.to_owned(),

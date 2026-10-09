@@ -91,10 +91,24 @@ pub struct Parsed {
 fn known_value_flag(flag: &str) -> bool {
     matches!(
         flag,
-        "--model" | "--agent" | "--agents" | "--append-system-prompt" | "--system-prompt"
-            | "--append-system-prompt-file" | "--system-prompt-file" | "--debug-file" | "--effort"
-            | "--fallback-model" | "--json-schema" | "--max-budget-usd" | "-n" | "--name"
-            | "--permission-mode" | "--plugin-dir" | "--plugin-url" | "--setting-sources"
+        "--model"
+            | "--agent"
+            | "--agents"
+            | "--append-system-prompt"
+            | "--system-prompt"
+            | "--append-system-prompt-file"
+            | "--system-prompt-file"
+            | "--debug-file"
+            | "--effort"
+            | "--fallback-model"
+            | "--json-schema"
+            | "--max-budget-usd"
+            | "-n"
+            | "--name"
+            | "--permission-mode"
+            | "--plugin-dir"
+            | "--plugin-url"
+            | "--setting-sources"
             | "--remote-control-session-name-prefix"
     )
 }
@@ -183,7 +197,8 @@ pub fn parse(args: &[String]) -> Parsed {
                     Some(f) => p.output_format = f,
                     None => {
                         if let Some(v) = v {
-                            p.warnings.push(format!("unknown --output-format '{v}', using text"));
+                            p.warnings
+                                .push(format!("unknown --output-format '{v}', using text"));
                         }
                     }
                 }
@@ -286,17 +301,25 @@ impl WrapperEnv {
     pub fn from_env() -> Self {
         let g = |k: &str| std::env::var(k).ok();
         WrapperEnv {
-            debug: g("CLAUDIO_DEBUG").map(|v| v == "1" || v == "true").unwrap_or(false),
-            timeout_sec: g("CLAUDIO_TIMEOUT_SEC").and_then(|v| v.parse().ok()).unwrap_or(300),
+            debug: g("CLAUDIO_DEBUG")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
+            timeout_sec: g("CLAUDIO_TIMEOUT_SEC")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
             hook_transport: match g("CLAUDIO_HOOK_TRANSPORT").as_deref() {
                 Some("file") => HookTransport::File,
                 _ => HookTransport::Tcp,
             },
             raw_log: g("CLAUDIO_RAW_LOG"),
-            cols: g("CLAUDIO_COLS").and_then(|v| v.parse().ok()).unwrap_or(120),
+            cols: g("CLAUDIO_COLS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
             rows: g("CLAUDIO_ROWS").and_then(|v| v.parse().ok()).unwrap_or(40),
             claude_path: g("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|| "claude".into()),
-            fast: g("CLAUDIO_FAST").map(|v| v == "1" || v == "true").unwrap_or(false),
+            fast: g("CLAUDIO_FAST")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false),
         }
     }
 }
@@ -407,7 +430,9 @@ mod tests {
     #[test]
     fn dangerously_skip_forwarded() {
         let p = parse(&s(&["-p", "--dangerously-skip-permissions", "go"]));
-        assert!(p.forward.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(p
+            .forward
+            .contains(&"--dangerously-skip-permissions".to_string()));
         assert_eq!(p.prompt.as_deref(), Some("go"));
     }
 

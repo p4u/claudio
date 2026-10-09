@@ -39,7 +39,9 @@ impl std::fmt::Display for DriverError {
             DriverError::Spawn(s) => write!(f, "failed to spawn claude: {s}"),
             DriverError::SessionStartTimeout => write!(f, "timed out waiting for the UI to start"),
             DriverError::StopTimeout => write!(f, "timed out waiting for the turn to finish"),
-            DriverError::TranscriptUnavailable => write!(f, "could not read the session transcript"),
+            DriverError::TranscriptUnavailable => {
+                write!(f, "could not read the session transcript")
+            }
             DriverError::NoPrompt => write!(f, "no prompt supplied"),
             DriverError::Internal(s) => write!(f, "internal error: {s}"),
         }
@@ -112,7 +114,12 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
         .session_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut sess = PtySession::start(env, &parsed.forward, &session_id, parsed.user_settings.as_deref())?;
+    let mut sess = PtySession::start(
+        env,
+        &parsed.forward,
+        &session_id,
+        parsed.user_settings.as_deref(),
+    )?;
 
     let corr = if crate::msglog::enabled() {
         let c = crate::msglog::new_corr();
@@ -134,14 +141,21 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
         crate::msglog::record(
             crate::msglog::Dir::ClaudeToClaudio,
             &corr,
-            &format!("reply · turns={} · error={}", summary.num_turns, summary.is_error),
+            &format!(
+                "reply · turns={} · error={}",
+                summary.num_turns, summary.is_error
+            ),
             &summary.final_text,
         );
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     sess.close();
-    Ok(RunResult { summary, duration_ms, failure })
+    Ok(RunResult {
+        summary,
+        duration_ms,
+        failure,
+    })
 }
 
 /// A live, interactive `claude` driven under a PTY, reusable across turns.
@@ -192,7 +206,8 @@ impl PtySession {
             .to_string_lossy()
             .into_owned();
         let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
-        let (settings, settings_warns) = hooks::build_settings_merged(&exe, relay_arg, user_settings);
+        let (settings, settings_warns) =
+            hooks::build_settings_merged(&exe, relay_arg, user_settings);
         for w in &settings_warns {
             eprintln!("claudio: {w}");
         }
@@ -203,8 +218,16 @@ impl PtySession {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0xabcdef12);
-            let cols = if env.cols == 120 { 180 + (seed % 81) as u16 } else { env.cols };
-            let rows = if env.rows == 40 { 40 + (seed >> 8 & 0x1f) as u16 } else { env.rows };
+            let cols = if env.cols == 120 {
+                180 + (seed % 81) as u16
+            } else {
+                env.cols
+            };
+            let rows = if env.rows == 40 {
+                40 + (seed >> 8 & 0x1f) as u16
+            } else {
+                env.rows
+            };
             (cols, rows)
         };
         trace!(debug, start, "PTY size: {cols}×{rows}");
@@ -236,7 +259,10 @@ impl PtySession {
         for (k, v) in listener.child_env() {
             cmd.env(k, v);
         }
-        let term = std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into());
+        let term = std::env::var("TERM")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "xterm-256color".into());
         cmd.env("TERM", term);
         if std::env::var("COLORTERM").is_err() {
             cmd.env("COLORTERM", "truecolor");
@@ -247,17 +273,30 @@ impl PtySession {
 
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| DriverError::Spawn(e.to_string()))?;
-        let child = pair.slave.spawn_command(cmd).map_err(|e| DriverError::Spawn(e.to_string()))?;
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| DriverError::Spawn(e.to_string()))?;
         let guard = ChildGuard { child };
         drop(pair.slave);
         trace!(debug, start, "claude spawned under PTY ({}x{})", cols, rows);
 
         let writer = Arc::new(Mutex::new(
-            pair.master.take_writer().map_err(|e| DriverError::Spawn(e.to_string()))?,
+            pair.master
+                .take_writer()
+                .map_err(|e| DriverError::Spawn(e.to_string()))?,
         ));
-        let mut reader = pair.master.try_clone_reader().map_err(|e| DriverError::Spawn(e.to_string()))?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| DriverError::Spawn(e.to_string()))?;
 
         let shared = Arc::new(Shared {
             last_output_ns: AtomicI64::new(0),
@@ -342,7 +381,11 @@ impl PtySession {
                     let low = strip_escapes(&recent).to_lowercase();
                     if low.contains("trust") && low.contains("folder") {
                         drop(recent);
-                        trace!(self.debug, self.start, "workspace-trust dialog — sending Enter");
+                        trace!(
+                            self.debug,
+                            self.start,
+                            "workspace-trust dialog — sending Enter"
+                        );
                         if let Ok(mut w) = self.writer.lock() {
                             let _ = w.write_all(b"\r");
                             let _ = w.flush();
@@ -352,7 +395,9 @@ impl PtySession {
                 }
             }
             if self.shared.exited.load(Ordering::SeqCst) {
-                return Err(DriverError::Spawn("claude exited before the UI was ready".into()));
+                return Err(DriverError::Spawn(
+                    "claude exited before the UI was ready".into(),
+                ));
             }
             if let Some(hook) = self.listener.poll(Duration::from_millis(100)) {
                 if self.transcript_path.is_none() {
@@ -389,7 +434,13 @@ impl PtySession {
 
         wait_quiescent(&self.shared, 150, 2000);
         let bracketed = self.shared.bracketed_paste.load(Ordering::SeqCst);
-        trace!(self.debug, self.start, "typing prompt ({} bytes, bracketed_paste={})", prompt.len(), bracketed);
+        trace!(
+            self.debug,
+            self.start,
+            "typing prompt ({} bytes, bracketed_paste={})",
+            prompt.len(),
+            bracketed
+        );
         type_prompt(&self.writer, prompt, self.fast, bracketed)
             .map_err(|e| DriverError::Internal(e.to_string()))?;
         trace!(self.debug, self.start, "prompt submitted; awaiting Stop");
@@ -405,7 +456,8 @@ impl PtySession {
                     self.transcript_path = session::payload_field(&hook.payload, "transcript_path");
                 }
                 if hook.event == HookEvent::Stop {
-                    last_assistant_message = session::payload_field(&hook.payload, "last_assistant_message");
+                    last_assistant_message =
+                        session::payload_field(&hook.payload, "last_assistant_message");
                     got_stop = true;
                     trace!(self.debug, self.start, "Stop — turn finished");
                     break;
@@ -421,8 +473,18 @@ impl PtySession {
 
         let summary = self.read_new_message(prev_id.as_deref(), last_assistant_message.as_deref());
 
-        let failure = if summary.as_ref().map(|s| s.final_text.is_empty()).unwrap_or(true) {
-            let recent = self.shared.recent.lock().ok().map(|r| strip_escapes(&r)).unwrap_or_default();
+        let failure = if summary
+            .as_ref()
+            .map(|s| s.final_text.is_empty())
+            .unwrap_or(true)
+        {
+            let recent = self
+                .shared
+                .recent
+                .lock()
+                .ok()
+                .map(|r| strip_escapes(&r))
+                .unwrap_or_default();
             Some(classify_failure(&recent, got_stop))
         } else {
             None
@@ -437,7 +499,11 @@ impl PtySession {
 
     /// Read the transcript until a terminal assistant message whose identity
     /// differs from the previous turn's appears (absorbing the flush race).
-    fn read_new_message(&mut self, prev_id: Option<&str>, fallback_text: Option<&str>) -> Option<Summary> {
+    fn read_new_message(
+        &mut self,
+        prev_id: Option<&str>,
+        fallback_text: Option<&str>,
+    ) -> Option<Summary> {
         if let Some(path) = self.transcript_path.clone() {
             for _ in 0..60 {
                 if let Some((summary, id)) = session::latest_terminal_with_id(&path) {
@@ -480,7 +546,9 @@ impl Rng {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x853c49e6748fea9b);
         let mut r = Self(seed | 1);
-        for _ in 0..16 { r.next(); } // Warm up.
+        for _ in 0..16 {
+            r.next();
+        } // Warm up.
         r
     }
     fn next(&mut self) -> u64 {
@@ -514,11 +582,16 @@ fn type_prompt(
     fast: bool,
     bracketed: bool,
 ) -> std::io::Result<()> {
-    let cadence = !fast && std::env::var("CLAUDIO_CADENCE").map(|v| v != "0").unwrap_or(true);
+    let cadence = !fast
+        && std::env::var("CLAUDIO_CADENCE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
     // Helper to lock and write a slice.
     let put = |bytes: &[u8]| -> std::io::Result<()> {
-        let mut w = writer.lock().map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut w = writer
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         w.write_all(bytes)?;
         w.flush()
     };
@@ -577,9 +650,9 @@ fn type_with_cadence(
 
         // Contextual multiplier: word boundary or punctuation → slower.
         let delay_us = if ch == ' ' || ch == '\t' || ch == '\n' {
-            base_delay * 3 / 2           // 1.5× after whitespace
+            base_delay * 3 / 2 // 1.5× after whitespace
         } else if ".!?,;:".contains(ch) {
-            base_delay * 2               // 2× after punctuation
+            base_delay * 2 // 2× after punctuation
         } else {
             base_delay
         };
@@ -627,13 +700,18 @@ fn fallback_summary(text: &str, session_id: &str) -> Summary {
 fn classify_failure(recent_stripped: &str, got_stop: bool) -> String {
     let low = recent_stripped.to_lowercase();
     let compact: String = low.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if low.contains("failed to authenticate") || low.contains("api error: 403") || compact.contains("pleaserunlogin") {
+    if low.contains("failed to authenticate")
+        || low.contains("api error: 403")
+        || compact.contains("pleaserunlogin")
+    {
         return "auth_blocked".into();
     }
     if low.contains("hit your limit") || low.contains("usage limit") || low.contains("rate limit") {
         return "rate_limit".into();
     }
-    if (low.contains("do you trust") && low.contains("folder")) || compact.contains("trustthisfolder") {
+    if (low.contains("do you trust") && low.contains("folder"))
+        || compact.contains("trustthisfolder")
+    {
         return "workspace_trust_blocked".into();
     }
     if low.contains("permission") && (low.contains("allow") || low.contains("deny")) {
@@ -716,20 +794,35 @@ mod tests {
 
     #[test]
     fn classify_examples() {
-        assert_eq!(classify_failure("Failed to authenticate", true), "auth_blocked");
-        assert_eq!(classify_failure("You've hit your limit", true), "rate_limit");
-        assert_eq!(classify_failure("Do you trust this folder?", true), "workspace_trust_blocked");
+        assert_eq!(
+            classify_failure("Failed to authenticate", true),
+            "auth_blocked"
+        );
+        assert_eq!(
+            classify_failure("You've hit your limit", true),
+            "rate_limit"
+        );
+        assert_eq!(
+            classify_failure("Do you trust this folder?", true),
+            "workspace_trust_blocked"
+        );
         assert_eq!(classify_failure("", false), "assistant_output_timeout");
     }
 
     #[test]
     fn classify_api_error_403() {
-        assert_eq!(classify_failure("API Error: 403 forbidden", true), "auth_blocked");
+        assert_eq!(
+            classify_failure("API Error: 403 forbidden", true),
+            "auth_blocked"
+        );
     }
 
     #[test]
     fn classify_usage_limit() {
-        assert_eq!(classify_failure("You have exceeded your usage limit", true), "rate_limit");
+        assert_eq!(
+            classify_failure("You have exceeded your usage limit", true),
+            "rate_limit"
+        );
         assert_eq!(classify_failure("rate limit exceeded", true), "rate_limit");
     }
 

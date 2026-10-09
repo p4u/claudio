@@ -32,10 +32,7 @@ pub fn encode_key(ev: &KeyEvent, modes: &Modes) -> Vec<u8> {
     let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
 
     // xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
-    let modp: u8 = 1
-        + u8::from(shift)
-        + 2 * u8::from(alt)
-        + 4 * u8::from(ctrl);
+    let modp: u8 = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
     let has_mod = modp > 1;
 
     let mut out: Vec<u8> = Vec::new();
@@ -87,15 +84,21 @@ pub fn encode_key(ev: &KeyEvent, modes: &Modes) -> Vec<u8> {
 
         // ── Special keys ──────────────────────────────────────────────────
         KeyCode::Enter => {
-            if alt { out.push(0x1b); }
+            if alt {
+                out.push(0x1b);
+            }
             out.push(b'\r');
         }
         KeyCode::Backspace => {
-            if alt { out.push(0x1b); }
+            if alt {
+                out.push(0x1b);
+            }
             out.push(0x7f);
         }
         KeyCode::Tab => {
-            if alt { out.push(0x1b); }
+            if alt {
+                out.push(0x1b);
+            }
             out.push(b'\t');
         }
         KeyCode::BackTab => {
@@ -110,10 +113,10 @@ pub fn encode_key(ev: &KeyEvent, modes: &Modes) -> Vec<u8> {
         //
         // With modifiers, xterm uses CSI 1 ; {modp} A/B/C/D regardless of
         // DECCKM. Without modifiers, DECCKM selects SS3 (O) vs CSI ([) prefix.
-        KeyCode::Up    => arrow_key(&mut out, b'A', modp, has_mod, modes.app_cursor),
-        KeyCode::Down  => arrow_key(&mut out, b'B', modp, has_mod, modes.app_cursor),
+        KeyCode::Up => arrow_key(&mut out, b'A', modp, has_mod, modes.app_cursor),
+        KeyCode::Down => arrow_key(&mut out, b'B', modp, has_mod, modes.app_cursor),
         KeyCode::Right => arrow_key(&mut out, b'C', modp, has_mod, modes.app_cursor),
-        KeyCode::Left  => arrow_key(&mut out, b'D', modp, has_mod, modes.app_cursor),
+        KeyCode::Left => arrow_key(&mut out, b'D', modp, has_mod, modes.app_cursor),
 
         // ── Home / End ────────────────────────────────────────────────────
         KeyCode::Home => {
@@ -132,10 +135,10 @@ pub fn encode_key(ev: &KeyEvent, modes: &Modes) -> Vec<u8> {
         }
 
         // ── Page Up / Page Down / Insert / Delete ─────────────────────────
-        KeyCode::PageUp   => tilde_key(&mut out, 5,  modp, has_mod),
-        KeyCode::PageDown => tilde_key(&mut out, 6,  modp, has_mod),
-        KeyCode::Insert   => tilde_key(&mut out, 2,  modp, has_mod),
-        KeyCode::Delete   => tilde_key(&mut out, 3,  modp, has_mod),
+        KeyCode::PageUp => tilde_key(&mut out, 5, modp, has_mod),
+        KeyCode::PageDown => tilde_key(&mut out, 6, modp, has_mod),
+        KeyCode::Insert => tilde_key(&mut out, 2, modp, has_mod),
+        KeyCode::Delete => tilde_key(&mut out, 3, modp, has_mod),
 
         // ── Function keys F1–F12 ──────────────────────────────────────────
         KeyCode::F(n) => encode_fkey(&mut out, n, modp, has_mod),
@@ -229,7 +232,14 @@ fn classify_mouse(ev: &MouseEvent, modes: &Modes) -> Option<(u8, bool)> {
     match ev.kind {
         MouseEventKind::Down(btn) => Some((mouse_button_code(btn), false)),
         // Legacy X10 encoding cannot say which button was released.
-        MouseEventKind::Up(btn) => Some((if modes.mouse_sgr { mouse_button_code(btn) } else { 3 }, true)),
+        MouseEventKind::Up(btn) => Some((
+            if modes.mouse_sgr {
+                mouse_button_code(btn)
+            } else {
+                3
+            },
+            true,
+        )),
         // Motion with a button held: button code | 32.
         MouseEventKind::Drag(btn) if modes.mouse != MouseMode::Click => {
             Some((mouse_button_code(btn) | 0x20, false))
@@ -247,9 +257,9 @@ fn classify_mouse(ev: &MouseEvent, modes: &Modes) -> Option<(u8, bool)> {
 
 fn mouse_button_code(btn: MouseButton) -> u8 {
     match btn {
-        MouseButton::Left   => 0,
+        MouseButton::Left => 0,
         MouseButton::Middle => 1,
-        MouseButton::Right  => 2,
+        MouseButton::Right => 2,
     }
 }
 
@@ -318,8 +328,14 @@ fn encode_fkey(out: &mut Vec<u8>, n: u8, modp: u8, has_mod: bool) {
         }
         5..=12 => {
             let num: u8 = match n {
-                5 => 15, 6 => 17, 7 => 18, 8 => 19,
-                9 => 20, 10 => 21, 11 => 23, 12 => 24,
+                5 => 15,
+                6 => 17,
+                7 => 18,
+                8 => 19,
+                9 => 20,
+                10 => 21,
+                11 => 23,
+                12 => 24,
                 _ => return,
             };
             if has_mod {
@@ -340,10 +356,17 @@ mod tests {
     use crossterm::event::{KeyEventState, MouseEventKind};
 
     fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
-        KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::empty() }
+        KeyEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
     }
 
-    fn modes_default() -> Modes { Modes::default() }
+    fn modes_default() -> Modes {
+        Modes::default()
+    }
 
     fn modes_with(f: impl Fn(&mut Modes)) -> Modes {
         let mut m = Modes::default();
@@ -377,10 +400,10 @@ mod tests {
 
     #[test]
     fn arrows_normal() {
-        assert_eq!(k(KeyCode::Up, NONE),    b"\x1b[A");
-        assert_eq!(k(KeyCode::Down, NONE),  b"\x1b[B");
+        assert_eq!(k(KeyCode::Up, NONE), b"\x1b[A");
+        assert_eq!(k(KeyCode::Down, NONE), b"\x1b[B");
         assert_eq!(k(KeyCode::Right, NONE), b"\x1b[C");
-        assert_eq!(k(KeyCode::Left, NONE),  b"\x1b[D");
+        assert_eq!(k(KeyCode::Left, NONE), b"\x1b[D");
     }
 
     // ── Arrow keys with DECCKM ────────────────────────────────────────────────
@@ -389,18 +412,18 @@ mod tests {
     fn arrows_decckm() {
         let modes = modes_with(|m| m.app_cursor = true);
         let enc = |c| encode_key(&press(c, NONE), &modes);
-        assert_eq!(enc(KeyCode::Up),    b"\x1bOA");
-        assert_eq!(enc(KeyCode::Down),  b"\x1bOB");
+        assert_eq!(enc(KeyCode::Up), b"\x1bOA");
+        assert_eq!(enc(KeyCode::Down), b"\x1bOB");
         assert_eq!(enc(KeyCode::Right), b"\x1bOC");
-        assert_eq!(enc(KeyCode::Left),  b"\x1bOD");
+        assert_eq!(enc(KeyCode::Left), b"\x1bOD");
     }
 
     // ── Arrows with modifiers (override DECCKM) ───────────────────────────────
 
     #[test]
     fn arrows_shift() {
-        assert_eq!(k(KeyCode::Up, SHIFT),    b"\x1b[1;2A");
-        assert_eq!(k(KeyCode::Down, SHIFT),  b"\x1b[1;2B");
+        assert_eq!(k(KeyCode::Up, SHIFT), b"\x1b[1;2A");
+        assert_eq!(k(KeyCode::Down, SHIFT), b"\x1b[1;2B");
     }
 
     #[test]
@@ -427,10 +450,7 @@ mod tests {
     fn arrows_decckm_with_modifier_overrides() {
         let modes = modes_with(|m| m.app_cursor = true);
         // Modifier takes priority; SS3 form is NOT used.
-        assert_eq!(
-            encode_key(&press(KeyCode::Up, SHIFT), &modes),
-            b"\x1b[1;2A"
-        );
+        assert_eq!(encode_key(&press(KeyCode::Up, SHIFT), &modes), b"\x1b[1;2A");
     }
 
     // ── Ctrl+letter ───────────────────────────────────────────────────────────
@@ -474,44 +494,44 @@ mod tests {
 
     #[test]
     fn special_keys() {
-        assert_eq!(k(KeyCode::Enter, NONE),    b"\r");
+        assert_eq!(k(KeyCode::Enter, NONE), b"\r");
         assert_eq!(k(KeyCode::Backspace, NONE), b"\x7f");
-        assert_eq!(k(KeyCode::Tab, NONE),       b"\t");
-        assert_eq!(k(KeyCode::BackTab, NONE),   b"\x1b[Z");
-        assert_eq!(k(KeyCode::Esc, NONE),       b"\x1b");
+        assert_eq!(k(KeyCode::Tab, NONE), b"\t");
+        assert_eq!(k(KeyCode::BackTab, NONE), b"\x1b[Z");
+        assert_eq!(k(KeyCode::Esc, NONE), b"\x1b");
     }
 
     #[test]
     fn editing_keys() {
-        assert_eq!(k(KeyCode::Home, NONE),     b"\x1b[H");
-        assert_eq!(k(KeyCode::End, NONE),      b"\x1b[F");
-        assert_eq!(k(KeyCode::Insert, NONE),   b"\x1b[2~");
-        assert_eq!(k(KeyCode::Delete, NONE),   b"\x1b[3~");
-        assert_eq!(k(KeyCode::PageUp, NONE),   b"\x1b[5~");
+        assert_eq!(k(KeyCode::Home, NONE), b"\x1b[H");
+        assert_eq!(k(KeyCode::End, NONE), b"\x1b[F");
+        assert_eq!(k(KeyCode::Insert, NONE), b"\x1b[2~");
+        assert_eq!(k(KeyCode::Delete, NONE), b"\x1b[3~");
+        assert_eq!(k(KeyCode::PageUp, NONE), b"\x1b[5~");
         assert_eq!(k(KeyCode::PageDown, NONE), b"\x1b[6~");
     }
 
     #[test]
     fn editing_keys_with_modifier() {
-        assert_eq!(k(KeyCode::Home, SHIFT),     b"\x1b[1;2H");
-        assert_eq!(k(KeyCode::End, CTRL),       b"\x1b[1;5F");
-        assert_eq!(k(KeyCode::Delete, ALT),     b"\x1b[3;3~");
-        assert_eq!(k(KeyCode::PageUp, SHIFT),   b"\x1b[5;2~");
+        assert_eq!(k(KeyCode::Home, SHIFT), b"\x1b[1;2H");
+        assert_eq!(k(KeyCode::End, CTRL), b"\x1b[1;5F");
+        assert_eq!(k(KeyCode::Delete, ALT), b"\x1b[3;3~");
+        assert_eq!(k(KeyCode::PageUp, SHIFT), b"\x1b[5;2~");
     }
 
     // ── Function keys ─────────────────────────────────────────────────────────
 
     #[test]
     fn fkeys() {
-        assert_eq!(k(KeyCode::F(1),  NONE), b"\x1bOP");
-        assert_eq!(k(KeyCode::F(2),  NONE), b"\x1bOQ");
-        assert_eq!(k(KeyCode::F(3),  NONE), b"\x1bOR");
-        assert_eq!(k(KeyCode::F(4),  NONE), b"\x1bOS");
-        assert_eq!(k(KeyCode::F(5),  NONE), b"\x1b[15~");
-        assert_eq!(k(KeyCode::F(6),  NONE), b"\x1b[17~");
-        assert_eq!(k(KeyCode::F(7),  NONE), b"\x1b[18~");
-        assert_eq!(k(KeyCode::F(8),  NONE), b"\x1b[19~");
-        assert_eq!(k(KeyCode::F(9),  NONE), b"\x1b[20~");
+        assert_eq!(k(KeyCode::F(1), NONE), b"\x1bOP");
+        assert_eq!(k(KeyCode::F(2), NONE), b"\x1bOQ");
+        assert_eq!(k(KeyCode::F(3), NONE), b"\x1bOR");
+        assert_eq!(k(KeyCode::F(4), NONE), b"\x1bOS");
+        assert_eq!(k(KeyCode::F(5), NONE), b"\x1b[15~");
+        assert_eq!(k(KeyCode::F(6), NONE), b"\x1b[17~");
+        assert_eq!(k(KeyCode::F(7), NONE), b"\x1b[18~");
+        assert_eq!(k(KeyCode::F(8), NONE), b"\x1b[19~");
+        assert_eq!(k(KeyCode::F(9), NONE), b"\x1b[20~");
         assert_eq!(k(KeyCode::F(10), NONE), b"\x1b[21~");
         assert_eq!(k(KeyCode::F(11), NONE), b"\x1b[23~");
         assert_eq!(k(KeyCode::F(12), NONE), b"\x1b[24~");
@@ -520,9 +540,9 @@ mod tests {
     #[test]
     fn fkeys_with_modifier() {
         assert_eq!(k(KeyCode::F(1), SHIFT), b"\x1b[1;2P");
-        assert_eq!(k(KeyCode::F(4), CTRL),  b"\x1b[1;5S");
+        assert_eq!(k(KeyCode::F(4), CTRL), b"\x1b[1;5S");
         assert_eq!(k(KeyCode::F(5), SHIFT), b"\x1b[15;2~");
-        assert_eq!(k(KeyCode::F(12), ALT),  b"\x1b[24;3~");
+        assert_eq!(k(KeyCode::F(12), ALT), b"\x1b[24;3~");
     }
 
     // ── Paste bracketing ──────────────────────────────────────────────────────
@@ -537,21 +557,23 @@ mod tests {
     #[test]
     fn paste_bracketed() {
         let m = modes_with(|m| m.bracketed_paste = true);
-        assert_eq!(
-            encode_paste("hello", &m),
-            b"\x1b[200~hello\x1b[201~"
-        );
+        assert_eq!(encode_paste("hello", &m), b"\x1b[200~hello\x1b[201~");
     }
 
     // ── Mouse ─────────────────────────────────────────────────────────────────
 
     fn mouse_ev(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
-        MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE }
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     /// Pane: origin (0,0), size (80,24).
     const ORIGIN: (u16, u16) = (0, 0);
-    const SIZE:   (u16, u16) = (80, 24);
+    const SIZE: (u16, u16) = (80, 24);
 
     #[test]
     fn mouse_off_returns_none() {
@@ -587,7 +609,10 @@ mod tests {
 
     #[test]
     fn mouse_sgr_left_press() {
-        let m = modes_with(|m| { m.mouse = MouseMode::Click; m.mouse_sgr = true; });
+        let m = modes_with(|m| {
+            m.mouse = MouseMode::Click;
+            m.mouse_sgr = true;
+        });
         let ev = mouse_ev(MouseEventKind::Down(MouseButton::Left), 10, 5);
         let out = encode_mouse(&ev, ORIGIN, SIZE, &m).unwrap();
         assert_eq!(out, b"\x1b[<0;11;6M");
@@ -595,7 +620,10 @@ mod tests {
 
     #[test]
     fn mouse_sgr_left_release() {
-        let m = modes_with(|m| { m.mouse = MouseMode::Click; m.mouse_sgr = true; });
+        let m = modes_with(|m| {
+            m.mouse = MouseMode::Click;
+            m.mouse_sgr = true;
+        });
         let ev = mouse_ev(MouseEventKind::Up(MouseButton::Left), 10, 5);
         let out = encode_mouse(&ev, ORIGIN, SIZE, &m).unwrap();
         assert_eq!(out, b"\x1b[<0;11;6m");
@@ -610,7 +638,10 @@ mod tests {
 
     #[test]
     fn mouse_drag_reported_in_drag_mode() {
-        let m = modes_with(|m| { m.mouse = MouseMode::Drag; m.mouse_sgr = true; });
+        let m = modes_with(|m| {
+            m.mouse = MouseMode::Drag;
+            m.mouse_sgr = true;
+        });
         let ev = mouse_ev(MouseEventKind::Drag(MouseButton::Left), 5, 5);
         // button 0 | 0x20 = 32
         let out = encode_mouse(&ev, ORIGIN, SIZE, &m).unwrap();
@@ -628,18 +659,29 @@ mod tests {
 
     #[test]
     fn mouse_scroll_in_click_mode() {
-        let m = modes_with(|m| { m.mouse = MouseMode::Click; m.mouse_sgr = true; });
+        let m = modes_with(|m| {
+            m.mouse = MouseMode::Click;
+            m.mouse_sgr = true;
+        });
         // xterm: wheel up = button 4 (64), wheel down = button 5 (65).
         let up = encode_mouse(&mouse_ev(MouseEventKind::ScrollUp, 5, 5), ORIGIN, SIZE, &m);
         assert_eq!(up.unwrap(), b"\x1b[<64;6;6M");
-        let down = encode_mouse(&mouse_ev(MouseEventKind::ScrollDown, 5, 5), ORIGIN, SIZE, &m);
+        let down = encode_mouse(
+            &mouse_ev(MouseEventKind::ScrollDown, 5, 5),
+            ORIGIN,
+            SIZE,
+            &m,
+        );
         assert_eq!(down.unwrap(), b"\x1b[<65;6;6M");
     }
 
     #[test]
     fn mouse_coordinate_translation() {
         // Pane starts at origin (10, 5); event at (12, 7) → pane-relative (2,2) → 1-based (3,3).
-        let m = modes_with(|m| { m.mouse = MouseMode::Click; m.mouse_sgr = true; });
+        let m = modes_with(|m| {
+            m.mouse = MouseMode::Click;
+            m.mouse_sgr = true;
+        });
         let ev = mouse_ev(MouseEventKind::Down(MouseButton::Left), 12, 7);
         let out = encode_mouse(&ev, (10, 5), (80, 24), &m).unwrap();
         assert_eq!(out, b"\x1b[<0;3;3M");
@@ -680,11 +722,17 @@ mod tests {
         let m = modes_default();
         // Ctrl+é (U+00E9) — non-ASCII, has no defined Ctrl encoding.
         let out = encode_key(&press(KeyCode::Char('é'), KeyModifiers::CONTROL), &m);
-        assert!(out.is_empty(), "Ctrl+non-ASCII must produce empty output, got: {out:?}");
+        assert!(
+            out.is_empty(),
+            "Ctrl+non-ASCII must produce empty output, got: {out:?}"
+        );
 
         // Ctrl+€ (U+20AC) — another non-ASCII character.
         let out2 = encode_key(&press(KeyCode::Char('€'), KeyModifiers::CONTROL), &m);
-        assert!(out2.is_empty(), "Ctrl+non-ASCII must produce empty output, got: {out2:?}");
+        assert!(
+            out2.is_empty(),
+            "Ctrl+non-ASCII must produce empty output, got: {out2:?}"
+        );
     }
 
     /// Ctrl+ASCII characters must still work correctly.

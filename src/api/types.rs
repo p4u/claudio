@@ -80,7 +80,10 @@ pub struct Message {
 impl Message {
     /// Message text, or empty string when content is absent/null.
     pub fn text(&self) -> String {
-        self.content.as_ref().map(Content::as_text).unwrap_or_default()
+        self.content
+            .as_ref()
+            .map(Content::as_text)
+            .unwrap_or_default()
     }
 }
 

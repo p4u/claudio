@@ -23,14 +23,23 @@ use crate::proto::SessionId;
 
 /// A popup that captures the keyboard.
 pub enum Modal {
-    Rename { id: SessionId, input: String },
+    Rename {
+        id: SessionId,
+        input: String,
+    },
     /// Confirm killing a session.
-    Close { id: SessionId },
+    Close {
+        id: SessionId,
+    },
     Wizard(Wizard),
     /// Proxy stats popup.
-    ProxyStats { profile_name: String },
+    ProxyStats {
+        profile_name: String,
+    },
     /// Overview / "mission control": all sessions at a glance.
-    Overview { selected: usize },
+    Overview {
+        selected: usize,
+    },
     /// Help popup: all key bindings.
     Help,
 }
@@ -96,7 +105,10 @@ impl App {
             Action::NewSession => self.open_wizard(),
             Action::Rename => {
                 if let Some(v) = self.active_view() {
-                    self.modal = Some(Modal::Rename { id: v.id, input: v.label() });
+                    self.modal = Some(Modal::Rename {
+                        id: v.id,
+                        input: v.label(),
+                    });
                 }
             }
             Action::Close => {
@@ -164,7 +176,10 @@ impl App {
                     if let Some(i) = self.index_of(id) {
                         let host = self.sessions[i].host.clone();
                         // M2: Add tombstone to killed list BEFORE sending Kill.
-                        self.killed.push(KillTombstone { host: host.clone(), id });
+                        self.killed.push(KillTombstone {
+                            host: host.clone(),
+                            id,
+                        });
                         // Remove from session list (also queues Save via remove()).
                         self.remove(i);
                         // Save includes the tombstone since to_state() includes killed.
@@ -264,7 +279,11 @@ impl App {
             v.mirror.resize(rows, cols);
             let id = v.id;
             let host = v.host.clone();
-            self.request(&host, Msg::Resize { id, rows, cols }, ReplyTo::Ack("resize"));
+            self.request(
+                &host,
+                Msg::Resize { id, rows, cols },
+                ReplyTo::Ack("resize"),
+            );
         }
     }
 
@@ -282,7 +301,9 @@ impl App {
                         w.on_host_connected("local", &self.home);
                     }
                     self.request_local(
-                        Msg::RecentProjects { limit: PROJECTS_LIMIT },
+                        Msg::RecentProjects {
+                            limit: PROJECTS_LIMIT,
+                        },
                         ReplyTo::Projects,
                     );
                 } else {
@@ -322,7 +343,9 @@ impl App {
             let h = host.to_owned();
             self.effects.push(Effect::Request {
                 host: h,
-                msg: Msg::RecentProjects { limit: PROJECTS_LIMIT },
+                msg: Msg::RecentProjects {
+                    limit: PROJECTS_LIMIT,
+                },
                 to: ReplyTo::RemoteProjects,
             });
         }

@@ -122,7 +122,10 @@ fn cmd_login(args: &[String]) -> ExitCode {
     let name = name_override.unwrap_or_else(|| profile::name_from_url(&url));
 
     // Validate with the proxy.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let verified = rt.block_on(async {
         match api::check_root(&url, &token).await {
             Ok(true) => {
@@ -168,7 +171,13 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     };
     let is_first = sec.profiles.is_empty();
-    sec.profiles.insert(name.clone(), Profile { url: url.clone(), token });
+    sec.profiles.insert(
+        name.clone(),
+        Profile {
+            url: url.clone(),
+            token,
+        },
+    );
     if is_first || sec.default.is_none() {
         sec.default = Some(name.clone());
         println!("  Set '{name}' as default proxy.");
@@ -275,19 +284,24 @@ fn read_token_no_echo() -> String {
     let saved = unsafe { saved.assume_init() };
 
     // Store for the signal handler before installing it.
-    unsafe { (*SIGINT_SAVED.0.get()).write(saved); }
+    unsafe {
+        (*SIGINT_SAVED.0.get()).write(saved);
+    }
     SIGINT_FD.store(stdin_fd, Ordering::Release);
 
     // Install temporary SIGINT handler.
     // SAFETY: on_sigint is a valid extern "C" fn.
-    let old_sigint = unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+    let old_sigint =
+        unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
 
     // Disable echo (keep ICANON so read_line still works line-by-line).
     let mut raw = saved;
     raw.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
     if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) } != 0 {
         // Restore signal handler — the RAII guard hasn't been created yet.
-        unsafe { libc::signal(libc::SIGINT, old_sigint); }
+        unsafe {
+            libc::signal(libc::SIGINT, old_sigint);
+        }
         SIGINT_FD.store(-1, Ordering::Release);
         eprintln!("\nclaudio proxy login: cannot disable echo; aborting");
         std::process::exit(1);
@@ -295,7 +309,11 @@ fn read_token_no_echo() -> String {
 
     // RAII guard: restores termios and signal handler on every exit path
     // (normal return, panic, early return, etc.).
-    let _guard = NoEchoGuard { fd: stdin_fd, saved, old_sigint };
+    let _guard = NoEchoGuard {
+        fd: stdin_fd,
+        saved,
+        old_sigint,
+    };
 
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
@@ -332,11 +350,19 @@ fn cmd_status() -> ExitCode {
     println!("Proxy profiles:");
     // Show env profile first, then saved ones.
     if let Some((n, p)) = &env_profile {
-        let marker = if default_name.as_deref() == Some(n) { " (default, env)" } else { " (env)" };
+        let marker = if default_name.as_deref() == Some(n) {
+            " (default, env)"
+        } else {
+            " (env)"
+        };
         println!("  {n}{marker}  {}  {}", p.url, p.masked_token());
     }
     for (n, p) in &sec.profiles {
-        let marker = if default_name.as_deref() == Some(n.as_str()) { " (default)" } else { "" };
+        let marker = if default_name.as_deref() == Some(n.as_str()) {
+            " (default)"
+        } else {
+            ""
+        };
         println!("  {n}{marker}  {}  {}", p.url, p.masked_token());
     }
 
@@ -348,7 +374,10 @@ fn cmd_status() -> ExitCode {
 
     if let Some(p) = active_profile {
         println!();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(print_live_status(p));
     }
 
@@ -360,7 +389,8 @@ async fn print_live_status(p: &Profile) {
     match api::fetch_stats(&p.url, &p.token, "24h").await {
         Ok(s) => {
             let total_tok = s.totals.input_tokens + s.totals.output_tokens;
-            println!("Stats ({}): {} req  {}  {} tok total",
+            println!(
+                "Stats ({}): {} req  {}  {} tok total",
                 s.period,
                 s.totals.requests,
                 s.user_name,
@@ -369,11 +399,17 @@ async fn print_live_status(p: &Profile) {
             if !s.by_model.is_empty() {
                 println!("  By model:");
                 for m in &s.by_model {
-                    println!("    {:50}  {} req  {} out tok", m.model, m.requests, fmt_tokens(m.output_tokens));
+                    println!(
+                        "    {:50}  {} req  {} out tok",
+                        m.model,
+                        m.requests,
+                        fmt_tokens(m.output_tokens)
+                    );
                 }
             }
             if let Some(lim) = &s.limit {
-                println!("  Limit: {:.0}% of {} out-tok/{}s",
+                println!(
+                    "  Limit: {:.0}% of {} out-tok/{}s",
                     lim.used_pct * 100.0,
                     fmt_tokens(lim.output_tokens),
                     lim.window_seconds,

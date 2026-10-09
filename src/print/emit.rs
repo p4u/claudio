@@ -19,7 +19,11 @@ impl Outcome<'_> {
         self.failure.is_some() || self.summary.is_error
     }
     fn subtype(&self) -> &str {
-        if self.is_error() { "error" } else { "success" }
+        if self.is_error() {
+            "error"
+        } else {
+            "success"
+        }
     }
     fn usage(&self) -> serde_json::Value {
         self.summary
@@ -72,28 +76,38 @@ pub fn emit(w: &mut dyn Write, fmt: OutputFormat, out: &Outcome) -> std::io::Res
 /// content_block_delta carrying the full final text, then the result envelope.
 fn emit_stream(w: &mut dyn Write, out: &Outcome) -> std::io::Result<()> {
     let sid = &out.summary.session_id;
-    let model = out.summary.model.clone().unwrap_or_else(|| "unknown".into());
+    let model = out
+        .summary
+        .model
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
 
     let line = |w: &mut dyn Write, v: serde_json::Value| -> std::io::Result<()> {
         writeln!(w, "{}", serde_json::to_string(&v).unwrap_or_default())
     };
 
-    line(w, serde_json::json!({
-        "type": "system", "subtype": "init",
-        "session_id": sid, "model": model,
-        "apiKeySource": "interactive_tui_subscription",
-        "tools": [], "mcp_servers": [],
-    }))?;
-    line(w, serde_json::json!({
-        "type": "assistant",
-        "message": {
-            "role": "assistant", "model": model,
-            "content": [{ "type": "text", "text": out.summary.final_text }],
-            "stop_reason": if out.is_error() { serde_json::Value::Null } else { "end_turn".into() },
-            "usage": out.usage(),
-        },
-        "session_id": sid,
-    }))?;
+    line(
+        w,
+        serde_json::json!({
+            "type": "system", "subtype": "init",
+            "session_id": sid, "model": model,
+            "apiKeySource": "interactive_tui_subscription",
+            "tools": [], "mcp_servers": [],
+        }),
+    )?;
+    line(
+        w,
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant", "model": model,
+                "content": [{ "type": "text", "text": out.summary.final_text }],
+                "stop_reason": if out.is_error() { serde_json::Value::Null } else { "end_turn".into() },
+                "usage": out.usage(),
+            },
+            "session_id": sid,
+        }),
+    )?;
     line(w, out.result_object())?;
     Ok(())
 }
@@ -117,7 +131,16 @@ mod tests {
     fn text_ok() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Text, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Text,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "hello\n");
     }
 
@@ -125,7 +148,16 @@ mod tests {
     fn json_carries_usage_and_session() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert_eq!(v["type"], "result");
         assert_eq!(v["result"], "hello");
@@ -138,7 +170,16 @@ mod tests {
     fn stream_emits_three_lines_ending_in_result() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::StreamJson, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::StreamJson,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3);
@@ -151,7 +192,16 @@ mod tests {
         let mut s = summary();
         s.final_text = String::new();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Text, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Text,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(buf).unwrap(), "\n");
     }
 
@@ -159,11 +209,15 @@ mod tests {
     fn text_error_returns_io_error() {
         let s = summary();
         let mut buf = Vec::new();
-        let result = emit(&mut buf, OutputFormat::Text, &Outcome {
-            summary: &s,
-            duration_ms: 5,
-            failure: Some("rate_limit"),
-        });
+        let result = emit(
+            &mut buf,
+            OutputFormat::Text,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: Some("rate_limit"),
+            },
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("rate_limit"), "error message: {msg}");
@@ -173,11 +227,16 @@ mod tests {
     fn json_error_subtype_and_is_error_flag() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome {
-            summary: &s,
-            duration_ms: 10,
-            failure: Some("auth_blocked"),
-        }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 10,
+                failure: Some("auth_blocked"),
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert_eq!(v["subtype"], "error");
         assert_eq!(v["is_error"], true);
@@ -188,7 +247,16 @@ mod tests {
     fn json_success_subtype() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome { summary: &s, duration_ms: 7, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 7,
+                failure: None,
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert_eq!(v["subtype"], "success");
         assert_eq!(v["terminal_reason"], "completed");
@@ -198,7 +266,16 @@ mod tests {
     fn json_duration_ms_present() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome { summary: &s, duration_ms: 1234, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 1234,
+                failure: None,
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert_eq!(v["duration_ms"], 1234);
     }
@@ -208,7 +285,16 @@ mod tests {
         let mut s = summary();
         s.usage = None;
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert!(v["usage"].is_null());
     }
@@ -218,7 +304,16 @@ mod tests {
         let mut s = summary();
         s.num_turns = 3;
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::Json, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::Json,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         assert_eq!(v["num_turns"], 3);
     }
@@ -227,10 +322,18 @@ mod tests {
     fn stream_first_line_is_system_init() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::StreamJson, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
-        let first: serde_json::Value = serde_json::from_str(
-            String::from_utf8(buf).unwrap().lines().next().unwrap()
-        ).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::StreamJson,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).unwrap().lines().next().unwrap()).unwrap();
         assert_eq!(first["type"], "system");
         assert_eq!(first["subtype"], "init");
         assert_eq!(first["session_id"], "sid");
@@ -240,11 +343,18 @@ mod tests {
     fn stream_second_line_is_assistant_with_text() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::StreamJson, &Outcome { summary: &s, duration_ms: 5, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::StreamJson,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: None,
+            },
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
-        let second: serde_json::Value = serde_json::from_str(
-            text.lines().nth(1).unwrap()
-        ).unwrap();
+        let second: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
         assert_eq!(second["type"], "assistant");
         assert_eq!(second["message"]["content"][0]["text"], "hello");
         assert_eq!(second["message"]["stop_reason"], "end_turn");
@@ -254,7 +364,16 @@ mod tests {
     fn stream_result_line_carries_session_and_usage() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::StreamJson, &Outcome { summary: &s, duration_ms: 99, failure: None }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::StreamJson,
+            &Outcome {
+                summary: &s,
+                duration_ms: 99,
+                failure: None,
+            },
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
         assert_eq!(last["session_id"], "sid");
@@ -267,9 +386,16 @@ mod tests {
     fn stream_error_stop_reason_null() {
         let s = summary();
         let mut buf = Vec::new();
-        emit(&mut buf, OutputFormat::StreamJson, &Outcome {
-            summary: &s, duration_ms: 5, failure: Some("rate_limit"),
-        }).unwrap();
+        emit(
+            &mut buf,
+            OutputFormat::StreamJson,
+            &Outcome {
+                summary: &s,
+                duration_ms: 5,
+                failure: Some("rate_limit"),
+            },
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         let second: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
         assert!(second["message"]["stop_reason"].is_null());

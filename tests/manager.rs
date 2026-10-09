@@ -25,10 +25,9 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    extract_nonce, wizard_pick_dir, current_nonce,
-    ManagerHarness, Region, TuiProcess, BINARY,
-    ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, CTRL_U, DAEMON_WAIT,
-    ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
+    current_nonce, extract_nonce, wizard_pick_dir, ManagerHarness, Region, TuiProcess, ALT_G,
+    ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, ENTER,
+    ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -143,7 +142,10 @@ fn test_4_quit_and_reattach() {
     }
 
     // Daemon must still be alive.
-    assert!(harness.daemon_pid().is_some(), "daemon should still be running after quit");
+    assert!(
+        harness.daemon_pid().is_some(),
+        "daemon should still be running after quit"
+    );
 
     // Second launch: reattach; banner must come back from the screen snapshot.
     let tui2 = harness.start_tui();
@@ -215,9 +217,9 @@ fn test_6_close_session() {
             let sessions = v.get("sessions").and_then(|s| s.as_array());
             match sessions {
                 None => true, // empty/absent sessions section
-                Some(a) => !a.iter().any(|s| {
-                    s.get("cwd").and_then(|c| c.as_str()) == Some(dir_path)
-                }),
+                Some(a) => !a
+                    .iter()
+                    .any(|s| s.get("cwd").and_then(|c| c.as_str()) == Some(dir_path)),
             }
         },
         WAIT,
@@ -329,9 +331,18 @@ fn test_daemon_status_cmd() {
         .output()
         .expect("claudio daemon status failed to spawn");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "daemon status should exit 0\nstdout: {stdout}");
-    assert!(stdout.contains("running"), "should say 'running'\nstdout: {stdout}");
-    assert!(stdout.contains("sessions:"), "should show session count\nstdout: {stdout}");
+    assert!(
+        out.status.success(),
+        "daemon status should exit 0\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("running"),
+        "should say 'running'\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("sessions:"),
+        "should show session count\nstdout: {stdout}"
+    );
 
     tui.quit(WAIT);
 }
@@ -357,7 +368,10 @@ fn test_daemon_stop_and_restart_cmd() {
         .output()
         .expect("claudio daemon stop failed to spawn");
     let stop_stdout = String::from_utf8_lossy(&stop_out.stdout);
-    assert!(stop_out.status.success(), "daemon stop should exit 0\nstdout: {stop_stdout}");
+    assert!(
+        stop_out.status.success(),
+        "daemon stop should exit 0\nstdout: {stop_stdout}"
+    );
     assert!(
         stop_stdout.contains("dormant"),
         "should mention dormant sessions\nstdout: {stop_stdout}"
@@ -393,7 +407,10 @@ fn test_daemon_stop_and_restart_cmd() {
             thread::sleep(Duration::from_millis(100));
         }
     };
-    assert!(new_pid.is_some(), "daemon should have a new pid after restart");
+    assert!(
+        new_pid.is_some(),
+        "daemon should have a new pid after restart"
+    );
 
     // The TUI must reconnect and re-spawn with a NEW nonce.
     tui.wait_until(
@@ -429,7 +446,11 @@ fn test_ssh_remote_session() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        std::time::SystemTime::now().elapsed().unwrap_or_default().subsec_nanos().hash(&mut h);
+        std::time::SystemTime::now()
+            .elapsed()
+            .unwrap_or_default()
+            .subsec_nanos()
+            .hash(&mut h);
         std::env::temp_dir().join(format!("cl-ssh-{:08x}", h.finish() as u32))
     };
     let runtime_dir = root.join("run");
@@ -502,7 +523,10 @@ fn test_ssh_remote_session() {
             tui.send_keys(ENTER);
             break;
         }
-        assert!(Instant::now() < deadline_spawn, "timeout waiting for remote session to start");
+        assert!(
+            Instant::now() < deadline_spawn,
+            "timeout waiting for remote session to start"
+        );
         thread::sleep(Duration::from_millis(200));
     }
 
@@ -516,8 +540,10 @@ fn test_ssh_remote_session() {
         while Instant::now() < dl {
             if let Ok(content) = fs::read_to_string(&hosts_json) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let first =
-                        v["hosts"].as_array().and_then(|a| a.first()).and_then(|h| h.as_str());
+                    let first = v["hosts"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|h| h.as_str());
                     if first == Some(host.as_str()) {
                         ok = true;
                         break;
@@ -536,7 +562,10 @@ fn test_ssh_remote_session() {
     tui.wait_for("Kill session", Region::Screen, WAIT);
     tui.send_keys(b"y");
     // The remote Kill may take time over SSH — use a generous timeout.
-    tui.wait_until(|s| !s.contains("Kill session", Region::Screen), RECONNECT_WAIT);
+    tui.wait_until(
+        |s| !s.contains("Kill session", Region::Screen),
+        RECONNECT_WAIT,
+    );
 
     // ── 8. Quit cleanly. ─────────────────────────────────────────────────────
     // ALT_Q is a global quit key — it works even if the wizard re-opened after
@@ -561,7 +590,11 @@ fn test_proxy_env_injection() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        std::time::SystemTime::now().elapsed().unwrap_or_default().subsec_nanos().hash(&mut h);
+        std::time::SystemTime::now()
+            .elapsed()
+            .unwrap_or_default()
+            .subsec_nanos()
+            .hash(&mut h);
         std::env::temp_dir().join(format!("cl-proxy-{:08x}", h.finish() as u32))
     };
     fs::create_dir_all(&proxy_tmp).expect("create proxy tmp dir");
@@ -569,7 +602,12 @@ fn test_proxy_env_injection() {
     let db_path = proxy_tmp.join("proxy.db");
 
     let build_out = std::process::Command::new("go")
-        .args(["build", "-o", proxy_bin.to_str().unwrap(), "./cmd/claude-proxy"])
+        .args([
+            "build",
+            "-o",
+            proxy_bin.to_str().unwrap(),
+            "./cmd/claude-proxy",
+        ])
         .current_dir("/volumes/repos/claude-proxy-claudio-api")
         .output()
         .expect("go build (is go installed?)");
@@ -622,7 +660,14 @@ fn test_proxy_env_injection() {
 
     // ── 3. Create a user token ────────────────────────────────────────────────
     let create_out = std::process::Command::new(&proxy_bin)
-        .args(["users", "create", "--name", "testuser", "--db", db_path.to_str().unwrap()])
+        .args([
+            "users",
+            "create",
+            "--name",
+            "testuser",
+            "--db",
+            db_path.to_str().unwrap(),
+        ])
         .output()
         .expect("users create");
     assert!(
@@ -697,13 +742,27 @@ fn test_proxy_env_injection() {
         Some("1"),
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY not set"
     );
-    assert!(env_get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_some(), "ANTHROPIC_DEFAULT_FABLE_MODEL missing");
-    assert!(env_get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_some(), "ANTHROPIC_DEFAULT_OPUS_MODEL missing");
-    assert!(env_get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_some(), "ANTHROPIC_DEFAULT_SONNET_MODEL missing");
-    assert!(env_get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_some(), "ANTHROPIC_DEFAULT_HAIKU_MODEL missing");
+    assert!(
+        env_get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_FABLE_MODEL missing"
+    );
+    assert!(
+        env_get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_OPUS_MODEL missing"
+    );
+    assert!(
+        env_get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_SONNET_MODEL missing"
+    );
+    assert!(
+        env_get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL missing"
+    );
     // ANTHROPIC_API_KEY must NOT appear (daemon scrubs it when AUTH_TOKEN is set).
     assert!(
-        !env_contents.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        !env_contents
+            .lines()
+            .any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
         "ANTHROPIC_API_KEY leaked into session env"
     );
 
@@ -716,12 +775,21 @@ fn test_proxy_env_injection() {
         state_json.contains("\"env\""),
         "state.json should contain proxy profile name \"env\"\nstate.json:\n{state_json}"
     );
-    assert!(!state_json.contains(&token), "state.json must not contain the proxy token");
+    assert!(
+        !state_json.contains(&token),
+        "state.json must not contain the proxy token"
+    );
 
     // ── 11. Assert daemon journal: token absent ───────────────────────────────
-    let journal_path = harness.config_home.join("claudio").join("daemon-sessions.json");
+    let journal_path = harness
+        .config_home
+        .join("claudio")
+        .join("daemon-sessions.json");
     if let Ok(journal) = fs::read_to_string(&journal_path) {
-        assert!(!journal.contains(&token), "daemon journal must not contain the proxy token");
+        assert!(
+            !journal.contains(&token),
+            "daemon journal must not contain the proxy token"
+        );
     }
 
     // ── 12. Recovery respawn: quit → kill daemon → restart → assert proxy env ─
@@ -804,7 +872,11 @@ fn test_e2e_real_claude() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        std::time::SystemTime::now().elapsed().unwrap_or_default().subsec_nanos().hash(&mut h);
+        std::time::SystemTime::now()
+            .elapsed()
+            .unwrap_or_default()
+            .subsec_nanos()
+            .hash(&mut h);
         std::env::temp_dir().join(format!("cl-e2e-{:08x}", h.finish() as u32))
     };
     let runtime_dir = root.join("run");
@@ -865,7 +937,10 @@ fn test_e2e_real_claude() {
         if screen.contains("Claude Code") || screen.contains(">") {
             break;
         }
-        assert!(Instant::now() < ready_dl, "timeout waiting for claude to be ready");
+        assert!(
+            Instant::now() < ready_dl,
+            "timeout waiting for claude to be ready"
+        );
         thread::sleep(Duration::from_millis(200));
     }
     thread::sleep(Duration::from_millis(500));
@@ -905,7 +980,11 @@ fn test_proxy_real_claude() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        std::time::SystemTime::now().elapsed().unwrap_or_default().subsec_nanos().hash(&mut h);
+        std::time::SystemTime::now()
+            .elapsed()
+            .unwrap_or_default()
+            .subsec_nanos()
+            .hash(&mut h);
         std::env::temp_dir().join(format!("cl-proxy-e2e-{:08x}", h.finish() as u32))
     };
     let runtime_dir = root.join("run");
@@ -960,7 +1039,10 @@ fn test_proxy_real_claude() {
         if screen.contains("Claude Code") || screen.contains(">") {
             break;
         }
-        assert!(Instant::now() < ready_dl, "timeout waiting for claude to be ready");
+        assert!(
+            Instant::now() < ready_dl,
+            "timeout waiting for claude to be ready"
+        );
         thread::sleep(Duration::from_millis(200));
     }
     thread::sleep(Duration::from_millis(500));

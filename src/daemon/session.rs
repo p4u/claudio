@@ -131,12 +131,19 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
     let (rows, cols) = size_or_default(spec.rows, spec.cols);
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| io::Error::other(format!("could not open a pty: {e}")))?;
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| io::Error::other(format!("could not start {}: {e}", daemon.config.claude.display())))?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        io::Error::other(format!(
+            "could not start {}: {e}",
+            daemon.config.claude.display()
+        ))
+    })?;
     drop(pair.slave);
 
     let pid = child.process_id();
@@ -145,7 +152,9 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
         Ok(io) => io,
         Err(e) => {
             let _ = killer.kill();
-            return Err(io::Error::other(format!("could not start session i/o: {e}")));
+            return Err(io::Error::other(format!(
+                "could not start session i/o: {e}"
+            )));
         }
     };
 
@@ -213,7 +222,9 @@ fn apply_env(cmd: &mut CommandBuilder, env: &[(String, String)]) {
 /// (`✳ Claude Code`, `◐ Fix the parser`); strip it so the title only changes
 /// — and is only broadcast — when the actual text does.
 fn clean_title(title: &str) -> &str {
-    title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim()
+    title
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim()
 }
 
 fn size_or_default(rows: u16, cols: u16) -> (u16, u16) {
@@ -590,9 +601,14 @@ impl Actor {
         }
 
         self.daemon.forget_live(self.id, &self.token);
+        self.daemon.broadcast(
+            self.id,
+            SessionEvent::State {
+                state: SessionState::Exited,
+            },
+        );
         self.daemon
-            .broadcast(self.id, SessionEvent::State { state: SessionState::Exited });
-        self.daemon.broadcast(self.id, SessionEvent::Exited { code });
+            .broadcast(self.id, SessionEvent::Exited { code });
     }
 
     /// SIGHUP the child; SIGKILL it if it is still around after a grace

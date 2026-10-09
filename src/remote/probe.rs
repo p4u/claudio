@@ -58,18 +58,16 @@ impl Probe {
 /// `__probe` may be called over an SSH connection where stdout is the channel.
 pub fn run() -> std::process::ExitCode {
     match Probe::current() {
-        Ok(probe) => {
-            match serde_json::to_string(&probe) {
-                Ok(json) => {
-                    println!("{json}");
-                    std::process::ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("claudio: __probe: serialize: {e}");
-                    std::process::ExitCode::FAILURE
-                }
+        Ok(probe) => match serde_json::to_string(&probe) {
+            Ok(json) => {
+                println!("{json}");
+                std::process::ExitCode::SUCCESS
             }
-        }
+            Err(e) => {
+                eprintln!("claudio: __probe: serialize: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Err(e) => {
             eprintln!("claudio: __probe: {e}");
             std::process::ExitCode::FAILURE
@@ -131,18 +129,42 @@ mod tests {
 
     #[test]
     fn up_to_date_compares_build_hash() {
-        let a = Probe { version: "1".into(), proto: 1, os: "linux".into(), arch: "x86_64".into(), build: "aabb".into() };
-        let b = Probe { build: "ccdd".into(), ..a.clone() };
-        let same = Probe { build: "aabb".into(), ..a.clone() };
+        let a = Probe {
+            version: "1".into(),
+            proto: 1,
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            build: "aabb".into(),
+        };
+        let b = Probe {
+            build: "ccdd".into(),
+            ..a.clone()
+        };
+        let same = Probe {
+            build: "aabb".into(),
+            ..a.clone()
+        };
         assert!(!a.is_up_to_date(&b));
         assert!(a.is_up_to_date(&same));
     }
 
     #[test]
     fn same_platform_compares_os_arch() {
-        let a = Probe { version: "1".into(), proto: 1, os: "linux".into(), arch: "x86_64".into(), build: "x".into() };
-        let mac = Probe { os: "macos".into(), ..a.clone() };
-        let arm = Probe { arch: "aarch64".into(), ..a.clone() };
+        let a = Probe {
+            version: "1".into(),
+            proto: 1,
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            build: "x".into(),
+        };
+        let mac = Probe {
+            os: "macos".into(),
+            ..a.clone()
+        };
+        let arm = Probe {
+            arch: "aarch64".into(),
+            ..a.clone()
+        };
         assert!(a.same_platform(&a.clone()));
         assert!(!a.same_platform(&mac));
         assert!(!a.same_platform(&arm));

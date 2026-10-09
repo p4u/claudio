@@ -105,7 +105,10 @@ impl Journal {
                 Vec::new()
             }
         };
-        Journal { path: path.to_path_buf(), sessions }
+        Journal {
+            path: path.to_path_buf(),
+            sessions,
+        }
     }
 
     /// All entries, in spawn order.
@@ -120,7 +123,9 @@ impl Journal {
 
     /// Persist a snapshot of sessions. Call this **outside** the registry lock.
     pub fn write_snapshot(path: &Path, sessions: &[Entry]) -> io::Result<()> {
-        let file = File { sessions: sessions.to_vec() };
+        let file = File {
+            sessions: sessions.to_vec(),
+        };
         let json = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
         paths::write_atomic(path, &json)
     }
@@ -201,7 +206,6 @@ impl Journal {
         Ok(true)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -336,8 +340,7 @@ mod tests {
     /// success while the on-disk entry survives.
     #[test]
     fn remove_propagates_write_error() {
-        let dir =
-            std::env::temp_dir().join(format!("claudio-journal-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("claudio-journal-{}", Uuid::new_v4()));
         let path = dir.join("j.json");
         let id = Uuid::new_v4();
         let mut j = Journal::load(&path);

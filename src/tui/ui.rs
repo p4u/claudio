@@ -9,8 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::proxy::api::PoolStatus;
 use crate::proto::SessionState;
+use crate::proxy::api::PoolStatus;
 
 use super::app::{App, Modal, ProxyStatus, SessionView};
 use super::wizard::{resume_label, Wizard};
@@ -21,8 +21,12 @@ const RECONNECTING: &str = "⇄";
 
 /// Draw the whole UI.
 pub fn draw(frame: &mut Frame, app: &App) {
-    let [tabs, pane, status] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [tabs, pane, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     draw_tabs(frame, app, tabs);
     draw_pane(frame, app, pane);
     draw_status(frame, app, status);
@@ -73,7 +77,11 @@ const PROXY_BADGE: &str = "⇅";
 /// ` {n} {glyph} {label} `, or ` {n} {glyph} ` when no label fits.
 pub fn tab_parts(index: usize, label: &str, cap: usize) -> (String, String) {
     let label = truncate(label, cap);
-    let suffix = if label.is_empty() { " ".to_owned() } else { format!(" {label} ") };
+    let suffix = if label.is_empty() {
+        " ".to_owned()
+    } else {
+        format!(" {label} ")
+    };
     (format!(" {index} "), suffix)
 }
 
@@ -108,7 +116,12 @@ pub fn fit_tabs(labels: &[usize], active: Option<usize>, width: usize) -> Vec<us
     if total(&caps) <= width {
         return caps;
     }
-    let inactive_max = labels.iter().enumerate().filter(|(i, _)| Some(*i) != active).map(|(_, &w)| w).max();
+    let inactive_max = labels
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != active)
+        .map(|(_, &w)| w)
+        .max();
     for cap in (0..inactive_max.unwrap_or(0)).rev() {
         for (i, c) in caps.iter_mut().enumerate() {
             if Some(i) != active {
@@ -144,11 +157,23 @@ pub fn tab_label(view: &SessionView) -> String {
 ///
 /// Each tab may optionally show the session age (e.g. `12m`). Age is shown
 /// when there is enough room; it is the first thing dropped when space shrinks.
-pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16, now: u64) -> Vec<(String, String)> {
+pub fn tab_titles(
+    sessions: &[SessionView],
+    active: Option<usize>,
+    width: u16,
+    now: u64,
+) -> Vec<(String, String)> {
     let labels: Vec<String> = sessions.iter().map(tab_label).collect();
-    let ages: Vec<String> = sessions.iter().map(|v| fmt_age(now.saturating_sub(v.created_at))).collect();
+    let ages: Vec<String> = sessions
+        .iter()
+        .map(|v| fmt_age(now.saturating_sub(v.created_at)))
+        .collect();
     // Two-pass fitting: first try label+age, then label only.
-    let combined: Vec<String> = labels.iter().zip(&ages).map(|(l, a)| format!("{l} {a}")).collect();
+    let combined: Vec<String> = labels
+        .iter()
+        .zip(&ages)
+        .map(|(l, a)| format!("{l} {a}"))
+        .collect();
     let combined_widths: Vec<usize> = combined.iter().map(|l| str_width(l)).collect();
     let label_widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
     let caps_with_age = fit_tabs(&combined_widths, active, width as usize);
@@ -191,10 +216,14 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = Vec::new();
     for (i, ((prefix, suffix), view)) in titles.into_iter().zip(&app.sessions).enumerate() {
         if i > 0 {
-            spans.push(Span::styled("│", Style::default().add_modifier(Modifier::DIM)));
+            spans.push(Span::styled(
+                "│",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
         }
         // Show reconnecting glyph when the session's host is offline.
-        let reconnecting = view.host != "local" && !view.attached
+        let reconnecting = view.host != "local"
+            && !view.attached
             && matches!(view.state, crate::proto::SessionState::Unknown);
         let (g, gstyle) = glyph(view.state, app.tick, reconnecting);
         let base = if Some(i) == app.active {
@@ -219,7 +248,14 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().add_modifier(Modifier::DIM))
             .centered();
         let y = area.y + area.height / 2;
-        frame.render_widget(hint, Rect { y, height: 1.min(area.height), ..area });
+        frame.render_widget(
+            hint,
+            Rect {
+                y,
+                height: 1.min(area.height),
+                ..area
+            },
+        );
         return;
     };
     view.mirror.render(area, frame.buffer_mut());
@@ -250,7 +286,10 @@ pub fn state_name(state: SessionState) -> &'static str {
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (left, left_style) = if !app.connected {
-        ("daemon disconnected, reconnecting…".to_owned(), Style::default().fg(Color::Red))
+        (
+            "daemon disconnected, reconnecting…".to_owned(),
+            Style::default().fg(Color::Red),
+        )
     } else if let Some(notice) = &app.notice {
         (notice.text.clone(), Style::default().fg(Color::Yellow))
     } else if let Some(v) = app.active_view() {
@@ -268,12 +307,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
         // Proxy status.
         if let Some((pname, status)) = app.active_proxy_status() {
-            let pool = status.pool.as_ref().map(|h| h.overall()).unwrap_or(PoolStatus::Unknown);
+            let pool = status
+                .pool
+                .as_ref()
+                .map(|h| h.overall())
+                .unwrap_or(PoolStatus::Unknown);
             let mut proxy_parts = vec![format!("proxy:{pname} {}", pool.label())];
             if let Some(stats) = &status.stats {
                 let total_tok = stats.totals.input_tokens + stats.totals.output_tokens;
-                proxy_parts.push(format!("{} tok/{}",
-                    fmt_tokens(total_tok), stats.period));
+                proxy_parts.push(format!("{} tok/{}", fmt_tokens(total_tok), stats.period));
                 if let Some(lim) = &stats.limit {
                     proxy_parts.push(format!("{:.0}%", lim.used_pct * 100.0));
                 }
@@ -299,8 +341,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     let pad = width.saturating_sub(str_width(&left) + str_width(&hints));
     spans.push(Span::raw(" ".repeat(pad)));
-    spans.push(Span::styled(hints, Style::default().add_modifier(Modifier::DIM)));
-    let bar = Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
+    spans.push(Span::styled(
+        hints,
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    let bar =
+        Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(bar, area);
 }
 
@@ -310,7 +356,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 /// Clear `rect`, draw a titled border and return the inner area.
@@ -346,7 +397,11 @@ fn draw_rename(frame: &mut Frame, input: &str) {
 fn draw_close(frame: &mut Frame, label: &str) {
     let text = format!("Kill session {label}? [y] kill · [n]/Esc cancel");
     let area = frame.area();
-    let rect = centered(area, (str_width(&text) as u16 + 4).min(area.width.saturating_sub(2)), 3);
+    let rect = centered(
+        area,
+        (str_width(&text) as u16 + 4).min(area.width.saturating_sub(2)),
+        3,
+    );
     let inner = popup(frame, rect, "Close session");
     frame.render_widget(Paragraph::new(text), inner);
 }
@@ -378,15 +433,21 @@ fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
 
 fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
     let area = frame.area();
-    let rect = centered(area, 90.min(area.width.saturating_sub(4)), 22.min(area.height.saturating_sub(2)));
+    let rect = centered(
+        area,
+        90.min(area.width.saturating_sub(4)),
+        22.min(area.height.saturating_sub(2)),
+    );
 
     // Step 0: host selection.
     if let Some(hs) = &w.host_step {
         let inner = popup(frame, rect, "New session: where? (Enter pick · Esc cancel)");
-        let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let [head, list] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
         if let Some(host) = &hs.connecting {
             frame.render_widget(
-                Paragraph::new(format!("Connecting to {host}…")).style(Style::default().fg(Color::Cyan)),
+                Paragraph::new(format!("Connecting to {host}…"))
+                    .style(Style::default().fg(Color::Cyan)),
                 head,
             );
             return;
@@ -400,17 +461,30 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
     if let Some(step) = &w.resume {
         // Proxy toggle row takes 1 line when profiles are available.
         let has_proxy = w.proxy_options.len() > 1;
-        let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back · ←/→ proxy)");
+        let inner = popup(
+            frame,
+            rect,
+            "New session: resume? (Enter pick · Esc back · ←/→ proxy)",
+        );
         let constraints = if has_proxy {
-            vec![Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ]
         } else {
             vec![Constraint::Length(1), Constraint::Min(0)]
         };
         let areas = Layout::vertical(constraints).split(inner);
-        let cwd = Paragraph::new(w.display(&step.cwd)).style(Style::default().add_modifier(Modifier::DIM));
+        let cwd = Paragraph::new(w.display(&step.cwd))
+            .style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(cwd, areas[0]);
         if has_proxy {
-            let sel = w.proxy_options.get(w.proxy_selected).map(String::as_str).unwrap_or("none");
+            let sel = w
+                .proxy_options
+                .get(w.proxy_selected)
+                .map(String::as_str)
+                .unwrap_or("none");
             let proxy_line = format!("Proxy: ◀ {} ▶", sel);
             frame.render_widget(
                 Paragraph::new(proxy_line).style(Style::default().fg(Color::Cyan)),
@@ -429,12 +503,18 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
     let title = if w.host == "local" {
         "New session: directory (Tab complete · Enter pick · Esc cancel)".to_owned()
     } else {
-        format!("New session on {} (Tab complete · Enter pick · Esc cancel)", w.host)
+        format!(
+            "New session on {} (Tab complete · Enter pick · Esc cancel)",
+            w.host
+        )
     };
     let inner = popup(frame, rect, &title);
     let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     if let Some(dir) = &w.pending {
-        frame.render_widget(Paragraph::new(format!("Looking for sessions in {}…", w.display(dir))), head);
+        frame.render_widget(
+            Paragraph::new(format!("Looking for sessions in {}…", w.display(dir))),
+            head,
+        );
         return;
     }
     draw_input(frame, head, "> ", &w.input);
@@ -525,7 +605,11 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
     let area = frame.area();
     let height = (app.sessions.len() as u16 + 4).min(area.height.saturating_sub(2));
     let rect = centered(area, 100.min(area.width.saturating_sub(2)), height);
-    let inner = popup(frame, rect, "Overview (↑/↓ select · Enter switch · Esc close)");
+    let inner = popup(
+        frame,
+        rect,
+        "Overview (↑/↓ select · Enter switch · Esc close)",
+    );
 
     let visible = inner.height as usize;
     let offset = selected.saturating_sub(visible.saturating_sub(1));
@@ -537,7 +621,8 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
         .skip(offset)
         .take(visible)
         .map(|(i, v)| {
-            let reconnecting = v.host != "local" && !v.attached
+            let reconnecting = v.host != "local"
+                && !v.attached
                 && matches!(v.state, crate::proto::SessionState::Unknown);
             let (g, _) = glyph(v.state, app.tick, reconnecting);
             let cwd = abbreviate_home(&v.cwd, &app.home);
@@ -552,7 +637,13 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
             let label = v.label();
             let text = format!(
                 " {:2} {} {:<20} {:<30} {:>14} {:>5} {}",
-                i + 1, g, truncate(&label, 20), truncate(&host_part, 30), state, age, proxy_badge
+                i + 1,
+                g,
+                truncate(&label, 20),
+                truncate(&host_part, 30),
+                state,
+                age,
+                proxy_badge
             );
             let base = if i == selected {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -581,7 +672,10 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
         .iter()
         .map(|(k, desc)| {
             Line::from(vec![
-                Span::styled(format!("  {:>14}  ", k), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {:>14}  ", k),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(*desc),
             ])
         })
@@ -593,7 +687,11 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
 
 fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&ProxyStatus>) {
     let area = frame.area();
-    let rect = centered(area, 70.min(area.width.saturating_sub(4)), 24.min(area.height.saturating_sub(2)));
+    let rect = centered(
+        area,
+        70.min(area.width.saturating_sub(4)),
+        24.min(area.height.saturating_sub(2)),
+    );
     let title = format!("Proxy stats: {} (Esc close)", profile_name);
     let inner = popup(frame, rect, &title);
 
@@ -618,7 +716,10 @@ fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&Proxy
         };
         lines.push(Line::from(vec![
             Span::raw("Pool: "),
-            Span::styled(overall.label(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                overall.label(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
         ]));
         for prov in &pool.providers {
             let pcolor = match prov.status.as_str() {
@@ -640,7 +741,9 @@ fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&Proxy
         let total_tok = stats.totals.input_tokens + stats.totals.output_tokens;
         lines.push(Line::raw(format!(
             "Stats ({}):  {} requests  {}  total tokens",
-            stats.period, stats.totals.requests, fmt_tokens(total_tok),
+            stats.period,
+            stats.totals.requests,
+            fmt_tokens(total_tok),
         )));
         lines.push(Line::raw(format!(
             "  in: {}  out: {}  cache-read: {}  cache-create: {}",
@@ -663,11 +766,21 @@ fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&Proxy
                 Color::Green
             };
             lines.push(Line::raw(""));
-            lines.push(Line::raw(format!("Limit: {:.0}% of {}", lim.used_pct * 100.0, fmt_tokens(lim.output_tokens))));
-            lines.push(Line::from(Span::styled(format!("[{bar}]"), Style::default().fg(color))));
+            lines.push(Line::raw(format!(
+                "Limit: {:.0}% of {}",
+                lim.used_pct * 100.0,
+                fmt_tokens(lim.output_tokens)
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("[{bar}]"),
+                Style::default().fg(color),
+            )));
             if lim.blocked {
                 lines.push(Line::styled(
-                    format!("BLOCKED until {}", lim.blocked_until.as_deref().unwrap_or("?")),
+                    format!(
+                        "BLOCKED until {}",
+                        lim.blocked_until.as_deref().unwrap_or("?")
+                    ),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ));
             }
@@ -676,19 +789,30 @@ fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&Proxy
         // By-model table.
         if !stats.by_model.is_empty() {
             lines.push(Line::raw(""));
-            lines.push(Line::styled("By model:", Style::default().add_modifier(Modifier::BOLD)));
+            lines.push(Line::styled(
+                "By model:",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
             for m in &stats.by_model {
                 let out_tok = fmt_tokens(m.output_tokens);
                 let model = truncate(&m.model, 40);
-                lines.push(Line::raw(format!("  {:42} {:>4} req  {:>8} out-tok",
-                    model, m.requests, out_tok)));
+                lines.push(Line::raw(format!(
+                    "  {:42} {:>4} req  {:>8} out-tok",
+                    model, m.requests, out_tok
+                )));
             }
         }
     } else {
-        lines.push(Line::styled("Stats unavailable", Style::default().fg(Color::DarkGray)));
+        lines.push(Line::styled(
+            "Stats unavailable",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), inner);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
 }
 
 // ── Wizard (proxy toggle) ─────────────────────────────────────────────────────
@@ -698,7 +822,11 @@ mod tests {
     use super::*;
 
     fn total_width(titles: &[(String, String)]) -> usize {
-        titles.iter().map(|(p, s)| str_width(p) + 1 + str_width(s)).sum::<usize>() + titles.len().saturating_sub(1)
+        titles
+            .iter()
+            .map(|(p, s)| str_width(p) + 1 + str_width(s))
+            .sum::<usize>()
+            + titles.len().saturating_sub(1)
     }
 
     #[test]
@@ -742,8 +870,11 @@ mod tests {
         let labels: Vec<usize> = (0..8).map(|i| 5 + i * 3).collect();
         for width in [50usize, 80, 120] {
             let caps = fit_tabs(&labels, Some(3), width);
-            let titles: Vec<(String, String)> =
-                caps.iter().enumerate().map(|(i, &c)| tab_parts(i + 1, &"x".repeat(labels[i]), c)).collect();
+            let titles: Vec<(String, String)> = caps
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| tab_parts(i + 1, &"x".repeat(labels[i]), c))
+                .collect();
             assert!(total_width(&titles) <= width, "width {width}: {titles:?}");
         }
     }
@@ -761,9 +892,9 @@ mod tests {
 
     #[test]
     fn tab_titles_with_age_show_age_when_room() {
-        use super::super::app::SessionView;
+        use super::super::super::proto::SessionState;
         use super::super::super::term::screen::Screen;
-        use super::super::super::proto::{SessionState};
+        use super::super::app::SessionView;
         use uuid::Uuid;
         let now = 600u64; // 600 seconds
         let make_view = |name: &str, created_at: u64| SessionView {
@@ -783,10 +914,16 @@ mod tests {
         // Wide bar: ages should appear.
         let titles_wide = tab_titles(&sessions, Some(0), 200, now);
         let wide_text: String = titles_wide.iter().map(|(p, s)| format!("{p}{s}")).collect();
-        assert!(wide_text.contains("10m") || wide_text.contains("m"), "age should appear with wide bar");
+        assert!(
+            wide_text.contains("10m") || wide_text.contains("m"),
+            "age should appear with wide bar"
+        );
         // Very narrow bar: ages dropped.
         let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
-        let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
+        let narrow_text: String = titles_narrow
+            .iter()
+            .map(|(p, s)| format!("{p}{s}"))
+            .collect();
         // Narrow bar may still show partial, but should be shorter.
         assert!(str_width(&narrow_text) <= 21);
     }

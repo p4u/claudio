@@ -71,13 +71,17 @@ pub fn parse_transcript(path: &str, require_terminal: bool) -> Option<Summary> {
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
         }
-        let Some(message) = v.get("message") else { continue };
+        let Some(message) = v.get("message") else {
+            continue;
+        };
         num_turns += 1;
         let terminal = is_terminal(message);
         if require_terminal && !terminal {
             continue;
         }
-        let Some(content) = message.get("content") else { continue };
+        let Some(content) = message.get("content") else {
+            continue;
+        };
         let text = extract_text(content);
         if text.trim().is_empty() {
             continue;
@@ -85,7 +89,10 @@ pub fn parse_transcript(path: &str, require_terminal: bool) -> Option<Summary> {
         best = Some(Summary {
             final_text: text.trim().to_string(),
             session_id: session_id.clone(),
-            model: message.get("model").and_then(|m| m.as_str()).map(String::from),
+            model: message
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(String::from),
             usage: message.get("usage").cloned(),
             num_turns,
             is_error: false,
@@ -130,12 +137,16 @@ pub fn latest_terminal_with_id(path: &str) -> Option<(Summary, String)> {
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
         }
-        let Some(message) = v.get("message") else { continue };
+        let Some(message) = v.get("message") else {
+            continue;
+        };
         num_turns += 1;
         if !is_terminal(message) {
             continue;
         }
-        let Some(content) = message.get("content") else { continue };
+        let Some(content) = message.get("content") else {
+            continue;
+        };
         let text = extract_text(content);
         if text.trim().is_empty() {
             continue;
@@ -149,7 +160,10 @@ pub fn latest_terminal_with_id(path: &str) -> Option<(Summary, String)> {
             Summary {
                 final_text: text.trim().to_string(),
                 session_id: session_id.clone(),
-                model: message.get("model").and_then(|m| m.as_str()).map(String::from),
+                model: message
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .map(String::from),
                 usage: message.get("usage").cloned(),
                 num_turns,
                 is_error: false,
@@ -201,9 +215,12 @@ mod tests {
     #[test]
     fn picks_last_terminal_text() {
         let jsonl = concat!(
-            r#"{"type":"user","sessionId":"sid-1"}"#, "\n",
-            r#"{"type":"assistant","message":{"model":"opus","content":[{"type":"tool_use"}],"stop_reason":"tool_use"}}"#, "\n",
-            r#"{"type":"assistant","message":{"model":"opus","content":[{"type":"text","text":"final answer"}],"stop_reason":"end_turn","usage":{"output_tokens":3}}}"#, "\n",
+            r#"{"type":"user","sessionId":"sid-1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"opus","content":[{"type":"tool_use"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"opus","content":[{"type":"text","text":"final answer"}],"stop_reason":"end_turn","usage":{"output_tokens":3}}}"#,
+            "\n",
         );
         let path = write_tmp("terminal", jsonl);
         let s = parse_transcript(&path, true).unwrap();
@@ -216,18 +233,28 @@ mod tests {
     #[test]
     fn require_terminal_skips_tool_use() {
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking out loud"}],"stop_reason":"tool_use"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking out loud"}],"stop_reason":"tool_use"}}"#,
+            "\n",
         );
         let path = write_tmp("toolonly", jsonl);
         assert!(parse_transcript(&path, true).is_none());
-        assert_eq!(parse_transcript(&path, false).unwrap().final_text, "thinking out loud");
+        assert_eq!(
+            parse_transcript(&path, false).unwrap().final_text,
+            "thinking out loud"
+        );
     }
 
     #[test]
     fn payload_field_extracts() {
         let p = r#"{"transcript_path":"/a/b.jsonl","last_assistant_message":"OK"}"#;
-        assert_eq!(payload_field(p, "transcript_path").as_deref(), Some("/a/b.jsonl"));
-        assert_eq!(payload_field(p, "last_assistant_message").as_deref(), Some("OK"));
+        assert_eq!(
+            payload_field(p, "transcript_path").as_deref(),
+            Some("/a/b.jsonl")
+        );
+        assert_eq!(
+            payload_field(p, "last_assistant_message").as_deref(),
+            Some("OK")
+        );
         assert_eq!(payload_field(p, "missing"), None);
     }
 
@@ -242,9 +269,11 @@ mod tests {
     fn malformed_json_lines_are_skipped() {
         let jsonl = concat!(
             "not json at all\n",
-            r#"{"type":"user","sessionId":"s1"}"#, "\n",
+            r#"{"type":"user","sessionId":"s1"}"#,
+            "\n",
             "{ broken json }\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("malformed", jsonl);
         let s = parse_transcript(&path, true).unwrap();
@@ -254,29 +283,42 @@ mod tests {
     #[test]
     fn session_id_camelcase_extracted() {
         let jsonl = concat!(
-            r#"{"type":"user","sessionId":"camel-sid"}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"user","sessionId":"camel-sid"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("camelcase", jsonl);
-        assert_eq!(parse_transcript(&path, true).unwrap().session_id, "camel-sid");
+        assert_eq!(
+            parse_transcript(&path, true).unwrap().session_id,
+            "camel-sid"
+        );
     }
 
     #[test]
     fn session_id_snake_case_fallback() {
         let jsonl = concat!(
-            r#"{"type":"user","session_id":"snake-sid"}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"user","session_id":"snake-sid"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("snakecase", jsonl);
-        assert_eq!(parse_transcript(&path, true).unwrap().session_id, "snake-sid");
+        assert_eq!(
+            parse_transcript(&path, true).unwrap().session_id,
+            "snake-sid"
+        );
     }
 
     #[test]
     fn num_turns_counts_all_assistant_lines() {
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t1"}],"stop_reason":"tool_use"}}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t2"}],"stop_reason":"tool_use"}}"#, "\n",
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t1"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"t2"}],"stop_reason":"tool_use"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"final"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("numturns", jsonl);
         let s = parse_transcript(&path, true).unwrap();
@@ -288,7 +330,8 @@ mod tests {
     fn content_as_plain_string_extracted() {
         // Some older Claude transcript versions use a plain string for content.
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":"plain string answer","stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":"plain string answer","stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("contentstr", jsonl);
         let s = parse_transcript(&path, true).unwrap();
@@ -298,17 +341,22 @@ mod tests {
     #[test]
     fn multi_content_blocks_concatenated() {
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("multiblocks", jsonl);
-        assert_eq!(parse_transcript(&path, true).unwrap().final_text, "hello world");
+        assert_eq!(
+            parse_transcript(&path, true).unwrap().final_text,
+            "hello world"
+        );
     }
 
     #[test]
     fn non_text_blocks_skipped() {
         // tool_use blocks have no "text" field — they must not crash or appear.
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"x"},{"type":"text","text":"answer"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"x"},{"type":"text","text":"answer"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("nontext", jsonl);
         assert_eq!(parse_transcript(&path, true).unwrap().final_text, "answer");
@@ -328,7 +376,8 @@ mod tests {
     #[test]
     fn read_with_retry_finds_content_immediately() {
         let jsonl = concat!(
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"retry-ok"}],"stop_reason":"end_turn"}}"#, "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"retry-ok"}],"stop_reason":"end_turn"}}"#,
+            "\n",
         );
         let path = write_tmp("retry", jsonl);
         let s = read_with_retry(&path, 3, std::time::Duration::from_millis(1)).unwrap();
