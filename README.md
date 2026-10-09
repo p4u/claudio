@@ -69,6 +69,7 @@ make install      # builds a static musl binary, installs it, and restarts a run
    | `Alt+n` | New session |
    | `Alt+r` | Rename session |
    | `Alt+x` | Close session |
+   | `Ctrl+D` twice | Exit Claude Code; the tab closes on its own |
    | `Alt+g` | Overview of all sessions |
    | `Alt+h` | Help (all keys) |
    | `Alt+q` | Quit the UI; sessions keep running |
@@ -136,6 +137,7 @@ All manager keys use `Alt` so they never clash with Claude Code's own bindings. 
 | `Alt+a` | Jump to next session needing attention |
 | `Alt+r` | Rename session |
 | `Alt+x` | Close / kill session |
+| `Ctrl+D` twice, `/exit` | Claude Code's own exit: the session ends and its tab closes, no confirmation |
 | `Alt+s` | Proxy stats popup |
 | `Alt+h` | Help |
 | `Alt+.` | Wizard only: show/hide hidden directories |

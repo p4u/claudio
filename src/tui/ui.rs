@@ -909,7 +909,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
 pub fn draw_help(frame: &mut Frame, app: &App) {
     let entries = app.keymap.help_entries();
     let extra = if app.upgrade_notice.is_some() { 2 } else { 0 };
-    let height = (entries.len() as u16 + 4 + extra).min(frame.area().height.saturating_sub(2));
+    let height = (entries.len() as u16 + 6 + extra).min(frame.area().height.saturating_sub(2));
     let area = frame.area();
     let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);
     let inner = popup(frame, rect, "Manager keys (any key closes)");
@@ -926,6 +926,18 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
             ])
         })
         .collect();
+    // Claude Code's own key, not ours: listed because it closes the tab.
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {:>14}  ", "Ctrl+D twice"),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            "exit claude; the tab closes",
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+    ]));
     // Show upgrade notice at the bottom of the help popup when available.
     if let Some(tag) = &app.upgrade_notice {
         lines.push(Line::from(""));

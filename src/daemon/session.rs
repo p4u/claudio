@@ -689,7 +689,7 @@ impl Actor {
             return;
         }
 
-        self.daemon.forget_live(self.id, &self.token);
+        let ours = self.daemon.forget_live(self.id, &self.token);
         self.daemon.broadcast(
             self.id,
             SessionEvent::State {
@@ -698,6 +698,19 @@ impl Actor {
         );
         self.daemon
             .broadcast(self.id, SessionEvent::Exited { code });
+
+        // A clean exit is the user ending the conversation (Ctrl+D twice,
+        // `/exit`): close the session like a Kill would. A crash leaves it
+        // dormant so it can come back with `--resume`.
+        if ours && code == Some(0) {
+            let id = self.id;
+            let daemon = Arc::clone(&self.daemon);
+            tokio::spawn(async move {
+                if let Err(e) = daemon.kill(id).await {
+                    tracing::warn!(%id, error = %e, "could not close exited session");
+                }
+            });
+        }
     }
 
     /// SIGHUP the child; SIGKILL it if it is still around after a grace

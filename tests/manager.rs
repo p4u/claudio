@@ -208,24 +208,45 @@ fn test_6_close_session() {
     // After closing the only session the wizard opens again; dismiss it.
     // Wait until the wizard is actually closed before quitting.
     tui.send_keys(ESC);
-    tui.wait_until(|s| !s.contains("where?", Region::Screen), WAIT);
+    tui.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
 
-    // state.json should no longer contain the closed session's cwd.
-    let dir_path = harness.dirs[0].to_str().unwrap();
+    wait_session_forgotten(&harness, &harness.dirs[0]);
+    tui.quit(WAIT);
+}
+
+/// 6b. When claude exits cleanly (Ctrl+D twice, `/exit`) the tab closes on
+///     its own, without the confirm modal. The fake claude is `cat`, which a
+///     single ^D ends with status 0.
+#[test]
+fn test_6b_clean_exit_closes_session() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.send_keys(b"\x04");
+
+    // The only session is gone, so the wizard opens again.
+    tui.wait_for("session ended", Region::Screen, WAIT);
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
+
+    wait_session_forgotten(&harness, &harness.dirs[0]);
+    tui.quit(WAIT);
+}
+
+/// Wait until state.json no longer lists a session in `dir`.
+fn wait_session_forgotten(harness: &ManagerHarness, dir: &std::path::Path) {
+    let dir = dir.to_str().unwrap();
     harness.wait_state(
-        |v| {
-            let sessions = v.get("sessions").and_then(|s| s.as_array());
-            match sessions {
-                None => true, // empty/absent sessions section
-                Some(a) => !a
-                    .iter()
-                    .any(|s| s.get("cwd").and_then(|c| c.as_str()) == Some(dir_path)),
-            }
+        |v| match v.get("sessions").and_then(|s| s.as_array()) {
+            None => true, // empty/absent sessions section
+            Some(a) => !a
+                .iter()
+                .any(|s| s.get("cwd").and_then(|c| c.as_str()) == Some(dir)),
         },
         WAIT,
     );
-
-    tui.quit(WAIT);
 }
 
 // ── Test 7: Input echo ────────────────────────────────────────────────────────

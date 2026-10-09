@@ -17,7 +17,7 @@ use crate::proto::{
 const BANNER: &str = "FAKE-CLAUDE-BANNER";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A variant of the fake claude that exits 0 immediately on any real invocation.
+/// A variant of the fake claude that exits 3 immediately on any real invocation.
 /// Used to trigger the commit-before-exit race deterministically.
 fn fake_claude_exits_immediately() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
@@ -30,7 +30,7 @@ fn fake_claude_exits_immediately() -> &'static Path {
         let bin = dir.join("claude");
         let script = "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
-             exit 0\n";
+             exit 3\n";
         std::fs::write(&bin, script).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
@@ -499,14 +499,14 @@ async fn kill_removes_session_everywhere() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exit_leaves_a_dormant_session() {
+async fn clean_exit_closes_the_session() {
     let d = TestDaemon::start().await;
     let mut c = d.client().await;
     let id = Uuid::new_v4();
     c.spawn(d.spec(id)).await;
     c.attach_until(id, BANNER).await;
 
-    // ^D ends `cat`.
+    // ^D ends `cat` with status 0, like Ctrl+D twice or `/exit` in claude.
     c.send(Frame::Data {
         session: id,
         bytes: vec![4],
@@ -519,6 +519,34 @@ async fn exit_leaves_a_dormant_session() {
         })
         .await;
     assert_eq!(code, Some(0));
+    c.event(id, |e| matches!(e, SessionEvent::Removed).then_some(()))
+        .await;
+
+    assert!(c.sessions().await.is_empty());
+    assert!(d.journal()["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crash_leaves_a_dormant_session() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    c.spawn(d.spec(id)).await;
+    c.attach_until(id, BANNER).await;
+
+    // ^C kills `cat` with SIGINT.
+    c.send(Frame::Data {
+        session: id,
+        bytes: vec![3],
+    })
+    .await;
+    let code = c
+        .event(id, |e| match e {
+            SessionEvent::Exited { code } => Some(*code),
+            _ => None,
+        })
+        .await;
+    assert_ne!(code, Some(0));
 
     let sessions = c.sessions().await;
     assert_eq!(sessions[0].pid, None);
@@ -756,7 +784,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A child that exits immediately (exit 0, no --resume) must leave the session
+/// A child that crashes immediately (exit 3, no --resume) must leave the session
 /// dormant (pid=None) and must not strand a stale live handle for a dead pid.
 ///
 /// This is a direct regression test for the commit-before-exit race: the fake

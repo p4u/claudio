@@ -612,12 +612,15 @@ impl Daemon {
     }
 
     /// Drop a session from the live set when its process exits — unless it
-    /// was already replaced by a newer spawn (different token).
-    fn forget_live(&self, id: SessionId, token: &str) {
+    /// was already replaced by a newer spawn (different token). Returns
+    /// whether it was dropped.
+    fn forget_live(&self, id: SessionId, token: &str) -> bool {
         let mut reg = self.registry();
-        if reg.live.get(&id).is_some_and(|h| h.token == token) {
+        let ours = reg.live.get(&id).is_some_and(|h| h.token == token);
+        if ours {
             reg.live.remove(&id);
         }
+        ours
     }
 
 }

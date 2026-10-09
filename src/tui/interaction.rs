@@ -550,7 +550,13 @@ impl App {
                 }
                 self.save();
             }
-            SessionEvent::Removed => self.remove(i),
+            // Our own closes are gone already; this is a clean exit or
+            // another client's kill.
+            SessionEvent::Removed => {
+                let label = v.label();
+                self.remove(i);
+                self.notify(format!("{label}: session ended"));
+            }
             SessionEvent::State { state } => v.state = state,
             SessionEvent::ClaudeSession { claude_session_id } => {
                 v.claude_session_id = Some(claude_session_id);
