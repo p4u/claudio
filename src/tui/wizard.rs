@@ -606,6 +606,18 @@ impl Wizard {
         w
     }
 
+    /// A fresher list of SSH host candidates. It replaces the first screen's
+    /// only while nothing was typed there, so rows never move under the user.
+    pub fn set_ssh_hosts(&mut self, hosts: &[String]) {
+        let Some(step) = self.host_step.as_mut() else {
+            return;
+        };
+        if step.input.is_empty() && step.connecting.is_none() {
+            let local_dirs = std::mem::take(&mut step.local_dirs);
+            *step = HostStep::with_local_dirs(&self.host, hosts, &local_dirs);
+        }
+    }
+
     /// The currently selected proxy profile name, or `None` when "none".
     pub fn selected_proxy(&self) -> Option<&str> {
         self.proxy_options.get(self.proxy_selected).and_then(|s| {

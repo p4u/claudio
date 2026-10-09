@@ -71,6 +71,7 @@ mod tests {
     use crate::proto::{GitLogEntry, GitLogPage, SessionInfo, SessionState};
     use crate::tui::app::Effect;
     use crate::tui::state::ClientState;
+    use crate::tui::test_support;
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -94,9 +95,7 @@ mod tests {
     }
 
     fn app(sessions: &[SessionInfo]) -> App {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.proxy_default = None;
-        app.proxy_profiles = Vec::new();
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), sessions);
         app.modal = None;
         app.take_effects();

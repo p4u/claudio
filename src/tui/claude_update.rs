@@ -154,17 +154,21 @@ fn claude_prompt(host: &str, have: Option<&str>, want: &str) -> ConfirmPrompt {
 mod tests {
     use super::*;
     use crate::tui::app::Effect;
+    use crate::tui::app::AppConfig;
     use crate::tui::interaction::Modal;
+    use crate::tui::test_support;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     const LOCAL: &str = "2.1.296 (Claude Code)";
 
     fn new_app(policy: UpdatePolicy) -> App {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.claude_policy.update_check = policy;
-        app.claude_policy.remote_check = policy;
-        app.set_local_claude(Some(LOCAL.into()));
-        app
+        let mut config = test_support::config();
+        config.claude.update_check = policy;
+        config.claude.remote_check = policy;
+        App::new(AppConfig {
+            local_claude: Some(LOCAL.into()),
+            ..config
+        })
     }
 
     fn press(app: &mut App, code: KeyCode) {

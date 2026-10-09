@@ -550,8 +550,7 @@ impl App {
         // The wizard starts on the active host; picking another host seeds
         // it again (see `on_host_connected`).
         let seeds = wizard::assemble(None, &self.wizard_seeds(&active_host), &self.projects);
-        let host_candidates = crate::remote::hosts::candidates();
-        // Determine effective proxy default for the wizard:
+        // Effective proxy default for the wizard:
         // active session's proxy > startup override > config default.
         let proxy_default = active_proxy
             .as_deref()
@@ -560,10 +559,12 @@ impl App {
             seeds,
             self.home.clone(),
             &active_host,
-            &host_candidates,
-            &self.proxy_profiles.clone(),
+            &self.ssh_hosts,
+            &self.proxy_profiles,
             proxy_default,
         )));
+        // `~/.ssh/config` may have changed since the list was read.
+        self.effects.push(Effect::LoadSshHosts);
         self.request_projects("local");
         self.redraw = true;
     }

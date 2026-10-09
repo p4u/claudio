@@ -100,6 +100,8 @@ pub enum Effect {
     Connect(String),
     /// Write state.json.
     Save,
+    /// Read the SSH host candidates again; they go to [`App::on_ssh_hosts`].
+    LoadSshHosts,
     /// Fetch proxy config (env) for a profile name. Result goes to
     /// [`App::on_proxy_config`].
     FetchProxyConfig { profile_name: String },
@@ -244,50 +246,51 @@ pub struct App {
     pub(super) claude_checked: HashSet<String>,
     /// Prompts waiting for the open modal to close.
     pub(super) confirms: VecDeque<ConfirmPrompt>,
+    /// The SSH hosts the wizard offers: recently used ones, then
+    /// `~/.ssh/config` aliases.
+    pub(super) ssh_hosts: Vec<String>,
+}
+
+/// What the app starts from. The event loop gathers it (reading config.toml,
+/// state.json, the SSH host lists and the local daemon's welcome), so that
+/// `App` itself never touches the outside world.
+pub struct AppConfig {
+    pub mode: Mode,
+    /// Terminal size, `(width, height)`.
+    pub size: (u16, u16),
+    /// The local daemon host's home directory.
+    pub home: String,
+    pub keymap: Keymap,
+    /// Desktop notifications for background sessions (`[ui] notify`).
+    pub notify: bool,
+    /// The startup proxy choice (`--proxy` / `--no-proxy`).
+    pub proxy_override: ProxyChoice,
+    /// The configured proxy profile names, and the default one.
+    pub proxy_profiles: Vec<String>,
+    pub proxy_default: Option<String>,
+    /// `[claude]` from config.toml: the update policies.
+    pub claude: crate::config::ClaudeSection,
+    /// This machine's `claude --version`.
+    pub local_claude: Option<String>,
+    /// From state.json: recently used directories per host, and the claude
+    /// versions the user chose to skip.
+    pub recent_dirs: HashMap<String, Vec<String>>,
+    pub claude_skipped: HashMap<String, String>,
+    /// The SSH hosts the wizard offers (refreshed through
+    /// [`Effect::LoadSshHosts`]).
+    pub ssh_hosts: Vec<String>,
 }
 
 impl App {
-    /// Create an App with default settings (notify enabled, default keymap).
-    /// Used by unit tests; kept pub for future daemon-status command.
-    #[cfg(test)]
-    pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
-        use std::collections::HashMap;
-        let mut rd = HashMap::new();
-        if !recent_dirs.is_empty() {
-            rd.insert("local".to_owned(), recent_dirs);
-        }
-        App::new_with_config(width, height, home, rd, true, Keymap::default())
-    }
-
-    #[cfg(test)]
-    pub fn new_with_config(
-        width: u16,
-        height: u16,
-        home: String,
-        recent_dirs: HashMap<String, Vec<String>>,
-        notify_enabled: bool,
-        keymap: Keymap,
-    ) -> App {
-        App::new_with_proxy(width, height, home, recent_dirs, notify_enabled, keymap, ProxyChoice::Default)
-    }
-
-    pub fn new_with_proxy(
-        width: u16,
-        height: u16,
-        home: String,
-        recent_dirs: HashMap<String, Vec<String>>,
-        notify_enabled: bool,
-        keymap: Keymap,
-        proxy_override: ProxyChoice,
-    ) -> App {
-        let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
+    pub fn new(cfg: AppConfig) -> App {
+        let (width, height) = cfg.size;
         App {
-            mode: Mode::Manager,
+            mode: cfg.mode,
             exit: Default::default(),
             sessions: Vec::new(),
             active: None,
             modal: None,
-            recent_dirs,
+            recent_dirs: cfg.recent_dirs,
             projects: Vec::new(),
             width,
             height,
@@ -295,29 +298,40 @@ impl App {
             now: crate::paths::unix_now(),
             notice: None,
             connected: true,
-            home,
+            home: cfg.home,
             quit: false,
             redraw: true,
             effects: Vec::new(),
             proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
             session_creds: HashMap::new(),
-            proxy_profiles,
-            proxy_default,
-            proxy_override,
+            proxy_profiles: cfg.proxy_profiles,
+            proxy_default: cfg.proxy_default,
+            proxy_override: cfg.proxy_override,
             notified: HashMap::new(),
-            notify_enabled,
+            notify_enabled: cfg.notify,
             pending_notifs: Vec::new(),
             killed: Vec::new(),
-            keymap,
+            keymap: cfg.keymap,
             upgrade_notice: None,
             host_stats: HashMap::new(),
-            claude_policy: Default::default(),
-            local_claude: None,
-            claude_skipped: HashMap::new(),
+            claude_policy: cfg.claude,
+            local_claude: cfg.local_claude,
+            claude_skipped: cfg.claude_skipped,
             claude_checked: HashSet::new(),
             confirms: VecDeque::new(),
+            ssh_hosts: cfg.ssh_hosts,
         }
+    }
+
+    /// The SSH host candidates were (re)read: offer them from now on, and in
+    /// the wizard's first screen if it is open and untouched.
+    pub fn on_ssh_hosts(&mut self, hosts: Vec<String>) {
+        if let Some(w) = self.wizard_mut() {
+            w.set_ssh_hosts(&hosts);
+        }
+        self.ssh_hosts = hosts;
+        self.redraw = true;
     }
 
     /// Drain the queued effects, in order.
@@ -607,6 +621,7 @@ mod tests {
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
+    use crate::tui::test_support;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
 
@@ -640,10 +655,7 @@ mod tests {
     }
 
     fn app_with(live: &[SessionInfo]) -> App {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        // Isolate tests from any real proxy config on disk.
-        app.proxy_default = None;
-        app.proxy_profiles = Vec::new();
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), live);
         app.take_effects();
         app
@@ -669,7 +681,7 @@ mod tests {
             active: Some(live[1].id),
             ..Default::default()
         };
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         let reqs = requests(&effects);
@@ -693,7 +705,7 @@ mod tests {
 
     #[test]
     fn no_sessions_opens_the_wizard() {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &[]);
         assert!(matches!(app.modal, Some(Modal::Wizard(_))));
         assert!(
@@ -701,6 +713,29 @@ mod tests {
                 limit: PROJECTS_LIMIT
             })
         );
+    }
+
+    #[test]
+    fn the_wizard_offers_the_ssh_hosts_and_asks_for_a_fresh_list() {
+        let mut app = App::new(AppConfig {
+            ssh_hosts: vec!["devbox".into()],
+            ..test_support::config()
+        });
+        app.recover(&ClientState::default(), &[]);
+        assert!(app.take_effects().iter().any(|e| matches!(e, Effect::LoadSshHosts)));
+        let hosts = |app: &App| match &app.modal {
+            Some(Modal::Wizard(w)) => w.host_step.as_ref().unwrap().items.clone(),
+            _ => panic!("expected the wizard"),
+        };
+        assert_eq!(hosts(&app), ["devbox"]);
+        // The fresh list replaces the untouched first screen...
+        app.on_ssh_hosts(vec!["devbox".into(), "nas".into()]);
+        assert_eq!(hosts(&app), ["devbox", "nas"]);
+        // ...but not one the user is typing in.
+        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_ssh_hosts(vec!["other".into()]);
+        assert_eq!(hosts(&app), ["nas"]);
+        assert_eq!(app.ssh_hosts, ["other"], "the next wizard has it");
     }
 
     #[test]
@@ -926,7 +961,7 @@ mod tests {
             context_tokens: None,
             kind: SessionKind::Claude,
         }];
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         // Kill must be re-sent.
@@ -961,7 +996,7 @@ mod tests {
             context_tokens: None,
             kind: SessionKind::Claude,
         }];
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &local_live);
         app.take_effects();
         assert_eq!(app.sessions.len(), 1);
@@ -1189,7 +1224,7 @@ mod tests {
 
     #[test]
     fn on_incoming_from_remote_tags_created_sessions_correctly() {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &[]);
         // Close wizard.
         app.modal = None;
@@ -1215,7 +1250,7 @@ mod tests {
     fn local_disconnect_does_not_affect_remote_sessions() {
         let local_id = Uuid::new_v4();
         let remote_id = Uuid::new_v4();
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         for (id, host) in [(local_id, "local"), (remote_id, "myserver")] {
             app.sessions.push(SessionView {
                 attached: true,
@@ -1333,8 +1368,10 @@ mod tests {
     fn notifications_disabled_when_flag_is_off() {
         let mut live = [info(Some(1), None), info(Some(2), None)];
         live[1].state = SessionState::NeedsApproval;
-        let mut app =
-            App::new_with_config(100, 30, "/home/u".into(), HashMap::new(), false, Keymap::default());
+        let mut app = App::new(AppConfig {
+            notify: false,
+            ..test_support::config()
+        });
         app.recover(&ClientState::default(), &live);
         app.take_effects();
         app.check_notifications();
@@ -1432,8 +1469,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.proxy_default = None;
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         assert!(

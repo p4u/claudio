@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn status_line_appends_the_credential_after_the_proxy_badge() {
         use crate::proto::SessionKind;
-        let mut app = App::new(120, 30, "/home/u".into(), vec![]);
+        let mut app = App::new(crate::tui::app::AppConfig { size: (120, 30), ..crate::tui::test_support::config() });
         app.now = 1_000;
         app.sessions.push(SessionView {
             name: Some("s".into()),

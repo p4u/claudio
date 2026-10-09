@@ -1130,9 +1130,17 @@ mod tests {
         }
     }
 
+    /// A manager on a 90×30 terminal.
+    fn stats_app() -> App {
+        App::new(crate::tui::app::AppConfig {
+            size: (90, 30),
+            ..crate::tui::test_support::config()
+        })
+    }
+
     /// An app with three sessions (two on the proxy) and all stats loaded.
     fn app_with_stats() -> App {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
+        let mut app = stats_app();
         app.now = 7_201;
         app.proxy_profiles = vec!["myproxy".into()];
         app.proxy_default = Some("myproxy".into());
@@ -1194,7 +1202,7 @@ mod tests {
 
     #[test]
     fn open_fetches_and_result_clears_loading() {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
+        let mut app = stats_app();
         app.sessions.push(session("s", Some("myproxy"), None));
         app.active = Some(0);
         app.open_proxy_stats();
@@ -1239,10 +1247,7 @@ mod tests {
 
     #[test]
     fn no_proxy_shows_login_hint() {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
-        // `App::new` loads the real config.toml; make sure no profile leaks in.
-        app.proxy_profiles.clear();
-        app.proxy_default = None;
+        let mut app = stats_app();
         app.sessions.push(session("s", None, None));
         app.active = Some(0);
         app.open_proxy_stats();

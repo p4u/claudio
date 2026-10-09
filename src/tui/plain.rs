@@ -43,10 +43,11 @@ impl Exit {
 }
 
 impl App {
-    /// Become the plain UI and start its session on the local daemon, with
-    /// the proxy profile the startup choice picks (like the wizard's default).
+    /// Start the plain UI's session on the local daemon, with the proxy
+    /// profile the startup choice picks (like the wizard's default). The app
+    /// is one made in [`Mode::Plain`].
     pub fn start_plain(&mut self, start: PlainStart) {
-        self.mode = Mode::Plain;
+        debug_assert_eq!(self.mode, Mode::Plain);
         let proxy = self
             .proxy_override
             .pick(self.proxy_default.as_deref())
@@ -110,28 +111,25 @@ mod tests {
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
     use crate::proxy::ProxyChoice;
-    use crate::tui::app::{Effect, ReplyTo};
+    use crate::tui::app::{AppConfig, Effect, ReplyTo};
     use crate::tui::interaction::Modal;
     use crate::tui::keymap::Keymap;
+    use crate::tui::test_support;
     use crate::tui::ui;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn plain_app(args: &[&str]) -> (App, SessionId) {
         let mut notices = Vec::new();
-        let keymap = Keymap::build_plain(&Default::default(), &mut notices);
-        let mut app = App::new_with_proxy(
-            100,
-            30,
-            "/home/u".into(),
-            HashMap::new(),
-            false,
-            keymap,
-            ProxyChoice::Direct,
-        );
+        let mut app = App::new(AppConfig {
+            mode: Mode::Plain,
+            keymap: Keymap::build_plain(&Default::default(), &mut notices),
+            notify: false,
+            proxy_override: ProxyChoice::Direct,
+            ..test_support::config()
+        });
         let id = Uuid::new_v4();
         app.start_plain(PlainStart {
             id,
