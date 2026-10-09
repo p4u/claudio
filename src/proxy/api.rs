@@ -11,8 +11,22 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::Deserialize;
+use thiserror::Error;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+/// Errors returned by the proxy API client.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    /// Network or transport failure.
+    #[error("request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    /// The proxy returned an unexpected HTTP status.
+    #[error("proxy returned {0}")]
+    Http(reqwest::StatusCode),
+}
 
 // ── Response types ────────────────────────────────────────────────────────────
 
@@ -131,64 +145,62 @@ impl PoolHealthResponse {
 // ── HTTP client ───────────────────────────────────────────────────────────────
 
 /// Build a reqwest Client with rustls-tls and our short timeout.
-pub fn build_client() -> Result<Client, reqwest::Error> {
-    Client::builder().timeout(TIMEOUT).build()
+pub fn build_client() -> Result<Client, ApiError> {
+    Ok(Client::builder().timeout(TIMEOUT).build()?)
 }
 
 /// `GET /v1/claudio` — check that the proxy speaks the Claudio API.
 /// Returns `Ok(false)` when the endpoint returns 404 (older proxy without
 /// Claudio API support). Returns `Err` on network/auth errors.
-pub async fn check_root(base_url: &str, token: &str) -> Result<bool, String> {
-    let client = build_client().map_err(|e| e.to_string())?;
+pub async fn check_root(base_url: &str, token: &str) -> Result<bool, ApiError> {
+    let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/claudio"))
         .bearer_auth(token)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     if resp.status().as_u16() == 404 {
         return Ok(false);
     }
     if !resp.status().is_success() {
-        return Err(format!("proxy returned {}", resp.status()));
+        return Err(ApiError::Http(resp.status()));
     }
     Ok(true)
 }
 
-/// `GET /v1/models` — minimal check that a token is accepted (fallback when
-/// `/v1/claudio` is not available).
-pub async fn check_models_fallback(base_url: &str, token: &str) -> Result<(), String> {
-    let client = build_client().map_err(|e| e.to_string())?;
+/// `GET /v1/models` — verify that a token is accepted (fallback when
+/// `/v1/claudio` is not available). Requires a 2xx response; 404 is treated
+/// as an auth failure (the endpoint is present but the token is rejected).
+pub async fn check_models_fallback(base_url: &str, token: &str) -> Result<(), ApiError> {
+    let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/models"))
         .bearer_auth(token)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status().is_success() || resp.status().as_u16() == 404 {
+        .await?;
+    if resp.status().is_success() {
         return Ok(());
     }
-    Err(format!("proxy returned {}", resp.status()))
+    Err(ApiError::Http(resp.status()))
 }
 
 /// `GET /v1/claudio/config` — fetch recommended env vars.
 /// Returns `None` when the endpoint is not available (404), allowing
 /// the caller to fall back to built-in defaults.
-pub async fn fetch_config(base_url: &str, token: &str) -> Result<Option<ConfigResponse>, String> {
-    let client = build_client().map_err(|e| e.to_string())?;
+pub async fn fetch_config(base_url: &str, token: &str) -> Result<Option<ConfigResponse>, ApiError> {
+    let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/claudio/config"))
         .bearer_auth(token)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     if resp.status().as_u16() == 404 {
         return Ok(None);
     }
     if !resp.status().is_success() {
-        return Err(format!("proxy returned {}", resp.status()));
+        return Err(ApiError::Http(resp.status()));
     }
-    let cfg: ConfigResponse = resp.json().await.map_err(|e| e.to_string())?;
+    let cfg: ConfigResponse = resp.json().await?;
     Ok(Some(cfg))
 }
 
@@ -197,34 +209,32 @@ pub async fn fetch_stats(
     base_url: &str,
     token: &str,
     period: &str,
-) -> Result<StatsResponse, String> {
-    let client = build_client().map_err(|e| e.to_string())?;
+) -> Result<StatsResponse, ApiError> {
+    let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/claudio/me/stats"))
         .query(&[("period", period)])
         .bearer_auth(token)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     if !resp.status().is_success() {
-        return Err(format!("proxy returned {}", resp.status()));
+        return Err(ApiError::Http(resp.status()));
     }
-    resp.json().await.map_err(|e| e.to_string())
+    Ok(resp.json().await?)
 }
 
 /// `GET /v1/claudio/pool/health` — pool availability.
-pub async fn fetch_pool_health(base_url: &str, token: &str) -> Result<PoolHealthResponse, String> {
-    let client = build_client().map_err(|e| e.to_string())?;
+pub async fn fetch_pool_health(base_url: &str, token: &str) -> Result<PoolHealthResponse, ApiError> {
+    let client = build_client()?;
     let resp = client
         .get(format!("{base_url}/v1/claudio/pool/health"))
         .bearer_auth(token)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     if !resp.status().is_success() {
-        return Err(format!("proxy returned {}", resp.status()));
+        return Err(ApiError::Http(resp.status()));
     }
-    resp.json().await.map_err(|e| e.to_string())
+    Ok(resp.json().await?)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -312,5 +322,25 @@ mod tests {
             providers: vec![ProviderHealth { name: "anthropic".into(), status: "saturated".into() }],
         };
         assert_eq!(saturated.overall(), PoolStatus::Saturated);
+    }
+
+    /// Astra #19: check_models_fallback must NOT accept 404 as success.
+    #[tokio::test]
+    async fn check_models_fallback_404_is_failure() {
+        // No routes → 404 for /v1/models.
+        let router = Router::new();
+        let base = serve(router).await;
+        let result = check_models_fallback(&base, "tok").await;
+        assert!(result.is_err(), "404 from /v1/models must not count as auth success");
+    }
+
+    #[tokio::test]
+    async fn check_models_fallback_200_is_success() {
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"models": []})) }),
+        );
+        let base = serve(router).await;
+        assert!(check_models_fallback(&base, "tok").await.is_ok());
     }
 }
