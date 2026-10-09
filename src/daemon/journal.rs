@@ -196,6 +196,16 @@ impl Journal {
         true
     }
 
+    /// Forget a session's claude conversation id in memory only (no disk
+    /// write). Returns `false` when `id` is not journaled.
+    pub fn clear_claude_session(&mut self, id: SessionId) -> bool {
+        let Some(e) = self.sessions.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.claude_session_id = None;
+        true
+    }
+
     /// Record a new claude conversation id (`SessionStart`, `/clear`, fork)
     /// in memory and persist. Returns `false` when `id` is not journaled.
     /// A write failure is logged, not propagated (a missing conversation id

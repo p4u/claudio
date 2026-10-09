@@ -47,7 +47,13 @@ impl App {
         {
             return;
         }
-        let skipped = self.claude_skipped.get(host).is_some_and(|v| v == want);
+        // `want` is a bare release ("2.1.296") from the channel, or a local
+        // `--version` line ("2.1.296 (Claude Code)"); compare version numbers
+        // only, so a skip holds whichever form it was recorded from.
+        let skipped = self
+            .claude_skipped
+            .get(host)
+            .is_some_and(|v| short(v) == short(want));
         match decide(policy, have.is_none(), skipped) {
             Decision::Nothing => {}
             Decision::Run => self.start_claude_update(host, false),
@@ -83,7 +89,11 @@ impl App {
                 }
             }
             Ok(Msg::ClaudeUpdated { tail, .. }) => {
-                let line = tail.lines().last().unwrap_or("no output");
+                let line = tail
+                    .lines()
+                    .map(str::trim)
+                    .rfind(|l| !l.is_empty())
+                    .unwrap_or("no output");
                 self.notify(format!("claude update failed on {host}: {line}"));
             }
             Ok(_) => {}
@@ -127,7 +137,7 @@ fn claude_prompt(host: &str, have: Option<&str>, want: &str) -> ConfirmPrompt {
     };
     let skip = ConfirmAction::SkipClaude(Skip {
         host: host.to_owned(),
-        version: want.to_owned(),
+        version: want_short.to_owned(),
     });
     ConfirmPrompt::new(
         "Claude is out of date",
@@ -265,7 +275,8 @@ mod tests {
         let state = first.to_state();
         assert_eq!(
             state.claude_skipped.get("devbox").map(String::as_str),
-            Some(LOCAL)
+            Some("2.1.296"),
+            "stored as the bare version"
         );
 
         // A later run with that state stays quiet for this version...
@@ -283,6 +294,24 @@ mod tests {
             .insert("devbox".into(), "2.1.200".into());
         newer.check_remote_claude("devbox", Some("2.1.280"));
         assert!(has_prompt(&newer));
+    }
+
+    #[test]
+    fn a_skip_matches_whichever_form_the_version_came_in() {
+        // Skipped from the local check, where `want` is the channel's bare
+        // version; the remote check's `want` carries the "(Claude Code)" tail.
+        let mut app = new_app(UpdatePolicy::Ask);
+        app.claude_skipped.insert("devbox".into(), "2.1.296".into());
+        app.check_remote_claude("devbox", Some("2.1.280"));
+        assert!(app.modal.is_none());
+
+        // A state.json written before versions were normalised, read while
+        // the local version is known in its bare form.
+        let mut app = new_app(UpdatePolicy::Ask);
+        app.set_local_claude(Some("2.1.296".into()));
+        app.claude_skipped.insert("devbox".into(), LOCAL.into());
+        app.check_remote_claude("devbox", Some("2.1.280"));
+        assert!(app.modal.is_none());
     }
 
     #[test]
@@ -376,7 +405,7 @@ mod tests {
         let failed = Msg::ClaudeUpdated {
             version: Some("2.1.280".into()),
             ok: false,
-            tail: "downloading\nEACCES: permission denied".into(),
+            tail: "downloading\nEACCES: permission denied\n  \n".into(),
         };
         app.on_reply(ReplyTo::ClaudeUpdate("devbox".into()), Ok(failed));
         assert_eq!(

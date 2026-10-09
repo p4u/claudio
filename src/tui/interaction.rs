@@ -654,6 +654,12 @@ impl App {
                 self.save();
                 self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
             }
+            // A fresh reset: recovery must not resume the old conversation
+            // from what we saved.
+            SessionEvent::ClaudeSessionCleared => {
+                v.claude_session_id = None;
+                self.save();
+            }
             SessionEvent::Title { title } => v.title = Some(title),
             SessionEvent::Exited { .. } => v.state = SessionState::Exited,
             SessionEvent::Notice { text } => self.notify(text),

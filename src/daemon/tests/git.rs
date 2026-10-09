@@ -457,12 +457,9 @@ async fn configured_diff_drivers_never_execute() {
     assert!(!external.exists(), "the external diff driver ran");
 }
 
-/// While a git process is stuck, the client loop keeps serving terminal I/O.
-/// Git is held up by a config include that points at a FIFO.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_slow_git_request_does_not_stall_terminal_data() {
-    let d = TestDaemon::start().await;
-    let repo = Repo::create(&d.dir);
+/// Hold up every git command in `repo`: its config includes a FIFO, which
+/// blocks reading the config until a writer opens it. Returns the FIFO.
+fn block_git(d: &TestDaemon, repo: &Repo) -> PathBuf {
     let fifo = d.dir.join("blocker");
     let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
     // SAFETY: `path` is a valid NUL-terminated string.
@@ -471,6 +468,16 @@ async fn a_slow_git_request_does_not_stall_terminal_data() {
     let mut text = std::fs::read_to_string(&config).unwrap();
     text.push_str(&format!("[include]\n\tpath = {}\n", fifo.display()));
     std::fs::write(&config, text).unwrap();
+    fifo
+}
+
+/// While a git process is stuck, the client loop keeps serving terminal I/O.
+/// Git is held up by a config include that points at a FIFO.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_git_request_does_not_stall_terminal_data() {
+    let d = TestDaemon::start().await;
+    let repo = Repo::create(&d.dir);
+    let fifo = block_git(&d, &repo);
 
     let mut c = d.client().await;
     let id = Uuid::new_v4();
@@ -519,6 +526,65 @@ async fn a_slow_git_request_does_not_stall_terminal_data() {
         })
         .await;
     assert!(matches!(reply, Msg::GitLogPage(_)), "{reply:?}");
+}
+
+/// A client cannot pile up git requests behind a stuck git: past the pending
+/// bound they are refused as busy at once, and the held ones still complete
+/// once git is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_git_requests_behind_a_stuck_one_is_bounded() {
+    let d = TestDaemon::start().await;
+    let repo = Repo::create(&d.dir);
+    let fifo = block_git(&d, &repo);
+    let mut c = d.client().await;
+
+    let mut reqs = Vec::new();
+    for _ in 0..server::GIT_PENDING + 2 {
+        reqs.push(c.request(repo.log(false, 0, 5)).await);
+    }
+    let (held, refused) = reqs.split_at(server::GIT_PENDING);
+    let mut busy = Vec::new();
+    while busy.len() < refused.len() {
+        let (req, msg) = c
+            .until(|f| match f {
+                Frame::Control(Envelope { req: Some(r), msg }) => Some((*r, msg.clone())),
+                _ => None,
+            })
+            .await;
+        assert!(refused.contains(&req), "answered while git is stuck: {msg:?}");
+        assert!(
+            matches!(&msg, Msg::Error { message } if message.contains("busy")),
+            "{msg:?}"
+        );
+        busy.push(req);
+    }
+
+    // Release git: move the FIFO aside so later commands skip the include,
+    // then hold it open as a writer for a moment, freeing the commands stuck
+    // opening it; they read an empty config once it closes. Read-write so
+    // the open never blocks, even if no git has reached the FIFO yet.
+    let aside = d.dir.join("blocker-released");
+    std::fs::rename(&fifo, &aside).unwrap();
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&aside)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(writer);
+    let mut answered = std::collections::HashSet::new();
+    while answered.len() < held.len() {
+        let req = c
+            .until(|f| match f {
+                Frame::Control(Envelope { req: Some(r), msg }) if held.contains(r) => {
+                    assert!(matches!(msg, Msg::GitLogPage(_)), "{msg:?}");
+                    Some(*r)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(answered.insert(req), "answered twice");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

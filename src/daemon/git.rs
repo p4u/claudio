@@ -20,6 +20,7 @@
 //! tests.
 
 use std::ffi::{OsStr, OsString};
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -104,8 +105,11 @@ const DIFF_ARGS: [&str; 3] = ["--no-ext-diff", "--no-textconv", "-M"];
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Execute a git request and return its reply (`Msg::Error` on failure).
-pub async fn handle(request: Msg) -> Msg {
+/// It starts once `turn` resolves (e.g. to a concurrency permit, held until
+/// the reply is ready); the deadline counts from the call, waiting included.
+pub async fn handle<T>(request: Msg, turn: impl Future<Output = T>) -> Msg {
     let work = async {
+        let _turn = turn.await;
         match request {
             Msg::GitLog {
                 cwd,

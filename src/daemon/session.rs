@@ -102,7 +102,13 @@ pub enum Cmd {
     Status(oneshot::Sender<Status>),
     /// Kill the child and stop. The registry has already forgotten it.
     Kill,
+    /// Like `Kill`, first handing over the subscribers so a respawn can
+    /// attach them to the new process.
+    Stop(oneshot::Sender<Vec<Subscription>>),
 }
+
+/// An attached client's id and output queue.
+pub type Subscription = (ClientId, mpsc::Sender<Frame>);
 
 /// What `ListSessions` needs from a live actor.
 pub struct Status {
@@ -125,11 +131,16 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
     tokio::time::timeout(wait, rx).await.ok()?.ok()
 }
 
-/// Kill a live session's child and wait until its actor is gone. The actor
-/// stops on `Kill` without running `on_exit`, so nothing is announced.
-pub async fn stop(handle: &Handle) {
-    let _ = handle.tx.send(Cmd::Kill).await;
+/// Kill a live session's child and wait until its actor is gone; returns the
+/// clients that were attached to it. The actor stops on `Stop` without
+/// running `on_exit`, so nothing is announced.
+pub async fn stop(handle: &Handle) -> Vec<Subscription> {
+    let (reply, mut subscribers) = oneshot::channel();
+    let _ = handle.tx.send(Cmd::Stop(reply)).await;
     let _ = tokio::time::timeout(2 * KILL_GRACE, handle.tx.closed()).await;
+    // Answered before the actor kills its child; empty if it was already on
+    // its way out (or is still stuck after the timeout).
+    subscribers.try_recv().unwrap_or_default()
 }
 
 /// Start claude (or, for `SessionKind::Shell`, the login shell) for `spec` under
@@ -517,6 +528,13 @@ impl Actor {
                         self.kill(exit).await;
                         return;
                     }
+                    Some(Cmd::Stop(reply)) => {
+                        let subs = std::mem::take(&mut self.subs);
+                        let _ = reply.send(subs.into_iter().map(|(c, s)| (c, s.queue)).collect());
+                        drop(output);
+                        self.kill(exit).await;
+                        return;
+                    }
                     Some(cmd) => self.on_cmd(cmd),
                 },
                 Some(bytes) = output.recv() => self.on_output(&bytes),
@@ -610,7 +628,7 @@ impl Actor {
                 });
             }
             // Handled by `run`.
-            Cmd::Kill => {}
+            Cmd::Kill | Cmd::Stop(_) => {}
         }
     }
 
@@ -787,14 +805,10 @@ impl Actor {
         // dormant so it can come back with `--resume`. A shell has nothing to
         // resume, and exits with its last command's status (Ctrl+D after a
         // failing command is still "I am done"), so any exit closes it.
+        // Not a Kill: a respawn that took the id over since `forget_live`
+        // must keep its new process.
         if ours && (code == Some(0) || self.kind == SessionKind::Shell) {
-            let id = self.id;
-            let daemon = Arc::clone(&self.daemon);
-            tokio::spawn(async move {
-                if let Err(e) = daemon.kill(id).await {
-                    tracing::warn!(%id, error = %e, "could not close exited session");
-                }
-            });
+            self.daemon.close_exited(self.id);
         }
     }
 

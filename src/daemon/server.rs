@@ -46,6 +46,10 @@ const INBOUND_QUEUE: usize = 64;
 /// Git requests one client may run at once; the rest wait their turn.
 const GIT_CONCURRENCY: usize = 2;
 
+/// Git requests one client may have pending, running or waiting; more are
+/// answered "busy" at once.
+pub(super) const GIT_PENDING: usize = 8;
+
 /// How often the serve loop checks that the socket path still exists and
 /// re-binds if a tmp cleaner has removed it.
 const SOCKET_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
@@ -119,6 +123,12 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 impl Listening {
+    /// The shared state, for tests that drive it directly.
+    #[cfg(test)]
+    pub(super) fn daemon(&self) -> Arc<Daemon> {
+        Arc::clone(&self.daemon)
+    }
+
     /// Accept connections forever, re-binding the socket if it disappears.
     /// Exits when the daemon's shutdown notification fires.
     pub async fn serve(mut self) {
@@ -256,6 +266,7 @@ async fn client_loop(
         events,
         attached: HashSet::new(),
         git_slots: Arc::new(Semaphore::new(GIT_CONCURRENCY)),
+        git_pending: Arc::new(Semaphore::new(GIT_PENDING)),
     };
     let welcome = Welcome {
         claudio_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -378,6 +389,8 @@ struct Client {
     attached: HashSet<SessionId>,
     /// Bounds this client's concurrent git processes.
     git_slots: Arc<Semaphore>,
+    /// Bounds this client's pending git requests.
+    git_pending: Arc<Semaphore>,
 }
 
 impl Client {
@@ -417,8 +430,8 @@ impl Client {
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }
+            // Stays in `attached`: a respawn carries subscribers over.
             Msg::Respawn(spec) => {
-                self.attached.remove(&spec.id);
                 let id = spec.id;
                 spawned(id, self.daemon.respawn(spec).await)
             }
@@ -462,8 +475,10 @@ impl Client {
             }
             Msg::GitLog { .. } | Msg::GitCommit { .. } | Msg::GitDiff { .. } => {
                 // The task replies itself, so the loop never waits on git.
-                self.spawn_git(req, msg);
-                return;
+                match self.spawn_git(req, msg) {
+                    Ok(()) => return,
+                    Err(busy) => busy,
+                }
             }
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
@@ -540,15 +555,20 @@ impl Client {
     }
 
     /// Run a git request off the client loop and queue its reply when done.
-    /// Dropped without running if the client disconnects first.
-    fn spawn_git(&self, req: Option<u64>, request: Msg) {
+    /// Dropped without running if the client disconnects first. Past
+    /// [`GIT_PENDING`] requests the reply is an immediate busy error, so a
+    /// stuck git cannot make a client pile up tasks without bound.
+    fn spawn_git(&self, req: Option<u64>, request: Msg) -> Result<(), Msg> {
+        let pending = Arc::clone(&self.git_pending)
+            .try_acquire_owned()
+            .map_err(|_| Msg::Error {
+                message: "busy: too many git requests".into(),
+            })?;
         let queue = self.queue.clone();
         let slots = Arc::clone(&self.git_slots);
         tokio::spawn(async move {
-            let work = async {
-                let _slot = slots.acquire().await;
-                git::handle(request).await
-            };
+            let _pending = pending;
+            let work = git::handle(request, slots.acquire_owned());
             tokio::select! {
                 msg = work => {
                     let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
@@ -556,6 +576,7 @@ impl Client {
                 _ = queue.closed() => {}
             }
         });
+        Ok(())
     }
 
     /// Send `cmd` to a live session; the reply is `Ok` or `Error`.

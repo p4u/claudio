@@ -1151,6 +1151,26 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_reset_drops_the_saved_conversation() {
+        let live = [info(Some(1), Some("c1"))];
+        let mut app = app_with(&live);
+        let id = live[0].id;
+        let event = SessionEvent::ClaudeSessionCleared;
+        app.on_incoming_from("local", Incoming::Event { id, event });
+        let saved = app.to_state();
+        assert_eq!(saved.sessions[0].claude_session_id, None);
+
+        // Recovering it dormant, with the daemon knowing no conversation
+        // either, starts a new one instead of resuming "c1".
+        let dormant = SessionInfo {
+            id,
+            ..info(None, None)
+        };
+        let merged = crate::tui::state::merge_for_host("local", &saved, &[dormant]);
+        assert_eq!(merged[0].respawn, Some(vec![]));
+    }
+
+    #[test]
     fn on_incoming_from_remote_tags_created_sessions_correctly() {
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&ClientState::default(), &[]);
