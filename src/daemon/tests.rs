@@ -22,10 +22,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 fn fake_claude_exits_immediately() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "claudio-fake-claude-ei-{}",
-            Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ei-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
         let script = "#!/bin/sh\n\
@@ -44,10 +41,7 @@ fn fake_claude_exits_immediately() -> &'static Path {
 fn fake_claude_resume_fails() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "claudio-fake-claude-rf-{}",
-            Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-rf-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
         // Exit 1 immediately if --resume is in the arguments, otherwise behave
@@ -108,6 +102,7 @@ impl TestDaemon {
             journal: dir.join("state/journal.json"),
             claude: fake_claude().to_path_buf(),
             claudio: PathBuf::from("/bin/true"),
+            skip_permissions: true,
         }
     }
 
@@ -690,6 +685,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         journal: dir.join("state/journal.json"),
         claude: fake_claude_resume_fails().to_path_buf(),
         claudio: PathBuf::from("/bin/true"),
+        skip_permissions: true,
     };
     // Pre-populate a journal entry with a claude_session_id so the spawn
     // request carries --resume.
@@ -800,6 +796,7 @@ async fn immediate_exit_leaves_session_dormant() {
         journal: dir.join("state/journal.json"),
         claude: fake_claude_exits_immediately().to_path_buf(),
         claudio: PathBuf::from("/bin/true"),
+        skip_permissions: true,
     };
 
     let listening = server::start(config).unwrap().expect("lock is free");
@@ -835,7 +832,10 @@ async fn immediate_exit_leaves_session_dormant() {
     within(async {
         loop {
             let sessions = c.sessions().await;
-            let s = sessions.iter().find(|s| s.id == id).expect("session in list");
+            let s = sessions
+                .iter()
+                .find(|s| s.id == id)
+                .expect("session in list");
             if s.pid.is_none() {
                 return; // dormant — correct
             }

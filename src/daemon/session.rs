@@ -138,7 +138,13 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
         )));
     }
     let token = hooks::new_token();
-    let cmd = command(&daemon.config, spec, &cwd, &token);
+    let cmd = command(
+        &daemon.config,
+        spec,
+        &cwd,
+        &token,
+        daemon.skip_permissions(),
+    );
     let (rows, cols) = size_or_default(spec.rows, spec.cols);
 
     let pair = native_pty_system()
@@ -200,13 +206,31 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
     Ok((Handle { tx, token, pid }, committed_tx))
 }
 
-/// `<claude> --settings <hooks> [args…] [-n <name>]`, in `cwd`, with the
-/// session env applied.
-fn command(cfg: &super::Config, spec: &SpawnSpec, cwd: &Path, token: &str) -> CommandBuilder {
+/// `<claude> --settings <hooks> [--allow-dangerously-skip-permissions]
+/// [args…] [-n <name>]`, in `cwd`, with the session env applied.
+///
+/// The skip-permissions flag is added here, on every launch path (new spawn,
+/// `--resume`, resume-retry), rather than in `spec.args`, so the journal never
+/// stores it. It is left out when the args already choose a permissions flag.
+fn command(
+    cfg: &super::Config,
+    spec: &SpawnSpec,
+    cwd: &Path,
+    token: &str,
+    skip_permissions: bool,
+) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token);
     let mut cmd = CommandBuilder::new(&cfg.claude);
     cmd.arg("--settings");
     cmd.arg(settings.to_string());
+    if skip_permissions
+        && !spec
+            .args
+            .iter()
+            .any(|a| a == host::ALLOW_SKIP_PERMISSIONS || a == "--dangerously-skip-permissions")
+    {
+        cmd.arg(host::ALLOW_SKIP_PERMISSIONS);
+    }
     for a in &spec.args {
         cmd.arg(a);
     }
@@ -642,7 +666,14 @@ impl Actor {
                 .and_then(|sid| crate::claude::projects::read_last_assistant_meta(&cwd, sid))
                 .map(|(m, t)| (Some(m), Some(t)))
                 .unwrap_or((None, None));
-            daemon.broadcast(id, SessionEvent::Meta { branch, model, context_tokens });
+            daemon.broadcast(
+                id,
+                SessionEvent::Meta {
+                    branch,
+                    model,
+                    context_tokens,
+                },
+            );
         });
     }
 
@@ -732,8 +763,7 @@ fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
     let head_path = cwd.join(".git/HEAD");
     let content = std::fs::read_to_string(head_path).ok()?;
     let line = content.trim();
-    line.strip_prefix("ref: refs/heads/")
-        .map(str::to_owned)
+    line.strip_prefix("ref: refs/heads/").map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -829,7 +859,11 @@ mod tests {
         assert_eq!(cmd.get_env("CLAUDE_CODE_ENTRYPOINT"), None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_CHILD_SESSION"), None);
         // User settings survive; only per-session markers are scrubbed.
-        assert_eq!(cmd.get_env("CLAUDE_CODE_USE_GATEWAY").and_then(|v| v.to_str()), Some("1"));
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_USE_GATEWAY")
+                .and_then(|v| v.to_str()),
+            Some("1")
+        );
         assert_eq!(cmd.get_env("ANTHROPIC_API_KEY"), None);
         assert_eq!(cmd.get_env("ANTHROPIC_AUTH_TOKEN"), Some(OsStr::new("tok")));
         assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
@@ -852,6 +886,7 @@ mod tests {
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
             claudio: "/bin/claudio".into(),
+            skip_permissions: true,
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -862,12 +897,8 @@ mod tests {
             rows: 24,
             cols: 80,
         };
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123");
-        let argv: Vec<String> = cmd
-            .get_argv()
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false);
+        let argv = argv_of(&cmd);
         assert_eq!(argv[0], "/bin/claude");
         assert_eq!(argv[1], "--settings");
         let settings: Value = serde_json::from_str(&argv[2]).unwrap();
@@ -876,5 +907,48 @@ mod tests {
             .unwrap();
         assert!(hook.contains("tok123") && hook.contains("/run/d.sock"));
         assert_eq!(&argv[3..], ["--resume", "abc", "-n", "work"]);
+
+        // With skip-permissions on, the flag follows --settings, ahead of
+        // the spec args (which are what the journal stores).
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true);
+        assert_eq!(
+            &argv_of(&cmd)[3..],
+            [ALLOW, "--resume", "abc", "-n", "work"]
+        );
+        assert_eq!(spec.args, ["--resume", "abc"]);
+    }
+
+    const ALLOW: &str = "--allow-dangerously-skip-permissions";
+
+    fn argv_of(cmd: &CommandBuilder) -> Vec<String> {
+        cmd.get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn skip_permissions_not_duplicated() {
+        let cfg = super::super::Config {
+            socket: "/run/d.sock".into(),
+            lock: "/run/d.lock".into(),
+            journal: "/j.json".into(),
+            claude: "/bin/claude".into(),
+            claudio: "/bin/claudio".into(),
+            skip_permissions: true,
+        };
+        for given in [ALLOW, "--dangerously-skip-permissions"] {
+            let spec = SpawnSpec {
+                id: uuid::Uuid::nil(),
+                cwd: "/".into(),
+                name: None,
+                args: vec![given.into()],
+                env: vec![],
+                rows: 24,
+                cols: 80,
+            };
+            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true));
+            assert_eq!(&argv[3..], [given]);
+        }
     }
 }

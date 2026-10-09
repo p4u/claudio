@@ -84,11 +84,14 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     tracing::info!(socket = %config.socket.display(), "daemon listening");
 
     let daemon = Arc::new(Daemon::new(config));
-    // Warm the host probe (`claude --version`) so the first Welcome is quick.
+    // Warm the host probe (`claude --version`) so the first Welcome is quick,
+    // and the `claude --help` flag check so the first spawn is.
     let warm = Arc::clone(&daemon);
     tokio::spawn(async move {
         warm.host().await;
     });
+    let warm = Arc::clone(&daemon);
+    tokio::task::spawn_blocking(move || warm.skip_permissions());
     Ok(Some(Listening {
         daemon,
         listener,
