@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, extract_nonce, wizard_pick_dir, ManagerHarness, Region, TuiProcess, ALT_G,
-    ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, ENTER,
-    ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
+    current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
+    TuiProcess, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
+    DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -463,6 +463,7 @@ fn test_ssh_remote_session() {
     // Cleanup guard.
     let runtime_dir_g = runtime_dir.clone();
     let cleanup_root = root.clone();
+    let host_g = host.clone();
     let _guard = scopeguard(move || {
         let lock = runtime_dir_g.join("claudio").join("daemon-v1.lock");
         if let Some(pid) = fs::read_to_string(&lock)
@@ -472,6 +473,19 @@ fn test_ssh_remote_session() {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
         let _ = fs::remove_dir_all(&cleanup_root);
+        // Remove the claude project dir for /tmp on the remote host.
+        // /tmp encodes to -tmp under Claude's non-alphanumeric → '-' scheme.
+        let remote_path = "'~/.claude/projects/-tmp'";
+        let _ = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                &host_g,
+                &format!("rm -rf {remote_path}"),
+            ])
+            .status();
     });
 
     let mut cmd = CommandBuilder::new(BINARY);
@@ -510,28 +524,52 @@ fn test_ssh_remote_session() {
     // If /tmp has existing sessions a resume picker appears; pressing Enter
     // selects "+ New session" (always the first item).
     //
-    // Wait up to 90 s for either the @host tab (auto-spawn) or the session
-    // picker prompt, then press Enter if the picker is showing.
+    // Wait up to 120 s for the newly spawned session to become active.
+    // Handles:
+    //  - claude's trust dialog (press Down then Enter to pick "Yes, I trust")
+    //  - the wizard's resume/new picker (press Enter)
+    //  - pre-existing @host tabs (don't break until the new session is ready)
     let at_host = format!("@{host}");
-    let deadline_spawn = Instant::now() + Duration::from_secs(90);
+    let deadline_spawn = Instant::now() + Duration::from_secs(120);
+    let mut trust_pressed = false;
     loop {
         let screen = tui.screen_text(Region::Screen);
-        if screen.contains(&at_host) {
-            break; // auto-spawned
-        }
-        // Session picker shows "+ New" or "Resume"; press Enter to pick.
-        if screen.contains("New session") || screen.contains("Resume") {
+        let wizard_visible =
+            screen.contains("New session") || screen.contains("Resume");
+        // ① Wizard session picker: always handle first so Down/Enter go to the
+        //    wizard, not to the session's trust dialog behind it.
+        if wizard_visible {
             tui.send_keys(ENTER);
+            thread::sleep(Duration::from_millis(500)); // wait for wizard to close
+            continue;
+        }
+        // ② Claude trust dialog (only once wizard is gone).
+        //    Default cursor is "❯ No, exit"; Down moves to "Yes, I trust".
+        if !trust_pressed && screen.contains("Yes, I trust this folder") {
+            tui.send_keys(DOWN_ARROW);
+            thread::sleep(Duration::from_millis(300));
+            tui.send_keys(ENTER);
+            trust_pressed = true;
+            thread::sleep(Duration::from_millis(1000)); // wait for dialog to dismiss
+            continue;
+        }
+        // ③ Session is ready: @host in tab bar, no longer starting, no trust dialog.
+        if screen.contains(&at_host)
+            && !screen.contains("starting")
+            && !screen.contains("Yes, I trust")
+        {
             break;
         }
         assert!(
             Instant::now() < deadline_spawn,
-            "timeout waiting for remote session to start"
+            "timeout waiting for remote session to start;\nscreen:\n{}",
+            screen
         );
         thread::sleep(Duration::from_millis(200));
     }
 
-    // ── 5. Wait for tab to show @host. ───────────────────────────────────────
+    // ── 5. Wait for tab to show @host and assert the dir step showed host. ───
+    // The wait_for("on {host}") in step 2 already asserted the dir step title.
     tui.wait_for(&at_host, Region::TabBar, Duration::from_secs(90));
 
     // ── 6. Assert hosts.json lists the host first. ───────────────────────────
@@ -889,6 +927,7 @@ fn test_e2e_real_claude() {
 
     let runtime_dir_g = runtime_dir.clone();
     let cleanup_root = root.clone();
+    let session_dir_g = session_dir.clone();
     let _guard = scopeguard(move || {
         let lock = runtime_dir_g.join("claudio").join("daemon-v1.lock");
         if let Some(pid) = fs::read_to_string(&lock)
@@ -899,6 +938,8 @@ fn test_e2e_real_claude() {
         }
         let _ = fs::remove_dir_all(&cleanup_root);
     });
+    // Remove the project dir that claude creates in ~/.claude/projects/<encoded-sess>/.
+    let _project_guard = ClaudeProjectGuard::new(&session_dir);
 
     let mut cmd = CommandBuilder::new(BINARY);
     // Isolate claudio state; keep real HOME so claude finds ~/.claude.
@@ -926,6 +967,9 @@ fn test_e2e_real_claude() {
     tui.send_keys(ENTER);
 
     // ── 3. Wait for claude to be ready (handle trust dialog). ────────────────
+    // Use the same dual-signal readiness check as test_proxy_real_claude:
+    // wait for claude's input prompt (❯) in the pane AND the SessionStart
+    // hook's `?` needs-input glyph in the tab bar, so no keys are lost.
     let ready_dl = Instant::now() + Duration::from_secs(90);
     let mut trust_pressed = false;
     loop {
@@ -935,16 +979,18 @@ fn test_e2e_real_claude() {
             trust_pressed = true;
             continue;
         }
-        if screen.contains("Claude Code") || screen.contains(">") {
+        let tabs = tui.screen_text(Region::TabBar);
+        if screen.contains("❯") && tabs.contains('?') {
             break;
         }
         assert!(
             Instant::now() < ready_dl,
-            "timeout waiting for claude to be ready"
+            "timeout waiting for claude to be ready; pane:\n{screen}\ntabs:\n{tabs}"
         );
         thread::sleep(Duration::from_millis(200));
     }
     thread::sleep(Duration::from_millis(500));
+    let _ = session_dir_g; // keep alive until readiness check
 
     // ── 4. Send prompt: the expected answer (4243) is NOT in the prompt. ─────
     tui.send_paste("Reply with only the number 4242 plus 1");
@@ -1007,6 +1053,8 @@ fn test_proxy_real_claude() {
         }
         let _ = fs::remove_dir_all(&cleanup_root);
     });
+    // Remove the project dir that claude creates in ~/.claude/projects/<encoded-sess>/.
+    let _project_guard = ClaudeProjectGuard::new(&session_dir);
 
     let mut cmd = CommandBuilder::new(BINARY);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);

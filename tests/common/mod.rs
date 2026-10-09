@@ -60,6 +60,7 @@ pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
 pub const ESC: &[u8] = b"\x1b";
 pub const UP_ARROW: &[u8] = b"\x1b[A";
+pub const DOWN_ARROW: &[u8] = b"\x1b[B";
 
 // ── Region ───────────────────────────────────────────────────────────────────
 
@@ -578,6 +579,50 @@ pub fn extract_nonce(text: &str) -> Option<String> {
 pub fn current_nonce(tui: &TuiProcess) -> String {
     let text = tui.screen_text(Region::Pane);
     extract_nonce(&text).expect("no nonce in pane — is the banner visible?")
+}
+
+// ── Claude project-dir cleanup guard (Bug 3) ─────────────────────────────────
+
+/// Encode a cwd path the same way `claude::projects::project_dir` does:
+/// replace every non-alphanumeric character with `-`.
+///
+/// Replicated here because integration tests cannot import the binary crate.
+/// Keep in sync with `src/claude/projects.rs::encode_cwd`.
+pub fn encode_cwd(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// On drop, removes `~/.claude/projects/<encoded-cwd>/` for the test's temp
+/// session directory.
+///
+/// This prevents real-claude E2E tests from permanently polluting the user's
+/// `~/.claude/projects/` with stale test transcripts.  Only the exact
+/// directory corresponding to `cwd` is removed — nothing else.
+pub struct ClaudeProjectGuard {
+    pub project_dir: PathBuf,
+}
+
+impl ClaudeProjectGuard {
+    /// Create a guard for a test whose session was run in `session_cwd`.
+    pub fn new(session_cwd: &std::path::Path) -> Self {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let encoded = encode_cwd(session_cwd);
+        let project_dir = home.join(".claude").join("projects").join(encoded);
+        ClaudeProjectGuard { project_dir }
+    }
+}
+
+impl Drop for ClaudeProjectGuard {
+    fn drop(&mut self) {
+        if self.project_dir.exists() {
+            let _ = fs::remove_dir_all(&self.project_dir);
+        }
+    }
 }
 
 // ── Short tmp root ────────────────────────────────────────────────────────────
