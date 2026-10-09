@@ -206,8 +206,9 @@ fn command(cfg: &super::Config, spec: &SpawnSpec, cwd: &Path, token: &str) -> Co
 /// from a daemon started inside claude, set the terminal type, then apply the
 /// spec's env. A proxy token replaces any API key.
 fn apply_env(cmd: &mut CommandBuilder, env: &[(String, String)]) {
-    cmd.env_remove("CLAUDECODE");
-    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for marker in CLAUDE_SESSION_MARKERS {
+        cmd.env_remove(marker);
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     for (k, v) in env {
@@ -226,6 +227,26 @@ fn clean_title(title: &str) -> &str {
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim()
 }
+
+/// Variables a running claude sets for its own children. A daemon started
+/// from inside a claude session inherits them, and a session spawned with them
+/// believes it is a child: it turns off transcript saving (breaking `--resume`)
+/// and talks to the parent's messaging socket. User settings such as
+/// `CLAUDE_CODE_USE_GATEWAY` are deliberately kept.
+const CLAUDE_SESSION_MARKERS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+];
 
 fn size_or_default(rows: u16, cols: u16) -> (u16, u16) {
     if rows == 0 || cols == 0 {
@@ -712,10 +733,15 @@ mod tests {
         let mut cmd = CommandBuilder::new("claude");
         cmd.env("CLAUDECODE", "1");
         cmd.env("CLAUDE_CODE_ENTRYPOINT", "cli");
+        cmd.env("CLAUDE_CODE_CHILD_SESSION", "1");
+        cmd.env("CLAUDE_CODE_USE_GATEWAY", "1");
         cmd.env("ANTHROPIC_API_KEY", "old");
         apply_env(&mut cmd, &[("ANTHROPIC_AUTH_TOKEN".into(), "tok".into())]);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_ENTRYPOINT"), None);
+        assert_eq!(cmd.get_env("CLAUDE_CODE_CHILD_SESSION"), None);
+        // User settings survive; only per-session markers are scrubbed.
+        assert_eq!(cmd.get_env("CLAUDE_CODE_USE_GATEWAY").and_then(|v| v.to_str()), Some("1"));
         assert_eq!(cmd.get_env("ANTHROPIC_API_KEY"), None);
         assert_eq!(cmd.get_env("ANTHROPIC_AUTH_TOKEN"), Some(OsStr::new("tok")));
         assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
