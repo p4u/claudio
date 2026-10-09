@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::proxy::api::{PoolStatus, StatsModel, StatsTotals};
+use crate::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
 use crate::proxy::cmd::fmt_tokens;
 
 use super::super::app::{App, ProxyStatus, SessionView};
@@ -371,6 +371,9 @@ fn overview_lines(
         .filter(|v| v.proxy.as_deref() == Some(profile))
     {
         lines.push(kv("This session", session_summary(v, app.now)));
+        if let Some(cred) = app.session_credential(v) {
+            lines.push(kv("Credential", credential_spans(cred, app.now)));
+        }
     }
 }
 
@@ -418,6 +421,39 @@ fn session_summary(v: &SessionView, now: u64) -> Vec<Span<'static>> {
         spans.push(Span::styled(
             format!(" · up {}", fmt_age(now - v.created_at)),
             dim(),
+        ));
+    }
+    spans
+}
+
+/// `work-max (max) · 5h 37% · ⇆ switched 3m ago`: the upstream credential the
+/// proxy reports for a session.
+fn credential_spans(cred: &SessionCredential, now: u64) -> Vec<Span<'static>> {
+    fn sep(spans: &mut Vec<Span<'static>>) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ".to_owned(), dim()));
+        }
+    }
+    let mut spans = Vec::new();
+    if let Some(name) = cred.name() {
+        spans.push(Span::styled(truncate(name, 28), bold()));
+        if let Some(plan) = cred.plan() {
+            spans.push(Span::styled(format!(" ({plan})"), dim()));
+        }
+    }
+    if let Some(pct) = cred.five_hour_pct() {
+        sep(&mut spans);
+        spans.push(Span::styled("5h ".to_owned(), dim()));
+        spans.push(Span::styled(
+            format!("{}%", pct.floor() as i64),
+            fg(limit_color(pct / 100.0)).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(age) = cred.recent_switch_age(now) {
+        sep(&mut spans);
+        spans.push(Span::styled(
+            format!("⇆ switched {} ago", fmt_age(age)),
+            fg(Color::Yellow),
         ));
     }
     spans
@@ -765,7 +801,7 @@ fn sessions_lines(app: &App, profile: &str, lines: &mut Vec<Line<'static>>) {
         ),
         bold().add_modifier(Modifier::UNDERLINED),
     ));
-    for (i, v) in using {
+    for &(i, v) in &using {
         let active = app.active == Some(i);
         let model = v.model.as_deref().map(short_model).unwrap_or("-");
         let ctx = v
@@ -799,6 +835,13 @@ fn sessions_lines(app: &App, profile: &str, lines: &mut Vec<Line<'static>>) {
         ]));
     }
     lines.push(Line::raw(""));
+    if let Some(cred) = using
+        .iter()
+        .find(|(i, _)| app.active == Some(*i))
+        .and_then(|(_, v)| app.session_credential(v))
+    {
+        lines.push(kv("▶ credential", credential_spans(cred, app.now)));
+    }
     lines.push(Line::styled(
         "   ▶ = the active session; # is the tab number".to_owned(),
         dim(),
@@ -1241,6 +1284,45 @@ mod tests {
         // The Sessions page lists only sessions on this profile (the direct
         // session is the only one on sonnet).
         assert!(!render(&app).contains("sonnet-5-5"));
+    }
+
+    #[test]
+    fn credential_shows_on_overview_and_sessions_pages() {
+        use crate::proxy::api::{CredentialInfo, CredentialUtilization};
+        let mut app = app_with_stats();
+        let id = app.sessions[0].id;
+        app.sessions[0].claude_session_id = Some("c1".into());
+        app.session_creds.insert(
+            id,
+            crate::tui::proxy_state::SessionCred {
+                claude_session_id: "c1".into(),
+                cred: Some(SessionCredential {
+                    credential: CredentialInfo {
+                        label: "work-max".into(),
+                        plan: "max".into(),
+                        ..Default::default()
+                    },
+                    utilization: Some(CredentialUtilization {
+                        five_hour_pct: Some(37.5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                asked_at: 0,
+            },
+        );
+        for key in ['1', '5'] {
+            goto(&mut app, key);
+            app.take_effects();
+            let text = render(&app);
+            assert!(
+                text.contains("work-max (max) · 5h 37%"),
+                "page {key}:\n{text}"
+            );
+        }
+        // Nothing known: no credential row.
+        app.session_creds.get_mut(&id).unwrap().cred = None;
+        assert!(!render(&app).contains("work-max"));
     }
 
     #[test]

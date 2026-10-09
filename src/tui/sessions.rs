@@ -207,6 +207,7 @@ impl App {
         );
         self.redraw = true;
         self.save();
+        self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
     }
 
     /// Forget session `i` and activate a neighbour.
@@ -214,7 +215,8 @@ impl App {
         if i >= self.sessions.len() {
             return;
         }
-        self.sessions.remove(i);
+        let removed = self.sessions.remove(i);
+        self.session_creds.remove(&removed.id);
         match self.active {
             Some(a) if a == i => {
                 self.active = None;

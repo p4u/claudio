@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use super::stats_view::Window;
-use crate::proxy::api::{ModelsResponse, PoolHealthResponse, StatsResponse};
+use crate::proxy::api::{ModelsResponse, PoolHealthResponse, SessionCredential, StatsResponse};
 
 /// Live proxy data per profile, shown in the stats popup (Alt+s).
 #[derive(Debug, Clone, Default)]
@@ -58,4 +58,23 @@ pub struct ProxyFetch {
     pub stats: Vec<(Window, Result<StatsResponse, String>)>,
     pub pool: Option<PoolHealthResponse>,
     pub models: Option<ModelsResponse>,
+}
+
+/// How long a credential lookup stays fresh while its session is active.
+pub const SESSION_CRED_POLL_SECS: u64 = 30;
+/// Minimum gap between lookups triggered by activation or opening Alt+s; the
+/// proxy rate-limits to 1 req/s, so tab-flipping must not hammer it.
+pub const SESSION_CRED_MIN_GAP_SECS: u64 = 5;
+
+/// The upstream credential claude-proxy last used for one claudio session.
+#[derive(Debug, Clone)]
+pub struct SessionCred {
+    /// The claude session id the lookup was made for; a reply or a cache
+    /// entry for another id is stale.
+    pub claude_session_id: String,
+    /// `None` until the proxy knows the conversation (404) or on an error
+    /// before the first success.
+    pub cred: Option<SessionCredential>,
+    /// Unix seconds when the last lookup was requested.
+    pub asked_at: u64,
 }

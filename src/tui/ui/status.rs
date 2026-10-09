@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::proto::{SessionKind, SessionState};
+use crate::proxy::api::SessionCredential;
 
 use super::super::app::App;
 use super::super::sessions::SessionView;
@@ -141,6 +142,39 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
         Some(name) => colored(format!("⇄ proxy:{name}"), GREEN),
         None => dim("direct"),
     }]);
+    if let Some(cred) = app.session_credential(v) {
+        segments.extend(credential_segments(cred, app.now));
+    }
+    segments
+}
+
+/// The credential the proxy reports for the session: `work-max (max)`, the
+/// 5-hour utilization colored by level, and a short-lived switch notice.
+/// Empty when the proxy sent nothing to name.
+pub(super) fn credential_segments(
+    cred: &SessionCredential,
+    now: u64,
+) -> Vec<Vec<Span<'static>>> {
+    let mut segments = Vec::new();
+    if let Some(name) = cred.name() {
+        let mut spans = vec![bold_colored(truncate(name, 24), TEXT)];
+        if let Some(plan) = cred.plan() {
+            spans.push(dim(format!(" ({plan})")));
+        }
+        segments.push(spans);
+    }
+    if let Some(pct) = cred.five_hour_pct() {
+        segments.push(vec![
+            dim("5h "),
+            bold_colored(format!("{}%", pct.floor() as i64), level_color(pct as f32)),
+        ]);
+    }
+    if let Some(age) = cred.recent_switch_age(now) {
+        segments.push(vec![Span::styled(
+            format!("⇆ switched {} ago", fmt_age(age)),
+            style(YELLOW).add_modifier(Modifier::DIM),
+        )]);
+    }
     segments
 }
 
@@ -322,6 +356,113 @@ mod tests {
         assert_eq!(level_color(84.9), YELLOW);
         assert_eq!(level_color(85.0), RED);
         assert_eq!(level_color(100.0), RED);
+    }
+
+    fn cred(five_hour: Option<f64>, switched_at: Option<&str>) -> SessionCredential {
+        use crate::proxy::api::{CredentialInfo, CredentialUtilization};
+        SessionCredential {
+            credential: CredentialInfo {
+                label: "work-max".into(),
+                plan: "max".into(),
+                ..Default::default()
+            },
+            switched_at: switched_at.map(str::to_owned),
+            utilization: five_hour.map(|p| CredentialUtilization {
+                five_hour_pct: Some(p),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn credential_shows_label_plan_and_colored_five_hour_percent() {
+        let segs = credential_segments(&cred(Some(37.5), None), 0);
+        let spans = join_segments(segs);
+        assert_eq!(plain(&spans), "work-max (max) · 5h 37%");
+        let pct = spans.iter().find(|s| s.content == "37%").unwrap();
+        assert_eq!(pct.style.fg, Some(GREEN));
+        let plan = spans.iter().find(|s| s.content == " (max)").unwrap();
+        assert_eq!(plan.style.fg, Some(DIM));
+        for (value, color) in [(72.0, YELLOW), (91.0, RED)] {
+            let spans = join_segments(credential_segments(&cred(Some(value), None), 0));
+            let pct = spans.iter().find(|s| s.content.ends_with('%')).unwrap();
+            assert_eq!(pct.style.fg, Some(color), "{value}");
+        }
+    }
+
+    #[test]
+    fn credential_without_utilization_or_plan_is_just_the_label() {
+        let mut c = cred(None, None);
+        c.credential.plan.clear();
+        assert_eq!(plain(&join_segments(credential_segments(&c, 0))), "work-max");
+        // The id stands in for a missing label; nothing to name shows nothing.
+        c.credential.label.clear();
+        c.credential.id = "cred_ab12".into();
+        assert_eq!(plain(&join_segments(credential_segments(&c, 0))), "cred_ab12");
+        c.credential.id.clear();
+        assert!(credential_segments(&c, 0).is_empty());
+    }
+
+    #[test]
+    fn switch_notice_lasts_ten_minutes() {
+        let at = "2026-10-09T10:07:02Z";
+        let t0 = crate::proxy::api::parse_rfc3339(at).unwrap();
+        let line = |now| plain(&join_segments(credential_segments(&cred(None, Some(at)), now)));
+        assert_eq!(line(t0 + 180), "work-max (max) · ⇆ switched 3m ago");
+        assert_eq!(line(t0 + 599), "work-max (max) · ⇆ switched 9m ago");
+        assert_eq!(line(t0 + 600), "work-max (max)");
+        let spans = join_segments(credential_segments(&cred(None, Some(at)), t0 + 5));
+        let sw = spans.iter().find(|s| s.content.contains("switched")).unwrap();
+        assert_eq!(sw.style.fg, Some(YELLOW));
+        assert!(sw.style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn status_line_appends_the_credential_after_the_proxy_badge() {
+        use crate::proto::SessionKind;
+        let mut app = App::new(120, 30, "/home/u".into(), vec![]);
+        app.now = 1_000;
+        app.sessions.push(SessionView {
+            id: uuid::Uuid::new_v4(),
+            name: Some("s".into()),
+            cwd: "/srv".into(),
+            host: "local".into(),
+            state: SessionState::Idle,
+            title: None,
+            claude_session_id: Some("c1".into()),
+            created_at: 0,
+            mirror: crate::term::screen::Screen::new(10, 40),
+            attached: true,
+            proxy: Some("work".into()),
+            branch: None,
+            model: None,
+            context_tokens: None,
+            kind: SessionKind::Claude,
+        });
+        app.active = Some(0);
+        let line = |app: &App| plain(&join_segments(session_segments(app, &app.sessions[0])));
+        assert!(line(&app).ends_with("⇄ proxy:work"), "{}", line(&app));
+        // Unknown yet: nothing extra.
+        app.session_creds.insert(
+            app.sessions[0].id,
+            crate::tui::proxy_state::SessionCred {
+                claude_session_id: "c1".into(),
+                cred: None,
+                asked_at: 0,
+            },
+        );
+        assert!(line(&app).ends_with("⇄ proxy:work"));
+        app.session_creds.get_mut(&app.sessions[0].id).unwrap().cred =
+            Some(cred(Some(37.5), None));
+        assert!(
+            line(&app).ends_with("⇄ proxy:work · work-max (max) · 5h 37%"),
+            "{}",
+            line(&app)
+        );
+        // A cached credential of a previous conversation is not shown.
+        app.sessions[0].claude_session_id = Some("c2".into());
+        assert!(line(&app).ends_with("⇄ proxy:work"));
     }
 
     #[test]
