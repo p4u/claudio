@@ -313,10 +313,10 @@ fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
         if v.created_at > 0 && app.now >= v.created_at {
             parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
         }
-        if let Some((pname, _)) = app.active_proxy_status() {
-            parts.push(format!("proxy:{pname}"));
-        } else {
-            parts.push("direct".to_owned());
+        // The session's proxy choice, not whether stats have been fetched.
+        match &v.proxy {
+            Some(name) => parts.push(format!("proxy:{name}")),
+            None => parts.push("direct".to_owned()),
         }
         (parts.join(" · "), Style::default())
     } else {

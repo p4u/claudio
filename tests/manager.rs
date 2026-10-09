@@ -677,6 +677,10 @@ fn test_proxy_env_injection() {
     let proxy_bin = proxy_tmp.join("cp");
     let db_path = proxy_tmp.join("proxy.db");
 
+    // The claude-proxy source: $CLAUDIO_PROXY_SRC, else a sibling checkout.
+    let proxy_src = std::env::var_os("CLAUDIO_PROXY_SRC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../claude-proxy"));
     let build_out = std::process::Command::new("go")
         .args([
             "build",
@@ -684,7 +688,7 @@ fn test_proxy_env_injection() {
             proxy_bin.to_str().unwrap(),
             "./cmd/claude-proxy",
         ])
-        .current_dir("/home/user/src/claude-proxy-claudio-api")
+        .current_dir(&proxy_src)
         .output()
         .expect("go build (is go installed?)");
     assert!(
@@ -842,8 +846,8 @@ fn test_proxy_env_injection() {
         "ANTHROPIC_API_KEY leaked into session env"
     );
 
-    // ── 9. Assert ⇅ badge in tab bar ─────────────────────────────────────────
-    tui.wait_for("⇅", Region::TabBar, WAIT);
+    // ── 9. The status bar names the session's proxy profile ──────────────────
+    tui.wait_for("proxy:env", Region::StatusBar, WAIT);
 
     // ── 10. Assert state.json: profile name present, token absent ─────────────
     let state_json = fs::read_to_string(harness.state_json()).unwrap_or_default();

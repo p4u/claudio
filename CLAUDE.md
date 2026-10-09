@@ -39,8 +39,9 @@ Must run single-threaded. Two tests inside are gated:
 
 - `CLAUDIO_E2E=1` — enables `test_real_claude_session` (sends a prompt to the
   real `claude`, costs tokens, requires an authenticated `claude` on PATH).
-- `CLAUDIO_PROXY_TEST=1` — enables the proxy-integration test. Requires a
-  running claude-proxy Go worktree reachable at `CLAUDIO_PROXY_URL`.
+- `CLAUDIO_PROXY_TEST=1` — enables the proxy-integration test. It builds and
+  runs claude-proxy from source (`$CLAUDIO_PROXY_SRC`, default `../claude-proxy`;
+  needs `go`).
   The test for real-claude via proxy additionally needs `CLAUDIO_E2E=1` and
   `CLAUDIO_PROXY_URL`.
 
