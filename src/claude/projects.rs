@@ -362,7 +362,11 @@ pub fn recent_project_dirs(limit: usize) -> Vec<(PathBuf, u64)> {
         // Find the newest transcript in this project dir.
         let (newest_mtime, cwd_path) = newest_transcript_cwd(&path);
         if let Some(cwd) = cwd_path {
-            dirs.push((newest_mtime, cwd));
+            // Skip cwds that no longer exist so stale test temp dirs don't
+            // pollute the recent-dirs list in the wizard's LOCAL section.
+            if cwd.exists() {
+                dirs.push((newest_mtime, cwd));
+            }
         }
     }
 
@@ -600,5 +604,89 @@ mod tests {
     fn recent_project_dirs_no_panic_wrapper() {
         // This just must not panic; we don't care about the actual result.
         let _ = recent_project_dirs(10);
+    }
+
+    /// `recent_project_dirs` must skip cwds whose directories no longer exist.
+    ///
+    /// This prevents stale test temp dirs (e.g. `/tmp/cl-e2e-*`) from appearing
+    /// in the wizard's LOCAL section after the test cleans up its temp root.
+    #[test]
+    fn recent_project_dirs_skips_nonexistent_cwd() {
+        use std::io::Write;
+        // Build a fake projects root.
+        let tmp = std::env::temp_dir()
+            .join(format!("claudio-rpd-test-{}", uuid::Uuid::new_v4()));
+        let projects = tmp.join("projects");
+        // A "deleted" project: the transcript's cwd points at a dir that doesn't exist.
+        let deleted_cwd = tmp.join("deleted-session-dir");
+        // DO NOT create deleted_cwd — it must not exist.
+        let encoded = deleted_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>();
+        let proj_dir = projects.join(&encoded);
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let transcript = proj_dir.join("abc123.jsonl");
+        let mut f = std::fs::File::create(&transcript).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"summary","cwd":"{}","sessionId":"abc123"}}"#,
+            deleted_cwd.display()
+        )
+        .unwrap();
+        // Also write a line with a user message so the transcript isn't skipped.
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":"hello"}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        // A "live" project whose cwd actually exists.
+        let live_cwd = tmp.join("live-session-dir");
+        std::fs::create_dir_all(&live_cwd).unwrap();
+        let encoded_live = live_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>();
+        let live_dir = projects.join(&encoded_live);
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let live_transcript = live_dir.join("def456.jsonl");
+        let mut f = std::fs::File::create(&live_transcript).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"summary","cwd":"{}","sessionId":"def456"}}"#,
+            live_cwd.display()
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":"hello"}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        // Override CLAUDE_CONFIG_DIR to point at our fake root.
+        // SAFETY: single-threaded test process for env mutation.
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.to_str().unwrap());
+        let result = recent_project_dirs(100);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let paths: Vec<String> = result
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p == &deleted_cwd.to_string_lossy().to_string()),
+            "deleted cwd must not appear in results; got: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == &live_cwd.to_string_lossy().to_string()),
+            "live cwd must appear in results; got: {paths:?}"
+        );
     }
 }
