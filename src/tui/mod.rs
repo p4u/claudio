@@ -6,6 +6,8 @@
 
 pub mod app;
 mod connections;
+mod git_app;
+mod git_view;
 mod interaction;
 mod keymap;
 mod notifications;

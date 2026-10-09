@@ -11,6 +11,7 @@
 //! - `proxy_state`   – ProxyStatus, load_proxy_profiles, proxy_env_for
 //! - `notifications` – Notice, check_notifications
 //! - `interaction`   – Modal
+//! - `git_app`       – the history viewer's glue to `App`
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -111,6 +112,9 @@ pub enum ReplyTo {
     /// Wizard recent projects for a remote host (host, wizard generation).
     /// Both must match the current wizard or the reply is discarded.
     RemoteProjects(String, u64),
+    /// A request of the history viewer: the view's generation and the
+    /// request's sequence number (see `git_view`).
+    Git { gen: u64, seq: u64 },
 }
 
 /// The manager's state.

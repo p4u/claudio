@@ -11,10 +11,12 @@ use ratatui::Frame;
 
 use crate::proto::SessionState;
 
+mod git;
 mod stats;
 mod status;
 
 pub use status::state_name;
+use git::draw_git;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
@@ -59,6 +61,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
+        Some(Modal::Git(view)) => draw_git(frame, view, app.now, pane),
         None => {}
     }
 }

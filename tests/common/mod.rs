@@ -57,6 +57,7 @@ pub const ALT_X: &[u8] = b"\x1bx";
 pub const ALT_Q: &[u8] = b"\x1bq";
 pub const ALT_G: &[u8] = b"\x1bg";
 pub const ALT_H: &[u8] = b"\x1bh";
+pub const ALT_L: &[u8] = b"\x1bl";
 pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
 pub const ESC: &[u8] = b"\x1b";
@@ -177,6 +178,17 @@ impl ScreenModel {
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
+    }
+
+    /// The foreground colour of the first cell of the first occurrence of
+    /// `needle` on screen, as a named/indexed/RGB colour.
+    pub fn fg_of(&self, needle: &str) -> Option<ansi::Color> {
+        let grid = self.term.grid();
+        (0..self.rows as usize).find_map(|row| {
+            let at = self.row_text(row).find(needle)?;
+            let col = self.row_text(row)[..at].chars().count();
+            Some(grid[Line(row as i32)][Column(col)].fg)
+        })
     }
 
     /// Whether `text` appears anywhere in `region`.

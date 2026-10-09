@@ -31,6 +31,8 @@ pub enum Action {
     Overview,
     /// Open the help popup.
     Help,
+    /// Browse the commit history of the active session's directory.
+    GitLog,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
 }
@@ -49,6 +51,7 @@ impl Action {
             Action::ProxyStats => "proxy_stats",
             Action::Overview => "overview",
             Action::Help => "help",
+            Action::GitLog => "git_log",
             Action::ToggleHidden => "toggle_hidden",
         }
     }
@@ -142,6 +145,15 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "this help popup",
         action: Action::Help,
+        scope: Scope::Global,
+    },
+    // Alt+l: commit history. Verified free in Claude Code 2.1.280; readline's
+    // Alt+l (downcase-word) is shadowed in terminal tabs.
+    Binding {
+        code: KeyCode::Char('l'),
+        mods: KeyModifiers::ALT,
+        label: "git history of the session's directory",
+        action: Action::GitLog,
         scope: Scope::Global,
     },
     // Alt+.: show/hide dot-directories in the wizard's directory step. Wizard

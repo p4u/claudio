@@ -26,7 +26,7 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
-    TuiProcess, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
+    TuiProcess, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
     DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
@@ -1295,6 +1295,96 @@ fn test_tab_label_is_basename() {
     let tab_text = tui.screen_text(Region::TabBar);
     assert!(!tab_text.contains("Claude Code"), "tab should not say 'Claude Code', got: {tab_text:?}");
     tui.quit(WAIT);
+}
+
+// ── Git viewer ────────────────────────────────────────────────────────────────
+
+/// Run git in `dir` (fixed identity); panics on failure.
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=Tess", "-c", "user.email=tess@example.org"])
+        .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Alt+l lists the session directory's commits; Enter opens one, Enter on a
+/// file shows its colored patch, and Esc steps back out, one page at a time.
+#[test]
+fn test_git_viewer_log_commit_and_diff() {
+    let harness = ManagerHarness::new();
+    let repo = &harness.dirs[0];
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("a.txt"), "first line\n").unwrap();
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "first commit"]);
+    fs::write(repo.join("a.txt"), "first line\nhello world line\n").unwrap();
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "second change", "-m", "Body of the second."]);
+
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, repo);
+
+    // The log: both commits, the branch in the header.
+    tui.send_keys(ALT_L);
+    tui.wait_for("second change", Region::Pane, WAIT);
+    tui.wait_for("first commit", Region::Pane, WAIT);
+    tui.wait_for("⎇ main", Region::Pane, WAIT);
+    tui.wait_for("HEAD → main", Region::Pane, WAIT);
+
+    // Enter opens the selected (newest) commit: header, message and files.
+    tui.send_keys(ENTER);
+    tui.wait_for("Author: Tess", Region::Pane, WAIT);
+    tui.wait_for("Body of the second.", Region::Pane, WAIT);
+    tui.wait_for("a.txt", Region::Pane, WAIT);
+    tui.wait_for("1 files changed", Region::Pane, WAIT);
+
+    // Enter on the file shows its patch with colored line kinds.
+    tui.send_keys(ENTER);
+    tui.wait_for("+hello world line", Region::Pane, WAIT);
+    tui.wait_for("diff --git", Region::Pane, WAIT);
+    // ANSI palette indexes: 2 = green, 6 = cyan.
+    tui.wait_until(
+        |s| matches!(s.fg_of("+hello world line"), Some(c) if format!("{c:?}") == "Indexed(2)"),
+        WAIT,
+    );
+    tui.wait_until(
+        |s| matches!(s.fg_of("@@ -1"), Some(c) if format!("{c:?}") == "Indexed(6)"),
+        WAIT,
+    );
+
+    // Esc: back to the commit, back to the log, then the view closes.
+    tui.send_keys(ESC);
+    tui.wait_for("Author: Tess", Region::Pane, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Enter open", Region::Pane, WAIT);
+    tui.wait_for("first commit", Region::Pane, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Enter open", Region::Pane), WAIT);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+    tui.quit(WAIT);
+}
+
+/// A directory that is not a repository shows git's error inside the view,
+/// and a manager key (Alt+q) still works from there.
+#[test]
+fn test_git_viewer_not_a_repo_shows_the_error() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[1]);
+
+    tui.send_keys(ALT_L);
+    tui.wait_for("not a git repository", Region::Pane, WAIT);
+    tui.wait_for("r retry", Region::Pane, WAIT);
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
 }
 
 // ── Scope guard ───────────────────────────────────────────────────────────────
