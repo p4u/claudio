@@ -513,21 +513,11 @@ impl App {
     }
 
     pub(super) fn open_wizard(&mut self) {
-        let active_cwd = self.active_view().map(|v| v.cwd.clone());
         let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
         let active_host = self.active_host();
-
-        // Seeds come from the active host's recent dirs. If the user later
-        // switches to a remote host, on_host_connected rebuilds the seeds.
-        let host_recent = state::recent_for_host(&self.recent_dirs, &active_host).to_vec();
-
-        // Only include the active session's cwd if it is on the active host.
-        let active_cwd_for_host = active_cwd.as_deref().filter(|_| {
-            self.active_view()
-                .map(|v| v.host == active_host)
-                .unwrap_or(false)
-        });
-        let seeds = wizard::assemble(active_cwd_for_host, &host_recent, &self.projects);
+        // The wizard starts on the active host; picking another host seeds
+        // it again (see `on_host_connected`).
+        let seeds = wizard::assemble(None, &self.wizard_seeds(&active_host), &self.projects);
         let host_candidates = crate::remote::hosts::candidates();
         // Determine effective proxy default for the wizard:
         // active session's proxy > startup override > config default.

@@ -426,63 +426,24 @@ impl App {
         match outcome {
             Outcome::None => {}
             Outcome::Cancel => self.modal = None,
-            Outcome::ConnectHost(host) => {
-                if host == "local" {
-                    // Compute seeds before mutably borrowing self.modal.
-                    let host_recent =
-                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
-                    let active_cwd_local: Option<String> = self.active_view().and_then(|v| {
-                        if v.host == "local" {
-                            Some(v.cwd.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    let new_seeds = super::wizard::assemble(
-                        active_cwd_local.as_deref(),
-                        &host_recent,
-                        &[],
-                    );
-                    let local_home = self.home.clone();
-                    let list_home = match &mut self.modal {
-                        Some(Modal::Wizard(w)) => {
-                            w.on_host_connected("local", &local_home, new_seeds);
-                            w.browse_home()
-                        }
-                        _ => Outcome::None,
-                    };
-                    self.wizard_outcome(list_home);
-                    self.request_projects("local");
-                } else {
-                    self.effects.push(Effect::Connect(host));
-                }
+            // The local daemon is always connected.
+            Outcome::ConnectHost(host) if host == "local" => {
+                let home = self.home.clone();
+                self.on_host_connected("local", &home);
             }
+            Outcome::ConnectHost(host) => self.effects.push(Effect::Connect(host)),
             Outcome::ListDir(path) => {
                 self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
             }
             Outcome::ChooseDir(cwd) => {
-                // If ChooseDir comes from the first screen's LOCAL section,
-                // the wizard is still in host_step. Transition to directory
-                // step (local host) before recording pending.
+                // A directory picked from the first screen's LOCAL section:
+                // move on to the local directory step, waiting for this one.
                 let in_host_step = matches!(&self.modal,
                     Some(Modal::Wizard(w)) if w.host_step.is_some());
                 if in_host_step {
-                    // Compute seeds before mutable borrow.
-                    let host_recent =
-                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
-                    let active_cwd_local = self.active_view()
-                        .filter(|v| v.host == "local")
-                        .map(|v| v.cwd.clone());
-                    let seeds = super::wizard::assemble(
-                        active_cwd_local.as_deref(),
-                        &host_recent,
-                        &[],
-                    );
-                    let local_home = self.home.clone();
-                    let pending_dir = cwd.clone();
-                    if let Some(Modal::Wizard(w)) = &mut self.modal {
-                        w.on_host_connected("local", &local_home, seeds);
-                        w.pending = Some(pending_dir);
+                    let home = self.home.clone();
+                    if let Some(w) = self.wizard_enter_host("local", &home) {
+                        w.pending = Some(cwd.clone());
                     }
                     self.request_projects("local");
                 }
@@ -504,26 +465,35 @@ impl App {
         self.redraw = true;
     }
 
+    /// `host` (whose home is `home`) is connected: the wizard goes on to its
+    /// directory step, browsing the home directory.
     pub fn on_host_connected(&mut self, host: &str, home: &str) {
-        // Compute seeds before mutably borrowing self.modal.
-        let host_recent = super::state::recent_for_host(&self.recent_dirs, host).to_vec();
-        let active_cwd_for_host: Option<String> = self.active_view().and_then(|v| {
-            if v.host == host {
-                Some(v.cwd.clone())
-            } else {
-                None
-            }
-        });
-        let new_seeds =
-            super::wizard::assemble(active_cwd_for_host.as_deref(), &host_recent, &[]);
-
-        if let Some(Modal::Wizard(w)) = &mut self.modal {
-            w.on_host_connected(host, home, new_seeds);
+        if let Some(w) = self.wizard_enter_host(host, home) {
             let list_home = w.browse_home();
             self.request_projects(host);
             self.wizard_outcome(list_home);
         }
         self.redraw = true;
+    }
+
+    /// Move the open wizard on to `host`'s directory step, seeded for it.
+    fn wizard_enter_host(&mut self, host: &str, home: &str) -> Option<&mut Wizard> {
+        let seeds = self.wizard_seeds(host);
+        let w = self.wizard_mut()?;
+        w.on_host_connected(host, home, seeds);
+        Some(w)
+    }
+
+    /// The wizard's directory candidates on `host`: the active session's
+    /// directory when it runs there, then the host's recently used ones.
+    /// Recent claude projects follow when they arrive.
+    pub(super) fn wizard_seeds(&self, host: &str) -> Vec<String> {
+        let active_cwd = self
+            .active_view()
+            .filter(|v| v.host == host)
+            .map(|v| v.cwd.as_str());
+        let recent = super::state::recent_for_host(&self.recent_dirs, host);
+        super::wizard::assemble(active_cwd, recent, &[])
     }
 
     pub fn on_host_error(&mut self, host: &str, error: &str) {
