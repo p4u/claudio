@@ -28,7 +28,7 @@ use common::{
     current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
     TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT,
     ALT_SHIFT_1, ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC,
-    RECONNECT_WAIT, UP_ARROW, WAIT,
+    LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -381,9 +381,10 @@ fn test_wizard_hidden_dirs_toggle() {
     fs::create_dir_all(browse.join("visible-dir")).expect("create visible dir");
     let mut tui = harness.start_tui();
 
-    // Host step: "Explore local dirs…" (pre-selected). Then browse `browse/`.
+    // Host step: "Explore local dirs…" (pre-selected). Then browse `browse/`
+    // (a pasted path replaces the initial `~/`).
     tui.send_keys(ENTER);
-    tui.wait_for("Tab complete", Region::Screen, WAIT);
+    tui.wait_for("start here", Region::Screen, WAIT);
     tui.send_paste(&format!("{}/", browse.display()));
 
     // Listing arrived: the visible dir is shown, the hidden one is not, and the
@@ -405,6 +406,63 @@ fn test_wizard_hidden_dirs_toggle() {
     tui.send_keys(b"\x1b.");
     tui.wait_until(|s| !s.contains(".secret-dir", Region::Screen), WAIT);
     tui.wait_for("Alt+. hidden: off", Region::Screen, WAIT);
+
+    tui.quit(WAIT);
+}
+
+// ── Wizard: directory browser ─────────────────────────────────────────────────
+
+/// "Explore local dirs…" opens a browser at $HOME: → descends into a child,
+/// and Enter on the "start here" row starts the session in the directory
+/// that was navigated to (not just one of the listed seeds).
+#[test]
+fn test_wizard_browse_from_home_and_start_here() {
+    let harness = ManagerHarness::new();
+    let proj = harness.home.join("work").join("proj");
+    fs::create_dir_all(&proj).expect("create nested dir under HOME");
+    let mut tui = harness.start_tui();
+
+    // Explore local dirs… → browser at `~/`, "start here" on top.
+    tui.send_keys(ENTER);
+    tui.wait_for("start here: ~", Region::Screen, WAIT);
+    tui.wait_for("work", Region::Screen, WAIT);
+
+    // Down to `work`, → opens it.
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(RIGHT_ARROW);
+    tui.wait_for("start here: ~/work", Region::Screen, WAIT);
+    tui.wait_for("proj", Region::Screen, WAIT);
+
+    // Down to `proj`, → opens it; "start here" is now the nested dir.
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(RIGHT_ARROW);
+    tui.wait_for("start here: ~/work/proj", Region::Screen, WAIT);
+
+    // ← goes back up one level, → comes back down.
+    tui.send_keys(LEFT_ARROW);
+    tui.wait_for("start here: ~/work", Region::Screen, WAIT);
+    tui.wait_until(|s| !s.contains("start here: ~/work/proj", Region::Screen), WAIT);
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(RIGHT_ARROW);
+    tui.wait_for("start here: ~/work/proj", Region::Screen, WAIT);
+
+    // Enter on "start here" (preselected after descending) starts the session.
+    tui.send_keys(ENTER);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+
+    let want = proj.to_str().unwrap().to_owned();
+    harness.wait_state(
+        |v| {
+            v.get("sessions")
+                .and_then(|s| s.as_array())
+                .map(|a| {
+                    a.iter()
+                        .any(|s| s.get("cwd").and_then(|c| c.as_str()) == Some(want.as_str()))
+                })
+                .unwrap_or(false)
+        },
+        WAIT,
+    );
 
     tui.quit(WAIT);
 }

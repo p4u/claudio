@@ -442,9 +442,14 @@ impl App {
                         &[],
                     );
                     let local_home = self.home.clone();
-                    if let Some(Modal::Wizard(w)) = &mut self.modal {
-                        w.on_host_connected("local", &local_home, new_seeds);
-                    }
+                    let list_home = match &mut self.modal {
+                        Some(Modal::Wizard(w)) => {
+                            w.on_host_connected("local", &local_home, new_seeds);
+                            w.browse_home()
+                        }
+                        _ => Outcome::None,
+                    };
+                    self.wizard_outcome(list_home);
                     self.request_local(
                         Msg::RecentProjects {
                             limit: PROJECTS_LIMIT,
@@ -525,6 +530,7 @@ impl App {
 
         if let Some(Modal::Wizard(w)) = &mut self.modal {
             w.on_host_connected(host, home, new_seeds);
+            let list_home = w.browse_home();
             let gen = w.generation;
             let h = host.to_owned();
             self.effects.push(Effect::Request {
@@ -534,6 +540,7 @@ impl App {
                 },
                 to: ReplyTo::RemoteProjects(host.to_owned(), gen),
             });
+            self.wizard_outcome(list_home);
         }
         self.redraw = true;
     }

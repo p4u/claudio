@@ -936,8 +936,13 @@ mod tests {
         let mut app = app_with(&[]);
         // Step 0: press Enter to select "local" host (empty host filter → picks local).
         app.on_terminal(plain(KeyCode::Enter));
-        app.take_effects(); // consume RecentProjects request
-                            // Step 1: type "/w" into the directory input, then press Enter.
+        // The directory step opens in browse mode at `~/`: the home listing is requested.
+        let effects = app.take_effects();
+        assert!(requests(&effects)
+            .iter()
+            .any(|m| **m == Msg::ListDir { path: "/home/u".into() }));
+        // Step 1: replace the `~/` input with "/w", then press Enter.
+        app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "/w".chars() {
             app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
         }

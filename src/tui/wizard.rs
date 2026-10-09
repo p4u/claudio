@@ -769,11 +769,99 @@ impl Wizard {
     /// path query, otherwise the whole (trimmed) input.
     fn query_base(&self) -> &str {
         let input = self.input.trim();
-        if input.starts_with('/') || input.starts_with('~') {
+        if self.browsing() {
             input.rfind('/').map_or("", |i| &input[i + 1..])
         } else {
             input
         }
+    }
+
+    /// Whether the directory step is in browse mode: the input is a path
+    /// (starts with `/` or `~`), so the list is the listing of a directory
+    /// rather than a fuzzy search over the seeds.
+    pub fn browsing(&self) -> bool {
+        let input = self.input.trim();
+        input.starts_with('/') || input.starts_with('~')
+    }
+
+    /// Split a path query into the directory being listed and the fragment
+    /// typed after its last `/` (empty for `~/`, `/srv/`, or a bare `~`).
+    fn path_parts(&self) -> (String, String) {
+        let input = self.input.trim();
+        match input.rfind('/') {
+            Some(i) => (self.expand(&input[..=i]), input[i + 1..].to_owned()),
+            // A bare `~` or `~user`: list home itself.
+            None => (self.expand(input), String::new()),
+        }
+    }
+
+    /// Whether the "start here" pseudo-row (row 0 in browse mode) is selected.
+    pub fn here_selected(&self) -> bool {
+        self.browsing() && self.selected == 0
+    }
+
+    /// The directory the "start here" row picks (`None` outside browse mode):
+    /// the one being listed. When a fragment matches no child (or the listing
+    /// has not arrived yet) it is the typed path itself, so Enter still takes it.
+    pub fn here_dir(&self) -> Option<String> {
+        if !self.browsing() {
+            return None;
+        }
+        let (dir, fragment) = self.path_parts();
+        if fragment.is_empty() || !self.items.is_empty() {
+            Some(dir)
+        } else {
+            Some(self.expand(self.input.trim()))
+        }
+    }
+
+    /// The highlighted candidate; `None` on the "start here" row.
+    fn selected_item(&self) -> Option<&String> {
+        if self.browsing() {
+            self.items.get(self.selected.checked_sub(1)?)
+        } else {
+            self.items.get(self.selected)
+        }
+    }
+
+    /// The input line that browses `dir`: `~`-abbreviated, ending in `/`.
+    fn dir_input(&self, dir: &str) -> String {
+        let shown = abbreviate_home(dir, &self.home);
+        if shown.ends_with('/') {
+            shown
+        } else {
+            format!("{shown}/")
+        }
+    }
+
+    /// Browse the highlighted candidate.
+    fn descend(&mut self) -> Outcome {
+        match self.selected_item() {
+            Some(item) => {
+                self.input = self.dir_input(item);
+                self.refilter()
+            }
+            None => Outcome::None,
+        }
+    }
+
+    /// Browse the parent of the listed directory (stops at `/`).
+    fn go_up(&mut self) -> Outcome {
+        let (dir, _) = self.path_parts();
+        let parent = match dir.rfind('/') {
+            Some(0) | None => "/",
+            Some(i) => &dir[..i],
+        };
+        self.input = self.dir_input(parent);
+        self.refilter()
+    }
+
+    /// Open the directory step in browse mode at the host's home (`~/`).
+    /// Call right after [`Wizard::on_host_connected`]; returns the `ListDir`
+    /// for the home directory.
+    pub fn browse_home(&mut self) -> Outcome {
+        self.input = "~/".to_owned();
+        self.refilter()
     }
 
     /// Handle a key press.
@@ -867,7 +955,13 @@ impl Wizard {
                 Outcome::None
             }
             KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+                // Browse mode has the "start here" row above the items.
+                let last = if self.browsing() {
+                    self.items.len()
+                } else {
+                    self.items.len().saturating_sub(1)
+                };
+                self.selected = (self.selected + 1).min(last);
                 Outcome::None
             }
             // Proxy toggle is also available in the directory step (S7 fix):
@@ -884,26 +978,27 @@ impl Wizard {
                 self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
                 Outcome::None
             }
-            KeyCode::Tab => match self.items.get(self.selected) {
-                Some(item) => {
-                    self.input = abbreviate_home(item, &self.home);
-                    self.refilter()
-                }
-                None => Outcome::None,
-            },
+            // Browse mode: → opens the highlighted directory, ← goes up. The
+            // proxy arms above win only while the input is empty, which never
+            // holds in browse mode.
+            KeyCode::Right if self.browsing() => self.descend(),
+            KeyCode::Left if self.browsing() => self.go_up(),
+            KeyCode::Tab => self.descend(),
             KeyCode::Enter => {
-                let dir = match self.items.get(self.selected) {
-                    Some(item) => item.clone(),
-                    None if !self.input.trim().is_empty() => self.expand(self.input.trim()),
-                    None => return Outcome::None,
+                let dir = match (self.here_dir(), self.selected_item()) {
+                    (Some(here), _) if self.here_selected() => here,
+                    (_, Some(item)) => item.clone(),
+                    _ if !self.input.trim().is_empty() => self.expand(self.input.trim()),
+                    _ => return Outcome::None,
                 };
                 self.pending = Some(dir.clone());
                 Outcome::ChooseDir(dir)
             }
             KeyCode::Backspace => {
-                if self.input.is_empty() {
-                    // Backspace with empty input: return to the first screen
-                    // (item E: step history / back navigation).
+                let input = self.input.trim();
+                if matches!(input, "" | "~/" | "/") {
+                    // Backspace on an empty or root input: return to the first
+                    // screen (item E: step history / back navigation).
                     if let Some(hs) = self.saved_host_step.take() {
                         self.host_step = Some(hs);
                         self.input.clear();
@@ -914,7 +1009,13 @@ impl Wizard {
                         return Outcome::None;
                     }
                 }
-                self.input.pop();
+                if input.len() > 1 && input.ends_with('/') {
+                    // Right after a `/`: go up one level (drop the last component).
+                    let kept = input.trim_end_matches('/').rfind('/').map_or(0, |i| i + 1);
+                    self.input.truncate(kept);
+                } else {
+                    self.input.pop();
+                }
                 self.refilter()
             }
             KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
@@ -942,7 +1043,12 @@ impl Wizard {
         if self.resume.is_some() || self.pending.is_some() {
             return Outcome::None;
         }
-        self.input.push_str(text.lines().next().unwrap_or(""));
+        let line = text.lines().next().unwrap_or("");
+        if line.starts_with('/') || line.starts_with('~') {
+            // A pasted path replaces the input instead of extending `~/`.
+            self.input.clear();
+        }
+        self.input.push_str(line);
         self.refilter()
     }
 
@@ -959,12 +1065,10 @@ impl Wizard {
         let input = self.input.trim().to_owned();
         let reveal_hidden = self.hidden_visible();
 
-        if input.starts_with('/') || input.starts_with('~') {
-            let (parent, base) = match input.rfind('/') {
-                Some(i) => (self.expand(&input[..=i]), input[i + 1..].to_lowercase()),
-                // A bare `~` or `~user`: list home itself.
-                None => (self.expand(&input), String::new()),
-            };
+        let browsing = self.browsing();
+        if browsing {
+            let (parent, base) = self.path_parts();
+            let base = base.to_lowercase();
             if self.listed.as_deref() != Some(parent.as_str()) {
                 self.listed = Some(parent.clone());
                 self.completions.clear();
@@ -986,9 +1090,11 @@ impl Wizard {
             items.extend(matching.into_iter().cloned());
         }
 
+        // Seeds only feed the fuzzy search; a browsed path lists just its directory.
         let mut scored: Vec<(i64, &String)> = self
             .seeds
             .iter()
+            .filter(|_| !browsing)
             .filter_map(|s| {
                 if !reveal_hidden && is_hidden_path(s) {
                     return None;
@@ -1020,7 +1126,14 @@ impl Wizard {
         }
 
         self.items = items;
-        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        if browsing {
+            // Row 0 is "start here"; with a fragment typed, the best match
+            // (first child) is preselected instead.
+            let has_fragment = !self.query_base().is_empty();
+            self.selected = usize::from(has_fragment && !self.items.is_empty());
+        } else {
+            self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        }
         outcome
     }
 
@@ -1180,16 +1293,15 @@ mod tests {
             ],
         );
         assert_eq!(w.items[..2], strings(&["/home/u/reports", "/home/u/repos"]));
-        // Tab completes to the highlighted entry; its exact match ranks first.
+        // The best match (first child) is preselected; Down moves to `repos`.
+        assert_eq!(w.selected, 1);
         w.on_key(&press(KeyCode::Down));
-        w.on_key(&press(KeyCode::Tab));
-        assert_eq!(w.input, "~/repos");
-        assert_eq!(w.items[0], "/home/u/repos");
-        // Descending lists the next directory.
+        // Tab opens the highlighted entry and lists it.
         assert_eq!(
-            w.on_key(&press(KeyCode::Char('/'))),
+            w.on_key(&press(KeyCode::Tab)),
             Outcome::ListDir("/home/u/repos".into())
         );
+        assert_eq!(w.input, "~/repos/");
     }
 
     #[test]
@@ -1640,5 +1752,224 @@ mod tests {
         assert!(w.host_step.is_some());
         w.toggle_hidden();
         assert!(!w.show_hidden, "host step ignores the toggle");
+    }
+
+    // ── Directory browser ─────────────────────────────────────────────────────
+
+    /// A wizard past the host step, browsing `/home/u` (`~/`) with `entries`
+    /// listed. Returns the `ListDir` outcome that opening the browser produced.
+    fn browser(entries: &[&str]) -> (Wizard, Outcome) {
+        let mut w = Wizard::new(strings(&["/srv/app"]), "/home/u".into(), "local", &[], &[], None);
+        w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
+        let opened = w.browse_home();
+        let entries: Vec<DirEntry> = entries.iter().map(|n| DirEntry::simple(*n, true)).collect();
+        w.set_dir_entries("/home/u", &entries);
+        (w, opened)
+    }
+
+    #[test]
+    fn explore_opens_the_browser_at_home() {
+        let (w, opened) = browser(&["repos", "docs"]);
+        assert_eq!(opened, Outcome::ListDir("/home/u".into()));
+        assert_eq!(w.input, "~/");
+        assert!(w.browsing());
+        assert_eq!(w.items, strings(&["/home/u/docs", "/home/u/repos"]));
+        assert!(w.here_selected(), "`start here` is preselected on a trailing slash");
+        assert_eq!(w.here_dir().as_deref(), Some("/home/u"));
+        assert_eq!(w.display("/home/u"), "~");
+    }
+
+    #[test]
+    fn browser_uses_the_remote_hosts_home() {
+        let mut w = Wizard::new(vec![], "/home/u".into(), "local", &["box".into()], &[], None);
+        w.on_host_connected("box", "/home/remote", vec![]);
+        assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
+        w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)]);
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/remote".into())
+        );
+    }
+
+    #[test]
+    fn enter_on_start_here_picks_the_listed_dir() {
+        let (mut w, _) = browser(&["repos"]);
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u".into())
+        );
+        assert_eq!(w.pending.as_deref(), Some("/home/u"));
+    }
+
+    #[test]
+    fn enter_on_a_child_picks_the_child() {
+        let (mut w, _) = browser(&["docs", "repos"]);
+        w.on_key(&press(KeyCode::Down));
+        assert!(!w.here_selected());
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u/docs".into())
+        );
+    }
+
+    #[test]
+    fn a_fragment_preselects_the_best_child_and_start_here_is_the_parent() {
+        let (mut w, _) = browser(&["docs", "repos", "reports"]);
+        type_str(&mut w, "rep");
+        assert_eq!(w.items, strings(&["/home/u/reports", "/home/u/repos"]));
+        assert_eq!(w.selected, 1, "first match");
+        // Up reaches `start here`, which is the listed dir, not the fragment.
+        w.on_key(&press(KeyCode::Up));
+        assert!(w.here_selected());
+        assert_eq!(w.here_dir().as_deref(), Some("/home/u"));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u".into())
+        );
+    }
+
+    #[test]
+    fn unmatched_fragment_falls_back_to_the_typed_path() {
+        let (mut w, _) = browser(&["docs"]);
+        type_str(&mut w, "new");
+        assert!(w.items.is_empty());
+        assert_eq!(w.here_dir().as_deref(), Some("/home/u/new"));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u/new".into())
+        );
+    }
+
+    #[test]
+    fn right_and_tab_descend_into_the_child() {
+        let (mut w, _) = browser(&["docs", "repos"]);
+        w.on_key(&press(KeyCode::Down));
+        w.on_key(&press(KeyCode::Down));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Right)),
+            Outcome::ListDir("/home/u/repos".into())
+        );
+        assert_eq!(w.input, "~/repos/");
+        assert!(w.here_selected(), "`start here` is selected after descending");
+        w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)]);
+        w.on_key(&press(KeyCode::Down));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Tab)),
+            Outcome::ListDir("/home/u/repos/claudio".into())
+        );
+        assert_eq!(w.input, "~/repos/claudio/");
+        assert_eq!(w.here_dir().as_deref(), Some("/home/u/repos/claudio"));
+        // → on `start here` has nothing to open.
+        assert_eq!(w.on_key(&press(KeyCode::Right)), Outcome::None);
+        assert_eq!(w.input, "~/repos/claudio/");
+    }
+
+    #[test]
+    fn left_goes_up_and_stops_at_root() {
+        let (mut w, _) = browser(&["repos"]);
+        // Above home we leave the `~` form.
+        assert_eq!(
+            w.on_key(&press(KeyCode::Left)),
+            Outcome::ListDir("/home".into())
+        );
+        assert_eq!(w.input, "/home/");
+        assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::ListDir("/".into()));
+        assert_eq!(w.input, "/");
+        assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::None, "stays at /");
+        assert_eq!(w.input, "/");
+        assert_eq!(w.here_dir().as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn left_from_a_subdir_returns_to_the_parent_with_tilde() {
+        let (mut w, _) = browser(&["repos"]);
+        type_str(&mut w, "repos/");
+        assert_eq!(w.input, "~/repos/");
+        assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::ListDir("/home/u".into()));
+        assert_eq!(w.input, "~/");
+    }
+
+    #[test]
+    fn backspace_after_a_slash_goes_up_one_level() {
+        let (mut w, _) = browser(&["repos"]);
+        type_str(&mut w, "repos/x/");
+        assert_eq!(w.input, "~/repos/x/");
+        w.on_key(&press(KeyCode::Backspace));
+        assert_eq!(w.input, "~/repos/");
+        w.on_key(&press(KeyCode::Backspace));
+        assert_eq!(w.input, "~/");
+        assert!(w.host_step.is_none(), "`~/` is still the directory step");
+    }
+
+    #[test]
+    fn backspace_on_a_fragment_removes_one_character() {
+        let (mut w, _) = browser(&["repos"]);
+        type_str(&mut w, "rep");
+        w.on_key(&press(KeyCode::Backspace));
+        assert_eq!(w.input, "~/re");
+    }
+
+    #[test]
+    fn backspace_on_bare_home_returns_to_the_start_screen() {
+        let (mut w, _) = browser(&["repos"]);
+        assert_eq!(w.on_key(&press(KeyCode::Backspace)), Outcome::None);
+        assert!(w.host_step.is_some(), "back on the first screen");
+        assert!(w.input.is_empty());
+    }
+
+    #[test]
+    fn arrows_cycle_the_proxy_only_without_input() {
+        let mut w = Wizard::new(vec![], "/h".into(), "local", &[], &["p".to_owned()], None);
+        w.on_host_connected("local", "/h", vec![]);
+        // Empty input: proxy cycling.
+        w.on_key(&press(KeyCode::Right));
+        assert_eq!(w.proxy_selected, 1);
+        // Browse mode always has input: arrows browse instead.
+        w.browse_home();
+        w.on_key(&press(KeyCode::Right));
+        w.on_key(&press(KeyCode::Left));
+        assert_eq!(w.proxy_selected, 1, "unchanged while browsing");
+    }
+
+    #[test]
+    fn non_path_input_is_still_a_fuzzy_seed_search() {
+        let mut w = wizard_local(strings(&["/srv/app", "/home/u/docs"]), "/home/u");
+        assert!(!w.browsing());
+        assert!(w.here_dir().is_none());
+        assert_eq!(w.items.len(), 2);
+        type_str(&mut w, "app");
+        assert_eq!(w.items, strings(&["/srv/app"]));
+        assert_eq!(w.selected, 0, "no `start here` row");
+        assert_eq!(w.on_key(&press(KeyCode::Enter)), Outcome::ChooseDir("/srv/app".into()));
+    }
+
+    #[test]
+    fn seeds_do_not_leak_into_a_browsed_directory() {
+        let mut w = wizard_local(strings(&["/home/u/repos/claudio"]), "/home/u");
+        type_str(&mut w, "~/");
+        w.set_dir_entries("/home/u", &[DirEntry::simple("docs", true)]);
+        assert_eq!(w.items, strings(&["/home/u/docs"]));
+    }
+
+    #[test]
+    fn hidden_toggle_and_dot_fragment_work_in_the_browser() {
+        let (mut w, _) = browser(&[".config", "repos"]);
+        assert_eq!(names(&w), vec!["repos"]);
+        w.toggle_hidden();
+        assert_eq!(names(&w), vec![".config", "repos"]);
+        w.toggle_hidden();
+        type_str(&mut w, ".c");
+        assert_eq!(names(&w), vec![".config"]);
+        assert_eq!(w.selected, 1);
+    }
+
+    #[test]
+    fn pasting_a_path_replaces_the_browse_input() {
+        let (mut w, _) = browser(&[]);
+        assert_eq!(w.on_paste("/srv/app/"), Outcome::ListDir("/srv/app".into()));
+        assert_eq!(w.input, "/srv/app/");
+        // A non-path paste extends it.
+        w.on_paste("x");
+        assert_eq!(w.input, "/srv/app/x");
     }
 }
