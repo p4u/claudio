@@ -322,16 +322,30 @@ impl Wizard {
     }
 
     /// The host was chosen and the connection is ready. Advance to step 1
-    /// (directory) and update `home` for the target host.
-    pub fn on_host_connected(&mut self, host: &str, home: &str) {
+    /// (directory) and update `home` and seeds for the target host.
+    ///
+    /// `new_seeds` should already be assembled from the host's recent dirs and
+    /// active cwd (if on that host). The caller supplies this so the wizard
+    /// state machine stays pure.
+    pub fn on_host_connected(&mut self, host: &str, home: &str, new_seeds: Vec<String>) {
         self.host_step = None;
         self.host = host.to_owned();
         self.home = home.to_owned();
+        self.seeds = new_seeds;
+        self.completions.clear();
+        self.listed = None;
+        self.input.clear();
+        self.selected = 0;
         self.refilter();
     }
 
-    /// Add late-arriving seeds (the `RecentProjects` reply), keeping order.
-    pub fn add_seeds(&mut self, more: &[String]) {
+    /// Add late-arriving seeds (e.g. `RecentProjects` reply), keeping order.
+    /// Only applies when the wizard is on `host` and has advanced to the
+    /// directory step. Stale replies for a different host are silently ignored.
+    pub fn add_seeds_for_host(&mut self, host: &str, more: &[String]) {
+        if self.host != host || self.host_step.is_some() {
+            return;
+        }
         self.seeds = assemble(None, &self.seeds, more);
         self.refilter();
     }
@@ -639,9 +653,10 @@ mod tests {
     /// the directory step). Convenience wrapper for tests that don't care
     /// about the host step.
     fn wizard_local(seeds: Vec<String>, home: &str) -> Wizard {
+        let seeds_clone = seeds.clone();
         let mut w = Wizard::new(seeds, home.into(), "local", &[], &[], None);
         // Advance past the host step by picking "local".
-        w.on_host_connected("local", home);
+        w.on_host_connected("local", home, seeds_clone);
         w
     }
 
@@ -715,22 +730,10 @@ mod tests {
         w.set_dir_entries(
             "/home/u",
             &[
-                DirEntry {
-                    name: "repos".into(),
-                    dir: true,
-                },
-                DirEntry {
-                    name: "readme.md".into(),
-                    dir: false,
-                },
-                DirEntry {
-                    name: "Desktop".into(),
-                    dir: true,
-                },
-                DirEntry {
-                    name: "reports".into(),
-                    dir: true,
-                },
+                DirEntry::simple("repos", true),
+                DirEntry::simple("readme.md", false),
+                DirEntry::simple("Desktop", true),
+                DirEntry::simple("reports", true),
             ],
         );
         assert_eq!(w.items[..2], strings(&["/home/u/reports", "/home/u/repos"]));
@@ -750,13 +753,7 @@ mod tests {
     fn stale_dir_entries_are_ignored() {
         let mut w = wizard_local(vec![], "/h");
         type_str(&mut w, "/a/");
-        w.set_dir_entries(
-            "/b",
-            &[DirEntry {
-                name: "x".into(),
-                dir: true,
-            }],
-        );
+        w.set_dir_entries("/b", &[DirEntry::simple("x", true)]);
         assert!(w.items.is_empty());
     }
 
@@ -869,7 +866,7 @@ mod tests {
             &["myproxy".to_owned()],
             None,
         );
-        w.on_host_connected("local", "/h");
+        w.on_host_connected("local", "/h", strings(&["/w"]));
         // proxy_options = ["none", "myproxy"], selected = 0 initially
         assert_eq!(w.proxy_selected, 0);
         // Left/Right should cycle the proxy when input is empty.

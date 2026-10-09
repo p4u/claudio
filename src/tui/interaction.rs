@@ -300,8 +300,24 @@ impl App {
             Outcome::Cancel => self.modal = None,
             Outcome::ConnectHost(host) => {
                 if host == "local" {
+                    // Compute seeds before mutably borrowing self.modal.
+                    let host_recent =
+                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
+                    let active_cwd_local: Option<String> = self.active_view().and_then(|v| {
+                        if v.host == "local" {
+                            Some(v.cwd.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    let new_seeds = super::wizard::assemble(
+                        active_cwd_local.as_deref(),
+                        &host_recent,
+                        &[],
+                    );
+                    let local_home = self.home.clone();
                     if let Some(Modal::Wizard(w)) = &mut self.modal {
-                        w.on_host_connected("local", &self.home);
+                        w.on_host_connected("local", &local_home, new_seeds);
                     }
                     self.request_local(
                         Msg::RecentProjects {
@@ -341,15 +357,28 @@ impl App {
     }
 
     pub fn on_host_connected(&mut self, host: &str, home: &str) {
+        // Compute seeds before mutably borrowing self.modal.
+        let host_recent = super::state::recent_for_host(&self.recent_dirs, host).to_vec();
+        let active_cwd_for_host: Option<String> = self.active_view().and_then(|v| {
+            if v.host == host {
+                Some(v.cwd.clone())
+            } else {
+                None
+            }
+        });
+        let new_seeds =
+            super::wizard::assemble(active_cwd_for_host.as_deref(), &host_recent, &[]);
+
         if let Some(Modal::Wizard(w)) = &mut self.modal {
-            w.on_host_connected(host, home);
+            w.on_host_connected(host, home, new_seeds);
+            let gen = w.generation;
             let h = host.to_owned();
             self.effects.push(Effect::Request {
                 host: h,
                 msg: Msg::RecentProjects {
                     limit: PROJECTS_LIMIT,
                 },
-                to: ReplyTo::RemoteProjects,
+                to: ReplyTo::RemoteProjects(host.to_owned(), gen),
             });
         }
         self.redraw = true;
@@ -476,7 +505,8 @@ impl App {
                 self.projects = dirs.into_iter().map(|d| d.path).collect();
                 let projects = self.projects.clone();
                 if let Some(w) = self.wizard_mut() {
-                    w.add_seeds(&projects);
+                    // Local projects only apply when wizard is on "local".
+                    w.add_seeds_for_host("local", &projects);
                 }
             }
             (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -521,11 +551,16 @@ impl App {
                 self.notify(format!("could not start claude: {e}"));
             }
             // Remote variants route to the same wizard handlers.
-            (ReplyTo::RemoteProjects, Ok(Msg::Projects { dirs })) => {
-                self.projects = dirs.into_iter().map(|d| d.path).collect();
-                let projects = self.projects.clone();
+            (ReplyTo::RemoteProjects(host, gen), Ok(Msg::Projects { dirs })) => {
+                if gen != self.wizard_generation() {
+                    // S7: stale reply from a cancelled or superseded wizard.
+                    return;
+                }
+                let project_paths: Vec<String> =
+                    dirs.into_iter().map(|d| d.path).collect();
                 if let Some(w) = self.wizard_mut() {
-                    w.add_seeds(&projects);
+                    // Only apply if the wizard is still on that host.
+                    w.add_seeds_for_host(&host, &project_paths);
                 }
             }
             (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -559,7 +594,7 @@ impl App {
             (to, Err(e)) if self.connected => {
                 let what = match to {
                     ReplyTo::Ack(what) => what,
-                    ReplyTo::Projects | ReplyTo::RemoteProjects => "recent projects",
+                    ReplyTo::Projects | ReplyTo::RemoteProjects(..) => "recent projects",
                     _ => "request",
                 };
                 self.notify(format!("{what} failed: {e}"));

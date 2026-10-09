@@ -113,20 +113,67 @@ fn run_version(claude: &Path) -> Option<String> {
         .filter(|l| !l.is_empty())
 }
 
+/// Detect the git branch for a directory without running `git`.
+///
+/// Returns `Some(branch)` when the dir contains `.git/HEAD` with a branch ref,
+/// `Some("")` for a detached HEAD or an unreadable HEAD, and `None` when the
+/// directory is not a git repo. Worktrees (`.git` is a file) are followed one
+/// level by parsing the `gitdir:` pointer.
+pub fn detect_git_branch(path: &Path) -> Option<String> {
+    let git = path.join(".git");
+    let head_path = if git.is_dir() {
+        git.join("HEAD")
+    } else if git.is_file() {
+        // Worktree: .git is a file containing "gitdir: <path>"
+        let content = std::fs::read_to_string(&git).ok()?;
+        let gitdir = content
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("gitdir:"))?
+            .trim();
+        Path::new(gitdir).join("HEAD")
+    } else {
+        return None;
+    };
+    let head = std::fs::read_to_string(&head_path).ok()?;
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        Some(branch.to_owned())
+    } else {
+        // Detached HEAD or unknown format.
+        Some(String::new())
+    }
+}
+
 /// List `path` (with `~` expanded): directories first, then by name, capped
 /// at 5000 entries. Returns the expanded path alongside the entries.
 pub fn list_dir(path: &str) -> io::Result<(String, Vec<DirEntry>)> {
     let dir = expand_tilde(path);
     let mut entries: Vec<DirEntry> = std::fs::read_dir(&dir)?
         .filter_map(Result::ok)
-        .map(|e| DirEntry {
-            name: e.file_name().to_string_lossy().into_owned(),
+        .take(MAX_DIR_ENTRIES)
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            let hidden = name.starts_with('.');
+            // Detect symlinks without following them (symlink_metadata vs metadata).
+            let symlink = e
+                .metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
             // Follow symlinks so a link to a directory can be descended into.
-            dir: e.path().is_dir(),
+            let dir_flag = path.is_dir();
+            DirEntry {
+                name,
+                dir: dir_flag,
+                git: detect_git_branch(&path),
+                claude_at: None, // enriched below for dirs only
+                symlink,
+                hidden,
+            }
         })
         .collect();
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
-    entries.truncate(MAX_DIR_ENTRIES);
     Ok((dir.to_string_lossy().into_owned(), entries))
 }
 

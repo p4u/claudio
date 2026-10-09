@@ -271,7 +271,7 @@ impl App {
             attached: false,
             proxy: proxy.clone(),
         });
-        state::push_recent(&mut self.recent_dirs, &cwd);
+        state::push_recent(&mut self.recent_dirs, &host, &cwd);
         self.activate(self.sessions.len() - 1);
     }
 
@@ -279,7 +279,18 @@ impl App {
         let active_cwd = self.active_view().map(|v| v.cwd.clone());
         let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
         let active_host = self.active_host();
-        let seeds = wizard::assemble(active_cwd.as_deref(), &self.recent_dirs, &self.projects);
+
+        // Seeds come from the active host's recent dirs. If the user later
+        // switches to a remote host, on_host_connected rebuilds the seeds.
+        let host_recent = state::recent_for_host(&self.recent_dirs, &active_host).to_vec();
+
+        // Only include the active session's cwd if it is on the active host.
+        let active_cwd_for_host = active_cwd.as_deref().filter(|_| {
+            self.active_view()
+                .map(|v| v.host == active_host)
+                .unwrap_or(false)
+        });
+        let seeds = wizard::assemble(active_cwd_for_host, &host_recent, &self.projects);
         let host_candidates = crate::remote::hosts::candidates();
         let proxy_default = active_proxy.as_deref().or(self.proxy_default.as_deref());
         self.modal = Some(Modal::Wizard(Wizard::new(

@@ -6,6 +6,7 @@
 //! journal is authoritative for which sessions exist; [`merge`] and
 //! [`merge_for_host`] reconcile the two on every (re)connect.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -32,12 +33,56 @@ pub struct ClientState {
     pub sessions: Vec<SavedSession>,
     #[serde(default)]
     pub active: Option<SessionId>,
-    /// Most recently used first.
-    #[serde(default)]
-    pub recent_dirs: Vec<String>,
+    /// Most recently used directories, keyed by host ("local" for the local
+    /// machine). Older state.json files stored a flat `Vec<String>`; those are
+    /// transparently promoted to `{"local": [...]}` on load via a custom
+    /// deserialiser so no data is ever lost.
+    #[serde(default, deserialize_with = "deser_recent_dirs")]
+    pub recent_dirs: HashMap<String, Vec<String>>,
     /// Sessions the user explicitly closed; Kill is retried until acknowledged.
     #[serde(default)]
     pub killed: Vec<KillTombstone>,
+}
+
+/// Deserialise `recent_dirs` from either the new `{host: [dirs]}` map or the
+/// legacy flat `[dirs]` list. The legacy list is promoted to `{"local": [dirs]}`.
+fn deser_recent_dirs<'de, D>(d: D) -> Result<HashMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{MapAccess, SeqAccess, Visitor};
+
+    struct Vis;
+
+    impl<'de> Visitor<'de> for Vis {
+        type Value = HashMap<String, Vec<String>>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a map of host→dirs or a legacy list of dirs")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut out = HashMap::new();
+            while let Some((k, v)) = map.next_entry::<String, Vec<String>>()? {
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+
+        fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<Self::Value, S::Error> {
+            let mut dirs = Vec::new();
+            while let Some(d) = seq.next_element::<String>()? {
+                dirs.push(d);
+            }
+            let mut out = HashMap::new();
+            if !dirs.is_empty() {
+                out.insert("local".to_owned(), dirs);
+            }
+            Ok(out)
+        }
+    }
+
+    d.deserialize_any(Vis)
 }
 
 /// One session as the client remembers it.
@@ -84,12 +129,18 @@ impl ClientState {
     }
 }
 
-/// Move `dir` to the front of a most-recently-used list, capped at
-/// [`MAX_RECENT_DIRS`].
-pub fn push_recent(recent: &mut Vec<String>, dir: &str) {
-    recent.retain(|d| d != dir);
-    recent.insert(0, dir.to_owned());
-    recent.truncate(MAX_RECENT_DIRS);
+/// Move `dir` to the front of `host`'s MRU list in `recent`, capped at
+/// [`MAX_RECENT_DIRS`] per host.
+pub fn push_recent(recent: &mut HashMap<String, Vec<String>>, host: &str, dir: &str) {
+    let dirs = recent.entry(host.to_owned()).or_default();
+    dirs.retain(|d| d != dir);
+    dirs.insert(0, dir.to_owned());
+    dirs.truncate(MAX_RECENT_DIRS);
+}
+
+/// Return the MRU directory list for `host` (empty slice when unknown).
+pub fn recent_for_host<'a>(recent: &'a HashMap<String, Vec<String>>, host: &str) -> &'a [String] {
+    recent.get(host).map(Vec::as_slice).unwrap_or(&[])
 }
 
 /// A session after reconciling state.json with the daemon.
@@ -195,13 +246,19 @@ mod tests {
         }
     }
 
+    fn mk_recent(host: &str, dirs: &[&str]) -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert(host.to_owned(), dirs.iter().map(|s| s.to_string()).collect());
+        m
+    }
+
     #[test]
     fn json_round_trip() {
         let a = Uuid::new_v4();
         let state = ClientState {
             sessions: vec![saved(a, Some("api"), Some("c1"))],
             active: Some(a),
-            recent_dirs: vec!["/srv".into(), "/tmp".into()],
+            recent_dirs: mk_recent("local", &["/srv", "/tmp"]),
             killed: vec![],
         };
         let dir = std::env::temp_dir().join(format!("claudio-state-test-{}", Uuid::new_v4()));
@@ -225,16 +282,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_flat_recent_dirs_migrated_to_local() {
+        // Old state.json stores recent_dirs as a flat array.
+        let json = r#"{"recent_dirs":["/srv","/tmp"]}"#;
+        let state: ClientState = serde_json::from_str(json).unwrap();
+        let local_dirs = state.recent_dirs.get("local").map(Vec::as_slice).unwrap_or(&[]);
+        assert_eq!(local_dirs, &["/srv", "/tmp"][..]);
+    }
+
+    #[test]
     fn recent_dirs_move_to_front_and_cap() {
-        let mut recent = Vec::new();
+        let mut recent = HashMap::new();
         for i in 0..25 {
-            push_recent(&mut recent, &format!("/d{i}"));
+            push_recent(&mut recent, "local", &format!("/d{i}"));
         }
-        assert_eq!(recent.len(), MAX_RECENT_DIRS);
-        assert_eq!(recent[0], "/d24");
-        push_recent(&mut recent, "/d20");
-        assert_eq!(recent[0], "/d20");
-        assert_eq!(recent.iter().filter(|d| *d == "/d20").count(), 1);
+        let dirs = recent.get("local").unwrap();
+        assert_eq!(dirs.len(), MAX_RECENT_DIRS);
+        assert_eq!(dirs[0], "/d24");
+        push_recent(&mut recent, "local", "/d20");
+        let dirs = recent.get("local").unwrap();
+        assert_eq!(dirs[0], "/d20");
+        assert_eq!(dirs.iter().filter(|d| **d == "/d20").count(), 1);
+    }
+
+    #[test]
+    fn recent_dirs_per_host() {
+        let mut recent = HashMap::new();
+        push_recent(&mut recent, "local", "/local/dir");
+        push_recent(&mut recent, "myhost", "/remote/dir");
+        assert_eq!(
+            recent_for_host(&recent, "local"),
+            &["/local/dir".to_owned()]
+        );
+        assert_eq!(
+            recent_for_host(&recent, "myhost"),
+            &["/remote/dir".to_owned()]
+        );
+        // A host with no entries returns an empty slice.
+        assert!(recent_for_host(&recent, "unknown").is_empty());
     }
 
     #[test]
@@ -252,7 +337,7 @@ mod tests {
                 saved(a, None, None),
             ],
             active: Some(a),
-            recent_dirs: vec![],
+            recent_dirs: HashMap::new(),
             killed: vec![],
         };
         let live = vec![

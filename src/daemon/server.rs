@@ -564,9 +564,25 @@ async fn recent_projects(limit: u32) -> Msg {
         Ok(dirs) => Msg::Projects {
             dirs: dirs
                 .into_iter()
-                .map(|(path, modified)| ProjectDir {
-                    path: path.to_string_lossy().into_owned(),
-                    modified,
+                .map(|(path, modified)| {
+                    let path_str = path.to_string_lossy().into_owned();
+                    let git = host::detect_git_branch(&path);
+                    let hidden = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with('.'))
+                        .unwrap_or(false);
+                    let symlink = path
+                        .symlink_metadata()
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false);
+                    ProjectDir {
+                        path: path_str,
+                        modified,
+                        git,
+                        hidden,
+                        symlink,
+                    }
                 })
                 .collect(),
         },

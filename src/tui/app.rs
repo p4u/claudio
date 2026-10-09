@@ -85,8 +85,9 @@ pub enum ReplyTo {
     RemoteDirEntries,
     /// Wizard claude sessions for a remote host (S7: generation-tagged).
     RemoteClaudeSessions(String, u64),
-    /// Wizard recent projects for a remote host.
-    RemoteProjects,
+    /// Wizard recent projects for a remote host (host, wizard generation).
+    /// Both must match the current wizard or the reply is discarded.
+    RemoteProjects(String, u64),
 }
 
 /// The manager's state.
@@ -94,7 +95,8 @@ pub struct App {
     pub sessions: Vec<SessionView>,
     pub active: Option<usize>,
     pub modal: Option<Modal>,
-    pub recent_dirs: Vec<String>,
+    /// Most recently used directories per host ("local" for the local machine).
+    pub recent_dirs: HashMap<String, Vec<String>>,
     /// The last `RecentProjects` reply, to seed the wizard.
     pub projects: Vec<String>,
     /// Terminal size.
@@ -144,14 +146,19 @@ impl App {
     /// Used by unit tests; kept pub for future daemon-status command.
     #[cfg(test)]
     pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
-        App::new_with_config(width, height, home, recent_dirs, true, Keymap::default())
+        use std::collections::HashMap;
+        let mut rd = HashMap::new();
+        if !recent_dirs.is_empty() {
+            rd.insert("local".to_owned(), recent_dirs);
+        }
+        App::new_with_config(width, height, home, rd, true, Keymap::default())
     }
 
     pub fn new_with_config(
         width: u16,
         height: u16,
         home: String,
-        recent_dirs: Vec<String>,
+        recent_dirs: HashMap<String, Vec<String>>,
         notify_enabled: bool,
         keymap: Keymap,
     ) -> App {
@@ -379,6 +386,9 @@ mod tests {
 
     fn app_with(live: &[SessionInfo]) -> App {
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        // Isolate tests from any real proxy config on disk.
+        app.proxy_default = None;
+        app.proxy_profiles = Vec::new();
         app.recover(&ClientState::default(), live);
         app.take_effects();
         app
@@ -751,7 +761,10 @@ mod tests {
             }
         );
         assert!(app.modal.is_none());
-        assert_eq!(app.recent_dirs, vec!["/w".to_owned()]);
+        assert_eq!(
+            app.recent_dirs.get("local").map(Vec::as_slice).unwrap_or(&[]),
+            &["/w".to_owned()][..]
+        );
         assert_eq!(app.sessions[0].label(), "w");
     }
 
@@ -970,7 +983,7 @@ mod tests {
         let mut live = [info(Some(1), None), info(Some(2), None)];
         live[1].state = SessionState::NeedsApproval;
         let mut app =
-            App::new_with_config(100, 30, "/home/u".into(), vec![], false, Keymap::default());
+            App::new_with_config(100, 30, "/home/u".into(), HashMap::new(), false, Keymap::default());
         app.recover(&ClientState::default(), &live);
         app.take_effects();
         app.check_notifications();

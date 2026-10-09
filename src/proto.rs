@@ -317,6 +317,37 @@ pub enum SessionEvent {
 pub struct DirEntry {
     pub name: String,
     pub dir: bool,
+    /// The git branch name when the directory is a git repo, `Some("")` for a
+    /// detached/unknown HEAD, `None` when not a git repo. Filled by the daemon;
+    /// older daemons leave this as `None`.
+    #[serde(default)]
+    pub git: Option<String>,
+    /// Unix seconds of the last claude session activity in this directory.
+    /// `None` when no claude session is known. Filled by the daemon.
+    #[serde(default)]
+    pub claude_at: Option<u64>,
+    /// Whether the directory entry is a symlink.
+    #[serde(default)]
+    pub symlink: bool,
+    /// Whether the entry name starts with `.`.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+impl DirEntry {
+    /// Construct a minimal entry with no enrichment. Used in tests and by
+    /// callers that do their own field assignment.
+    #[allow(dead_code)]
+    pub fn simple(name: impl Into<String>, dir: bool) -> Self {
+        DirEntry {
+            name: name.into(),
+            dir,
+            git: None,
+            claude_at: None,
+            symlink: false,
+            hidden: false,
+        }
+    }
 }
 
 /// A directory with claude history.
@@ -325,6 +356,15 @@ pub struct ProjectDir {
     pub path: String,
     /// Unix seconds of the newest transcript there.
     pub modified: u64,
+    /// Git branch name, `Some("")` for detached HEAD, `None` for non-git.
+    #[serde(default)]
+    pub git: Option<String>,
+    /// Whether the path is a symlink.
+    #[serde(default)]
+    pub symlink: bool,
+    /// Whether the path's basename starts with `.`.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// A resumable claude conversation found under `~/.claude/projects`.
