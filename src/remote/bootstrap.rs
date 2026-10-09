@@ -360,7 +360,9 @@ async fn upload_bytes(
         "_tmp={tmp_quoted}; sha256sum \"$_tmp\" 2>/dev/null || shasum -a 256 \"$_tmp\" 2>/dev/null"
     );
     let hash_out = ssh_run(host, &verify_cmd).await.map_err(|e| {
-        let _ = ssh_run_sync(host, &format!("rm -f {tmp_quoted}"));
+        let h = host.to_owned();
+        let cmd = format!("rm -f {tmp_quoted} 2>/dev/null; true");
+        tokio::spawn(async move { let _ = ssh_run(&h, &cmd).await; });
         format!("remote hash check failed: {e}")
     })?;
     let remote_hash = hash_out
@@ -394,7 +396,9 @@ else
 fi"#
     );
     ssh_run(host, &install_cmd).await.map_err(|e| {
-        let _ = ssh_run_sync(host, &format!("rm -f {tmp_quoted}"));
+        let h = host.to_owned();
+        let cmd = format!("rm -f {tmp_quoted} 2>/dev/null; true");
+        tokio::spawn(async move { let _ = ssh_run(&h, &cmd).await; });
         format!("install failed on {host}: {e}")
     })?;
 
@@ -417,25 +421,6 @@ async fn ssh_run(host: &str, cmd: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-/// Synchronous ssh run used only for async-context cleanup (e.g. removing a
-/// temp file after a failed hash check). Must not be called from within a
-/// tokio worker thread — only from `spawn_blocking` contexts or after the
-/// async runtime has exited. In practice we call it only on error paths that
-/// don't need the result.
-fn ssh_run_sync(host: &str, cmd: &str) {
-    let _ = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "--",
-            host,
-            cmd,
-        ])
-        .output();
 }
 
 /// Download a URL with `curl` to a local file.
