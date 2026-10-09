@@ -17,6 +17,7 @@ mod host;
 mod journal;
 mod server;
 mod session;
+mod stats;
 #[cfg(test)]
 mod tests;
 
@@ -196,6 +197,8 @@ pub(crate) struct Daemon {
     host: OnceCell<HostInfo>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
+    /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
+    pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -217,6 +220,8 @@ impl Daemon {
             "journal loaded; all sessions dormant"
         );
         let (events, _) = broadcast::channel(EVENTS_CAPACITY);
+        let (stats_tx, stats_rx) = tokio::sync::watch::channel(stats::HostSnapshot::default());
+        tokio::spawn(stats::sample_loop(stats_tx));
         Daemon {
             config,
             registry: Mutex::new(Registry {
@@ -229,6 +234,7 @@ impl Daemon {
             events,
             host: OnceCell::new(),
             shutdown: tokio::sync::Notify::new(),
+            stats_rx,
         }
     }
 
@@ -627,5 +633,8 @@ fn dormant_info(entry: &Entry) -> SessionInfo {
         title: None,
         pid: None,
         created_at: entry.created_at,
+        branch: None,
+        model: None,
+        context_tokens: None,
     }
 }

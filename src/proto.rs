@@ -126,6 +126,12 @@ pub enum Msg {
         payload: serde_json::Value,
     },
 
+    // ── host stats subscription (opt-in, additive) ───────────────────────
+    /// Client opts in to receiving periodic `HostStats` pushes from the daemon.
+    /// An old daemon that does not know this op answers `Error`; the client
+    /// treats that as "unsupported" and hides the sparklines.
+    SubscribeHostStats,
+
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -167,6 +173,20 @@ pub enum Msg {
         id: SessionId,
         event: SessionEvent,
     },
+    /// Pushed every ~2 s to subscribed clients. Carries the host's current
+    /// CPU and memory utilisation so the TUI can render sparklines.
+    HostStats {
+        cpu_pct: f32,
+        mem_used: u64,
+        mem_total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load1: Option<f32>,
+    },
+
+    /// Catch-all for ops this client does not recognise yet.
+    /// Keeps older clients alive when a newer daemon sends a new op.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,6 +277,18 @@ pub struct SessionInfo {
     pub pid: Option<u32>,
     /// Unix seconds.
     pub created_at: u64,
+    /// Git branch of the session's cwd (None when not a git repo or unknown).
+    /// Added in a later protocol version; old daemons omit this field.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Short human-readable model name (e.g. `"opus-4.5"`).
+    /// Added in a later protocol version; old daemons omit this field.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Total input+cache tokens of the last assistant turn.
+    /// Added in a later protocol version; old daemons omit this field.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
 }
 
 /// What a session is doing, derived from Claude Code hooks.
@@ -316,6 +348,17 @@ pub enum SessionEvent {
     /// A transient user-visible notice (e.g. resume-fallback).
     Notice {
         text: String,
+    },
+    /// Session metadata updated: git branch, active model, context token count.
+    /// Broadcast on `SessionStart`, `Stop`, `UserPromptSubmit` hooks and when
+    /// the claude session id changes. Old clients map this to `Unknown`.
+    Meta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_tokens: Option<u64>,
     },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.

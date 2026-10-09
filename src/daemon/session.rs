@@ -194,6 +194,7 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
         subs: HashMap::new(),
         spawned_with_resume,
         spawn_time,
+        cwd: cwd.clone(),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
     Ok((Handle { tx, token, pid }, committed_tx))
@@ -410,6 +411,8 @@ struct Actor {
     spawned_with_resume: bool,
     /// When the child was spawned, for measuring quick-exit window.
     spawn_time: std::time::Instant,
+    /// Working directory of this session (for git branch detection).
+    cwd: std::path::PathBuf,
 }
 
 impl Actor {
@@ -625,6 +628,16 @@ impl Actor {
             }
             self.daemon.broadcast(self.id, ev);
         }
+        // Broadcast updated metadata (branch) after each hook.
+        let branch = read_git_branch(&self.cwd);
+        self.daemon.broadcast(
+            self.id,
+            SessionEvent::Meta {
+                branch,
+                model: None,
+                context_tokens: None,
+            },
+        );
     }
 
     fn write(&mut self, bytes: Vec<u8>) {
@@ -692,6 +705,16 @@ impl Actor {
             }
         }
     }
+}
+
+/// Read the current git branch from `cwd/.git/HEAD`.
+/// Returns `None` when the directory is not a git repo or HEAD is detached.
+fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
+    let head_path = cwd.join(".git/HEAD");
+    let content = std::fs::read_to_string(head_path).ok()?;
+    let line = content.trim();
+    line.strip_prefix("ref: refs/heads/")
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

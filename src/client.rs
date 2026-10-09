@@ -85,6 +85,13 @@ pub enum Incoming {
         id: SessionId,
         event: SessionEvent,
     },
+    /// Host resource stats pushed by the daemon (after `SubscribeHostStats`).
+    HostStats {
+        cpu_pct: f32,
+        mem_used: u64,
+        mem_total: u64,
+        load1: Option<f32>,
+    },
     /// The connection is gone; nothing else follows.
     Disconnected,
 }
@@ -567,6 +574,18 @@ fn route(env: Envelope, pending: &Mutex<Pending>) -> Option<Incoming> {
             id: *id,
             event: event.clone(),
         }),
+        Msg::HostStats {
+            cpu_pct,
+            mem_used,
+            mem_total,
+            load1,
+        } if env.req.is_none() => Some(Incoming::HostStats {
+            cpu_pct: *cpu_pct,
+            mem_used: *mem_used,
+            mem_total: *mem_total,
+            load1: *load1,
+        }),
+        Msg::Unknown => None,
         _ => None,
     };
     if let Some(req) = env.req {

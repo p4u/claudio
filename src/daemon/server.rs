@@ -442,6 +442,34 @@ impl Client {
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
             Msg::RecentProjects { limit } => recent_projects(limit).await,
+            Msg::SubscribeHostStats => {
+                // Spawn a task that watches the stats channel and pushes
+                // HostStats events to this client whenever the value changes.
+                let mut rx = self.daemon.stats_rx.clone();
+                let queue = self.queue.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                        let snap = *rx.borrow_and_update();
+                        let msg = crate::proto::Msg::HostStats {
+                            cpu_pct: snap.cpu_pct,
+                            mem_used: snap.mem_used,
+                            mem_total: snap.mem_total,
+                            load1: None,
+                        };
+                        if queue
+                            .send(Frame::Control(crate::proto::Envelope::event(msg)))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                Msg::Ok
+            }
             other => Msg::Error {
                 message: format!("unsupported op: {}", op_name(&other)),
             },
