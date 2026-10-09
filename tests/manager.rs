@@ -26,8 +26,8 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
-    TuiProcess, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_X, BINARY, CTRL_U,
-    DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
+    TuiProcess, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2,
+    ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -81,6 +81,39 @@ fn test_2_two_sessions_switching() {
     // Switch right (back to second session).
     tui.send_keys(ALT_RIGHT);
     tui.wait_for(n1, Region::TabBar, WAIT);
+
+    tui.quit(WAIT);
+}
+
+/// 2b. Alt+Shift+<digit> (kitty keyboard protocol encoding) jumps to that tab.
+///     Each session is told apart by its per-spawn banner nonce in the pane.
+#[test]
+fn test_2b_alt_shift_digit_goes_to_session() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let nonce1 = current_nonce(&tui);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &harness.dirs[1]);
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != nonce1),
+        WAIT,
+    );
+    let nonce2 = current_nonce(&tui);
+
+    // Alt+Shift+1 → first tab.
+    tui.send_keys(ALT_SHIFT_1);
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).as_deref() == Some(nonce1.as_str()),
+        WAIT,
+    );
+    // Alt+Shift+2 → second tab again.
+    tui.send_keys(ALT_SHIFT_2);
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).as_deref() == Some(nonce2.as_str()),
+        WAIT,
+    );
 
     tui.quit(WAIT);
 }

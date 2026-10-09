@@ -33,6 +33,9 @@ pub enum Action {
     Help,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
+    /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
+    /// Fixed: not in [`DEFAULT_BINDINGS`], so `[keys]` can't override it.
+    GotoSession(u8),
 }
 
 impl Action {
@@ -50,6 +53,7 @@ impl Action {
             Action::Overview => "overview",
             Action::Help => "help",
             Action::ToggleHidden => "toggle_hidden",
+            Action::GotoSession(_) => "goto_session",
         }
     }
 }
@@ -164,6 +168,26 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     },
 ];
 
+/// Help-popup row for the fixed `Alt+Shift+<digit>` bindings (see
+/// [`goto_session`]); these are not in [`DEFAULT_BINDINGS`].
+const GOTO_SESSION_HELP: (&str, &str) = ("Alt+Shift+1…9,0", "go to session 1…10");
+
+/// `Alt+Shift+<digit>` → [`Action::GotoSession`].
+///
+/// With the kitty keyboard protocol (enabled in `tui/mod.rs`), terminals send
+/// the base key plus modifiers, so crossterm reports `Char('1')` with
+/// `ALT | SHIFT` on any layout. Without the protocol the terminal sends the
+/// layout-dependent shifted symbol (`!`, `"`…), which we deliberately don't map.
+fn goto_session(key: &KeyEvent) -> Option<Action> {
+    if key.modifiers != (KeyModifiers::ALT | KeyModifiers::SHIFT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c @ '0'..='9') => Some(Action::GotoSession(c as u8 - b'0')),
+        _ => None,
+    }
+}
+
 /// The effective keymap: defaults + config overrides.
 ///
 /// Owned by `App`; used for dispatch, help rendering, and status-bar hints.
@@ -238,6 +262,7 @@ impl Keymap {
     /// The global action bound to `key`, if any. Releases never trigger actions.
     pub fn lookup(&self, key: &KeyEvent) -> Option<Action> {
         self.lookup_scope(key, Scope::Global)
+            .or_else(|| goto_session(key).filter(|_| key.kind != KeyEventKind::Release))
     }
 
     /// The wizard-scoped action bound to `key`, if any.
@@ -266,10 +291,19 @@ impl Keymap {
     /// Generate the help lines from the current effective bindings.
     /// Each entry is `(key_str, label)`.
     pub fn help_entries(&self) -> Vec<(String, &'static str)> {
-        self.bindings
+        let mut entries: Vec<_> = self
+            .bindings
             .iter()
             .map(|b| (key_str(b.code, b.mods), b.label))
-            .collect()
+            .collect();
+        // The fixed Alt+Shift+digit row sits right after "next session".
+        let at = self
+            .bindings
+            .iter()
+            .position(|b| b.action == Action::NextSession)
+            .map_or(entries.len(), |i| i + 1);
+        entries.insert(at, (GOTO_SESSION_HELP.0.to_owned(), GOTO_SESSION_HELP.1));
+        entries
     }
 
     /// Generate the status-bar hints line from the current effective bindings.
@@ -592,6 +626,77 @@ mod tests {
             km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT)),
             Some(Action::NewSession)
         );
+    }
+
+    // ── Alt+Shift+digit ───────────────────────────────────────────────────────
+
+    #[test]
+    fn alt_shift_digits_go_to_sessions() {
+        let km = Keymap::default();
+        let mods = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        for d in 0..=9u8 {
+            let c = char::from(b'0' + d);
+            assert_eq!(
+                km.lookup(&key(KeyCode::Char(c), mods)),
+                Some(Action::GotoSession(d)),
+                "Alt+Shift+{c}"
+            );
+        }
+        assert_eq!(Action::GotoSession(1).name(), "goto_session");
+    }
+
+    #[test]
+    fn plain_alt_digit_and_shift_digit_are_not_intercepted() {
+        let km = Keymap::default();
+        let digit = KeyCode::Char('1');
+        assert_eq!(km.lookup(&key(digit, KeyModifiers::ALT)), None);
+        assert_eq!(km.lookup(&key(digit, KeyModifiers::SHIFT)), None);
+        assert_eq!(km.lookup(&key(digit, KeyModifiers::NONE)), None);
+        // Not by symbol either: the shifted glyph is layout-dependent.
+        assert_eq!(
+            km.lookup(&key(
+                KeyCode::Char('!'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            )),
+            None
+        );
+        // Other modifiers in the mix do not match.
+        assert_eq!(
+            km.lookup(&key(
+                digit,
+                KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::CONTROL
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn goto_session_ignores_releases_and_config_overrides() {
+        let km = Keymap::default();
+        let release = KeyEvent {
+            code: KeyCode::Char('1'),
+            modifiers: KeyModifiers::ALT | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(km.lookup(&release), None);
+        // The action is fixed: `[keys]` can't name it, and that's just a notice.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("goto_session".to_owned(), "alt+j".to_owned());
+        let mut notices = Vec::new();
+        let km = Keymap::build(&overrides, &mut notices);
+        assert!(notices[0].contains("unknown action 'goto_session'"));
+        assert_eq!(km.lookup(&key(KeyCode::Char('j'), KeyModifiers::ALT)), None);
+    }
+
+    #[test]
+    fn help_lists_goto_session_after_next_session() {
+        let entries = Keymap::default().help_entries();
+        let at = entries
+            .iter()
+            .position(|(k, desc)| k == "Alt+Shift+1…9,0" && *desc == "go to session 1…10")
+            .expect("goto row in help");
+        assert_eq!(entries[at - 1].0, "Alt+→");
     }
 
     // ── help_entries ──────────────────────────────────────────────────────────

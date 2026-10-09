@@ -66,6 +66,7 @@ make install      # builds a static musl binary, installs it, and restarts a run
    | Key | Action |
    |---|---|
    | `Alt+←` / `Alt+→` | Switch session |
+| `Alt+Shift+1`…`9`, `0` | Go to session 1…9, 10 (needs a kitty-keyboard terminal) |
    | `Alt+n` | New session |
    | `Alt+r` | Rename session |
    | `Alt+x` | Close session |
@@ -132,6 +133,7 @@ All manager keys use `Alt` so they never clash with Claude Code's own bindings. 
 | Key | Action |
 |---|---|
 | `Alt+←` / `Alt+→` | Switch between sessions |
+| `Alt+Shift+1`…`9`, `0` | Go to session 1…9, 10 (kitty keyboard protocol terminals; fixed, not rebindable) |
 | `Alt+n` | New session (opens wizard) |
 | `Alt+g` | Overview of all sessions |
 | `Alt+a` | Jump to next session needing attention |
