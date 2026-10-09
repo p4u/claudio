@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`claudio` is a Rust drop-in wrapper for the `claude` CLI, written as a responsible-disclosure proof of concept. It has three modes, chosen in `src/main.rs`:
+`claudio` is a Rust drop-in wrapper for the `claude` CLI, written as a responsible-disclosure proof of concept. It has four modes, chosen in `src/main.rs`:
 
+- **No arguments (bare `claudio`)**: it opens the **session manager** TUI — a terminal multiplexer for many Claude Code sessions, local and over SSH.
 - **No `-p`/`--print`**: it `exec`s the real `claude` unchanged (passthrough).
 - **`-p`**: it emulates print mode by driving the *interactive* TUI under a PTY. It types the prompt, waits for the `Stop` hook, then reads the answer and real token usage from the session JSONL.
 - **`--api`**: it serves an OpenAI-compatible server (axum) on the same PTY backend, using a pool of persistent interactive sessions.
@@ -18,17 +19,165 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make                 # release build → target/release/claudio
 make static          # static musl binary → dist/claudio (ARCH=aarch64 for cross)
 make test-unit       # unit tests only: cargo test --locked --bin claudio (no claude needed)
-make test-manager    # manager integration tests: fake claude, no API, --test-threads=1
+make test-manager    # manager integration tests (fake claude, no API key required)
 make test            # unit + E2E (E2E needs an authenticated `claude` on PATH, ~5 min)
 make e2e             # E2E only
 make fmt             # cargo fmt
 ```
 
-- Run one unit test with `cargo test --bin claudio <name_substring>`. Unit tests are `#[cfg(test)]` modules inside `src/`.
-- Run one E2E test with `CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration <name> -- --test-threads=1 --nocapture`. Without `CLAUDIO_E2E=1`, the tests in `tests/integration.rs` silently no-op. They call the real Claude API, so they cost tokens, and they must run single-threaded.
-- CI (`.github/workflows/ci.yml`) runs only the release build and unit tests, on Linux, macOS, and Windows. Keep code compiling on all three.
+### Test suites and gates
+
+**Manager integration tests** (fake `claude`, no real API):
+
+```bash
+make test-manager
+# equivalent:
+cargo test --test manager -- --test-threads=1
+```
+
+Must run single-threaded. Two tests inside are gated:
+
+- `CLAUDIO_E2E=1` — enables `test_real_claude_session` (sends a prompt to the
+  real `claude`, costs tokens, requires an authenticated `claude` on PATH).
+- `CLAUDIO_PROXY_TEST=1` — enables the proxy-integration test. Requires a
+  running claude-proxy Go worktree reachable at `CLAUDIO_PROXY_URL`.
+  The test for real-claude via proxy additionally needs `CLAUDIO_E2E=1` and
+  `CLAUDIO_PROXY_URL`.
+
+**Print-mode / API E2E tests** (tests/integration.rs):
+
+```bash
+CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration -- --test-threads=1 --nocapture
+```
+
+Without `CLAUDIO_E2E=1` the integration tests silently no-op. They call the
+real Claude API and must run single-threaded.
+
+**Remote / SSH tests** (tests/remote.rs):
+
+```bash
+CLAUDIO_SSH_TEST_HOST=<host> cargo test --test remote -- --test-threads=1 --nocapture
+# diag subcommands (compiled in by default; may be gated behind --features diag in future):
+cargo test --features diag --test remote -- --test-threads=1 --nocapture
+```
+
+Tests `t1`, `t7`, `t8` are unit-style and always run. Tests `t2`–`t6` require
+`CLAUDIO_SSH_TEST_HOST` to be set to a reachable SSH host alias.
+
+- Run one unit test: `cargo test --bin claudio <name_substring>`.
+- Run one E2E test: `CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration <name> -- --test-threads=1 --nocapture`.
+- CI runs only the release build and unit tests, on Linux, macOS, and Windows. Keep code compiling on all three.
 
 ## Architecture
+
+### Session manager (bare `claudio`)
+
+A bare `claudio` calls `tui::run()`. The manager's architecture spans:
+
+**`proto.rs`** — wire framing shared by daemon and client. Frames are
+`[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
+(`Envelope { req, msg: Msg }`); unknown `op` fields are ignored. Tag `D`
+carries terminal bytes: `[16-byte session UUID][raw bytes]`. The protocol
+version (`PROTO = 1`) is embedded in the socket file name so old and new
+daemons coexist.
+
+**`daemon/`** — the per-host session daemon (invoked as `claudio --daemon`):
+- `server.rs` — accepts Unix socket connections, uid-checks peers, runs the
+  per-client loop.
+- `session.rs` — one actor task per live session: owns the PTY writer, VT
+  engine (`alacritty_terminal`), and subscriber list. Fans PTY output to
+  all attached clients. Hook events (`__hook <Event> <socket> <token>`) are
+  authenticated by uid plus a per-spawn token, enforced with a read deadline
+  and size cap. On `SessionStart` the claude session id is journaled
+  immediately so recovery works even when no client is attached.
+- `journal.rs` — durable session list (`daemon-sessions-v1.json`): writes via
+  temp + fsync + rename (`paths::write_atomic`). Never stores secrets or the
+  daemon's `--settings` injection. On fresh daemon start, non-killed entries
+  are re-spawned with `claude --resume <claude_session_id>`.
+- `ctl.rs` — `claudio daemon status|stop|restart`.
+
+**`client.rs`** — generic client connection and local daemon autostart.
+Connects to the socket; if unavailable, starts the daemon (double-fork +
+`setsid`, or `systemd-run --user` on systemd hosts) and retries.
+
+**`tui/`** — the manager UI, driven by tokio + ratatui:
+- `mod.rs` — I/O edge: owns the terminal, runs the event loop, drives
+  daemon connections. Emits OSC 9 notifications (`ESC ] 9 ; … BEL`) for
+  background sessions that need attention.
+- `app.rs` — pure coordinator (`App`): processes events into state transitions
+  and returns `Effect` values. No I/O here; all I/O is in `mod.rs`.
+- `sessions.rs` — `SessionView`: the UI-side view of a session; `label()`,
+  state glyphs, attention logic.
+- `interaction.rs` — handles daemon events, wizard transitions, rename, kill.
+- `wizard.rs` — the new-session wizard (where → dir → resume? → options).
+- `connections.rs` — manages local + SSH connections, reconnect backoff.
+- `ui.rs` — ratatui rendering: tab bar, status bar, term pane, popups
+  (overview, help, proxy stats, rename, kill confirm).
+- `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
+  (defaults + config overrides); `parse_key_spec`; collision detection.
+- `state.rs` — `ClientState`: persisted session order and names
+  (`state.json`).
+- `proxy_state.rs` — per-session proxy UI state (stats, badge).
+- `notifications.rs` — debounce logic for attention notifications.
+
+**`remote/`** — SSH bootstrap and bridge:
+- `bootstrap.rs` — `ensure_remote(host)`: runs `__probe` + `uname -sm` in one
+  ssh round trip; uploads the binary if missing or stale (SHA-256 check).
+  Same-platform: uploads self. Cross-platform: downloads release asset to
+  `~/.cache/claudio/<version>/` and uploads that.
+- `bridge.rs` — `--slave` mode: the stdio↔socket bridge the local client runs
+  on the remote as `ssh HOST ~/.local/bin/claudio --slave`. Starts the remote
+  daemon if not running (`systemd-run --user` preferred, `setsid` fallback).
+- `hosts.rs` — SSH host candidates: MRU list (`hosts.json`) + `~/.ssh/config`
+  aliases.
+- `probe.rs` — `__probe` subcommand: prints `{version, proto, os, arch,
+  build}` as JSON.
+
+**`proxy/`** — claude-proxy HTTP client and profile management:
+- `profile.rs` — load/save profiles from `config.toml` (`[proxy]` section,
+  mode 0600); `from_env()` parses `CLAUDIO_PROXY_URL=<token>@host`.
+- `env.rs` — `session_env(profile, config)`: builds the `SpawnSpec.env` for a
+  proxy-backed session. Falls back to built-in model defaults when the proxy's
+  `/v1/claudio/config` is unreachable.
+- `cmd.rs` — `claudio proxy login|status|logout|use`.
+- `api.rs` — HTTP client for `/v1/claudio/config`, `/v1/claudio/me/stats`,
+  `/v1/claudio/pool/health`.
+
+**`term/`** — terminal primitives:
+- `mod.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.
+- `keys.rs` — key → byte encoding for input forwarding to the PTY.
+
+**`claude/`** — claude knowledge:
+- `projects.rs` — scan `~/.claude/projects/` for existing sessions (feeds the
+  wizard's resume list).
+- `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
+  to the daemon socket.
+- `state.rs` — session state tracker derived from hook events.
+
+### Non-obvious constraints (don't "fix" these — manager)
+
+- **Keys must never collide with claude/terminal bindings.** All manager keys
+  use the `Alt` modifier. `keymap.rs` enforces no-collision among manager
+  bindings; the `config.toml` parser rejects collisions with a notice.
+- **`Attached` precedes the snapshot `D` frames.** The daemon sends the
+  `Attached` control message, then immediately the snapshot as a `D` frame.
+  The client must not render anything until it has received `Attached`.
+- **Protocol additions must be backward compatible.** New `op` values in `Msg`
+  must be accepted (ignored) by older daemons. New `SessionEvent` variants
+  deserialize to `SessionEvent::Unknown` so an old client never panics.
+- **The PTY test harness asserts on the rendered screen model, never on raw
+  bytes.** All `wait_for` calls in `tests/manager.rs` operate on the
+  `alacritty_terminal::Term` VT model. Asserting on raw bytes is fragile and
+  forbidden.
+- **Don't send `ESC` immediately before `Alt+key` in tests.** `ESC ESC q` is
+  ambiguous — the VT parser may interpret it as two separate `ESC` sequences.
+  Use the crossterm key-event encoding instead.
+- **Secrets never go in argv or state files.** Proxy tokens are passed only
+  through `Spawn.env` over the Unix socket. The journal and `state.json` store
+  only profile names, never tokens.
+- **`app.rs` is pure; I/O is only in `tui/mod.rs`.** `App::update` takes
+  events and returns `Effect` values. `mod.rs` drives the effects. Don't add
+  I/O to `app.rs`.
 
 ### Print-mode pipeline (`-p`)
 

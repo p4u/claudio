@@ -1,9 +1,67 @@
 # claudio manager — design (v1)
 
-Status: v1. This version folds in the Fable 5.1 architecture review and the GPT
-Astra security review. Nothing is implemented yet. **[open]** = the user still
-needs to decide. **[spike]** = settled by the P0 prototype. **[later]** = deliberately
-deferred.
+Status: **implemented on branch `manager`**. This version folds in the Fable
+5.1 architecture review and the GPT Astra security review.
+**[open]** = the user still needs to decide. **[spike]** = settled by the P0
+prototype. **[later]** = deliberately deferred.
+
+## Implementation notes / deviations from design
+
+The following are places where the implementation differs from or does not yet
+cover the design above. They are listed as facts, not as bugs.
+
+### Deviations that were intentional
+
+- **Arrow keys chosen for session navigation.** The design left keys as
+  `[open]`. The implementation chose `Alt+←` / `Alt+→` for prev/next session,
+  `Alt+n` for new, `Alt+r` for rename, `Alt+x` for close, `Alt+a` for
+  next-attention, `Alt+s` for proxy stats, `Alt+g` for overview, `Alt+h` for
+  help, `Alt+q` for quit. `Alt+←/→` were in the design's "likely word movement
+  in claude's input" ruled-out list; they were reconsidered and verified free
+  in practice by the user.
+- **`--proxy <host>` flag not implemented.** The design mentioned a `--proxy`
+  CLI flag. Proxy selection uses `CLAUDIO_PROXY_URL=<token>@host` (ephemeral)
+  or a saved default profile from `config.toml`. There is no `--proxy` flag.
+- **The statusLine feed is not implemented.** Design §2.2 described chaining
+  the user's own `statusLine` command. This is deferred (`[later]` in the
+  design).
+- **Git worktrees are not implemented.** Design §3.2 step 4 listed git
+  worktree creation (via `claude -w <name>`) as an option in the wizard. This
+  is deferred.
+- **The snapshot does not restore the primary screen.** The snapshot restores
+  alt-screen state, bracketed paste, application cursor keys, and cursor
+  visibility, but does not serialize and replay the primary screen scroll-back
+  buffer. This matches the design intent (the design describes restoring
+  modes, not the primary screen), but clients that switch between primary and
+  alt screen may see the primary screen blank on reattach.
+- **Close requires confirmation, not a command palette.** Design §3.3 said
+  "Close is never a single keystroke" and pointed to a command palette.
+  The implementation shows an inline `[y] kill · [n]/Esc cancel` prompt in the
+  status bar after `Alt+x`, without a full command palette.
+- **`SO_PEERCRED` uid check is platform-dependent.** Linux uses `SO_PEERCRED`.
+  macOS uses `getpeereid`. The implementation handles both via the `libc`
+  crate.
+- **Session journal path.** The design said `~/.local/state/claudio/sessions.json`.
+  The implementation uses `~/.config/claudio/daemon-sessions-v1.json` (versioned,
+  under `config_dir()`).
+
+### Future work (deferred from design)
+
+- Overview / "mission control" popup (partially implemented: `Alt+g` opens a
+  per-session summary list, but it does not show the full last assistant
+  message from the Stop hook).
+- Scripting CLI (`claudio ls`, `claudio new`, `claudio attach`, `claudio hosts`).
+- Auto-respawn with `--resume` when claude crashes.
+- Scrollback / copy mode in the terminal mirror.
+- Git worktrees.
+- Desktop notifications via `notify-send` / `osascript` fallback (currently
+  only OSC 9 + BEL is emitted).
+- Mouse click to switch tabs.
+- `claudio daemon upgrade` / session migration between protocol versions.
+- The statusLine feed.
+- Supply the proxy token through claude's `apiKeyHelper` so it never sits in
+  the process environment.
+- zoxide seeding for the directory picker.
 
 ## 1. Goal
 

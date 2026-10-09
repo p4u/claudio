@@ -4,7 +4,9 @@ A **drop-in wrapper for `claude`** that emulates `claude -p` (print mode) by
 driving the *interactive* Claude Code TUI under a real pseudo-terminal, instead
 of calling `claude -p`. With `--api` it also exposes an **OpenAI-compatible API
 server** — served by that same PTY backend, so any OpenAI client talks to your
-local `claude` install.
+local `claude` install. A bare `claudio` (no arguments) opens the **session
+manager** — a terminal-native multiplexer for many Claude Code sessions, local
+and over SSH.
 
 > **What this is.** A responsible-disclosure proof of concept. It demonstrates
 > that client-side restrictions on programmatic Claude Code use cannot be
@@ -15,6 +17,199 @@ local `claude` install.
 > Code features. It does **not** bypass authentication or billing — every
 > request counts against your account, and the wrapper prints the real token
 > usage to prove it.
+
+## Session manager
+
+Run `claudio` with no arguments to open the session manager: many Claude Code
+sessions, local and over SSH, all in one terminal window. Sessions survive
+closing the UI or an SSH drop because a per-host background daemon owns the
+PTYs. On restart the manager restores the previous state, and sessions that
+were interrupted are recovered with `claude --resume`.
+
+### Quick start
+
+```bash
+claudio        # opens the manager TUI
+```
+
+The new-session wizard starts automatically when there are no sessions.
+Steps:
+
+1. **Where:** choose `local` or an SSH host.
+2. **Directory:** pick or type the working directory.
+3. **Resume or new:** if the directory already has Claude sessions you can
+   resume one; otherwise a fresh session starts.
+
+### Keys
+
+All manager keys use the `Alt` modifier so they never collide with Claude
+Code's own bindings. Every key can be overridden in
+`~/.config/claudio/config.toml` under `[keys]`.
+
+| Key | Action |
+|-----|--------|
+| `Alt+←` | previous session |
+| `Alt+→` | next session |
+| `Alt+n` | new session (wizard) |
+| `Alt+r` | rename session |
+| `Alt+x` | close / kill session |
+| `Alt+a` | jump to next session needing attention |
+| `Alt+s` | proxy stats popup |
+| `Alt+g` | overview of all sessions |
+| `Alt+h` | help popup |
+| `Alt+q` | quit (sessions keep running in the daemon) |
+
+To override a key, add its action name and a key spec to `[keys]` in
+`~/.config/claudio/config.toml`. Unknown action names, unparseable specs,
+and collisions with other manager bindings are ignored with a notice:
+
+```toml
+[keys]
+prev_session = "alt+left"     # default — shown for reference
+next_session = "alt+right"
+overview     = "alt+g"
+quit         = "alt+q"
+```
+
+Valid modifiers: `alt` / `ctrl` / `shift`. Valid keys: letters, digits,
+`left` / `right` / `up` / `down`, `enter`, `esc`, `tab`, `backspace`,
+`delete`, `home`, `end`, `pageup`, `pagedown`, `f1`–`f12`, `space`, and
+common punctuation.
+
+### Session states and glyphs
+
+The tab bar shows a glyph for each session's current state:
+
+| Glyph | State | Meaning |
+|-------|-------|---------|
+| ● (animated) | Working | Claude is running a turn |
+| ◆ (red) | NeedsApproval | Waiting for a permission decision |
+| ? (yellow) | NeedsInput | Waiting for user input |
+| ✓ (green) | Idle | Turn complete, waiting for the next prompt |
+| ✗ (red) | Error | Last turn ended in an error |
+| · | Starting / Unknown | Session is starting or state is not yet known |
+| ⇄ (dim) | Reconnecting | Host is unreachable; reconnecting |
+
+When a background session enters a state that needs attention
+(`NeedsApproval`, `NeedsInput`, or `Error`), the manager sends an **OSC 9**
+desktop notification to the outer terminal (format:
+`ESC ] 9 ; claudio: <session> needs you BEL`). Notifications are debounced
+per session and state. To disable them:
+
+```toml
+[ui]
+notify = false
+```
+
+### SSH
+
+- Hosts are listed most-recently-used first (from
+  `~/.config/claudio/hosts.json`), followed by every `Host` alias in
+  `~/.ssh/config` (including `Include`d files; wildcard patterns are skipped).
+- The claudio binary is installed automatically on the remote at
+  `~/.local/bin/claudio`. The local binary is compared to the remote by
+  SHA-256; if they differ the correct binary is uploaded (same-platform: the
+  local binary itself; cross-platform: a downloaded release asset).
+- The remote daemon is started under `systemd-run --user` when available
+  (survives SSH logout / `KillUserProcesses`); otherwise it falls back to
+  `setsid`.
+- No remote dotfiles are modified. The binary is always placed at the
+  absolute path `~/.local/bin/claudio`.
+- Requirements: `ssh` with key or agent authentication (`BatchMode` — no
+  password prompts), and `claude` installed on the remote host (or
+  `CLAUDIO_PROXY_URL` set so the remote sessions use the proxy instead).
+
+### claude-proxy integration
+
+claudio integrates with **claude-proxy**, an optional self-hosted gateway that
+lets remote sessions authenticate without a local `claude` login.
+
+**Login:**
+
+```bash
+claudio proxy login [URL]
+```
+
+The URL is prompted if omitted. The token is **always read interactively** (no
+echo) or piped on stdin — it is never accepted as a command-line argument.
+
+**Ephemeral profile (no saved file):**
+
+```
+CLAUDIO_PROXY_URL=<token>@<host>
+```
+
+where `<host>` may be `claude.example.net`, `https://claude.example.net`, or
+`host:port`. `http://` is only allowed for `127.0.0.1` / `localhost`.
+
+**Other proxy commands:**
+
+```bash
+claudio proxy status              # show profiles and live stats
+claudio proxy use NAME|none       # set or clear the default profile
+claudio proxy logout [NAME]       # remove a saved profile
+```
+
+**What gets injected into each session's environment:**
+
+When a session is spawned with a proxy profile the daemon injects
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and several
+`CLAUDE_CODE_*` / `ANTHROPIC_DEFAULT_*_MODEL` variables via the `Spawn`
+message. Secrets are passed through the daemon's environment plumbing and
+are never written to any state file.
+
+**Model defaults:** The proxy's `/v1/claudio/config` endpoint returns the
+recommended `ANTHROPIC_DEFAULT_{FABLE,OPUS,SONNET,HAIKU}_MODEL` values. When
+the endpoint is unreachable the built-in fallbacks are used
+(`claude-fable-5-1[1m]`, `claude-opus-5-5[1m]`, `claude-sonnet-5-5[1m]`,
+`claude-haiku-5-5[1m]`).
+
+**Stats popup:** `Alt+s` opens a popup showing per-model token usage and
+quota for the active session's proxy profile. The status bar also shows
+proxy state.
+
+### CLI commands
+
+```bash
+claudio daemon status             # is the daemon running? version, session count
+claudio daemon stop               # send SIGTERM; running sessions go dormant
+claudio daemon restart            # stop then start (use after installing a new binary)
+claudio sessions                  # list sessions as a table (id, state, name, cwd)
+```
+
+### Files
+
+| Path | Contents |
+|------|----------|
+| `~/.config/claudio/config.toml` | Main config (mode 0600): `[ui]`, `[keys]`, `[proxy]` sections |
+| `~/.config/claudio/state.json` | TUI client state: session order, names, hosts |
+| `~/.config/claudio/hosts.json` | SSH host MRU list |
+| `~/.config/claudio/daemon-sessions-v1.json` | Daemon journal: sessions on this host |
+| `$XDG_RUNTIME_DIR/claudio/` (or `/tmp/claudio-<uid>/`) | Runtime socket directory (mode 0700) |
+
+The journal file name is versioned (`daemon-sessions-v<N>.json`) so that
+incompatible daemon versions can coexist.
+
+### Security notes
+
+- The runtime socket directory is checked to be owned by the current user,
+  mode 0700, and not a symlink. Every connection is uid-checked
+  (`SO_PEERCRED`).
+- Tokens are never stored in session state files, never passed as CLI
+  arguments, and never logged. They live only in a spawned session's
+  environment (readable by the same uid via `/proc/<pid>/environ` on Linux).
+- Hook relay commands include a per-spawn token bound to a session generation
+  so that a compromised child cannot forge hook events for another session.
+
+### Upgrading
+
+To upgrade the local binary: replace it, then run `claudio daemon restart`.
+The daemon will pick up the new version on restart, and running sessions are
+recovered with `claude --resume`.
+
+Remote binaries are upgraded automatically: when the local SHA-256 of the
+claudio binary changes, the next connection to that host re-bootstraps the
+remote binary without any manual step.
 
 ## Drop-in behavior
 
@@ -110,9 +305,10 @@ So the CLI surface stays byte-for-byte claude's, wrapper knobs are env vars:
 | `CLAUDIO_HOOK_TRANSPORT` | `tcp` | `tcp` or `file` (sandboxes blocking loopback) |
 | `CLAUDIO_RAW_LOG` | — | dump the raw PTY byte stream to this path |
 | `CLAUDIO_COLS` / `CLAUDIO_ROWS` | `120`/`40` | PTY size |
-| `CLAUDIO_CLAUDE_PATH` | `claude` | path to the real claude binary |
+| `CLAUDIO_CLAUDE_PATH` | `claude` | path to the real claude binary (also used by the daemon to find claude on each host) |
 | `CLAUDIO_CADENCE` | `1` | `0` disables per-character human typing cadence (burst instead) |
 | `CLAUDIO_FAST` | `0` | `1` strips *all* cosmetic typing delays (implies cadence off); on by default under `--api` |
+| `CLAUDIO_PROXY_URL` | — | ephemeral proxy profile: `<token>@<host>`; overrides any saved default profile |
 
 ## OpenAI-compatible API mode
 
