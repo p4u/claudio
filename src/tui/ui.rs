@@ -43,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let status = app.proxy_status.get(profile_name.as_str());
             draw_proxy_stats(frame, profile_name, status);
         }
-        Some(Modal::Overview { selected }) => draw_overview(frame, app, *selected),
+        Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
         None => {}
     }
@@ -439,22 +439,22 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
         let inner = popup(
             frame,
             rect,
-            "New session: resume? (Enter pick · Esc back · ←/→ proxy)",
+            "New session: resume? (Enter pick · type to filter · Esc back · ←/→ proxy)",
         );
-        let constraints = if has_proxy {
-            vec![
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ]
-        } else {
-            vec![Constraint::Length(1), Constraint::Min(0)]
-        };
+        // Layout: cwd · [proxy] · filter · list.
+        let mut constraints = vec![
+            Constraint::Length(1), // cwd
+            Constraint::Length(1), // filter
+        ];
+        if has_proxy {
+            constraints.insert(1, Constraint::Length(1)); // proxy before filter
+        }
+        constraints.push(Constraint::Min(0)); // list
         let areas = Layout::vertical(constraints).split(inner);
         let cwd = Paragraph::new(w.display(&step.cwd))
             .style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(cwd, areas[0]);
-        if has_proxy {
+        let (filter_idx, list_idx) = if has_proxy {
             let sel = w
                 .proxy_options
                 .get(w.proxy_selected)
@@ -465,12 +465,16 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
                 Paragraph::new(proxy_line).style(Style::default().fg(Color::Cyan)),
                 areas[1],
             );
-        }
-        let list_area = areas[if has_proxy { 2 } else { 1 }];
+            (2, 3)
+        } else {
+            (1, 2)
+        };
+        draw_input(frame, areas[filter_idx], "filter> ", &step.filter);
+        let filtered = step.filtered_sessions();
         let rows: Vec<String> = std::iter::once("+ New session".to_owned())
-            .chain(step.sessions.iter().map(|s| resume_label(s, now)))
+            .chain(filtered.iter().map(|s| resume_label(s, now)))
             .collect();
-        draw_list(frame, list_area, &rows, step.selected);
+        draw_list(frame, areas[list_idx], &rows, step.selected);
         return;
     }
 
@@ -658,26 +662,38 @@ pub fn fmt_age(secs: u64) -> String {
 
 /// Render the overview / "mission control" popup.
 /// One row per session: `index glyph label host cwd state age [⇅]`.
-pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
+pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str) {
+    use super::interaction::overview_matches;
     let area = frame.area();
-    let height = (app.sessions.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let filtered: Vec<(usize, &super::app::SessionView)> = app
+        .sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| overview_matches(v, filter))
+        .collect();
+    let height = (filtered.len() as u16 + 5).min(area.height.saturating_sub(2));
     let rect = centered(area, 100.min(area.width.saturating_sub(2)), height);
     let inner = popup(
         frame,
         rect,
-        "Overview (↑/↓ select · Enter switch · Esc close)",
+        "Overview (↑/↓ select · Enter switch · type to filter · Esc close)",
     );
 
-    let visible = inner.height as usize;
+    // Split into filter input (1 line) + list.
+    let [filter_area, list_area] =
+        ratatui::layout::Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+            .areas(inner);
+    draw_input(frame, filter_area, "filter> ", filter);
+
+    let visible = list_area.height as usize;
     let offset = selected.saturating_sub(visible.saturating_sub(1));
 
-    let rows: Vec<Line> = app
-        .sessions
+    let rows: Vec<Line> = filtered
         .iter()
         .enumerate()
         .skip(offset)
         .take(visible)
-        .map(|(i, v)| {
+        .map(|(fi, (i, v))| {
             let reconnecting = v.host != "local"
                 && !v.attached
                 && matches!(v.state, crate::proto::SessionState::Unknown);
@@ -702,7 +718,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
                 age,
                 proxy_badge
             );
-            let base = if i == selected {
+            let base = if fi == selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else if v.state.wants_attention() {
                 Style::default().add_modifier(Modifier::BOLD)
@@ -712,7 +728,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
             Line::styled(text, base)
         })
         .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
+    frame.render_widget(Paragraph::new(rows), list_area);
 }
 
 // ── Help popup ────────────────────────────────────────────────────────────────

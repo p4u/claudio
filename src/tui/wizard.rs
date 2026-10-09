@@ -182,9 +182,38 @@ impl HostStep {
 #[derive(Debug, Clone)]
 pub struct ResumeStep {
     pub cwd: String,
-    /// Newest first. The list shown is `+ New session` followed by these.
+    /// All sessions, newest first.
     pub sessions: Vec<ClaudeSession>,
     pub selected: usize,
+    /// Live filter string (fuzzy match against session age/path).
+    pub filter: String,
+}
+
+impl ResumeStep {
+    /// Sessions matching the current filter (all when filter is empty).
+    pub fn filtered_sessions(&self) -> Vec<&ClaudeSession> {
+        if self.filter.is_empty() {
+            return self.sessions.iter().collect();
+        }
+        let f = self.filter.to_lowercase();
+        self.sessions
+            .iter()
+            .filter(|s| {
+                s.id.to_lowercase().contains(&f)
+                    || resume_label(s, 0).to_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    /// Count of items shown (including the "New session" entry).
+    pub fn filtered_count(&self) -> usize {
+        self.filtered_sessions().len()
+    }
+
+    /// The `i`-th filtered session (0-based, not counting the "New" entry).
+    pub fn filtered_session(&self, i: usize) -> Option<&ClaudeSession> {
+        self.filtered_sessions().into_iter().nth(i)
+    }
 }
 
 /// The wizard's state (three steps: host → directory → resume).
@@ -481,6 +510,7 @@ impl Wizard {
             cwd: cwd.to_owned(),
             sessions,
             selected: 0,
+            filter: String::new(),
         });
         Outcome::None
     }
@@ -506,9 +536,25 @@ impl Wizard {
         }
         // Step 2: resume picker.
         if let Some(step) = &mut self.resume {
+            let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
             return match key.code {
                 KeyCode::Esc => {
-                    self.resume = None;
+                    if step.filter.is_empty() {
+                        self.resume = None;
+                    } else {
+                        step.filter.clear();
+                        step.selected = 0;
+                    }
+                    Outcome::None
+                }
+                KeyCode::Backspace => {
+                    step.filter.pop();
+                    step.selected = 0;
+                    Outcome::None
+                }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    step.filter.clear();
+                    step.selected = 0;
                     Outcome::None
                 }
                 KeyCode::Up => {
@@ -516,7 +562,8 @@ impl Wizard {
                     Outcome::None
                 }
                 KeyCode::Down => {
-                    step.selected = (step.selected + 1).min(step.sessions.len());
+                    let max = step.filtered_count();
+                    step.selected = (step.selected + 1).min(max);
                     Outcome::None
                 }
                 KeyCode::Left if self.proxy_options.len() > 1 => {
@@ -532,15 +579,25 @@ impl Wizard {
                         (self.proxy_selected + 1) % self.proxy_options.len().max(1);
                     Outcome::None
                 }
-                KeyCode::Enter => Outcome::Spawn {
-                    cwd: step.cwd.clone(),
-                    resume: step
+                KeyCode::Enter => {
+                    let cwd = step.cwd.clone();
+                    // selected=0 means "New session", 1+ is offset into filtered list
+                    let resume = step
                         .selected
                         .checked_sub(1)
-                        .and_then(|i| step.sessions.get(i))
-                        .map(|s| s.id.clone()),
-                    proxy: self.selected_proxy().map(str::to_owned),
-                },
+                        .and_then(|i| step.filtered_session(i))
+                        .map(|s| s.id.clone());
+                    Outcome::Spawn {
+                        cwd,
+                        resume,
+                        proxy: self.selected_proxy().map(str::to_owned),
+                    }
+                }
+                KeyCode::Char(c) if plain => {
+                    step.filter.push(c);
+                    step.selected = 0;
+                    Outcome::None
+                }
                 _ => Outcome::None,
             };
         }

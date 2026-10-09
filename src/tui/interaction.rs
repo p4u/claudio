@@ -42,6 +42,8 @@ pub enum Modal {
     /// Overview / "mission control": all sessions at a glance.
     Overview {
         selected: usize,
+        /// Live filter string; empty = show all.
+        filter: String,
     },
     /// Help popup: all key bindings.
     Help,
@@ -133,7 +135,7 @@ impl App {
 
     fn open_overview(&mut self) {
         let selected = self.active.unwrap_or(0);
-        self.modal = Some(Modal::Overview { selected });
+        self.modal = Some(Modal::Overview { selected, filter: String::new() });
         self.redraw = true;
     }
 
@@ -208,22 +210,56 @@ impl App {
                     self.modal = None;
                 }
             }
-            Modal::Overview { selected } => match key.code {
-                KeyCode::Esc => self.modal = None,
-                KeyCode::Up if *selected > 0 => *selected -= 1,
-                KeyCode::Down => {
-                    let max = self.sessions.len().saturating_sub(1);
-                    if *selected < max {
-                        *selected += 1;
+            Modal::Overview { selected, filter } => {
+                let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+                match key.code {
+                    KeyCode::Esc => {
+                        if filter.is_empty() {
+                            self.modal = None;
+                        } else {
+                            *filter = String::new();
+                            *selected = 0;
+                        }
                     }
-                }
-                KeyCode::Enter => {
-                    if let Modal::Overview { selected } = self.modal.take().unwrap() {
-                        self.activate(selected);
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        *selected = 0;
                     }
+                    KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                        filter.clear();
+                        *selected = 0;
+                    }
+                    KeyCode::Up if *selected > 0 => *selected -= 1,
+                    KeyCode::Down => {
+                        // Max is the filtered session count.
+                        let f = filter.clone();
+                        let matches = self.sessions.iter()
+                            .filter(|v| overview_matches(v, &f))
+                            .count();
+                        if *selected + 1 < matches {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let f = filter.clone();
+                        let sel = *selected;
+                        // Find the actual index in all sessions.
+                        let real_idx = self.sessions.iter().enumerate()
+                            .filter(|(_, v)| overview_matches(v, &f))
+                            .nth(sel)
+                            .map(|(i, _)| i);
+                        self.modal = None;
+                        if let Some(i) = real_idx {
+                            self.activate(i);
+                        }
+                    }
+                    KeyCode::Char(c) if plain => {
+                        filter.push(c);
+                        *selected = 0;
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Modal::Help => self.modal = None,
         }
     }
@@ -620,4 +656,20 @@ impl App {
             _ => {}
         }
     }
+}
+
+// ── Overview filter helper ─────────────────────────────────────────────────────
+
+/// Whether a session matches the overview filter string (case-insensitive
+/// substring match against label, cwd, host, or state name).
+pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let f = filter.to_lowercase();
+    let label = v.label().to_lowercase();
+    let cwd = v.cwd.to_lowercase();
+    let host = v.host.to_lowercase();
+    let state = super::ui::state_name(v.state).to_lowercase();
+    label.contains(&f) || cwd.contains(&f) || host.contains(&f) || state.contains(&f)
 }

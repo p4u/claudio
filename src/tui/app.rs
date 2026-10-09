@@ -919,7 +919,7 @@ mod tests {
         app.on_terminal(alt('g'));
         // Navigate down to index 1.
         app.modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert!(matches!(app.modal, Some(Modal::Overview { selected: 1 })));
+        assert!(matches!(app.modal, Some(Modal::Overview { selected: 1, .. })));
         // Press Enter — should activate session 1.
         app.modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal.is_none());
