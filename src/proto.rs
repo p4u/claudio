@@ -249,6 +249,12 @@ pub enum SessionEvent {
     ClaudeSession { claude_session_id: String },
     Title { title: String },
     Exited { code: Option<i32> },
+    /// A transient user-visible notice (e.g. resume-fallback).
+    Notice { text: String },
+    /// Catch-all for event kinds this client doesn't recognise yet.
+    /// Keeps older clients alive when the daemon sends a newer event kind.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -438,5 +444,20 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(64);
         a.write_all(&((MAX_FRAME as u32) + 1).to_be_bytes()).await.unwrap();
         assert!(read_frame(&mut b).await.is_err());
+    }
+
+    #[test]
+    fn session_event_notice_roundtrips() {
+        let event = SessionEvent::Notice { text: "resume fallback".into() };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn session_event_unknown_kind_deserialises_to_unknown() {
+        let json = r#"{"kind":"future_event","data":42}"#;
+        let event: SessionEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event, SessionEvent::Unknown);
     }
 }

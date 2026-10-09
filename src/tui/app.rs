@@ -377,6 +377,8 @@ impl App {
             }
             SessionEvent::Title { title } => v.title = Some(title),
             SessionEvent::Exited { .. } => v.state = SessionState::Exited,
+            SessionEvent::Notice { text } => self.notify(text),
+            SessionEvent::Unknown => {}
         }
     }
 
