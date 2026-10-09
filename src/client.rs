@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::time::Instant as TokioInstant;
 
 use crate::paths;
 use crate::proto::{
@@ -53,6 +54,9 @@ const INCOMING_QUEUE: usize = 1024;
 /// Outgoing-frame channel capacity. Backpressure prevents unbounded memory
 /// growth when the socket is slow.
 const OUTGOING_QUEUE: usize = 512;
+/// Input-forwarding channel capacity. Generous to absorb burst typing without
+/// blocking the UI loop; the forwarder task drains it with `send().await`.
+const INPUT_FWD_QUEUE: usize = 4096;
 /// Heartbeat interval: send `Ping` this often.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// Liveness deadline: if no frame is received within this window, the
@@ -95,12 +99,21 @@ struct Pending {
 
 struct Shared {
     out: mpsc::Sender<Frame>,
+    /// Per-connection input-forwarding channel (capacity INPUT_FWD_QUEUE). A
+    /// forwarder task drains it with `.send().await` so keystrokes are never
+    /// silently dropped when the outgoing channel is momentarily busy.
+    input_fwd: mpsc::Sender<Frame>,
+    /// Clone of the incoming sender so `send_input` can surface a notice when
+    /// the input-forward queue is full.
+    in_tx: mpsc::Sender<Incoming>,
     pending: Arc<Mutex<Pending>>,
     next_req: AtomicU64,
     welcome: Welcome,
     incoming: Mutex<Option<mpsc::Receiver<Incoming>>>,
-    /// Last time any frame was received from the daemon (unix millis).
-    last_frame_ms: AtomicU64,
+    /// Tokio-time instant of the last frame received from the daemon.
+    /// The reader stamps it; the heartbeat checks it. Using `tokio::time::Instant`
+    /// makes the heartbeat testable with `tokio::time::pause()`.
+    last_frame: Arc<Mutex<TokioInstant>>,
     /// Signals the reader loop to exit when the writer exits abnormally.
     write_died: Arc<Notify>,
 }
@@ -224,13 +237,6 @@ fn disconnected() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "daemon disconnected")
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 impl Client {
     /// Send `Hello` over `stream`, expect a compatible `Welcome`, then start
     /// the reader, writer and heartbeat tasks.
@@ -290,16 +296,19 @@ impl Client {
         let pending = Arc::new(Mutex::new(Pending::default()));
         let (out_tx, out_rx) = mpsc::channel(OUTGOING_QUEUE);
         let (in_tx, in_rx) = mpsc::channel(INCOMING_QUEUE);
+        let (input_fwd_tx, input_fwd_rx) = mpsc::channel(INPUT_FWD_QUEUE);
         let write_died = Arc::new(Notify::new());
-        let last_frame_ms = AtomicU64::new(now_ms());
+        let last_frame = Arc::new(Mutex::new(TokioInstant::now()));
 
         let shared = Arc::new(Shared {
-            out: out_tx,
+            out: out_tx.clone(),
+            input_fwd: input_fwd_tx,
+            in_tx: in_tx.clone(),
             pending: Arc::clone(&pending),
             next_req: AtomicU64::new(1),
             welcome,
             incoming: Mutex::new(Some(in_rx)),
-            last_frame_ms,
+            last_frame: Arc::clone(&last_frame),
             write_died: Arc::clone(&write_died),
         });
 
@@ -309,7 +318,11 @@ impl Client {
             Arc::clone(&pending),
             in_tx,
             Arc::clone(&write_died),
+            last_frame,
         ));
+        // Input-forwarder: drains input_fwd with .send().await so keystrokes
+        // are never silently dropped when the outgoing channel is momentarily busy.
+        tokio::spawn(input_forwarder(input_fwd_rx, out_tx));
 
         // Heartbeat task.
         let hb_shared = Arc::clone(&shared);
@@ -385,13 +398,30 @@ impl Client {
         Ok(rx)
     }
 
-    /// Send keyboard/mouse input to a session (fire and forget).
+    /// Send keyboard/mouse input to a session.
+    ///
+    /// Input is queued in the per-connection input-forwarding channel
+    /// (capacity [`INPUT_FWD_QUEUE`]). A forwarder task drains it with
+    /// `.send().await` so this method is always non-blocking. If the queue is
+    /// full, the connection is unhealthy; a notice is surfaced and the excess
+    /// input is dropped.
     pub fn send_input(&self, id: SessionId, bytes: &[u8]) {
         for chunk in bytes.chunks(INPUT_CHUNK) {
-            let _ = self.shared.out.try_send(Frame::Data {
+            let frame = Frame::Data {
                 session: id,
                 bytes: chunk.to_vec(),
-            });
+            };
+            if let Err(_) = self.shared.input_fwd.try_send(frame) {
+                tracing::warn!(%id, "input dropped: connection congested");
+                // Surface a notice in the incoming stream so the TUI can show it.
+                let _ = self.shared.in_tx.try_send(Incoming::Event {
+                    id,
+                    event: crate::proto::SessionEvent::Notice {
+                        text: "input dropped: connection congested".into(),
+                    },
+                });
+                break;
+            }
         }
     }
 }
@@ -428,6 +458,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     pending: Arc<Mutex<Pending>>,
     incoming: mpsc::Sender<Incoming>,
     write_died: Arc<Notify>,
+    last_frame: Arc<Mutex<TokioInstant>>,
 ) {
     let mut ui_gone = false;
 
@@ -437,6 +468,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
             res = frame_fut => {
                 match res {
                     Ok(Some(frame)) => {
+                        // Stamp the tokio-time instant so the heartbeat can
+                        // check liveness with tokio::time::pause() in tests.
+                        *last_frame.lock().unwrap_or_else(|e| e.into_inner()) =
+                            TokioInstant::now();
                         match frame {
                             Frame::Data { session, bytes } => Some(Incoming::Data { id: session, bytes }),
                             Frame::Control(env) => route(env, &pending),
@@ -468,15 +503,19 @@ async fn read_loop<R: AsyncRead + Unpin>(
 
 /// Send Ping every `HEARTBEAT_INTERVAL` and kill the connection if no frame
 /// arrives within `LIVENESS_DEADLINE`.
+///
+/// Uses `tokio::time::Instant` so tests can drive time with
+/// `tokio::time::pause()` / `tokio::time::advance()`.
 async fn heartbeat_loop(shared: Arc<Shared>) {
-    let deadline_ms = LIVENESS_DEADLINE.as_millis() as u64;
     loop {
         tokio::time::sleep(HEARTBEAT_INTERVAL).await;
 
-        // Check liveness.
-        let last = shared.last_frame_ms.load(Ordering::Relaxed);
-        let now = now_ms();
-        if now.saturating_sub(last) > deadline_ms {
+        // Check liveness using tokio time so tests can control it.
+        let elapsed = {
+            let last = shared.last_frame.lock().unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        if elapsed > LIVENESS_DEADLINE {
             tracing::warn!("daemon liveness deadline exceeded, closing connection");
             // Mark pending as closed and signal the reader.
             {
@@ -501,6 +540,16 @@ async fn heartbeat_loop(shared: Arc<Shared>) {
         let _ = shared
             .out
             .try_send(Frame::Control(Envelope::request(req, Msg::Ping)));
+    }
+}
+
+/// Drain the input-forwarding channel with `.send().await` so keystrokes are
+/// delivered reliably even when the outgoing channel is momentarily full.
+async fn input_forwarder(mut rx: mpsc::Receiver<Frame>, out: mpsc::Sender<Frame>) {
+    while let Some(frame) = rx.recv().await {
+        if out.send(frame).await.is_err() {
+            break; // writer is gone
+        }
     }
 }
 
@@ -652,7 +701,7 @@ fn peer_uid_fd(fd: std::os::unix::io::RawFd) -> io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{HostInfo, SessionState};
+    use crate::proto::{self, HostInfo, SessionState};
     use uuid::Uuid;
 
     fn welcome(proto: u32) -> Msg {
@@ -946,5 +995,103 @@ mod tests {
             0o700
         );
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ── Heartbeat tests (use tokio time-pause to run instantly) ───────────────
+
+    /// A fake daemon that answers every Ping with Pong: even after advancing
+    /// time well past `LIVENESS_DEADLINE`, the connection must stay alive
+    /// because each Pong stamps `last_frame`.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_stays_alive_when_daemon_responds() {
+        let (ours, mut daemon) = tokio::io::duplex(64 * 1024);
+
+        // Fake daemon: answer every Ping with Pong so last_frame is refreshed.
+        let fake = tokio::spawn(async move {
+            accept(&mut daemon, welcome(PROTO)).await;
+            loop {
+                let Ok(Some(frame)) = proto::read_frame(&mut daemon).await else {
+                    break;
+                };
+                if let Frame::Control(Envelope {
+                    req: Some(req),
+                    msg: Msg::Ping,
+                }) = frame
+                {
+                    let _ = write_frame(
+                        &mut daemon,
+                        &Frame::Control(Envelope::request(req, Msg::Pong)),
+                    )
+                    .await;
+                }
+            }
+        });
+
+        let client = Client::handshake(ours).await.unwrap();
+        let mut incoming = client.take_incoming().unwrap();
+
+        // Advance time in steps of HEARTBEAT_INTERVAL so each heartbeat fires
+        // and the fake daemon gets a chance to respond (updating last_frame).
+        // Total: 4 * 15 s = 60 s > LIVENESS_DEADLINE (45 s).
+        for _ in 0..4 {
+            tokio::time::advance(HEARTBEAT_INTERVAL).await;
+            // Yield multiple times to let all tasks (heartbeat, write loop,
+            // fake daemon, read loop) complete their scheduling rounds.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // No Disconnected should have been sent — the connection is alive.
+        assert_eq!(
+            incoming.try_recv().ok(),
+            None,
+            "connection should still be alive after 60 s with ping/pong"
+        );
+
+        fake.abort();
+    }
+
+    /// A fake daemon that stops answering after the handshake: the heartbeat
+    /// must declare the connection dead once `LIVENESS_DEADLINE` has elapsed.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_declares_dead_when_daemon_stops_responding() {
+        let (ours, mut daemon) = tokio::io::duplex(64 * 1024);
+
+        // Accept the handshake then go silent (hold the connection open).
+        let fake = tokio::spawn(async move {
+            accept(&mut daemon, welcome(PROTO)).await;
+            // Don't respond to anything — just keep the connection open by
+            // sitting on a long sleep (which tokio::time::advance will skip).
+            tokio::time::sleep(Duration::from_secs(10_000)).await;
+        });
+
+        let client = Client::handshake(ours).await.unwrap();
+        let mut incoming = client.take_incoming().unwrap();
+
+        // Advance time well past LIVENESS_DEADLINE.
+        // We need at least 4 heartbeat intervals (60 s > 45 s LIVENESS_DEADLINE).
+        for _ in 0..4 {
+            tokio::time::advance(HEARTBEAT_INTERVAL).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // The heartbeat must have declared the connection dead.
+        let item = tokio::time::timeout(Duration::from_secs(5), incoming.recv()).await;
+        assert_eq!(
+            item.ok().flatten(),
+            Some(Incoming::Disconnected),
+            "connection should be declared dead after liveness deadline"
+        );
+
+        // New requests must fail.
+        assert!(
+            client.request(Msg::Ping).await.is_err(),
+            "requests must fail after connection is declared dead"
+        );
+
+        fake.abort();
     }
 }
