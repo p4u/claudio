@@ -292,7 +292,15 @@ impl App {
         });
         let seeds = wizard::assemble(active_cwd_for_host, &host_recent, &self.projects);
         let host_candidates = crate::remote::hosts::candidates();
-        let proxy_default = active_proxy.as_deref().or(self.proxy_default.as_deref());
+        // Determine effective proxy default for the wizard:
+        // active session's proxy > startup override > config default.
+        let proxy_default = active_proxy.as_deref().or_else(|| {
+            match &self.proxy_override {
+                crate::tui::app::ProxyChoice::Direct => None,
+                crate::tui::app::ProxyChoice::Profile(p) => Some(p.as_str()),
+                crate::tui::app::ProxyChoice::Default => self.proxy_default.as_deref(),
+            }
+        });
         self.modal = Some(Modal::Wizard(Wizard::new(
             seeds,
             self.home.clone(),

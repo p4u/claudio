@@ -139,9 +139,20 @@ fn main() -> std::process::ExitCode {
         return sessions_cmd();
     }
 
-    // A bare `claudio` opens the session manager.
+    // `claudio [--proxy <name>|--no-proxy]` — open the session manager with a
+    // proxy override applied to every new session.
     if argv.len() == 1 {
         return tui::run();
+    }
+    if argv.get(1).map(String::as_str) == Some("--no-proxy") && argv.len() == 2 {
+        return tui::run_with_proxy(tui::app::ProxyChoice::Direct);
+    }
+    if argv.get(1).map(String::as_str) == Some("--proxy") {
+        if let Some(name) = argv.get(2).cloned() {
+            return tui::run_with_proxy(tui::app::ProxyChoice::Profile(name));
+        }
+        eprintln!("claudio: --proxy requires a profile name");
+        return std::process::ExitCode::FAILURE;
     }
 
     let args = &argv[1..];

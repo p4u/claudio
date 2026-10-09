@@ -4,7 +4,7 @@
 //! connections (local + remote) and runs the event loop. State and update
 //! logic live in [`app`], rendering in [`ui`].
 
-mod app;
+pub mod app;
 mod connections;
 mod interaction;
 mod keymap;
@@ -68,6 +68,15 @@ fn emit_notification(label: &str) {
 
 /// Run the manager until the user quits.
 pub fn run() -> ExitCode {
+    run_with_proxy(app::ProxyChoice::Default)
+}
+
+/// Like [`run`] but applies a startup proxy override to every new session.
+///
+/// - `Direct`  → new sessions never use a proxy (--no-proxy).
+/// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
+/// - `Default` → wizard pre-selects the config.toml default, if any.
+pub fn run_with_proxy(proxy_override: app::ProxyChoice) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -78,12 +87,12 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = rt.block_on(main());
+    let code = rt.block_on(main(proxy_override));
     rt.shutdown_background();
     code
 }
 
-async fn main() -> ExitCode {
+async fn main(proxy_override: app::ProxyChoice) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let cfg = crate::config::load();
     let mut key_notices = Vec::new();
@@ -113,6 +122,7 @@ async fn main() -> ExitCode {
         cfg.ui.notify,
         km,
         key_notices,
+        proxy_override,
     )
     .await;
     restore_terminal();
@@ -240,16 +250,18 @@ async fn event_loop(
     notify_enabled: bool,
     km: keymap::Keymap,
     key_notices: Vec<String>,
+    proxy_override: app::ProxyChoice,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
-    let mut app = App::new_with_config(
+    let mut app = App::new_with_proxy(
         size.width,
         size.height,
         local_home,
         saved.recent_dirs.clone(),
         notify_enabled,
         km,
+        proxy_override,
     );
     app.recover(&saved, &live);
 

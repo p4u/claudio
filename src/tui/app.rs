@@ -27,6 +27,21 @@ pub use super::notifications::Notice;
 pub use super::proxy_state::ProxyStatus;
 pub use super::sessions::SessionView;
 
+/// How the manager should apply a proxy for new sessions.
+///
+/// Resolved once at startup (from `--proxy`/`--no-proxy` flags or config)
+/// and used as the pre-selected proxy in the new-session wizard.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ProxyChoice {
+    /// Use the profile named in `config.toml [proxy] default` (the default).
+    #[default]
+    Default,
+    /// Explicitly no proxy, even when a default is configured (--no-proxy).
+    Direct,
+    /// Use a specific named profile (--proxy <name>).
+    Profile(String),
+}
+
 /// Rows taken by the tab bar and the status bar.
 pub(super) const CHROME_ROWS: u16 = 2;
 /// How long a notice stays in the status bar, in ticks.
@@ -125,6 +140,9 @@ pub struct App {
     pub proxy_profiles: Vec<String>,
     /// The default proxy profile from config.
     pub proxy_default: Option<String>,
+    /// Startup proxy override: Direct suppresses the default; Profile forces
+    /// a specific profile regardless of per-session selection in the wizard.
+    pub proxy_override: ProxyChoice,
     /// Last state for which a desktop notification was sent per session.
     /// Used to debounce: only one notification per session per state change.
     pub notified: HashMap<SessionId, SessionState>,
@@ -154,6 +172,7 @@ impl App {
         App::new_with_config(width, height, home, rd, true, Keymap::default())
     }
 
+    #[cfg(test)]
     pub fn new_with_config(
         width: u16,
         height: u16,
@@ -161,6 +180,18 @@ impl App {
         recent_dirs: HashMap<String, Vec<String>>,
         notify_enabled: bool,
         keymap: Keymap,
+    ) -> App {
+        App::new_with_proxy(width, height, home, recent_dirs, notify_enabled, keymap, ProxyChoice::Default)
+    }
+
+    pub fn new_with_proxy(
+        width: u16,
+        height: u16,
+        home: String,
+        recent_dirs: HashMap<String, Vec<String>>,
+        notify_enabled: bool,
+        keymap: Keymap,
+        proxy_override: ProxyChoice,
     ) -> App {
         let (proxy_profiles, proxy_default) = super::proxy_state::load_proxy_profiles();
         App {
@@ -183,6 +214,7 @@ impl App {
             proxy_status: HashMap::new(),
             proxy_profiles,
             proxy_default,
+            proxy_override,
             notified: HashMap::new(),
             notify_enabled,
             pending_notifs: Vec::new(),
