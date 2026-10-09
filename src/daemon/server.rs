@@ -430,6 +430,15 @@ impl Client {
                     },
                 }
             }
+            Msg::Rename { id, name } => {
+                if self.daemon.rename(id, name).await {
+                    Msg::Ok
+                } else {
+                    Msg::Error {
+                        message: format!("no such session: {id}"),
+                    }
+                }
+            }
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
             Msg::RecentProjects { limit } => recent_projects(limit).await,

@@ -510,7 +510,16 @@ mod tests {
         app.on_terminal(Event::Paste("api".into()));
         app.on_terminal(plain(KeyCode::Enter));
         assert_eq!(app.sessions[0].name.as_deref(), Some("api"));
-        assert!(matches!(app.take_effects()[..], [Effect::Save]));
+        // Rename sends the change to the daemon (durable journal) and saves state.
+        let effects = app.take_effects();
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Save)),
+            "expected Save in effects"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Request { msg: Msg::Rename { .. }, .. })),
+            "expected Rename request in effects"
+        );
         app.on_terminal(alt('r'));
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.on_terminal(plain(KeyCode::Enter));

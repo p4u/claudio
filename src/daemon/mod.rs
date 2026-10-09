@@ -447,6 +447,27 @@ impl Daemon {
         Ok(())
     }
 
+    /// Update a session's human-readable name in the journal and broadcast the
+    /// change so all connected clients (and any future `ListSessions` response)
+    /// reflect it. Returns `false` when `id` is not in the journal.
+    async fn rename(&self, id: SessionId, name: Option<String>) -> bool {
+        let snap = {
+            let mut reg = self.registry();
+            if !reg.journal.rename_entry(id, name.clone()) {
+                return false;
+            }
+            reg.journal.snapshot()
+        };
+        let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
+            tracing::error!(%id, error = %e, "could not persist rename");
+            // Non-fatal: in-memory is updated, client sees Ok; disk will be
+            // repaired on next unrelated snapshot write.
+        }
+        self.broadcast(id, SessionEvent::Renamed { name });
+        true
+    }
+
     /// Every journaled session; live ones report their pid, state and title.
     async fn sessions(&self) -> Vec<SessionInfo> {
         let rows: Vec<(Entry, Option<(tokio::sync::mpsc::Sender<Cmd>, Option<u32>)>)> = {

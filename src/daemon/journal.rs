@@ -168,6 +168,17 @@ impl Journal {
         (entry, result)
     }
 
+    /// Update a session's human-readable name in memory only (no disk write).
+    /// Returns `false` when `id` is not journaled. Callers must follow up with
+    /// a snapshot + `write_snapshot` outside the registry lock.
+    pub fn rename_entry(&mut self, id: SessionId, name: Option<String>) -> bool {
+        let Some(e) = self.sessions.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.name = name;
+        true
+    }
+
     /// Update a session's claude conversation id in memory only (no disk write).
     /// Returns `false` when `id` is not journaled. Callers must follow up with
     /// a snapshot + `write_snapshot` outside the registry lock.
