@@ -161,8 +161,14 @@ impl ScreenModel {
         let rows = self.rows as usize;
         match region {
             Region::TabBar => self.row_text(0),
-            Region::StatusBar => self.row_text(rows.saturating_sub(1)),
-            Region::Pane => (1..rows.saturating_sub(1))
+            Region::StatusBar => {
+                let start = rows.saturating_sub(2);
+                (start..rows)
+                    .map(|r| self.row_text(r))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Region::Pane => (1..rows.saturating_sub(2))
                 .map(|r| self.row_text(r))
                 .collect::<Vec<_>>()
                 .join("\n"),

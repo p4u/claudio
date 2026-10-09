@@ -44,16 +44,31 @@ pub struct SessionView {
     pub attached: bool,
     /// Proxy profile name (None = no proxy). Only the name, never the token.
     pub proxy: Option<String>,
+    /// Git branch of the session's cwd, if any.
+    pub branch: Option<String>,
+    /// Short human-readable model name from the last assistant turn.
+    pub model: Option<String>,
+    /// Total input+cache tokens of the last assistant turn.
+    pub context_tokens: Option<u64>,
 }
 
 impl SessionView {
-    /// The tab label: the user's name, else claude's title, else the cwd's
-    /// basename. Sanitized so it is safe to embed in escape sequences.
+    /// The tab label: the user's name, else a meaningful claude title (not
+    /// "Claude Code"), else the cwd's basename.
+    /// Sanitized so it is safe to embed in escape sequences.
     pub fn label(&self) -> String {
         let raw = self
             .name
             .clone()
-            .or_else(|| self.title.clone())
+            .or_else(|| {
+                self.title.as_ref().and_then(|t| {
+                    if t == "Claude Code" || t.is_empty() {
+                        None
+                    } else {
+                        Some(t.clone())
+                    }
+                })
+            })
             .unwrap_or_else(|| {
                 self.cwd
                     .rsplit('/')
@@ -270,6 +285,9 @@ impl App {
             mirror: Screen::new(rows, cols),
             attached: false,
             proxy: proxy.clone(),
+            branch: None,
+            model: None,
+            context_tokens: None,
         });
         state::push_recent(&mut self.recent_dirs, &host, &cwd);
         self.activate(self.sessions.len() - 1);
@@ -455,6 +473,9 @@ impl App {
                 mirror: Screen::new(rows, cols),
                 attached: false,
                 proxy: r.saved.proxy,
+                branch: None,
+                model: None,
+                context_tokens: None,
             });
         }
 

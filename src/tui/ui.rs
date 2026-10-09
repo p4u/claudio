@@ -25,12 +25,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let [tabs, pane, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .areas(frame.area());
     draw_tabs(frame, app, tabs);
     draw_pane(frame, app, pane);
-    draw_status(frame, app, status);
+    let [status_session, status_machine] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(status);
+    draw_status_session(frame, app, status_session);
+    draw_status_machine(frame, app, status_machine);
     match &app.modal {
         Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
         Some(Modal::Close { id }) => {
@@ -275,7 +278,8 @@ pub fn state_name(state: SessionState) -> &'static str {
     }
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+/// Line 1: session info — host:cwd, branch, model, context tokens, state, proxy.
+fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
     let (left, left_style) = if !app.connected {
         (
             "daemon disconnected, reconnecting…".to_owned(),
@@ -284,18 +288,35 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(notice) = &app.notice {
         (notice.text.clone(), Style::default().fg(Color::Yellow))
     } else if let Some(v) = app.active_view() {
-        // Show `host:cwd` for remote sessions, `cwd` for local.
         let cwd = abbreviate_home(&v.cwd, &app.home);
         let location = if v.host == "local" {
             cwd
         } else {
             format!("{}:{}", v.host, cwd)
         };
-        let mut parts = vec![location, state_name(v.state).to_owned()];
-        // Show proxy name when one is active (pool status and token counts
-        // are available in the overview popup; keep the status bar terse).
+        let mut parts = vec![location];
+        if let Some(branch) = &v.branch {
+            if !branch.is_empty() {
+                parts.push(format!("⎇ {branch}"));
+            }
+        }
+        if let Some(model) = &v.model {
+            // Strip "claude-" prefix and truncate.
+            let short = model.strip_prefix("claude-").unwrap_or(model);
+            parts.push(truncate(short, 14));
+        }
+        if let Some(ctx) = v.context_tokens {
+            parts.push(fmt_tokens_k(ctx));
+        }
+        parts.push(state_name(v.state).to_owned());
+        // Uptime.
+        if v.created_at > 0 && app.now >= v.created_at {
+            parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
+        }
         if let Some((pname, _)) = app.active_proxy_status() {
             parts.push(format!("proxy:{pname}"));
+        } else {
+            parts.push("direct".to_owned());
         }
         (parts.join(" · "), Style::default())
     } else {
@@ -303,25 +324,64 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     let width = area.width as usize;
     let left = truncate(&format!(" {left}"), width);
-    let mut spans = vec![Span::styled(left.clone(), left_style)];
-    // Optional upgrade indicator: `↑ vX.Y.Z ` shown dim-cyan before the key hints.
+    let spans = vec![Span::styled(left, left_style)];
+    let bar =
+        Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_widget(bar, area);
+}
+
+/// Line 2: machine stats — CPU/mem sparklines left, upgrade + "Alt+h help" right.
+fn draw_status_machine(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+    let focused_host = app
+        .active_view()
+        .map(|v| v.host.clone())
+        .unwrap_or_else(|| "local".to_owned());
+
+    // Build left side: CPU and memory sparklines.
+    let mut left = String::new();
+    if let Some(ring) = app.host_stats.get(&focused_host) {
+        let n = ring.len().min(10);
+        if n > 0 {
+            let cpu_vals: Vec<f32> = ring.iter().rev().take(n).rev().map(|s| s.cpu_pct).collect();
+            let cpu_bar = sparkline(&cpu_vals, 100.0);
+            let cpu_pct = ring.back().map(|s| s.cpu_pct).unwrap_or(0.0);
+            left.push_str(&format!(" cpu {cpu_bar} {cpu_pct:.0}%"));
+
+            if let Some(last) = ring.back() {
+                if last.mem_total > 0 {
+                    let mem_vals: Vec<f32> = ring
+                        .iter()
+                        .rev()
+                        .take(n)
+                        .rev()
+                        .map(|s| s.mem_used as f32 / s.mem_total.max(1) as f32 * 100.0)
+                        .collect();
+                    let mem_bar = sparkline(&mem_vals, 100.0);
+                    let used_gb = last.mem_used as f64 / 1_073_741_824.0;
+                    let total_gb = last.mem_total as f64 / 1_073_741_824.0;
+                    left.push_str(&format!("  mem {mem_bar} {used_gb:.1}/{total_gb:.0}G"));
+                }
+            }
+        }
+    }
+
+    // Build right side: upgrade notice + "Alt+h help".
     let upgrade = app
         .upgrade_notice
         .as_deref()
         .map(|t| format!("↑ {t} "))
         .unwrap_or_default();
-    // Hints fill what's left, losing their head first so `Alt+q quit` stays.
-    let hints = format!("{} ", app.keymap.hints());
-    let used = str_width(&left) + str_width(&upgrade);
-    let room = width.saturating_sub(used + 2);
-    let hints = if str_width(&hints) <= room {
-        hints
-    } else if room >= 12 {
-        format!("…{}", tail(&hints, room - 1))
-    } else {
-        String::new()
-    };
-    let pad = width.saturating_sub(used + str_width(&hints));
+    let hint = "Alt+h help ";
+
+    let left_w = str_width(&left);
+    let right_w = str_width(&upgrade) + str_width(hint);
+    let pad = width.saturating_sub(left_w + right_w);
+
+    let mut spans = Vec::new();
+    if !left.is_empty() {
+        spans.push(Span::raw(left));
+    }
     spans.push(Span::raw(" ".repeat(pad)));
     if !upgrade.is_empty() {
         spans.push(Span::styled(
@@ -332,12 +392,35 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
     spans.push(Span::styled(
-        hints,
+        hint,
         Style::default().add_modifier(Modifier::DIM),
     ));
+
     let bar =
         Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(bar, area);
+}
+
+/// Render a sparkline from `vals` (each 0..=`max`).
+fn sparkline(vals: &[f32], max: f32) -> String {
+    const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    vals.iter()
+        .map(|&v| {
+            let idx = ((v / max.max(1.0)) * 7.0).clamp(0.0, 7.0) as usize;
+            BARS[idx]
+        })
+        .collect()
+}
+
+/// Format context tokens: `143k`, `1.2M`, or raw for small values.
+fn fmt_tokens_k(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("ctx {:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("ctx {}k", n / 1000)
+    } else {
+        format!("ctx {n}")
+    }
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────────
@@ -1070,6 +1153,9 @@ mod tests {
             mirror: Screen::new(24, 80),
             attached: false,
             proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
         };
         let sessions = vec![make_view("api"), make_view("docs")];
         // Wide bar: labels appear, no age.

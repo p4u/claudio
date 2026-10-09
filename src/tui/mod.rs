@@ -270,6 +270,15 @@ async fn event_loop(
     );
     app.recover(&saved, &live);
 
+    // Subscribe to host stats pushes (CPU/mem sparklines).
+    // Old daemons reply Error; we treat that as "unsupported" and the sparklines
+    // just stay empty.
+    app.effects.push(Effect::Request {
+        host: "local".to_owned(),
+        msg: Msg::SubscribeHostStats,
+        to: ReplyTo::Ack("host_stats"),
+    });
+
     // Show any config parse notices in the status bar at startup.
     for notice in key_notices {
         app.notify(notice);
@@ -381,6 +390,9 @@ async fn event_loop(
                                     }
                                 });
                             }
+                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
+                                app.on_host_stats("local".to_owned(), cpu_pct, mem_used, mem_total);
+                            }
                             inc => app.on_incoming_from("local", inc),
                         }
                     } else {
@@ -394,6 +406,9 @@ async fn event_loop(
                                 // M6: bump generation so stale LocalReconnected events are dropped.
                                 let new_gen = conns.next_generation(&host);
                                 spawn_connect_after(host, new_gen, delay, ev_tx.clone(), true);
+                            }
+                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
+                                app.on_host_stats(host, cpu_pct, mem_used, mem_total);
                             }
                             inc => app.on_incoming_from(&host, inc),
                         }

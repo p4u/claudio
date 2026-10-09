@@ -307,7 +307,7 @@ fn test_help_popup_opens_and_closes() {
     tui.wait_until(|s| !s.contains("any key closes", Region::Screen), WAIT);
 
     // Status bar hints should be back.
-    tui.wait_for("Alt+q", Region::StatusBar, WAIT);
+    tui.wait_for("Alt+h", Region::StatusBar, WAIT);
 
     tui.quit(WAIT);
 }

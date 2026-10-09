@@ -243,6 +243,9 @@ mod tests {
             title: Some("title".into()),
             pid,
             created_at: 100,
+            branch: None,
+            model: None,
+            context_tokens: None,
         }
     }
 

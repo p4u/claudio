@@ -494,6 +494,9 @@ impl App {
                 }
             }
             Incoming::Event { id, event } => self.on_event(host, id, event),
+            Incoming::HostStats { .. } => {
+                // Handled in the event loop before on_incoming_from is called.
+            }
             Incoming::Disconnected => {
                 if host == "local" {
                     self.on_disconnected_local();
@@ -522,6 +525,9 @@ impl App {
                     mirror: Screen::new(rows, cols),
                     attached: false,
                     proxy: None,
+                    branch: info.branch.clone(),
+                    model: info.model.clone(),
+                    context_tokens: info.context_tokens,
                 });
                 self.save();
                 return;
@@ -552,6 +558,21 @@ impl App {
             SessionEvent::Renamed { name } => {
                 v.name = name;
                 self.save();
+            }
+            SessionEvent::Meta {
+                branch,
+                model,
+                context_tokens,
+            } => {
+                if branch.is_some() {
+                    v.branch = branch;
+                }
+                if model.is_some() {
+                    v.model = model;
+                }
+                if context_tokens.is_some() {
+                    v.context_tokens = context_tokens;
+                }
             }
             SessionEvent::Unknown => {}
         }

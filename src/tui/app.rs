@@ -42,8 +42,16 @@ pub enum ProxyChoice {
     Profile(String),
 }
 
-/// Rows taken by the tab bar and the status bar.
-pub(super) const CHROME_ROWS: u16 = 2;
+/// Rows taken by the tab bar and the two-line status bar.
+pub(super) const CHROME_ROWS: u16 = 3;
+
+/// A single host-stats sample stored in the ring buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct HostStatsSample {
+    pub cpu_pct: f32,
+    pub mem_used: u64,
+    pub mem_total: u64,
+}
 /// How long a notice stays in the status bar, in ticks.
 const NOTICE_TICKS: u32 = 24;
 /// `RecentProjects` limit for the wizard.
@@ -160,6 +168,9 @@ pub struct App {
     /// Set by the background upgrade-check task when a newer release is found.
     /// Rendered as a dim `↑ vX.Y.Z` indicator at the right of the status bar.
     pub upgrade_notice: Option<String>,
+    /// Ring buffer of host stats samples, keyed by host name.
+    /// Capacity capped at 30 samples per host (~1 min at 2-s interval).
+    pub host_stats: HashMap<String, std::collections::VecDeque<HostStatsSample>>,
 }
 
 impl App {
@@ -224,6 +235,7 @@ impl App {
             killed: Vec::new(),
             keymap,
             upgrade_notice: None,
+            host_stats: HashMap::new(),
         }
     }
 
@@ -372,6 +384,16 @@ impl App {
         );
     }
 
+    /// Record a host-stats sample in the ring buffer.
+    pub fn on_host_stats(&mut self, host: String, cpu_pct: f32, mem_used: u64, mem_total: u64) {
+        let ring = self.host_stats.entry(host).or_default();
+        ring.push_back(HostStatsSample { cpu_pct, mem_used, mem_total });
+        while ring.len() > 30 {
+            ring.pop_front();
+        }
+        self.redraw = true;
+    }
+
     /// Advance animations, the clock and notice timeouts.
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
@@ -405,6 +427,9 @@ mod tests {
             title: None,
             pid,
             created_at: 1,
+            branch: None,
+            model: None,
+            context_tokens: None,
         }
     }
 
@@ -457,13 +482,13 @@ mod tests {
         let Msg::Spawn(spec) = reqs[0] else {
             panic!("expected Spawn, got {reqs:?}")
         };
-        assert_eq!((spec.id, spec.rows), (live[1].id, 28));
+        assert_eq!((spec.id, spec.rows), (live[1].id, 27));
         assert_eq!(spec.args, ["--resume", "c2"]);
         assert_eq!(
             *reqs[1],
             Msg::Attach {
                 id: live[1].id,
-                rows: 28,
+                rows: 27,
                 cols: 100
             }
         );
@@ -496,7 +521,7 @@ mod tests {
                 &Msg::Detach { id: live[0].id },
                 &Msg::Attach {
                     id: live[1].id,
-                    rows: 28,
+                    rows: 27,
                     cols: 100
                 }
             ]
@@ -521,7 +546,7 @@ mod tests {
                 cols: 5,
             },
         );
-        assert_eq!(app.sessions[0].mirror.size(), (28, 100));
+        assert_eq!(app.sessions[0].mirror.size(), (27, 100));
     }
 
     #[test]
@@ -674,6 +699,9 @@ mod tests {
             title: None,
             pid: Some(42),
             created_at: 1,
+            branch: None,
+            model: None,
+            context_tokens: None,
         }];
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&saved, &live);
@@ -705,6 +733,9 @@ mod tests {
             title: None,
             pid: Some(1),
             created_at: 1,
+            branch: None,
+            model: None,
+            context_tokens: None,
         }];
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
         app.recover(&ClientState::default(), &local_live);
@@ -724,6 +755,9 @@ mod tests {
             mirror: crate::term::screen::Screen::new(28, 100),
             attached: false,
             proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
         });
         assert_eq!(app.sessions.len(), 2);
 
@@ -801,7 +835,7 @@ mod tests {
             *reqs[1],
             Msg::Attach {
                 id: spec.id,
-                rows: 28,
+                rows: 27,
                 cols: 100
             }
         );
@@ -902,6 +936,9 @@ mod tests {
             mirror: Screen::new(28, 100),
             attached: true,
             proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
         });
         app.sessions.push(SessionView {
             id: remote_id,
@@ -915,6 +952,9 @@ mod tests {
             mirror: Screen::new(28, 100),
             attached: true,
             proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
         });
         app.on_incoming_from("local", Incoming::Disconnected);
         // Local session detached.
