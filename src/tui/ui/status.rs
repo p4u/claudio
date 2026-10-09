@@ -6,9 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::proto::SessionState;
+use crate::proto::{SessionKind, SessionState};
 
-use super::super::app::App;
+use super::super::app::{App, SessionView};
 use super::{abbreviate_home, fmt_age, str_width, truncate};
 
 // ── Status bar ────────────────────────────────────────────────────────────────
@@ -36,6 +36,8 @@ pub(super) fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else if let Some(notice) = &app.notice {
         (notice.text.clone(), Style::default().fg(Color::Yellow))
+    } else if let Some(v) = app.active_view().filter(|v| v.kind == SessionKind::Shell) {
+        (terminal_line(app, v), Style::default())
     } else if let Some(v) = app.active_view() {
         let cwd = abbreviate_home(&v.cwd, &app.home);
         let location = if v.host == "local" {
@@ -77,6 +79,19 @@ pub(super) fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
     let bar =
         Paragraph::new(Line::from(spans)).style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_widget(bar, area);
+}
+
+/// Line 1 for a terminal tab: `$ terminal · host:cwd · uptime`. No model,
+/// context or proxy; the cwd is where it was launched, not tracked.
+fn terminal_line(app: &App, v: &SessionView) -> String {
+    let mut parts = vec![
+        "$ terminal".to_owned(),
+        format!("{}:{}", v.host, abbreviate_home(&v.cwd, &app.home)),
+    ];
+    if v.created_at > 0 && app.now >= v.created_at {
+        parts.push(fmt_age(app.now - v.created_at));
+    }
+    parts.join(" · ")
 }
 
 /// Line 2: machine stats — CPU/mem sparklines left, upgrade + "Alt+h help" right.

@@ -29,7 +29,10 @@ use super::session::{ClientId, Cmd};
 use super::{host, Config, Daemon};
 use crate::claude::projects;
 use crate::paths;
-use crate::proto::{self, Envelope, Frame, Msg, ProjectDir, SessionId, Welcome, MAX_FRAME, PROTO};
+use crate::proto::{
+    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
+    PROTO,
+};
 
 /// Deadline for a connection's first frame.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -392,14 +395,18 @@ impl Client {
             Msg::ListSessions => Msg::Sessions {
                 sessions: self.daemon.sessions().await,
             },
-            Msg::Spawn(spec) => {
-                let id = spec.id;
-                match self.daemon.spawn(spec).await {
-                    Ok(pid) => Msg::Spawned { id, pid },
-                    Err(e) => Msg::Error {
-                        message: e.to_string(),
-                    },
-                }
+            Msg::Spawn(spec) => self.spawn(spec, SessionKind::Claude).await,
+            Msg::SpawnShell(shell) => {
+                let spec = SpawnSpec {
+                    id: shell.id,
+                    cwd: shell.cwd,
+                    name: shell.name,
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    rows: shell.rows,
+                    cols: shell.cols,
+                };
+                self.spawn(spec, SessionKind::Shell).await
             }
             Msg::Attach { id, rows, cols } => match self.attach(req, id, rows, cols).await {
                 // The session actor replies `Attached` itself.
@@ -475,6 +482,16 @@ impl Client {
             },
         };
         self.reply(req, reply).await;
+    }
+
+    async fn spawn(&self, spec: SpawnSpec, kind: SessionKind) -> Msg {
+        let id = spec.id;
+        match self.daemon.spawn(spec, kind).await {
+            Ok(pid) => Msg::Spawned { id, pid },
+            Err(e) => Msg::Error {
+                message: e.to_string(),
+            },
+        }
     }
 
     async fn attach(

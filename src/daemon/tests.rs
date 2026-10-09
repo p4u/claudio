@@ -889,3 +889,130 @@ async fn kill_in_flight_session_succeeds() {
     })
     .await;
 }
+
+// ── Terminal tabs (SessionKind::Shell) ───────────────────────────────────────
+
+impl TestDaemon {
+    /// `SpawnShell` for `id` in the work dir. The shell is pinned to `/bin/sh`
+    /// so the tests do not depend on the user's login shell and rc files.
+    fn shell_spec(&self, id: SessionId) -> proto::ShellSpec {
+        std::env::set_var("SHELL", "/bin/sh");
+        proto::ShellSpec {
+            id,
+            cwd: self.work().to_string_lossy().into_owned(),
+            name: None,
+            rows: 24,
+            cols: 80,
+        }
+    }
+}
+
+impl Client {
+    async fn spawn_shell(&mut self, spec: proto::ShellSpec) -> Option<u32> {
+        match self.call(Msg::SpawnShell(spec)).await {
+            Msg::Spawned { pid, .. } => pid,
+            other => panic!("spawn_shell failed: {other:?}"),
+        }
+    }
+
+    async fn type_line(&mut self, id: SessionId, line: &str) {
+        self.send(Frame::Data {
+            session: id,
+            bytes: format!("{line}\r").into_bytes(),
+        })
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_spawn_runs_a_shell_and_echoes() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+
+    let req = c.request(Msg::SpawnShell(d.shell_spec(id))).await;
+    let created = c
+        .until(|f| match f {
+            Frame::Control(Envelope {
+                msg:
+                    Msg::Event {
+                        event: SessionEvent::Created { info },
+                        ..
+                    },
+                ..
+            }) => Some(info.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(created.kind, proto::SessionKind::Shell);
+    assert_eq!(created.state, SessionState::Idle, "shells never wait on hooks");
+    c.until(|f| matches!(f, Frame::Control(env) if env.req == Some(req)).then_some(()))
+        .await;
+
+    c.attach(id, 24, 80).await;
+    c.type_line(id, "echo hi-$((20 + 22))").await;
+    c.output_until(id, "hi-42").await;
+
+    // Not claude: the fake would have written its --settings here.
+    assert!(!d.work().join("settings.json").exists());
+    let journal = d.journal();
+    let entry = &journal["sessions"][0];
+    assert_eq!(entry["kind"], "shell");
+    assert_eq!(entry["args"], serde_json::json!([]));
+    assert_eq!(c.sessions().await[0].kind, proto::SessionKind::Shell);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_closes_on_any_exit_status() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    c.spawn_shell(d.shell_spec(id)).await;
+    c.attach(id, 24, 80).await;
+
+    // A claude session would stay dormant after a status-1 exit.
+    c.type_line(id, "exit 1").await;
+    let code = c
+        .event(id, |e| match e {
+            SessionEvent::Exited { code } => Some(*code),
+            _ => None,
+        })
+        .await;
+    assert_eq!(code, Some(1));
+    c.event(id, |e| matches!(e, SessionEvent::Removed).then_some(()))
+        .await;
+    assert!(c.sessions().await.is_empty());
+    assert!(d.journal()["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_for_a_journaled_shell_starts_a_shell() {
+    // An old client (or a recovering one) sends a plain `Spawn`, with claude
+    // args and a proxy env, for a terminal. The journal says it is a shell.
+    let dir = TestDaemon::new_dir();
+    let id = Uuid::new_v4();
+    let journal = serde_json::json!({"sessions": [{
+        "id": id, "cwd": dir.join("work"), "kind": "shell", "created_at": 1700000000u64,
+    }]});
+    let path = TestDaemon::config(&dir).journal;
+    crate::paths::write_atomic(&path, journal.to_string().as_bytes()).unwrap();
+
+    let d = TestDaemon::start_in(dir).await;
+    let mut c = d.client().await;
+    let dormant = &c.sessions().await[0];
+    assert_eq!(dormant.kind, proto::SessionKind::Shell);
+    assert_eq!(dormant.pid, None);
+
+    let mut spec = d.spec(id);
+    spec.args = vec!["--resume".into(), "c1".into()];
+    std::env::set_var("SHELL", "/bin/sh");
+    assert!(c.spawn(spec).await.is_some());
+    c.attach(id, 24, 80).await;
+    c.type_line(id, "echo [${SECRET_ENV}]").await;
+    let seen = c.output_until(id, "[]").await;
+    assert!(!seen.contains("hunter2"), "a shell gets no proxy env");
+    assert!(!d.work().join("settings.json").exists(), "claude was not run");
+
+    let s = &c.sessions().await[0];
+    assert_eq!((s.kind, s.created_at), (proto::SessionKind::Shell, 1700000000));
+}

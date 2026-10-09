@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::proto::SessionState;
+use crate::proto::{SessionKind, SessionState};
 
 mod stats;
 mod status;
@@ -83,6 +83,22 @@ pub fn glyph(state: SessionState, tick: usize, reconnecting: bool) -> (&'static 
         SessionState::Exited => ("○", s.add_modifier(Modifier::DIM)),
         SessionState::Starting | SessionState::Unknown => ("·", s),
     }
+}
+
+/// The glyph for a session's tab or overview row: `$` (bold green) for a
+/// terminal, else its state glyph. A remote claude whose host connection has
+/// dropped shows `⇄` instead of its last known state.
+pub fn view_glyph(view: &SessionView, tick: usize) -> (&'static str, Style) {
+    if view.kind == SessionKind::Shell {
+        return (
+            "$",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        );
+    }
+    let reconnecting = view.host != "local"
+        && !view.attached
+        && matches!(view.state, SessionState::Unknown);
+    glyph(view.state, tick, reconnecting)
 }
 
 /// Proxy badge shown in the tab bar when the session uses a proxy.
@@ -162,10 +178,11 @@ pub fn fit_tabs(labels: &[usize], active: Option<usize>, width: usize) -> Vec<us
     caps
 }
 
-/// The tab label for a session: `label@host` for remote sessions.
+/// The tab label for a session: `label@host` for remote sessions, and for
+/// every terminal (`term@local`), where the host is part of what it is.
 pub fn tab_label(view: &SessionView) -> String {
     let base = view.label();
-    if view.host == "local" {
+    if view.host == "local" && view.kind == SessionKind::Claude {
         base
     } else {
         format!("{base}@{}", view.host)
@@ -218,11 +235,7 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().add_modifier(Modifier::DIM),
             ));
         }
-        // Show reconnecting glyph when the session's host is offline.
-        let reconnecting = view.host != "local"
-            && !view.attached
-            && matches!(view.state, crate::proto::SessionState::Unknown);
-        let (g, gstyle) = glyph(view.state, app.tick, reconnecting);
+        let (g, gstyle) = view_glyph(view, app.tick);
         let base = if Some(i) == app.active {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else {
@@ -710,10 +723,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
         .skip(offset)
         .take(visible)
         .map(|(fi, (i, v))| {
-            let reconnecting = v.host != "local"
-                && !v.attached
-                && matches!(v.state, crate::proto::SessionState::Unknown);
-            let (g, _) = glyph(v.state, app.tick, reconnecting);
+            let (g, _) = view_glyph(v, app.tick);
             let cwd = abbreviate_home(&v.cwd, &app.home);
             let host_part = if v.host == "local" {
                 cwd
@@ -722,7 +732,10 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
             };
             let age = fmt_age(app.now.saturating_sub(v.created_at));
             let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
-            let state = state_name(v.state);
+            let state = match v.kind {
+                SessionKind::Claude => state_name(v.state),
+                SessionKind::Shell => "terminal",
+            };
             let label = v.label();
             let text = format!(
                 " {:2} {} {:<20} {:<30} {:>14} {:>5} {}",
@@ -895,6 +908,7 @@ mod tests {
             branch: None,
             model: None,
             context_tokens: None,
+            kind: SessionKind::Claude,
         };
         let sessions = vec![make_view("api"), make_view("docs")];
         // Wide bar: labels appear, no age.

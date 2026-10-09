@@ -362,7 +362,7 @@ impl Client {
     ///
     /// A 30-second deadline applies to all requests; `Spawn` gets 60 seconds.
     pub fn request(&self, msg: Msg) -> impl Future<Output = io::Result<Msg>> + Send + 'static {
-        let timeout = if matches!(msg, Msg::Spawn(_)) {
+        let timeout = if matches!(msg, Msg::Spawn(_) | Msg::SpawnShell(_)) {
             SPAWN_TIMEOUT
         } else {
             REQUEST_TIMEOUT
