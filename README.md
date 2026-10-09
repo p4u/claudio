@@ -1,6 +1,6 @@
 # claudio
 
-A terminal-native session manager for [Claude Code](https://claude.ai/claude-code). Run many Claude Code sessions — local and SSH — in one terminal window. Sessions survive closing the UI or an SSH drop; everything picks up where it left off.
+A terminal-native session manager for [Claude Code](https://claude.ai/claude-code). Run many Claude Code sessions, local and over SSH, in one terminal window. Sessions survive closing the UI or an SSH drop, and pick up where they left off.
 
 ---
 
@@ -8,21 +8,21 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 
 <!-- Regenerate: CLAUDIO_SCREENSHOTS=docs/screenshots cargo test --test screenshots -- --nocapture -->
 
-![Sessions view — active session, tab states, status bar](docs/screenshots/sessions.png)
+![Sessions view: active session, tab states, status bar](docs/screenshots/sessions.png)
 
-*Active session showing Claude Code output. Tab bar displays all sessions with state glyphs; amber and red tabs flag sessions that need attention.*
+*The active session with Claude Code running. The tab bar shows every session with a state glyph; amber and red tabs need attention. The two-line status bar shows the session and its host's CPU and memory.*
 
 ![New-session wizard](docs/screenshots/wizard.png)
 
-*New-session wizard: LOCAL section lists recent directories with git branch (⎇) and claude-activity (✻) badges. REMOTE section lists SSH hosts from `~/.ssh/config`.*
+*The new-session wizard. LOCAL lists recent directories with git branch (⎇) and claude-activity (✻) badges; REMOTE lists SSH hosts from `~/.ssh/config`.*
 
-![Directory explorer with search](docs/screenshots/directories.png)
+![Directory browser](docs/screenshots/directories.png)
 
-*Directory picker with a live search query. Matching text is highlighted; git and claude-activity metadata appears right-aligned on each row.*
+*The directory browser. `▸ start here` starts the session in the directory you are looking at.*
 
 ![Overview popup](docs/screenshots/overview.png)
 
-*Alt+g overview: all sessions at a glance, with state, location, and age columns.*
+*Alt+g: all sessions at a glance.*
 
 ---
 
@@ -32,18 +32,14 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | bash
 ```
 
-**Options** (set as environment variables before the command):
+**Options** (environment variables before the command):
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDIO_VERSION` | latest | Pinned release tag, e.g. `v0.2.0` |
+| `CLAUDIO_VERSION` | latest | Pinned release tag, e.g. `v0.3.0` |
 | `CLAUDIO_INSTALL_DIR` | `~/.local/bin` | Where to place the `claudio` binary |
 
-**From source:**
-
-```bash
-make install      # builds a static musl binary, installs it, and restarts a running daemon
-```
+**From source:** `make install` builds a static binary, installs it, and restarts a running daemon.
 
 **Platforms:** Linux and macOS, x86\_64 and arm64.
 
@@ -53,31 +49,15 @@ make install      # builds a static musl binary, installs it, and restarts a run
 
 ### Without a proxy
 
-**Requirements:** [Claude Code](https://claude.ai/claude-code) installed and logged in (`claude` works in your shell), and `~/.local/bin` (or your `CLAUDIO_INSTALL_DIR`) on your `PATH`.
+**Requirements:** [Claude Code](https://claude.ai/claude-code) installed and logged in (`claude` works in your shell), and `~/.local/bin` on your `PATH`.
 
-1. [Install](#install) claudio.
-2. Run `claudio`.
-3. The new-session wizard opens:
-   - **Start screen:** under *Local*, pick **Explore local dirs…** or one of your recent directories. Under *Remote*, pick an SSH host.
-   - **Directory:** type a path or a fragment of one, `Tab` completes, `Enter` picks. Hidden (`.`) directories are not listed; `Alt+.` shows them.
-   - **New or resume:** start a new Claude Code session, or resume a previous one from that directory.
-4. Work as usual. These keys are handled by claudio; everything else goes to Claude Code:
+1. [Install](#install) claudio and run `claudio`.
+2. The new-session wizard opens. Pick **Explore local dirs…** to browse from your home directory, one of your recent directories, or an SSH host under *Remote*.
+3. Start a new conversation or resume a previous one from that directory.
+4. Work as usual. Only `Alt` keys are claudio's; everything else goes to Claude Code. `Alt+h` lists them all.
+5. Close the UI with `Alt+q` (sessions keep running) and run `claudio` again later: everything is where you left it.
 
-   | Key | Action |
-   |---|---|
-   | `Alt+←` / `Alt+→` | Switch session |
-| `Alt+Shift+1`…`9`, `0` | Go to session 1…9, 10 (needs a kitty-keyboard terminal) |
-   | `Alt+n` | New session |
-   | `Alt+r` | Rename session |
-   | `Alt+x` | Close session |
-   | `Ctrl+D` twice | Exit Claude Code; the tab closes on its own |
-   | `Alt+g` | Overview of all sessions |
-   | `Alt+h` | Help (all keys) |
-   | `Alt+q` | Quit the UI; sessions keep running |
-
-5. Run `claudio` again later: every session is restored where you left it.
-
-**SSH in one line:** pick a host from the *Remote* section of the wizard (needs key-based `ssh <host>`, e.g. `ssh devbox`, to work without a password). claudio installs itself on the remote, and those sessions survive disconnects too. `claude` must be installed on the remote host unless you use a proxy (below).
+**SSH:** pick a host under *Remote* (key-based `ssh <host>` must work without a password). claudio installs itself on the remote, and those sessions survive disconnects too.
 
 ### With claude-proxy
 
@@ -90,13 +70,22 @@ claudio                                         # new sessions now use the proxy
 
 - `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
 - `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
-- `claudio proxy status` shows your profiles, live stats and pool health. Inside the UI, `Alt+s` opens the stats for the active session.
+- The status bar shows which upstream credential the session is running on, and `Alt+s` opens the proxy stats.
+
+### Just one claude, with the proxy (`--plain`)
+
+```bash
+claudio --plain [--proxy NAME | --no-proxy] [claude args…]
+```
+
+One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only four keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart. Everything else, and every argument, goes to claude.
 
 ### Everyday commands
 
 | Command | What it does |
 |---|---|
 | `claudio` | Open the session manager |
+| `claudio --plain …` | One plain claude session with the proxy configured |
 | `claudio sessions` | List sessions as a table (for scripts) |
 | `claudio daemon status\|stop\|restart` | Inspect or control the background daemon |
 | `claudio proxy login\|status\|use\|logout` | Manage proxy profiles |
@@ -108,122 +97,145 @@ claudio                                         # new sessions now use the proxy
 
 ## What it does
 
-Run `claudio` with no arguments to open the session manager. A per-host background daemon owns all PTYs, so sessions keep running after you close the UI or lose an SSH connection. On restart every session is restored, and interrupted ones are recovered automatically with `claude --resume`.
+A per-host background daemon owns the sessions, so they keep running after you close the UI or lose an SSH connection. When the UI comes back every session is restored, and interrupted ones are recovered with `claude --resume`.
 
 ### New-session wizard
 
-Press `Alt+n` (or launch `claudio` with no sessions) to open the wizard:
+`Alt+n` opens the wizard (it also opens when there are no sessions).
 
-1. **Start screen** — two sections: LOCAL (an "Explore" entry plus your recently used directories, each annotated with the git branch and last claude-activity timestamp) and REMOTE (SSH host aliases from `~/.ssh/config`). Type to filter both sections at once; Tab switches focus between sections.
-2. **Directory picker** — navigate or type a path; Tab-completes. Each entry shows `⎇ branch` and `✻ last-used` badges. Directories starting with `.` are hidden by default; `Alt+.` toggles them (the picker shows `Alt+. hidden: off|on`), and typing a leading `.` (e.g. `~/.con`) reveals the matching ones.
-3. **Resume or new** — if the chosen directory has prior Claude Code sessions you can resume one; otherwise a fresh session starts.
+1. **Start screen.** *Local* has **Explore local dirs…** and your recently used directories, annotated with their git branch (⎇) and last claude activity (✻). *Remote* has your SSH hosts: recently used first, then every `Host` in `~/.ssh/config`. Typing filters both; `Tab` switches between them.
+2. **Directory browser.** It opens at the host's home. `▸ start here` starts the session in the directory you are looking at. `→` or `Tab` opens the highlighted folder, `←` or `Backspace` goes up, and `Enter` picks the highlighted row. Typing a path narrows the list; typing anything else fuzzy-searches your recent and project directories. Dot-directories are hidden; `Alt+.` shows them.
+3. **New or resume.** If the directory has earlier Claude Code conversations, pick one to resume or start a new one.
 
-### Attention colors
+`Backspace` on an empty input goes back a step.
 
-Background sessions that need attention (`NeedsInput`, `NeedsApproval`, `Error`) are highlighted in the tab bar and trigger an OSC 9 desktop notification to the outer terminal.
+### Tabs and attention
 
-### Status bar
-
-The two-line status bar shows CPU and memory sparklines for the active session's host (updated every few seconds), plus session metadata: session name, directory, state glyph, and — when a proxy is active — pool and token-usage stats. When a newer release is available the right side shows `↑ vX.Y.Z` in dim cyan.
-
-### Key bindings
-
-All manager keys use `Alt` so they never clash with Claude Code's own bindings. Every binding can be overridden in `~/.config/claudio/config.toml` under `[keys]`.
-
-| Key | Action |
-|---|---|
-| `Alt+←` / `Alt+→` | Switch between sessions |
-| `Alt+Shift+1`…`9`, `0` | Go to session 1…9, 10 (kitty keyboard protocol terminals; fixed, not rebindable) |
-| `Alt+n` | New session (opens wizard) |
-| `Alt+g` | Overview of all sessions |
-| `Alt+a` | Jump to next session needing attention |
-| `Alt+r` | Rename session |
-| `Alt+x` | Close / kill session |
-| `Ctrl+D` twice, `/exit` | Claude Code's own exit: the session ends and its tab closes, no confirmation |
-| `Alt+s` | Proxy stats popup |
-| `Alt+h` | Help |
-| `Alt+.` | Wizard only: show/hide hidden directories |
-| `Alt+q` | Quit UI (sessions keep running in daemon) |
-
-### Session states
-
-The tab bar shows a glyph for each session:
+Each tab shows the session name and, for remote sessions, the host. Its glyph shows the state:
 
 | Glyph | State | Tab color |
 |---|---|---|
 | ⠸ (animated) | Working | cyan |
-| ◆ | Needs approval | red / bold |
-| ? | Needs input | amber / bold |
+| ◆ | Needs approval | red, bold |
+| ? | Needs input | amber, bold |
 | ✓ | Idle | — |
-| ✗ | Error | red / bold |
+| ✗ | Error | red, bold |
 | ⇄ (dim) | Reconnecting | — |
+| `$` | Terminal tab | green |
+
+Background sessions that need you are colored (never blinking) and send a desktop notification (OSC 9). `Alt+a` jumps to the next one. When claude exits cleanly (`Ctrl+D` twice, or `/exit`), its tab closes by itself.
+
+### Status bar
+
+Line one describes the active session: host and directory, git branch, model, context size, state, uptime, and the proxy, including which upstream credential it is on (`⇄ proxy:work · work-max (max) · 5h 37%`, plus `⇆ switched 3m ago` after a switch). Line two shows CPU and memory sparklines for the session's host, turning yellow above 60% and red above 85%, and `Alt+h help`.
+
+### Terminal tabs (`Alt+c`)
+
+`Alt+c` opens a terminal next to the active tab: your login shell, on the same host (over SSH for remote sessions), in the session's directory. Terminal tabs read `$ term@host`, survive closing the UI, can be renamed, and close when the shell exits. After a daemon restart they come back as a fresh shell in the same directory.
+
+### Git history (`Alt+l`)
+
+`Alt+l` opens a read-only git viewer for the active session's directory, running git on the session's host. It has three pages:
+
+- **Log.** Colored commits with refs, author and age. `/` filters, `a` toggles all branches, `r` refreshes, and more commits load as you scroll.
+- **Commit.** The message and a colored diffstat. `Enter` on a file shows its patch; `d` shows the whole commit.
+- **Patch.** A colored diff. `n` and `N` jump between files.
+
+`Esc` goes back a page. Merges are shown against their first parent. Git's output is sanitized, and external diff drivers and textconv never run.
+
+### Restart a session (`Alt+e`)
+
+`Alt+e` restarts the active session in its tab. `r` restarts claude and resumes the same conversation, which picks up a claude update or proxy change or unsticks a wedged process. `n` starts a new conversation in the same directory. In a terminal tab it restarts the shell.
+
+### Proxy stats (`Alt+s`)
+
+A multi-page popup for the session's claude-proxy profile:
+
+- **Overview:** requests, tokens, cache hit rate, your limit, top models, and this session's credential.
+- **Models:** per-model usage.
+- **Trends:** 24h against 7d and 30d.
+- **Pool & limits:** provider health, your limit, and the model catalogue.
+- **Sessions:** your sessions on this profile.
+
+`←`/`→` or `1`–`5` switch pages, `w` changes the time window, and `r` refreshes.
+
+### Keeping claude up to date
+
+Once a day claudio compares your `claude --version` with the latest release on your update channel, and asks before running `claude update`. When an SSH host connects, its claude is compared with yours. If it is older, claudio offers to update it; if it is missing, claudio offers to install it with the official installer. Either way it asks first. Prompts offer `[y] update`, `[n] not now` and `[s] skip this version`. Running sessions keep their binary; new sessions use the updated one.
+
+claudio also starts claude with `--allow-dangerously-skip-permissions`, so bypass-permissions mode is available with `Shift+Tab` (claude does not start in it). Turn this off with `allow_skip_permissions = false` (see [Configuration](#configuration)).
+
+### Keys
+
+Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs they shadow the shell's readline `Alt` keys. Each can be rebound in `config.toml` under `[keys]`.
+
+| Key | Action |
+|---|---|
+| `Alt+←` / `Alt+→` | Previous / next session |
+| `Alt+Shift+1`…`9`, `0` | Go to session 1…9, 10 (terminals with the kitty keyboard protocol; not rebindable) |
+| `Alt+n` | New session |
+| `Alt+c` | Terminal tab next to this one |
+| `Alt+l` | Git history |
+| `Alt+e` | Restart this session (resume or new conversation) |
+| `Alt+r` | Rename |
+| `Alt+x` | Close (asks first) |
+| `Alt+a` | Next session that needs attention |
+| `Alt+g` | Overview of all sessions |
+| `Alt+s` | Proxy stats |
+| `Alt+h` | Help |
+| `Alt+.` | In the wizard: show or hide dot-directories |
+| `Alt+q` | Quit the UI (sessions keep running) |
+| `Ctrl+D` twice, `/exit` | Claude Code's own exit: the tab closes |
 
 ---
 
 ## Remote sessions
 
-SSH hosts are listed from `~/.config/claudio/hosts.json` (most-recently-used first) followed by every `Host` alias in `~/.ssh/config`. The claudio binary is automatically installed on the remote at `~/.local/bin/claudio` and kept in sync by SHA-256 comparison. The remote daemon runs under `systemd-run --user` when available (survives `KillUserProcesses`), with `setsid` as fallback. No remote dotfiles are modified.
+SSH hosts come from `~/.config/claudio/hosts.json` (most recently used first) and every `Host` alias in `~/.ssh/config`. claudio copies itself to `~/.local/bin/claudio` on the remote and keeps it in sync by checksum. The remote daemon runs under `systemd-run --user` when available, with `setsid` as a fallback. No remote dotfiles are touched.
 
-Requirements: SSH key or agent authentication (`BatchMode` — no password prompts), and `claude` installed on the remote host (or `CLAUDIO_PROXY_URL` set so the remote sessions use the proxy instead).
-
----
-
-## Drop-in `-p` (print mode)
-
-`claudio -p` is a drop-in for `claude -p`. It drives the interactive Claude Code TUI under a real PTY, forwards every flag verbatim, waits for the `Stop` lifecycle hook, and reads the exact answer and real token usage from the session JSONL. Point any tool that runs `claude -p ...` at `claudio -p ...`.
-
-See [docs/print-and-api.md](docs/print-and-api.md) for details.
+Requirements: key or agent SSH authentication (no password prompts), and `claude` on the remote. claudio offers to install `claude` there if it is missing.
 
 ---
 
-## OpenAI-compatible API server
+## Drop-in `-p` and the API server
 
-`claudio --api` exposes an OpenAI-compatible HTTP server backed by your local Claude Code install. Any OpenAI client works with it out of the box — point it at `http://127.0.0.1:8080/v1`.
-
-See [docs/print-and-api.md](docs/print-and-api.md) for details.
-
----
-
-## claude-proxy integration
-
-claudio integrates with [claude-proxy](https://github.com/p4u/claude-proxy), an optional self-hosted gateway. After `claudio proxy login <url>`, remote sessions authenticate through the gateway instead of requiring a local `claude` login on each host. The proxy can be configured with a 1M-context model as its default, and `claudio proxy status` shows live pool and token-usage stats.
-
-See [docs/print-and-api.md](docs/print-and-api.md) for details.
+`claudio -p` is a drop-in for `claude -p` that drives the interactive Claude Code UI and reads the real answer and token usage from the session transcript. `claudio --api` serves an OpenAI-compatible HTTP API on the same backend. See [docs/print-and-api.md](docs/print-and-api.md).
 
 ---
 
 ## Upgrade
 
-When a newer release is available, the status bar shows `↑ vX.Y.Z` in dim cyan. Run:
-
-```bash
-claudio upgrade
-```
-
-to download and replace the local binary in place. The update check is anonymous, cached for 24 hours, and never blocks. Disable with `CLAUDIO_NO_UPDATE_CHECK=1` or `[update] check = false` in `config.toml`.
+When a newer release exists, the status bar shows `↑ vX.Y.Z`. `claudio upgrade` replaces the binary in place. The check is anonymous, runs at most once a day and never blocks. Disable it with `CLAUDIO_NO_UPDATE_CHECK=1` or `[update] check = false`.
 
 ---
 
 ## Configuration
 
-`~/.config/claudio/config.toml` — all fields are optional:
+`~/.config/claudio/config.toml`, all optional:
 
 ```toml
-[keys]
-prev_session = "alt+left"
-next_session = "alt+right"
-overview     = "alt+g"
-quit         = "alt+q"
-
 [ui]
-notify = true   # OSC 9 desktop notifications for attention states
+notify = true                   # desktop notifications for sessions that need you
 
 [update]
-check = true
+check = true                    # check for new claudio releases
+
+[claude]
+allow_skip_permissions = true   # start claude with --allow-dangerously-skip-permissions
+update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
+remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
+
+[keys]                          # rebind any manager key
+new_session = "alt+n"
+terminal    = "alt+c"
+git_log     = "alt+l"
+reset       = "alt+e"
 ```
+
+`CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.
 
 ---
 
 ## Maintainer
 
-Bump `Cargo.toml` version, tag `vX.Y.Z`, push the tag → the release workflow publishes binaries to this repo.
+Bump the version in `Cargo.toml`, tag `vX.Y.Z` and push the tag. The release workflow publishes the binaries to this repo.
