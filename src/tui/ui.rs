@@ -400,7 +400,6 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
     if let Some(step) = &w.resume {
         // Proxy toggle row takes 1 line when profiles are available.
         let has_proxy = w.proxy_options.len() > 1;
-        let proxy_rows = if has_proxy { 1 } else { 0 };
         let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back · ←/→ proxy)");
         let constraints = if has_proxy {
             vec![Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]
@@ -419,7 +418,6 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
             );
         }
         let list_area = areas[if has_proxy { 2 } else { 1 }];
-        let _ = proxy_rows; // suppress unused warning
         let rows: Vec<String> = std::iter::once("+ New session".to_owned())
             .chain(step.sessions.iter().map(|s| resume_label(s, now)))
             .collect();

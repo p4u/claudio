@@ -17,8 +17,8 @@
 //! - If `systemd-run` is available and `$XDG_RUNTIME_DIR` is set, we start
 //!   the daemon as a transient user service so it survives ssh logout and
 //!   logind's `KillUserProcesses`.  We **wait** for the launcher to exit
-//!   (it is quick) and fall back to double-fork + setsid on failure.
-//! - Otherwise we fall back to double-fork + setsid.
+//!   (it is quick) and fall back to fork + setsid on failure.
+//! - Otherwise we fall back to fork + setsid.
 
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -181,7 +181,7 @@ fn try_systemd_run(exe: &PathBuf, log: std::fs::File) -> io::Result<()> {
     Ok(())
 }
 
-/// Fall back to double-fork + setsid.
+/// Spawn the daemon with setsid so it survives the parent's exit.
 fn spawn_setsid(exe: &PathBuf, log: std::fs::File) -> io::Result<()> {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--daemon")
