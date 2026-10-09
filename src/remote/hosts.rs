@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn is_concrete_filters_wildcards() {
-        assert!(is_concrete("z6"));
+        assert!(is_concrete("devbox"));
         assert!(is_concrete("user@host.example.com"));
         assert!(!is_concrete("*.example.com"));
         assert!(!is_concrete("!bastion"));

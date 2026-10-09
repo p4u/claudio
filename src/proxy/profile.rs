@@ -6,9 +6,9 @@
 //! Config file format:
 //! ```toml
 //! [proxy]
-//! default = "vocdoni"
-//! [proxy.profiles.vocdoni]
-//! url   = "https://claude.vocdoni.net"
+//! default = "work"
+//! [proxy.profiles.work]
+//! url   = "https://proxy.example.com"
 //! token = "…"
 //! ```
 //!
@@ -231,7 +231,7 @@ pub fn normalize_url(host: &str) -> Result<String, String> {
 
 /// Derive a default profile name from a URL (the first DNS label).
 ///
-/// `https://claude.vocdoni.net` → `"vocdoni"`
+/// `https://proxy.example.com` → `"proxy"`
 /// `http://127.0.0.1:8080`      → `"localhost"`
 pub fn name_from_url(url: &str) -> String {
     let host = url
@@ -260,8 +260,8 @@ mod tests {
 
     #[test]
     fn parse_full_https() {
-        let (url, tok) = parse_proxy_url("mytoken@https://claude.vocdoni.net").unwrap();
-        assert_eq!(url, "https://claude.vocdoni.net");
+        let (url, tok) = parse_proxy_url("mytoken@https://proxy.example.com").unwrap();
+        assert_eq!(url, "https://proxy.example.com");
         assert_eq!(tok, "mytoken");
     }
 
@@ -300,8 +300,8 @@ mod tests {
     #[test]
     fn parse_token_with_at_sign() {
         // Token itself contains '@'; we split on the last '@'.
-        let (url, tok) = parse_proxy_url("user@example.com@claude.vocdoni.net").unwrap();
-        assert_eq!(url, "https://claude.vocdoni.net");
+        let (url, tok) = parse_proxy_url("user@example.com@proxy.example.com").unwrap();
+        assert_eq!(url, "https://proxy.example.com");
         assert_eq!(tok, "user@example.com");
     }
 
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn name_from_url_extracts_first_label() {
-        assert_eq!(name_from_url("https://claude.vocdoni.net"), "claude");
+        assert_eq!(name_from_url("https://proxy.example.com"), "proxy");
         assert_eq!(name_from_url("https://proxy.example.com"), "proxy");
         assert_eq!(name_from_url("http://127.0.0.1:8080"), "localhost");
     }
@@ -337,11 +337,11 @@ mod tests {
         let path = dir.join("config.toml");
 
         let mut sec = ProxySection::default();
-        sec.default = Some("vocdoni".into());
+        sec.default = Some("work".into());
         sec.profiles.insert(
-            "vocdoni".into(),
+            "work".into(),
             Profile {
-                url: "https://claude.vocdoni.net".into(),
+                url: "https://proxy.example.com".into(),
                 token: "topsecret".into(),
             },
         );
@@ -351,9 +351,9 @@ mod tests {
         assert_eq!(mode, 0o600, "config.toml must be mode 0600");
 
         let loaded = load_from(&path).unwrap();
-        assert_eq!(loaded.default.as_deref(), Some("vocdoni"));
-        let p = loaded.profiles.get("vocdoni").unwrap();
-        assert_eq!(p.url, "https://claude.vocdoni.net");
+        assert_eq!(loaded.default.as_deref(), Some("work"));
+        let p = loaded.profiles.get("work").unwrap();
+        assert_eq!(p.url, "https://proxy.example.com");
         assert_eq!(p.token, "topsecret");
 
         std::fs::remove_dir_all(&dir).unwrap();

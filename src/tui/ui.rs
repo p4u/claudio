@@ -163,7 +163,7 @@ pub fn tab_label(view: &SessionView) -> String {
 
 /// The tab texts as laid out for a bar `width` columns wide.
 ///
-/// Tabs show only the session label (e.g. `api@z6`). Age and proxy badges
+/// Tabs show only the session label (e.g. `api@devbox`). Age and proxy badges
 /// are intentionally omitted to keep the bar uncluttered — the status bar
 /// already shows host:cwd, state, and proxy info for the active session.
 pub fn tab_titles(

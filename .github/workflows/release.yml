@@ -14,9 +14,7 @@ name: release
 #                   targets both archs); dynamically linked to libSystem
 #   darwin/aarch64 — macos-latest (M-series); dynamically linked to libSystem
 #
-# Releases are published to the PUBLIC repo p4u/claudio-releases so anyone
-# can install without a token.  This requires a fine-grained PAT stored as
-# RELEASES_TOKEN in p4u/claudio with Contents: Read+Write on claudio-releases.
+# Releases are published to p4u/claudio using the default GITHUB_TOKEN.
 
 on:
   push:
@@ -24,28 +22,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read  # source repo only needs read access
+  contents: write
 
 env:
   BIN: claudio
 
 jobs:
-  check-token:
-    name: verify RELEASES_TOKEN secret
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fail if RELEASES_TOKEN is missing
-        env:
-          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-        run: |
-          if [ -z "${RELEASES_TOKEN}" ]; then
-            echo "::error::RELEASES_TOKEN secret is not set." \
-              "Create a fine-grained PAT with Contents: Read+Write on p4u/claudio-releases" \
-              "and add it as a secret named RELEASES_TOKEN in p4u/claudio."
-            exit 1
-          fi
-          echo "RELEASES_TOKEN is present."
-
   check-version:
     name: verify tag matches Cargo.toml version
     runs-on: ubuntu-latest
@@ -69,7 +51,6 @@ jobs:
   build:
     name: build (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [check-token]
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +114,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [check-token, build]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -151,12 +132,11 @@ jobs:
           cp assets/claudio-linux-x86_64 assets/claudio
           cd assets && sha256sum claudio > claudio.sha256
 
-      - name: Publish GitHub Release to p4u/claudio-releases
+      - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          repository: p4u/claudio-releases
-          token: ${{ secrets.RELEASES_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             assets/claudio-linux-x86_64
             assets/claudio-linux-x86_64.sha256

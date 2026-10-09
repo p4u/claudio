@@ -20,3 +20,4 @@
 *.rs.bk
 .DS_Store
 /.claude/worktrees/
+.remember/

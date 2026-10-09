@@ -1,10 +1,10 @@
 //! Live SSH remote-session integration tests.
 //!
 //! These tests are **off by default**.  Set `CLAUDIO_SSH_TEST_HOST` to the
-//! hostname you want to test against (e.g. `z6`) to enable the SSH tests:
+//! hostname you want to test against (e.g. `devbox`) to enable the SSH tests:
 //!
 //! ```bash
-//! CLAUDIO_SSH_TEST_HOST=z6 cargo test --test remote -- --test-threads=1 --nocapture
+//! CLAUDIO_SSH_TEST_HOST=devbox cargo test --test remote -- --test-threads=1 --nocapture
 //! ```
 //!
 //! Tests `t1`, `t7`, and `t8` are pure unit-style tests (no SSH) and always

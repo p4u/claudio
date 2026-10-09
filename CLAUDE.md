@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`claudio` is a Rust drop-in wrapper for the `claude` CLI, written as a responsible-disclosure proof of concept. It has four modes, chosen in `src/main.rs`:
+`claudio` is a session manager TUI and drop-in wrapper for the `claude` CLI. It has four modes, chosen in `src/main.rs`:
 
 - **No arguments (bare `claudio`)**: it opens the **session manager** TUI — a terminal multiplexer for many Claude Code sessions, local and over SSH.
 - **No `-p`/`--print`**: it `exec`s the real `claude` unchanged (passthrough).
@@ -215,4 +215,4 @@ Connects to the socket; if unavailable, starts the daemon (double-fork +
 - `--log-messages` (`msglog.rs`) logs all four hops (CLI→claudio→claude→claudio→CLI), correlated by id. `--log-messages-file <path>` writes them untruncated as JSONL.
 - The API server logs pool decisions at INFO (`MATCH`, `RESUME`, `demoting LRU`).
 
-`README.md` has the full env-var tables and client configs for pi, opencode, and hermes. Docker (`docker-compose.yml`) mounts `./workspace` as `/work`.
+`docs/print-and-api.md` has the full env-var tables and client configs for pi, opencode, and hermes. Docker (`docker-compose.yml`) mounts `./workspace` as `/work`.

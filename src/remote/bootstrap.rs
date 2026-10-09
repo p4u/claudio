@@ -26,7 +26,7 @@ use super::{shell_quote, ssh_cmd, validate_host};
 /// The public GitHub repo where release assets are published.
 ///
 /// Shared with `crate::upgrade` so both modules download from the same repo.
-pub const RELEASES_REPO: &str = "p4u/claudio-releases";
+pub const RELEASES_REPO: &str = "p4u/claudio";
 
 /// GitHub release base URL for the binary's own version.
 ///

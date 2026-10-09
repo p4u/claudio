@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install claudio from its GitHub releases (Linux and macOS, x86_64 and arm64).
 #
-#   curl -fsSL https://github.com/p4u/claudio-releases/releases/latest/download/install.sh | bash
+#   curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | bash
 #
 # Environment:
 #   CLAUDIO_VERSION      release tag to install (default: latest)
@@ -12,7 +12,7 @@
 # Kept compatible with bash 3.2 (the macOS system bash).
 set -euo pipefail
 
-REPO="p4u/claudio-releases"
+REPO="p4u/claudio"
 VERSION="${CLAUDIO_VERSION:-latest}"
 INSTALL_DIR="${CLAUDIO_INSTALL_DIR:-$HOME/.local/bin}"
 

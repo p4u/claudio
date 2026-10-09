@@ -5,7 +5,7 @@
 //!
 //! # Usage
 //! ```
-//! CLAUDIO_SCREENSHOTS=release-repo/screenshots \
+//! CLAUDIO_SCREENSHOTS=docs/screenshots \
 //!   cargo test --test screenshots -- --nocapture
 //! ```
 //!
@@ -339,7 +339,7 @@ Host staging\n  HostName staging.example.com\n  User ubuntu\n";
     ///
     /// Panics on any violation so the test never silently writes leaky PNGs.
     fn privacy_check(&self, text: &str, label: &str) {
-        let forbidden = ["/volumes", "p4u", "vocdoni", "z6"];
+        let forbidden = ["/volumes", "p4u"];
         for pat in &forbidden {
             if text.contains(pat) {
                 panic!(

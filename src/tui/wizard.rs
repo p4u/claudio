@@ -1395,9 +1395,9 @@ mod tests {
     /// An empty query always restores the default: Local focus on "Explore".
     #[test]
     fn host_step_empty_query_selects_explore() {
-        let mut hs = make_host_step(&["z6", "prod"], &[]);
+        let mut hs = make_host_step(&["devbox", "prod"], &[]);
         // Type something then clear.
-        hs.input = "z6".to_owned();
+        hs.input = "devbox".to_owned();
         hs.refilter();
         hs.input.clear();
         hs.refilter();
@@ -1409,12 +1409,12 @@ mod tests {
     /// Typing a known host switches focus to Remote and selects that host.
     #[test]
     fn host_step_typing_known_host_switches_to_remote() {
-        let mut hs = make_host_step(&["z6", "prod"], &[]);
-        hs.input = "z6".to_owned();
+        let mut hs = make_host_step(&["devbox", "prod"], &[]);
+        hs.input = "devbox".to_owned();
         hs.refilter();
         assert_eq!(hs.focus, HostSection::Remote, "should switch to Remote");
         assert_eq!(hs.selected, 0, "top of REMOTE section");
-        assert!(hs.items.iter().any(|h| h == "z6"), "z6 should be visible");
+        assert!(hs.items.iter().any(|h| h == "devbox"), "devbox should be visible");
         assert!(!hs.connect_raw);
     }
 
@@ -1435,20 +1435,20 @@ mod tests {
     /// "Explore local dirs…" must NOT stay selected when query doesn't match it.
     #[test]
     fn host_step_explore_not_selected_for_host_query() {
-        let mut hs = make_host_step(&["z6"], &[]);
-        hs.input = "z6".to_owned();
+        let mut hs = make_host_step(&["devbox"], &[]);
+        hs.input = "devbox".to_owned();
         hs.refilter();
         // Must not be on Local / Explore.
         assert!(
             hs.focus != HostSection::Local || hs.local_selected != 0,
-            "Explore must not be selected when query is 'z6'"
+            "Explore must not be selected when query is 'devbox'"
         );
     }
 
     /// "Explore" IS selected when query matches its text.
     #[test]
     fn host_step_explore_selected_when_query_matches_its_text() {
-        let mut hs = make_host_step(&["z6"], &[]);
+        let mut hs = make_host_step(&["devbox"], &[]);
         hs.input = "explore".to_owned();
         hs.refilter();
         assert_eq!(hs.focus, HostSection::Local);
@@ -1480,7 +1480,7 @@ mod tests {
     /// looks_like_host rejects paths and whitespace.
     #[test]
     fn looks_like_host_basic() {
-        assert!(super::looks_like_host("z6"));
+        assert!(super::looks_like_host("devbox"));
         assert!(super::looks_like_host("user@host"));
         assert!(super::looks_like_host("my-server"));
         assert!(!super::looks_like_host("/tmp"), "paths are not hosts");

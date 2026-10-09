@@ -1,7 +1,7 @@
 //! Upgrade-check and self-upgrade for claudio.
 //!
 //! # Upgrade check
-//! [`check_once`] checks `https://api.github.com/repos/p4u/claudio-releases/releases/latest`
+//! [`check_once`] checks `https://api.github.com/repos/p4u/claudio/releases/latest`
 //! at most once per 24 hours (cached in `~/.config/claudio/update.json`).
 //! The check is skipped when `[update] check = false` in `config.toml` or
 //! `CLAUDIO_NO_UPDATE_CHECK=1` is set.
@@ -376,14 +376,14 @@ pub async fn run_upgrade(
 
 /// Derive a download URL base from the API URL and tag.
 ///
-/// - Real GitHub API:  `https://api.github.com/repos/p4u/claudio-releases/releases/latest`
-///   → `https://github.com/p4u/claudio-releases/releases/download/<tag>`
+/// - Real GitHub API:  `https://api.github.com/repos/p4u/claudio/releases/latest`
+///   → `https://github.com/p4u/claudio/releases/download/<tag>`
 /// - Mock server (tests):  `http://127.0.0.1:PORT/releases/latest`
 ///   → `http://127.0.0.1:PORT/releases/download/<tag>`
 fn derive_download_base(api_base: &str, tag: &str) -> String {
     if api_base.contains("api.github.com/repos/") {
         // Real GitHub: translate API URL to download URL.
-        // api.github.com/repos/p4u/claudio-releases → github.com/p4u/claudio-releases
+        // api.github.com/repos/p4u/claudio → github.com/p4u/claudio
         let repo_path = api_base
             .trim_start_matches("https://api.github.com/repos/")
             .split("/releases")
@@ -518,11 +518,11 @@ mod tests {
 
     #[test]
     fn derive_download_base_github() {
-        let api = "https://api.github.com/repos/p4u/claudio-releases/releases/latest";
+        let api = "https://api.github.com/repos/p4u/claudio/releases/latest";
         let base = derive_download_base(api, "v0.3.0");
         assert_eq!(
             base,
-            "https://github.com/p4u/claudio-releases/releases/download/v0.3.0"
+            "https://github.com/p4u/claudio/releases/download/v0.3.0"
         );
     }
 

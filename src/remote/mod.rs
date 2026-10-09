@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn validate_host_accepts_normal_hosts() {
-        assert!(validate_host("z6").is_ok());
+        assert!(validate_host("devbox").is_ok());
         assert!(validate_host("user@host.example.com").is_ok());
         assert!(validate_host("192.168.1.1").is_ok());
     }

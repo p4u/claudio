@@ -1,7 +1,7 @@
 {
   "hook_event_name": "SessionStart",
   "session_id": "bbbbbbbb-0000-0000-0000-000000000002",
-  "transcript_path": "/home/p4u/.claude/projects/-volumes-repos-claudio/bbbbbbbb-0000-0000-0000-000000000002.jsonl",
-  "cwd": "/volumes/repos/claudio",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-claudio/bbbbbbbb-0000-0000-0000-000000000002.jsonl",
+  "cwd": "/home/user/src/claudio",
   "source": "clear"
 }
