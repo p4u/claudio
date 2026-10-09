@@ -168,15 +168,30 @@ impl Journal {
         (entry, result)
     }
 
-    /// Record a new claude conversation id (`SessionStart`, `/clear`, fork)
-    /// in memory and persist. Returns `false` when `id` is not journaled.
-    /// A write failure is logged, not propagated (a missing conversation id
-    /// is recoverable; a live session must not be torn down for a disk error).
-    pub fn set_claude_session(&mut self, id: SessionId, claude_session_id: &str) -> bool {
+    /// Update a session's claude conversation id in memory only (no disk write).
+    /// Returns `false` when `id` is not journaled. Callers must follow up with
+    /// a snapshot + `write_snapshot` outside the registry lock.
+    pub fn update_claude_session(&mut self, id: SessionId, claude_session_id: &str) -> bool {
         let Some(e) = self.sessions.iter_mut().find(|e| e.id == id) else {
             return false;
         };
         e.claude_session_id = Some(claude_session_id.to_owned());
+        true
+    }
+
+    /// Record a new claude conversation id (`SessionStart`, `/clear`, fork)
+    /// in memory and persist. Returns `false` when `id` is not journaled.
+    /// A write failure is logged, not propagated (a missing conversation id
+    /// is recoverable; a live session must not be torn down for a disk error).
+    ///
+    /// Hot paths should use `update_claude_session` + snapshot +
+    /// `write_snapshot` outside the registry lock. This convenience method
+    /// is kept for tests and non-hot-path callers.
+    #[cfg(test)]
+    pub fn set_claude_session(&mut self, id: SessionId, claude_session_id: &str) -> bool {
+        if !self.update_claude_session(id, claude_session_id) {
+            return false;
+        }
         let snap = self.snapshot();
         let path = self.path.clone();
         if let Err(e) = Self::write_snapshot(&path, &snap) {
@@ -191,6 +206,16 @@ impl Journal {
         let before = self.sessions.len();
         self.sessions.retain(|e| e.id != id);
         self.sessions.len() != before
+    }
+
+    /// Re-insert a previously removed entry (rollback for a failed Kill).
+    /// If an entry with the same id already exists it is replaced (idempotent).
+    pub fn reinsert(&mut self, entry: Entry) {
+        if let Some(e) = self.sessions.iter_mut().find(|e| e.id == entry.id) {
+            *e = entry;
+        } else {
+            self.sessions.push(entry);
+        }
     }
 
     /// Forget a session and persist. Returns the write result; callers that

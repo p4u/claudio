@@ -345,21 +345,34 @@ impl Daemon {
 
     /// Kill a live session (or just forget a dormant one) and announce
     /// `Removed`. The journal removal is durable before returning `Ok`.
+    ///
+    /// If the journal write fails, the live handle and the in-memory journal
+    /// entry are re-inserted so the daemon stays consistent and the kill is
+    /// not acknowledged.
     async fn kill(&self, id: SessionId) -> io::Result<()> {
-        // Take the live handle and remove in-memory journal entry under lock.
-        let (live, was_journaled, journal_snapshot) = {
+        // Take the live handle and save the journal entry, then remove both
+        // from the in-memory registry, before doing any disk I/O.
+        let (live, saved_entry, was_known, journal_snapshot) = {
             let mut reg = self.registry();
             let live = reg.live.remove(&id);
+            // Save a copy of the journal entry so we can re-insert on failure.
+            let saved_entry = reg
+                .journal
+                .entries()
+                .iter()
+                .find(|e| e.id == id)
+                .cloned();
             let was_journaled = reg.journal.remove_in_memory(id);
-            let snap = if was_journaled || live.is_some() {
+            let was_known = was_journaled || live.is_some();
+            let snap = if was_known {
                 Some(reg.journal.snapshot())
             } else {
                 None
             };
-            (live, was_journaled, snap)
+            (live, saved_entry, was_known, snap)
         };
 
-        if live.is_none() && !was_journaled {
+        if !was_known {
             return Err(io::Error::other(format!("no such session: {id}")));
         }
 
@@ -367,10 +380,17 @@ impl Daemon {
         if let Some(snap) = journal_snapshot {
             let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
-                // Re-insert the entry in memory so we don't lie about success.
-                // We cannot un-kill the live session, but at least the journal
-                // stays consistent with what we're about to announce.
+                // Re-insert the live handle and journal entry so the daemon
+                // stays consistent with the on-disk state and does not lie
+                // about success.
                 tracing::error!(%id, error = %e, "kill journal write failed; not acking");
+                let mut reg = self.registry();
+                if let Some(handle) = live {
+                    reg.live.insert(id, handle);
+                }
+                if let Some(entry) = saved_entry {
+                    reg.journal.reinsert(entry);
+                }
                 return Err(io::Error::other(format!(
                     "could not durably remove session {id}: {e}"
                 )));
@@ -436,10 +456,30 @@ impl Daemon {
     }
 
     /// Journal a session's new claude conversation id (durably, right away).
+    ///
+    /// Follows the split-lock pattern: mutate in-memory under the registry
+    /// lock, snapshot, release the lock, then write to disk under the
+    /// journal_write mutex. This avoids holding the registry lock during
+    /// fsync'd I/O.
     fn record_claude_session(&self, id: SessionId, claude_session_id: &str) {
-        self.registry()
-            .journal
-            .set_claude_session(id, claude_session_id);
+        // Phase 1: mutate in-memory and snapshot under the registry lock.
+        let snapshot = {
+            let mut reg = self.registry();
+            let updated = reg.journal.update_claude_session(id, claude_session_id);
+            if updated {
+                Some(reg.journal.snapshot())
+            } else {
+                None
+            }
+        };
+        // Phase 2: write to disk outside the registry lock.
+        if let Some(snap) = snapshot {
+            let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
+                tracing::error!(path = %self.config.journal.display(), error = %e,
+                    "could not write journal after claude session id update");
+            }
+        }
     }
 
     /// Retry spawning a session without `--resume` after a quick-exit failure.
@@ -513,66 +553,6 @@ impl Daemon {
         }
     }
 
-    /// Resolve the args for respawning a dormant session.
-    ///
-    /// When the client requests a respawn with only `--resume` (or no extra
-    /// args), we merge in the journal's stored args (model, permission flags,
-    /// etc.) so the session is resumed with the same configuration it was
-    /// originally spawned with. The `--resume <claude_session_id>` pair is
-    /// always appended from the journal entry.
-    #[allow(dead_code)] // planned for daemon upgrade command (§2.6 of design doc)
-    pub(crate) fn resolve_respawn_args(&self, spec: &SpawnSpec) -> Vec<String> {
-        let reg = self.registry();
-        let Some(entry) = reg.journal.entries().iter().find(|e| e.id == spec.id) else {
-            return spec.args.clone();
-        };
-
-        // If the client supplied a non-trivial arg list (not just --resume),
-        // trust it as-is. We consider it non-trivial when it contains any arg
-        // other than "--resume" and its value.
-        let is_resume_only = {
-            let args = &spec.args;
-            args.is_empty()
-                || (args.len() == 2 && args[0] == "--resume" && !args[1].is_empty())
-                || (args.len() == 1 && args[0] == "--resume")
-        };
-
-        if !is_resume_only {
-            return spec.args.clone();
-        }
-
-        // Build merged args: journal's base args (minus any existing
-        // --resume/--session-id pairs) + --resume <current claude id>.
-        let mut merged: Vec<String> = entry
-            .args
-            .iter()
-            .filter(|a| *a != "--resume" && *a != "--session-id")
-            .cloned()
-            .collect();
-        // Remove the value that follows --resume / --session-id in the journal.
-        let mut skip_next = false;
-        let mut cleaned: Vec<String> = Vec::new();
-        for a in &merged {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if a == "--resume" || a == "--session-id" {
-                skip_next = true;
-                continue;
-            }
-            cleaned.push(a.clone());
-        }
-        merged = cleaned;
-
-        // Append --resume with the stored claude session id, if any.
-        if let Some(csid) = &entry.claude_session_id {
-            merged.push("--resume".into());
-            merged.push(csid.clone());
-        }
-
-        merged
-    }
 }
 
 /// A journal entry as seen while it has no process.
