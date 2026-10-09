@@ -125,7 +125,7 @@ fn main() -> std::process::ExitCode {
 
     // `claudio daemon <subcommand>` — daemon management.
     if argv.get(1).map(String::as_str) == Some("daemon") {
-        return daemon_cmd(&argv[2..]);
+        return daemon::ctl::daemon_cmd(&argv[2..]);
     }
 
     // `claudio sessions` — list sessions as a table.
@@ -252,121 +252,6 @@ fn print_help_with_appendix(args: &[String]) -> std::process::ExitCode {
             eprintln!("claudio: could not run '{claude} --help': {e}");
             print!("{}", cli::HELP_APPENDIX);
             std::process::ExitCode::SUCCESS
-        }
-    }
-}
-
-// ── `claudio daemon` subcommands ──────────────────────────────────────────────
-
-fn daemon_cmd(args: &[String]) -> std::process::ExitCode {
-    match args.first().map(String::as_str) {
-        Some("status") => daemon_status(),
-        Some("stop") => daemon_stop(),
-        Some("restart") => daemon_restart(),
-        _ => {
-            eprintln!("usage: claudio daemon <status|stop|restart>");
-            std::process::ExitCode::from(2)
-        }
-    }
-}
-
-/// Read the daemon PID from the lock file. Returns None when the file is
-/// absent, unreadable, or contains no parseable PID.
-fn read_daemon_pid() -> Option<u32> {
-    let lock = paths::daemon_lock();
-    std::fs::read_to_string(&lock)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-}
-
-/// Whether the daemon socket is currently connectable.
-fn daemon_socket_live() -> bool {
-    std::os::unix::net::UnixStream::connect(paths::daemon_socket()).is_ok()
-}
-
-fn daemon_status() -> std::process::ExitCode {
-    let pid = read_daemon_pid();
-    let live = daemon_socket_live();
-
-    if !live {
-        println!("daemon: not running");
-        return std::process::ExitCode::from(1);
-    }
-
-    let pid_str = pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
-    println!("daemon: running (pid {pid_str})");
-
-    // Connect and get session count + version.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-    let rt = match rt {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("claudio daemon status: {e}");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    rt.block_on(async {
-        match client::connect(&paths::daemon_socket()).await {
-            Ok(c) => {
-                let version = &c.welcome().claudio_version;
-                println!("version: {version}");
-                match c.request(proto::Msg::ListSessions).await {
-                    Ok(proto::Msg::Sessions { sessions }) => {
-                        println!("sessions: {}", sessions.len());
-                    }
-                    _ => println!("sessions: (could not fetch)"),
-                }
-            }
-            Err(e) => eprintln!("claudio daemon status: connect failed: {e}"),
-        }
-    });
-    std::process::ExitCode::SUCCESS
-}
-
-fn daemon_stop() -> std::process::ExitCode {
-    let Some(pid) = read_daemon_pid() else {
-        println!("daemon: not running");
-        return std::process::ExitCode::SUCCESS;
-    };
-    // SAFETY: kill(2) is async-signal-safe.
-    let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    if ret != 0 {
-        eprintln!("claudio daemon stop: kill failed: {}", std::io::Error::last_os_error());
-        return std::process::ExitCode::FAILURE;
-    }
-    // Wait for the socket to vanish (up to 10 s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if !daemon_socket_live() {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            eprintln!("claudio daemon stop: daemon did not exit within 10 s");
-            return std::process::ExitCode::FAILURE;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    println!("daemon stopped. Running sessions are dormant; the next `claudio` resumes them with --resume.");
-    std::process::ExitCode::SUCCESS
-}
-
-fn daemon_restart() -> std::process::ExitCode {
-    // Stop the existing daemon (if any).
-    if daemon_socket_live() {
-        let code = daemon_stop();
-        if code != std::process::ExitCode::SUCCESS {
-            return code;
-        }
-    }
-    // Start a new daemon.
-    match client::ensure_daemon() {
-        Ok(()) => {
-            println!("daemon restarted.");
-            daemon_status()
-        }
-        Err(e) => {
-            eprintln!("claudio daemon restart: {e}");
-            std::process::ExitCode::FAILURE
         }
     }
 }
