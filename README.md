@@ -47,7 +47,60 @@ make install      # builds a static musl binary, installs it, and restarts a run
 
 **Platforms:** Linux and macOS, x86\_64 and arm64.
 
-**Requirements:** Claude Code must already be installed. For remote sessions, SSH key/agent authentication to each host.
+---
+
+## Quick start
+
+### Without a proxy
+
+**Requirements:** [Claude Code](https://claude.ai/claude-code) installed and logged in (`claude` works in your shell), and `~/.local/bin` (or your `CLAUDIO_INSTALL_DIR`) on your `PATH`.
+
+1. [Install](#install) claudio.
+2. Run `claudio`.
+3. The new-session wizard opens:
+   - **Start screen:** under *Local*, pick **Explore local dirs…** or one of your recent directories. Under *Remote*, pick an SSH host.
+   - **Directory:** type a path or a fragment of one, `Tab` completes, `Enter` picks. Hidden (`.`) directories are not listed; `Alt+.` shows them.
+   - **New or resume:** start a new Claude Code session, or resume a previous one from that directory.
+4. Work as usual. These keys are handled by claudio; everything else goes to Claude Code:
+
+   | Key | Action |
+   |---|---|
+   | `Alt+←` / `Alt+→` | Switch session |
+   | `Alt+n` | New session |
+   | `Alt+r` | Rename session |
+   | `Alt+x` | Close session |
+   | `Alt+g` | Overview of all sessions |
+   | `Alt+h` | Help (all keys) |
+   | `Alt+q` | Quit the UI; sessions keep running |
+
+5. Run `claudio` again later: every session is restored where you left it.
+
+**SSH in one line:** pick a host from the *Remote* section of the wizard (needs key-based `ssh <host>`, e.g. `ssh devbox`, to work without a password). claudio installs itself on the remote, and those sessions survive disconnects too. `claude` must be installed on the remote host unless you use a proxy (below).
+
+### With claude-proxy
+
+[claude-proxy](https://github.com/p4u/claude-proxy) is a multi-subscription credential proxy for Claude Code: sessions authenticate through it instead of a local `claude` login.
+
+```bash
+claudio proxy login https://proxy.example.com   # prompts for your token; it is never an argument
+claudio                                         # new sessions now use the proxy by default
+```
+
+- `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
+- `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
+- `claudio proxy status` shows your profiles, live stats and pool health. Inside the UI, `Alt+s` opens the stats for the active session.
+
+### Everyday commands
+
+| Command | What it does |
+|---|---|
+| `claudio` | Open the session manager |
+| `claudio sessions` | List sessions as a table (for scripts) |
+| `claudio daemon status\|stop\|restart` | Inspect or control the background daemon |
+| `claudio proxy login\|status\|use\|logout` | Manage proxy profiles |
+| `claudio upgrade [--check]` | Install the latest release, or only check for one |
+| `claudio -p "…"` | Drop-in for `claude -p` ([details](docs/print-and-api.md)) |
+| `claudio --api` | OpenAI-compatible API server ([details](docs/print-and-api.md)) |
 
 ---
 
@@ -60,7 +113,7 @@ Run `claudio` with no arguments to open the session manager. A per-host backgrou
 Press `Alt+n` (or launch `claudio` with no sessions) to open the wizard:
 
 1. **Start screen** — two sections: LOCAL (an "Explore" entry plus your recently used directories, each annotated with the git branch and last claude-activity timestamp) and REMOTE (SSH host aliases from `~/.ssh/config`). Type to filter both sections at once; Tab switches focus between sections.
-2. **Directory picker** — navigate or type a path; Tab-completes. Each entry shows `⎇ branch` and `✻ last-used` badges.
+2. **Directory picker** — navigate or type a path; Tab-completes. Each entry shows `⎇ branch` and `✻ last-used` badges. Directories starting with `.` are hidden by default; `Alt+.` toggles them (the picker shows `Alt+. hidden: off|on`), and typing a leading `.` (e.g. `~/.con`) reveals the matching ones.
 3. **Resume or new** — if the chosen directory has prior Claude Code sessions you can resume one; otherwise a fresh session starts.
 
 ### Attention colors
@@ -85,6 +138,7 @@ All manager keys use `Alt` so they never clash with Claude Code's own bindings. 
 | `Alt+x` | Close / kill session |
 | `Alt+s` | Proxy stats popup |
 | `Alt+h` | Help |
+| `Alt+.` | Wizard only: show/hide hidden directories |
 | `Alt+q` | Quit UI (sessions keep running in daemon) |
 
 ### Session states
