@@ -1063,6 +1063,54 @@ fn test_proxy_real_claude() {
     tui.quit(WAIT);
 }
 
+// ── Soak test ─────────────────────────────────────────────────────────────────
+
+/// Soak test: stay idle for 75 s (longer than the 45 s liveness deadline) then
+/// verify the session is still attached and input still echoes.
+///
+/// Gated by `CLAUDIO_SOAK=1` because it takes 75 real seconds.
+#[test]
+fn test_soak_connection_stays_alive() {
+    if std::env::var("CLAUDIO_SOAK").as_deref() != Ok("1") {
+        return; // skip unless explicitly requested
+    }
+
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    // Create a session backed by the fake claude (exec cat).
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+
+    // Verify the session is up.
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+
+    // Stay idle for 75 s — longer than LIVENESS_DEADLINE (45 s).
+    // The heartbeat must keep the connection alive during this time.
+    thread::sleep(Duration::from_secs(75));
+
+    // Verify no reconnecting or disconnected notice.
+    let status = tui.screen_text(Region::StatusBar);
+    assert!(
+        !status.contains("reconnect") && !status.contains("disconnected"),
+        "status bar should not show reconnect/disconnected after 75 s: {status:?}"
+    );
+
+    // Session should still be attached (not showing a reconnecting spinner).
+    let pane = tui.screen_text(Region::Pane);
+    assert!(
+        !pane.contains("reconnecting") && !pane.contains("Connecting"),
+        "pane should not show reconnecting after 75 s: {pane:?}"
+    );
+
+    // Input must still echo — the connection is alive.
+    let echo_phrase = "soak-echo-ok";
+    tui.send_keys(echo_phrase.as_bytes());
+    tui.send_keys(ENTER);
+    tui.wait_for(echo_phrase, Region::Pane, WAIT);
+
+    tui.quit(WAIT);
+}
+
 // ── Scope guard ───────────────────────────────────────────────────────────────
 
 /// Minimal scope guard: runs `f` when dropped.
