@@ -609,7 +609,6 @@ mod tests {
     use super::*;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
-    use crate::term::screen::Screen;
     use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -944,23 +943,13 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
 
         // Manually add a fake "remote" session (simulating a previous recover_host call).
-        app.sessions.push(SessionView {
-            id: remote_id,
-            name: None,
-            cwd: "/remote".into(),
-            host: "myserver".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: crate::term::screen::Screen::new(28, 100),
-            attached: false,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
+        app.sessions.push(SessionView::new(
+            remote_id,
+            "myserver",
+            "/remote",
+            SessionKind::Claude,
+            (28, 100),
+        ));
         assert_eq!(app.sessions.len(), 2);
 
         // Now simulate a second local reconnect: recover_host("local", ...) must
@@ -1203,40 +1192,12 @@ mod tests {
         let local_id = Uuid::new_v4();
         let remote_id = Uuid::new_v4();
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.sessions.push(SessionView {
-            id: local_id,
-            name: None,
-            cwd: "/l".into(),
-            host: "local".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: Screen::new(28, 100),
-            attached: true,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
-        app.sessions.push(SessionView {
-            id: remote_id,
-            name: None,
-            cwd: "/r".into(),
-            host: "myserver".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: Screen::new(28, 100),
-            attached: true,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
+        for (id, host) in [(local_id, "local"), (remote_id, "myserver")] {
+            app.sessions.push(SessionView {
+                attached: true,
+                ..SessionView::new(id, host, "/w", SessionKind::Claude, (28, 100))
+            });
+        }
         app.on_incoming_from("local", Incoming::Disconnected);
         // Local session detached.
         assert!(

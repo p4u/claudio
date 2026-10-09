@@ -410,21 +410,12 @@ mod tests {
         let mut app = App::new(120, 30, "/home/u".into(), vec![]);
         app.now = 1_000;
         app.sessions.push(SessionView {
-            id: uuid::Uuid::new_v4(),
             name: Some("s".into()),
-            cwd: "/srv".into(),
-            host: "local".into(),
             state: SessionState::Idle,
-            title: None,
             claude_session_id: Some("c1".into()),
-            created_at: 0,
-            mirror: crate::term::screen::Screen::new(10, 40),
             attached: true,
             proxy: Some("work".into()),
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..SessionView::new(uuid::Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (10, 40))
         });
         app.active = Some(0);
         let line = |app: &App| plain(&join_segments(session_segments(app, &app.sessions[0])));

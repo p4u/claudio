@@ -605,24 +605,8 @@ impl App {
         }
         if let SessionEvent::Created { info } = &event {
             if self.index_of(id).is_none() {
-                let (rows, cols) = self.pane_size();
-                self.sessions.push(SessionView {
-                    id,
-                    name: info.name.clone(),
-                    cwd: info.cwd.clone(),
-                    host: host.to_owned(),
-                    state: info.state,
-                    title: info.title.clone(),
-                    claude_session_id: info.claude_session_id.clone(),
-                    created_at: info.created_at,
-                    mirror: Screen::new(rows, cols),
-                    attached: false,
-                    proxy: None,
-                    branch: info.branch.clone(),
-                    model: info.model.clone(),
-                    context_tokens: info.context_tokens,
-                    kind: info.kind,
-                });
+                let view = SessionView::from_info(host, info, self.pane_size());
+                self.sessions.push(view);
                 self.save();
                 return;
             }

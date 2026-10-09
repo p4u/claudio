@@ -955,27 +955,11 @@ mod tests {
 
     #[test]
     fn tab_titles_show_label_only() {
-        use super::super::super::proto::SessionState;
-        use super::super::super::term::screen::Screen;
-        use super::super::app::SessionView;
         use uuid::Uuid;
         let now = 600u64;
         let make_view = |name: &str| SessionView {
-            id: Uuid::new_v4(),
             name: Some(name.to_owned()),
-            cwd: "/srv".into(),
-            host: "local".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 0,
-            mirror: Screen::new(24, 80),
-            attached: false,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..SessionView::new(Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (24, 80))
         };
         let sessions = vec![make_view("api"), make_view("docs")];
         // Wide bar: labels appear, no age.

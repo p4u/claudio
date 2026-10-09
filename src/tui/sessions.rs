@@ -58,6 +58,64 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    /// A detached view of a session that nothing is known about yet but where
+    /// and what it runs. `size` is the pane's `(rows, cols)`.
+    pub fn new(
+        id: SessionId,
+        host: impl Into<String>,
+        cwd: impl Into<String>,
+        kind: SessionKind,
+        size: (u16, u16),
+    ) -> SessionView {
+        SessionView {
+            id,
+            name: None,
+            cwd: cwd.into(),
+            host: host.into(),
+            // A shell has no hooks to report its state: it is simply idle.
+            state: match kind {
+                SessionKind::Claude => SessionState::Starting,
+                SessionKind::Shell => SessionState::Idle,
+            },
+            title: None,
+            claude_session_id: None,
+            created_at: 0,
+            mirror: Screen::new(size.0, size.1),
+            attached: false,
+            proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
+            kind,
+        }
+    }
+
+    /// The view of a session `host`'s daemon reports.
+    pub fn from_info(host: &str, info: &SessionInfo, size: (u16, u16)) -> SessionView {
+        SessionView {
+            name: info.name.clone(),
+            state: info.state,
+            title: info.title.clone(),
+            claude_session_id: info.claude_session_id.clone(),
+            created_at: info.created_at,
+            branch: info.branch.clone(),
+            model: info.model.clone(),
+            context_tokens: info.context_tokens,
+            ..SessionView::new(info.id, host, info.cwd.clone(), info.kind, size)
+        }
+    }
+
+    /// The view of a session as state.json remembers it.
+    pub fn from_saved(saved: SavedSession, size: (u16, u16)) -> SessionView {
+        SessionView {
+            name: saved.name,
+            claude_session_id: saved.claude_session_id,
+            created_at: saved.created_at,
+            proxy: saved.proxy,
+            ..SessionView::new(saved.id, saved.host, saved.cwd, saved.kind, size)
+        }
+    }
+
     /// The tab label: the user's name, else a meaningful claude title (not
     /// "Claude Code"), else the cwd's basename. A terminal is its name, else
     /// `term`; its title is ignored so a shell prompt cannot rename the tab.
@@ -290,30 +348,12 @@ impl App {
             args,
         };
         self.send_spawn(&host, req, proxy.as_deref())?;
-        let (rows, cols) = self.pane_size();
-        self.sessions.insert(
-            at,
-            SessionView {
-                id,
-                name: None,
-                cwd,
-                host,
-                state: match kind {
-                    SessionKind::Claude => SessionState::Starting,
-                    SessionKind::Shell => SessionState::Idle,
-                },
-                title: None,
-                claude_session_id: None,
-                created_at: self.now,
-                mirror: Screen::new(rows, cols),
-                attached: false,
-                proxy,
-                branch: None,
-                model: None,
-                context_tokens: None,
-                kind,
-            },
-        );
+        let view = SessionView {
+            created_at: self.now,
+            proxy,
+            ..SessionView::new(id, host, cwd, kind, self.pane_size())
+        };
+        self.sessions.insert(at, view);
         self.activate(at);
         Ok(())
     }
@@ -556,7 +596,7 @@ impl App {
         live: &[SessionInfo],
         is_full: bool,
     ) {
-        let (rows, cols) = self.pane_size();
+        let size = self.pane_size();
         if is_full {
             self.connected = true;
             self.sessions.clear();
@@ -595,21 +635,9 @@ impl App {
                 }
             }
             self.sessions.push(SessionView {
-                id: r.saved.id,
-                name: r.saved.name,
-                cwd: r.saved.cwd,
-                host: r.saved.host,
                 state: r.state,
                 title: r.title,
-                claude_session_id: r.saved.claude_session_id,
-                created_at: r.saved.created_at,
-                mirror: Screen::new(rows, cols),
-                attached: false,
-                proxy: r.saved.proxy,
-                branch: None,
-                model: None,
-                context_tokens: None,
-                kind: r.saved.kind,
+                ..SessionView::from_saved(r.saved, size)
             });
         }
 
