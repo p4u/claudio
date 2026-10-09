@@ -82,11 +82,6 @@ fn draw_plain(frame: &mut Frame, app: &App) {
 fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
     match &app.modal {
         Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
-        Some(Modal::Close { id }) => {
-            if let Some(view) = app.sessions.iter().find(|v| v.id == *id) {
-                draw_close(frame, &view.label());
-            }
-        }
         Some(Modal::Wizard(w)) => {
             let toggle_key = app
                 .keymap
@@ -368,18 +363,6 @@ fn draw_rename(frame: &mut Frame, input: &str) {
     let rect = centered(area, 60.min(area.width.saturating_sub(4)), 3);
     let inner = popup(frame, rect, "Rename session (Enter save · Esc cancel)");
     draw_input(frame, inner, "", input);
-}
-
-fn draw_close(frame: &mut Frame, label: &str) {
-    let text = format!("Kill session {label}? [y] kill · [n]/Esc cancel");
-    let area = frame.area();
-    let rect = centered(
-        area,
-        (str_width(&text) as u16 + 4).min(area.width.saturating_sub(2)),
-        3,
-    );
-    let inner = popup(frame, rect, "Close session");
-    frame.render_widget(Paragraph::new(text), inner);
 }
 
 /// Render `rows` into `area`, highlighting `selected` and scrolling to keep

@@ -298,7 +298,7 @@ mod tests {
         app.on_terminal(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         app.on_terminal(alt('x'));
         app.on_terminal(alt('g'));
-        assert!(matches!(app.modal, Some(Modal::Close { .. })));
+        assert!(matches!(app.modal, Some(Modal::Confirm(_))));
     }
 
     #[test]

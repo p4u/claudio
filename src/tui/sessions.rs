@@ -13,7 +13,7 @@ use crate::proto::{
 use crate::term::screen::Screen;
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
-use super::state::{self, ClientState, SavedSession};
+use super::state::{self, ClientState, KillTombstone, SavedSession};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 
@@ -438,6 +438,38 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // ── Close (Alt+x) ─────────────────────────────────────────────────────────
+
+    /// Ask before killing the active session.
+    pub(super) fn ask_kill(&mut self) {
+        let Some(v) = self.active_view() else { return };
+        let prompt = ConfirmPrompt::new(
+            "Close session",
+            format!("Kill session {}?", v.label()),
+            vec![
+                Choice::new('y', "kill", Some(ConfirmAction::Kill(v.id))),
+                Choice::new('n', "cancel", None),
+            ],
+        );
+        self.queue_confirm(prompt.ready());
+    }
+
+    /// Kill session `id` and close its tab. The tombstone is saved before the
+    /// Kill is sent, so a Kill lost on the way is sent again on recovery
+    /// instead of the session coming back.
+    pub(super) fn kill_session(&mut self, id: SessionId) {
+        let Some(i) = self.index_of(id) else { return };
+        let host = self.sessions[i].host.clone();
+        self.killed.push(KillTombstone {
+            host: host.clone(),
+            id,
+        });
+        // Saves: state.json has the tombstone (`to_state` includes `killed`)
+        // and no longer the session.
+        self.remove(i);
+        self.request(&host, Msg::Kill { id }, ReplyTo::Kill(id));
     }
 
     // ── Reset (Alt+e) ─────────────────────────────────────────────────────────

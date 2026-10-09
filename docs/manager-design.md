@@ -36,8 +36,8 @@ cover the design above. They are listed as facts, not as bugs.
   alt screen may see the primary screen blank on reattach.
 - **Close requires confirmation, not a command palette.** Design §3.3 said
   "Close is never a single keystroke" and pointed to a command palette.
-  The implementation shows an inline `[y] kill · [n]/Esc cancel` prompt in the
-  status bar after `Alt+x`, without a full command palette.
+  The implementation shows a confirm popup (`[y] kill · [n] cancel`; Esc
+  cancels too) after `Alt+x`, without a full command palette.
 - **`SO_PEERCRED` uid check is platform-dependent.** Linux uses `SO_PEERCRED`.
   macOS uses `getpeereid`. The implementation handles both via the `libc`
   crate.

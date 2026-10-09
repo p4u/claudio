@@ -20,7 +20,6 @@ use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::sessions::SessionView;
-use super::state::KillTombstone;
 use super::stats_view::StatsView;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
@@ -33,10 +32,6 @@ pub enum Modal {
         id: SessionId,
         input: String,
     },
-    /// Confirm killing a session.
-    Close {
-        id: SessionId,
-    },
     Wizard(Wizard),
     /// Proxy stats popup (see `stats_view.rs`).
     ProxyStats(StatsView),
@@ -48,7 +43,8 @@ pub enum Modal {
     },
     /// Help popup: all key bindings.
     Help,
-    /// A yes / no / skip question (see [`super::confirm`]).
+    /// A multiple-choice question: kill, reset, update claude (see
+    /// [`super::confirm`]).
     Confirm(ConfirmPrompt),
     /// The commit-history viewer (full pane).
     Git(Box<GitView>),
@@ -171,11 +167,7 @@ impl App {
                     });
                 }
             }
-            Action::Close => {
-                if let Some(v) = self.active_view() {
-                    self.modal = Some(Modal::Close { id: v.id });
-                }
-            }
+            Action::Close => self.ask_kill(),
             Action::Quit => {
                 self.save();
                 self.quit = true;
@@ -241,29 +233,6 @@ impl App {
                 KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                     input.push(c)
                 }
-                _ => {}
-            },
-            Modal::Close { id } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let id = *id;
-                    self.modal = None;
-                    if let Some(i) = self.index_of(id) {
-                        let host = self.sessions[i].host.clone();
-                        // The tombstone goes in before the Kill is sent.
-                        self.killed.push(KillTombstone {
-                            host: host.clone(),
-                            id,
-                        });
-                        // Remove from session list (also queues Save via remove()).
-                        self.remove(i);
-                        // Save includes the tombstone since to_state() includes killed.
-                        self.save();
-                        // Kill is queued AFTER Save in the effects list, so the
-                        // tombstone is durably persisted before Kill reaches the daemon.
-                        self.request(&host, Msg::Kill { id }, ReplyTo::Kill(id));
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
                 _ => {}
             },
             Modal::ProxyStats(_) => self.stats_key(key),
@@ -353,11 +322,7 @@ impl App {
                 view.on_paste(text);
                 self.redraw = true;
             }
-            Some(Modal::Close { .. })
-            | Some(Modal::ProxyStats(_))
-            | Some(Modal::Overview { .. })
-            | Some(Modal::Help)
-            | Some(Modal::Confirm(_)) => {}
+            Some(Modal::ProxyStats(_) | Modal::Overview { .. } | Modal::Help | Modal::Confirm(_)) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());

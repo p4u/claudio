@@ -25,6 +25,8 @@ pub enum ConfirmAction {
     SkipClaude(Skip),
     /// Restart session `id` in its tab; `fresh` starts a new conversation.
     Reset { id: SessionId, fresh: bool },
+    /// Kill session `id` and close its tab.
+    Kill(SessionId),
 }
 
 /// A host and the version the user may choose to skip for it.
@@ -154,6 +156,7 @@ impl App {
                 self.save();
             }
             Some(ConfirmAction::Reset { id, fresh }) => self.reset_session(id, fresh),
+            Some(ConfirmAction::Kill(id)) => self.kill_session(id),
             None => {}
         }
         self.show_next_confirm();

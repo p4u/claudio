@@ -814,6 +814,21 @@ mod tests {
     }
 
     #[test]
+    fn the_kill_prompt_names_the_session_and_esc_cancels_it() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('x'));
+        match &app.modal {
+            Some(Modal::Confirm(p)) => assert_eq!(p.text, "Kill session app?"),
+            _ => panic!("expected the kill prompt"),
+        }
+        assert_eq!(hints(&app), ["[y] kill", "[n] cancel"]);
+        app.on_terminal(plain(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.killed.is_empty());
+    }
+
+    #[test]
     fn tombstone_persisted_in_state_before_kill() {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
