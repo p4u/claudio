@@ -16,7 +16,9 @@ use crate::proxy::api::SessionCredential;
 
 use super::super::app::App;
 use super::super::sessions::SessionView;
-use super::{abbreviate_home, fmt_age, str_width, truncate};
+use super::super::fmt::{
+    abbreviate_home, fmt_age, fmt_context, short_model, spans_width, str_width, truncate,
+};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -112,12 +114,10 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
         segments.push(vec![colored(format!("⎇ {branch}"), GREEN)]);
     }
     if let Some(model) = &v.model {
-        // Strip "claude-" prefix and truncate.
-        let short = model.strip_prefix("claude-").unwrap_or(model);
-        segments.push(vec![bold_colored(truncate(short, 14), BLUE)]);
+        segments.push(vec![bold_colored(truncate(short_model(model), 14), BLUE)]);
     }
     if let Some(ctx) = v.context_tokens {
-        segments.push(vec![colored(fmt_tokens_k(ctx), CYAN)]);
+        segments.push(vec![colored(fmt_context(ctx), CYAN)]);
     }
     segments.push(vec![colored(v.state.name(), state_color(v.state))]);
     if v.created_at > 0 && app.now >= v.created_at {
@@ -280,10 +280,6 @@ fn draw_bar(frame: &mut Frame, spans: Vec<Span<'static>>, area: Rect) {
 
 // ── Span helpers ──────────────────────────────────────────────────────────────
 
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|s| str_width(&s.content)).sum()
-}
-
 /// Cut `spans` to at most `max` columns, keeping each span's style. The span
 /// that straddles the limit is shortened with `…`.
 fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
@@ -313,17 +309,6 @@ fn sparkline(vals: &[f32], max: f32) -> String {
             BARS[idx]
         })
         .collect()
-}
-
-/// Format context tokens: `143k`, `1.2M`, or raw for small values.
-fn fmt_tokens_k(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("ctx {:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1000 {
-        format!("ctx {}k", n / 1000)
-    } else {
-        format!("ctx {n}")
-    }
 }
 
 #[cfg(test)]

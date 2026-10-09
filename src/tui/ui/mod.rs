@@ -22,6 +22,7 @@ use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
+use super::fmt::{abbreviate_home, fmt_age, str_width, tail, truncate};
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -657,76 +658,6 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-// ── Text helpers ──────────────────────────────────────────────────────────────
-
-/// Display width of `s` in terminal columns.
-pub fn str_width(s: &str) -> usize {
-    Span::raw(s).width()
-}
-
-/// Cut `s` to at most `max` columns, ending in `…` when shortened.
-pub fn truncate(s: &str, max: usize) -> String {
-    if str_width(s) <= max {
-        return s.to_owned();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in s.chars() {
-        let w = char_width(c);
-        if used + w > max - 1 {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('…');
-    out
-}
-
-/// The last `max` columns of `s`.
-fn tail(s: &str, max: usize) -> String {
-    let mut used = 0;
-    let mut chars: Vec<char> = Vec::new();
-    for c in s.chars().rev() {
-        used += char_width(c);
-        if used > max {
-            break;
-        }
-        chars.push(c);
-    }
-    chars.into_iter().rev().collect()
-}
-
-fn char_width(c: char) -> usize {
-    let mut buf = [0u8; 4];
-    str_width(c.encode_utf8(&mut buf))
-}
-
-/// Replace a leading `home` with `~`.
-pub fn abbreviate_home(path: &str, home: &str) -> String {
-    if home.is_empty() || home == "/" {
-        return path.to_owned();
-    }
-    match path.strip_prefix(home) {
-        Some("") => "~".to_owned(),
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_owned(),
-    }
-}
-
-/// A compact duration: `42s`, `12m`, `3h`, `5d`.
-pub fn fmt_age(secs: u64) -> String {
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        3600..=86_399 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86_400),
-    }
-}
-
 // ── Overview popup ────────────────────────────────────────────────────────────
 
 /// Render the overview / "mission control" popup.
@@ -875,18 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_marks_cut_text() {
-        assert_eq!(truncate("claudio", 10), "claudio");
-        assert_eq!(truncate("claudio", 7), "claudio");
-        assert_eq!(truncate("claudio", 5), "clau…");
-        assert_eq!(truncate("claudio", 1), "…");
-        assert_eq!(truncate("claudio", 0), "");
-        // Wide characters count two columns.
-        assert_eq!(truncate("日本語です", 5), "日本…");
-        assert_eq!(str_width(&truncate("日本語です", 4)), 3);
-    }
-
-    #[test]
     fn tabs_fit_untouched_when_there_is_room() {
         assert_eq!(fit_tabs(&[5, 7, 3], Some(0), 200), vec![5, 7, 3]);
     }
@@ -953,20 +872,5 @@ mod tests {
         let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
         let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
         assert!(str_width(&narrow_text) <= 21);
-    }
-
-    #[test]
-    fn home_is_abbreviated_only_on_a_path_boundary() {
-        assert_eq!(abbreviate_home("/home/u/repos", "/home/u"), "~/repos");
-        assert_eq!(abbreviate_home("/home/u", "/home/u"), "~");
-        assert_eq!(abbreviate_home("/home/user2", "/home/u"), "/home/user2");
-    }
-
-    #[test]
-    fn ages_are_compact() {
-        assert_eq!(fmt_age(5), "5s");
-        assert_eq!(fmt_age(300), "5m");
-        assert_eq!(fmt_age(7200), "2h");
-        assert_eq!(fmt_age(3 * 86_400), "3d");
     }
 }

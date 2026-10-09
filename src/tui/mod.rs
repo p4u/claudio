@@ -8,6 +8,7 @@ pub mod app;
 mod claude_update;
 mod confirm;
 mod connections;
+mod fmt;
 mod git_app;
 mod git_view;
 mod interaction;

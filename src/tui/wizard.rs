@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::proto::{ClaudeSession, DirEntry};
 
-use super::ui::{abbreviate_home, fmt_age};
+use super::fmt::{abbreviate_home, fmt_age};
 
 /// Enrichment metadata for a candidate directory.
 ///

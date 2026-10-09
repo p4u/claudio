@@ -13,14 +13,14 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
-use crate::proxy::cmd::fmt_tokens;
 
 use super::super::app::{App, ProxyStatus, SessionView};
-use super::super::stats_view::{
-    bar, delta, family, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, short_model, Family, Page,
-    StatsView, Window,
+use super::super::fmt::{
+    fmt_age, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, fmt_tokens, short_model, str_width,
+    truncate,
 };
-use super::{centered, fmt_age, popup, str_width, truncate};
+use super::super::stats_view::{Page, StatsView, Window};
+use super::{centered, popup};
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;
@@ -867,6 +867,31 @@ fn blocked_spans(until: Option<&str>) -> Vec<Span<'static>> {
     )]
 }
 
+/// A horizontal bar of `width` cells filled to `frac` (0..=1), using eighth
+/// blocks for the partial cell so small values are still visible.
+fn bar(frac: f64, width: usize) -> String {
+    const PARTIAL: [char; 8] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let frac = frac.clamp(0.0, 1.0);
+    let eighths = (frac * width as f64 * 8.0).round() as usize;
+    let full = eighths / 8;
+    let mut out = "█".repeat(full.min(width));
+    if full < width {
+        out.push(PARTIAL[eighths % 8]);
+        out.push_str(&"░".repeat(width - full - 1));
+    }
+    out
+}
+
+/// Relative change of `now` against `baseline`; `None` when there is no
+/// baseline to compare with.
+fn delta(now: f64, baseline: f64) -> Option<f64> {
+    if baseline <= 0.0 {
+        None
+    } else {
+        Some((now - baseline) / baseline)
+    }
+}
+
 /// Share of prompt tokens that were served from the cache.
 fn cache_hit(t: &StatsTotals) -> Option<f64> {
     let prompt = t.input_tokens + t.cache_read + t.cache_creation;
@@ -906,6 +931,31 @@ fn provider_color(status: &str) -> Color {
         "busy" => Color::Yellow,
         "saturated" | "unavailable" => Color::Red,
         _ => Color::DarkGray,
+    }
+}
+
+/// The model family, for colouring. Mirrors the proxy's `modelFamily`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Fable,
+    Opus,
+    Sonnet,
+    Haiku,
+    Other,
+}
+
+fn family(model: &str) -> Family {
+    let m = model.to_ascii_lowercase();
+    if m.contains("fable") || m.contains("mythos") {
+        Family::Fable
+    } else if m.contains("opus") {
+        Family::Opus
+    } else if m.contains("sonnet") {
+        Family::Sonnet
+    } else if m.contains("haiku") {
+        Family::Haiku
+    } else {
+        Family::Other
     }
 }
 
@@ -1099,6 +1149,23 @@ mod tests {
         app.take_effects();
         app.on_proxy_stats("myproxy".into(), fetch_all());
         app
+    }
+
+    #[test]
+    fn bars_deltas_and_families() {
+        assert_eq!(bar(0.0, 4), "░░░░");
+        assert_eq!(bar(1.0, 4), "████");
+        assert_eq!(bar(0.5, 4), "██░░");
+        assert_eq!(bar(0.125, 2), "▎░");
+        assert_eq!(bar(2.0, 3), "███", "clamped");
+        assert_eq!(bar(0.3, 0), "");
+
+        assert_eq!(delta(126.0, 100.0), Some(0.26));
+        assert_eq!(delta(5.0, 0.0), None);
+
+        assert_eq!(family("claude-opus-5-5[1m]"), Family::Opus);
+        assert_eq!(family("claude-mythos-1"), Family::Fable);
+        assert_eq!(family("claude-glm-5"), Family::Other);
     }
 
     fn render(app: &App) -> String {
