@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,12 +46,16 @@ impl fmt::Debug for Profile {
 
 impl Profile {
     /// Masked token for display: first 4 + last 4 chars, or all `*` when short.
+    ///
+    /// Uses `chars()` so multi-byte Unicode tokens don't cause a panic.
     pub fn masked_token(&self) -> String {
-        let t = &self.token;
-        if t.len() > 8 {
-            format!("{}…{}", &t[..4], &t[t.len() - 4..])
+        let chars: Vec<char> = self.token.chars().collect();
+        if chars.len() > 8 {
+            let head: String = chars[..4].iter().collect();
+            let tail: String = chars[chars.len() - 4..].iter().collect();
+            format!("{head}…{tail}")
         } else {
-            "*".repeat(t.len())
+            "*".repeat(chars.len())
         }
     }
 }
@@ -76,37 +81,71 @@ struct ConfigFile {
     extra: toml::Table,
 }
 
+// ── TOML error sanitization ────────────────────────────────────────────────────
+
+/// Extract a safe (non-secret) diagnostic from a TOML parse error.
+///
+/// The full `toml::de::Error` display includes the offending source line, which
+/// may contain a token. We keep only the first line (location) and discard the
+/// source excerpt.
+fn sanitize_toml_error(e: &toml::de::Error) -> String {
+    e.to_string()
+        .lines()
+        .next()
+        .unwrap_or("TOML parse error")
+        .to_owned()
+}
+
 // ── Loading and saving ────────────────────────────────────────────────────────
 
-/// Load the `[proxy]` section from `config.toml`. Missing file → empty section.
+/// Load the `[proxy]` section from the default `config.toml`.
+/// Missing file → empty section. Parse errors do NOT include source excerpts.
 pub fn load() -> io::Result<ProxySection> {
-    let path = paths::config_file();
-    let bytes = match std::fs::read(&path) {
+    load_from(&paths::config_file())
+}
+
+/// Load the `[proxy]` section from an explicit path (used in tests to avoid
+/// mutating the global `XDG_CONFIG_HOME`).
+pub fn load_from(path: &Path) -> io::Result<ProxySection> {
+    let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ProxySection::default()),
         Err(e) => return Err(e),
     };
-    let cfg: ConfigFile = toml::from_str(&String::from_utf8_lossy(&bytes))
-        .map_err(|e| io::Error::other(format!("config.toml parse error: {e}")))?;
+    let cfg: ConfigFile = toml::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| {
+        // Report only the location line; never embed the source (may contain token).
+        io::Error::other(format!(
+            "config.toml: {} (token content redacted)",
+            sanitize_toml_error(&e)
+        ))
+    })?;
     Ok(cfg.proxy.unwrap_or_default())
 }
 
-/// Save an updated `[proxy]` section back to `config.toml`, preserving any
-/// other keys that may already be present.
+/// Save an updated `[proxy]` section back to the default `config.toml`,
+/// preserving any other keys that may already be present.
 pub fn save(proxy: &ProxySection) -> io::Result<()> {
-    let path = paths::config_file();
+    save_to(&paths::config_file(), proxy)
+}
+
+/// Save an updated `[proxy]` section to an explicit path (used in tests).
+pub fn save_to(path: &Path, proxy: &ProxySection) -> io::Result<()> {
     // Load the current file (or start with an empty one) so we keep other sections.
-    let bytes = std::fs::read(&path).unwrap_or_default();
+    let bytes = std::fs::read(path).unwrap_or_default();
     let mut cfg: ConfigFile = if bytes.is_empty() {
         ConfigFile::default()
     } else {
-        toml::from_str(&String::from_utf8_lossy(&bytes))
-            .map_err(|e| io::Error::other(format!("config.toml parse error: {e}")))?
+        toml::from_str(&String::from_utf8_lossy(&bytes)).map_err(|e| {
+            io::Error::other(format!(
+                "config.toml: {} (token content redacted)",
+                sanitize_toml_error(&e)
+            ))
+        })?
     };
     cfg.proxy = Some(proxy.clone());
     let out = toml::to_string_pretty(&cfg)
         .map_err(|e| io::Error::other(format!("config.toml serialize error: {e}")))?;
-    paths::write_atomic(&path, out.as_bytes())
+    paths::write_atomic(path, out.as_bytes())
 }
 
 // ── URL / env-var parsing ─────────────────────────────────────────────────────
@@ -286,14 +325,14 @@ mod tests {
     }
 
     // ── TOML round-trip and file mode 0600 ───────────────────────────────────
+    // Uses load_from/save_to with an explicit temp path — no global env mutation.
 
     #[test]
     fn round_trip_and_file_mode() {
         let dir = std::env::temp_dir()
             .join(format!("claudio-proxy-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Override XDG_CONFIG_HOME so paths::config_file() points into our temp dir.
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let path = dir.join("config.toml");
 
         let mut sec = ProxySection::default();
         sec.default = Some("vocdoni".into());
@@ -301,13 +340,12 @@ mod tests {
             "vocdoni".into(),
             Profile { url: "https://claude.vocdoni.net".into(), token: "topsecret".into() },
         );
-        save(&sec).unwrap();
+        save_to(&path, &sec).unwrap();
 
-        let path = dir.join("claudio/config.toml");
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600, "config.toml must be mode 0600");
 
-        let loaded = load().unwrap();
+        let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.default.as_deref(), Some("vocdoni"));
         let p = loaded.profiles.get("vocdoni").unwrap();
         assert_eq!(p.url, "https://claude.vocdoni.net");
@@ -323,5 +361,43 @@ mod tests {
         let p = |t: &str| Profile { url: "u".into(), token: t.into() };
         assert_eq!(p("abcdefghwxyz").masked_token(), "abcd…wxyz");
         assert_eq!(p("ab").masked_token(), "**");
+    }
+
+    /// Fable: masked_token must not panic on Unicode tokens.
+    #[test]
+    fn masked_token_unicode_no_panic() {
+        // Token with multi-byte characters (e.g. emoji = 4 bytes each).
+        let p = Profile { url: "u".into(), token: "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑".into() };
+        // Should not panic; result length varies by char count.
+        let masked = p.masked_token();
+        assert!(!masked.is_empty());
+        // Short token: all stars.
+        let p2 = Profile { url: "u".into(), token: "🔑🔑".into() };
+        assert_eq!(p2.masked_token(), "**");
+    }
+
+    // ── TOML error sanitization ───────────────────────────────────────────────
+
+    /// Astra #8: a TOML parse error on a token line must NOT include the token
+    /// value in the error message.
+    #[test]
+    fn toml_error_does_not_leak_token() {
+        let dir = std::env::temp_dir()
+            .join(format!("claudio-proxy-toml-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // Write a malformed TOML where the token line is syntactically invalid.
+        let bad_toml = "[proxy.profiles.x]\nurl = \"https://x.net\"\ntoken = SUPERSECRETTOKEN_NO_QUOTES\n";
+        std::fs::write(&path, bad_toml).unwrap();
+
+        let err = load_from(&path).unwrap_err();
+        let msg = err.to_string();
+        // The error message must not contain the secret value.
+        assert!(!msg.contains("SUPERSECRETTOKEN_NO_QUOTES"), "error leaked token: {msg}");
+        // But it should still say something useful (location).
+        assert!(msg.contains("config.toml") || msg.contains("TOML"), "error not useful: {msg}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
