@@ -259,7 +259,7 @@ default = "x"
         assert!(file.extra.contains_key("proxy"));
     }
 
-    /// Astra #8: TOML errors must not embed source content (which may contain
+    /// TOML errors must not embed source content (which may contain
     /// a token from the [proxy] section).
     #[test]
     fn toml_error_does_not_include_source_content() {

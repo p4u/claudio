@@ -305,7 +305,7 @@ fn test_7_input_echo() {
     tui.quit(WAIT);
 }
 
-// ── P4: Overview ──────────────────────────────────────────────────────────────
+// ── Overview ──────────────────────────────────────────────────────────────────
 
 /// Overview popup (Alt+g) lists both sessions; ↑ navigates; Enter switches.
 #[test]
@@ -339,7 +339,7 @@ fn test_overview_opens_lists_and_switches() {
     tui.quit(WAIT);
 }
 
-// ── P4: Help ──────────────────────────────────────────────────────────────────
+// ── Help ──────────────────────────────────────────────────────────────────────
 
 /// Help popup (Alt+h) shows key bindings; Esc closes it.
 #[test]
@@ -467,7 +467,7 @@ fn test_wizard_browse_from_home_and_start_here() {
     tui.quit(WAIT);
 }
 
-// ── P4: daemon CLI ────────────────────────────────────────────────────────────
+// ── daemon CLI ────────────────────────────────────────────────────────────────
 
 /// `claudio daemon status` reports "running" and a session count.
 #[test]

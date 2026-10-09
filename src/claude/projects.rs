@@ -542,7 +542,7 @@ mod tests {
         assert!(!is_real_prompt(&v));
     }
 
-    /// Fable M12: prompts starting with `<` are real prompts, not tool output.
+    /// Prompts starting with `<` are real prompts, not tool output.
     #[test]
     fn is_real_prompt_xml_tagged_task_is_real() {
         let v = serde_json::json!({
@@ -592,7 +592,7 @@ mod tests {
         );
     }
 
-    /// Fable M12: toolUseResult field marks a tool-result record.
+    /// A `toolUseResult` field marks a tool-result record.
     #[test]
     fn is_real_prompt_tool_use_result_field() {
         let v = serde_json::json!({
@@ -610,7 +610,7 @@ mod tests {
 
     // ── read_file_tail ────────────────────────────────────────────────────────
 
-    /// Fable M12: tail read must not fail when the seek lands in a multi-byte
+    /// The tail read must not fail when the seek lands in a multi-byte
     /// UTF-8 sequence.
     #[test]
     fn read_file_tail_multibyte_boundary() {

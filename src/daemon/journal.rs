@@ -247,7 +247,7 @@ impl Journal {
 
     /// Forget a session and persist. Returns the write result; callers that
     /// need durability (Kill) must propagate the error.
-    #[allow(dead_code)] // durable variant of remove_in_memory; kept for Kill-ack path (M2 design)
+    #[allow(dead_code)] // durable variant of remove_in_memory; kept for a Kill that must be durable
     pub fn remove(&mut self, id: SessionId) -> io::Result<bool> {
         if !self.remove_in_memory(id) {
             return Ok(false);

@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(saturated.overall(), PoolStatus::Saturated);
     }
 
-    /// Astra #19: check_models_fallback must NOT accept 404 as success.
+    /// check_models_fallback must NOT accept 404 as success.
     #[tokio::test]
     async fn check_models_fallback_404_is_failure() {
         // No routes → 404 for /v1/models.

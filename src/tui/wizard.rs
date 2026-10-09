@@ -7,7 +7,7 @@
 //! through the `set_*` and `on_host_connected` methods.
 //!
 //! Each wizard instance carries a `generation` counter so that async replies
-//! from a cancelled wizard are discarded (S7 fix).
+//! from a cancelled wizard are discarded.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::HashMap;
@@ -456,12 +456,11 @@ pub struct Wizard {
     pub proxy_options: Vec<String>,
     /// Currently selected index in `proxy_options` (0 = none).
     pub proxy_selected: usize,
-    /// Generation counter (S7): incremented on `new()`.
-    /// Carried in reply tags so stale replies from a cancelled wizard are
+    /// Unique per wizard. Carried in reply tags so stale replies from a cancelled wizard are
     /// discarded.
     pub generation: u64,
     /// Saved first-screen state so Backspace in the directory step can
-    /// return to the previous screen (step E: back navigation).
+    /// return to the previous screen.
     pub saved_host_step: Option<HostStep>,
     /// Per-path enrichment metadata (git branch, claude_at, symlink, hidden,
     /// recently_used). Populated lazily from `ListDir` and `RecentProjects`
@@ -532,7 +531,7 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     Some(score)
 }
 
-/// Global wizard generation counter (S7): each new Wizard gets a unique id.
+/// Gives each wizard a unique generation.
 static WIZARD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Wizard {
@@ -637,7 +636,7 @@ impl Wizard {
         new_seeds: Vec<String>,
         recent: &[String],
     ) {
-        // Save first screen state so Backspace can return to it (item E).
+        // Save first screen state so Backspace can return to it.
         self.saved_host_step = self.host_step.take();
         self.host = host.to_owned();
         self.home = home.to_owned();
@@ -739,7 +738,7 @@ impl Wizard {
         Outcome::None
     }
 
-    /// A `ListClaudeSessions` request failed (M12 fix).
+    /// A `ListClaudeSessions` request failed.
     ///
     /// Clears `pending` so the user can retry or choose a different directory.
     /// Does NOT spawn fresh — the caller must show an error notice.
@@ -964,7 +963,7 @@ impl Wizard {
                 self.selected = (self.selected + 1).min(last);
                 Outcome::None
             }
-            // Proxy toggle is also available in the directory step (S7 fix):
+            // The proxy toggle is also available in the directory step:
             // when the input box is empty, Left/Right cycle the proxy profile.
             KeyCode::Left if self.proxy_options.len() > 1 && self.input.is_empty() => {
                 if self.proxy_selected > 0 {
@@ -1032,8 +1031,8 @@ impl Wizard {
 
     /// Insert pasted text into the active step's input.
     ///
-    /// S7 fix: if the host step is active, paste sets the host input;
-    /// otherwise paste into the directory input.
+    /// In the host step, paste sets the host filter; otherwise it goes into
+    /// the directory input.
     pub fn on_paste(&mut self, text: &str) -> Outcome {
         // Step 0: paste into host filter.
         if let Some(step) = &mut self.host_step {

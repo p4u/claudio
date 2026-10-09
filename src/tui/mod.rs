@@ -63,10 +63,10 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// Emit an OSC 9 desktop notification + single BEL to the outer terminal for a
 /// session label. Written directly to stdout, between ratatui frames.
 ///
-/// M3 fix: label is sanitized before embedding; only one BEL.
+/// The label comes from claude (its title) and is sanitized first, so it
+/// cannot smuggle escape sequences into the outer terminal.
 fn emit_notification(label: &str) {
     use std::io::Write;
-    // sanitize_label strips C0/C1/DEL and caps at 200 chars.
     let safe = sessions::sanitize_label(label, 200);
     let msg = format!("\x1b]9;claudio: {safe} needs you\x07");
     let _ = std::io::stdout().write_all(msg.as_bytes());
@@ -406,10 +406,6 @@ async fn event_loop(
         app.notify(notice);
     }
 
-    // M6: `conns` has local pre-created (see `main`). The local entry always
-    // exists before any connection attempt, so bump_delay/reconnect_delay work
-    // even for the very first failure.
-
     // Merge all incoming streams into one tagged channel.
     let (ev_tx, mut ev_rx) = mpsc::channel::<HostEvent>(1024);
 
@@ -430,7 +426,7 @@ async fn event_loop(
             .into_iter()
             .collect();
         for host in remote_hosts {
-            // M6: ensure the entry exists before the first attempt.
+            // The entry must exist before the first attempt to track backoff.
             conns.ensure_host(&host);
             let gen = conns.next_generation(&host);
             spawn_connect(host, gen, ev_tx.clone(), false);
@@ -499,7 +495,7 @@ async fn event_loop(
             _ = &mut shutdown, if !manager => return Ok(Default::default()),
             ev = ev_rx.recv() => match ev {
                 Some(HostEvent::Incoming(host, gen, inc)) => {
-                    // M6: drop stale events from replaced connections.
+                    // Drop stale events from replaced connections.
                     if gen < conns.current_generation(&host) {
                         continue;
                     }
@@ -510,7 +506,6 @@ async fn event_loop(
                                 app.on_disconnected_local();
                                 let delay = conns.reconnect_delay("local");
                                 conns.bump_delay("local");
-                                // M6: get generation for this reconnect attempt.
                                 let new_gen = conns.next_generation("local");
                                 let tx = ev_tx.clone();
                                 tokio::spawn(async move {
@@ -520,7 +515,6 @@ async fn event_loop(
                                             let _ = tx.send(HostEvent::LocalReconnected { client, sessions, generation: new_gen }).await;
                                         }
                                         Err(_) => {
-                                            // M6: local failures retry (was silently dropped before).
                                             let _ = tx.send(HostEvent::LocalReconnectFailed { generation: new_gen }).await;
                                         }
                                     }
@@ -539,7 +533,6 @@ async fn event_loop(
                                 // Reconnect with backoff.
                                 let delay = conns.reconnect_delay(&host);
                                 conns.bump_delay(&host);
-                                // M6: bump generation so stale LocalReconnected events are dropped.
                                 let new_gen = conns.next_generation(&host);
                                 spawn_connect_after(host, new_gen, delay, ev_tx.clone(), true);
                             }
@@ -551,7 +544,7 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
-                    // M6: discard if a newer generation is already in flight.
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation(&host) {
                         continue;
                     }
@@ -567,13 +560,13 @@ async fn event_loop(
                     // Record this host in the MRU so it appears first next time.
                     crate::remote::hosts::touch(&host);
                     app.on_host_connected(&host, &home);
-                    // Recover remote sessions for this host only (M1 fix).
+                    // Recover this host's sessions only.
                     app.recover_host(&host, &sessions);
                     app.check_remote_claude(&host, remote_claude.as_deref());
                     app.redraw = true;
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
-                    // M6: discard if a newer generation is already in flight.
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation(&host) {
                         continue;
                     }
@@ -588,7 +581,7 @@ async fn event_loop(
                     spawn_connect_after(host, new_gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
-                    // M6: discard stale reconnections (a newer attempt already succeeded).
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation("local") {
                         continue;
                     }
@@ -603,7 +596,6 @@ async fn event_loop(
                     app.on_reconnected_local(&sessions, home);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
-                    // M6: local failure retries same as remote (was silently discarded before).
                     if generation < conns.current_generation("local") {
                         continue;
                     }
@@ -699,9 +691,9 @@ fn run_effect(
             }
         }
         Effect::Connect(host) => {
-            // M6: Wizard Connect on already-connected host reuses the connection.
+            // The wizard picked a host that is already connected: reuse the
+            // connection, and let the wizard advance as if it had just connected.
             if conns.is_connected(&host) {
-                // Deliver a synthetic Connected event so the wizard advances.
                 if let Some(client) = conns.client(&host) {
                     let home = client.welcome().host.home.clone();
                     app.on_host_connected(&host, &home);
@@ -709,7 +701,7 @@ fn run_effect(
                 }
                 return;
             }
-            // M6: ensure entry exists before first attempt.
+            // The entry must exist before the first attempt to track backoff.
             conns.ensure_host(&host);
             let gen = conns.next_generation(&host);
             spawn_connect(host, gen, ev_tx.clone(), false);

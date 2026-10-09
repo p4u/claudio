@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(encode_focus(false, &m).unwrap(), b"\x1b[O");
     }
 
-    // ── Fable S6: Ctrl+non-ASCII must produce no bytes ─────────────────────
+    // ── Ctrl+non-ASCII must produce no bytes ───────────────────────────────
 
     /// Ctrl+non-ASCII (e.g. Ctrl+é) must produce an empty byte sequence, not
     /// truncated garbage from `c as u8` on a multi-byte codepoint.

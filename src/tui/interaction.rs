@@ -249,7 +249,7 @@ impl App {
                     self.modal = None;
                     if let Some(i) = self.index_of(id) {
                         let host = self.sessions[i].host.clone();
-                        // M2: Add tombstone to killed list BEFORE sending Kill.
+                        // The tombstone goes in before the Kill is sent.
                         self.killed.push(KillTombstone {
                             host: host.clone(),
                             id,
@@ -610,7 +610,6 @@ impl App {
                     id,
                     name: info.name.clone(),
                     cwd: info.cwd.clone(),
-                    // M1 fix: use the originating host, not "local".
                     host: host.to_owned(),
                     state: info.state,
                     title: info.title.clone(),
@@ -690,7 +689,7 @@ impl App {
     pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
         self.redraw = true;
         match (to, reply) {
-            // M2: Kill acknowledged → clear tombstone.
+            // The Kill was delivered: drop the tombstone.
             (ReplyTo::Kill(id), Ok(Msg::Error { message }))
                 if message.contains("no such session") =>
             {
@@ -723,11 +722,10 @@ impl App {
                     w.set_dir_entries(&path, &entries);
                 }
             }
-            // M12: ListClaudeSessions error must NOT be treated as "no sessions".
-            // Show the error and let the user retry.
+            // An error is not "no sessions": show it and let the user retry.
             (ReplyTo::ClaudeSessions(cwd, gen), reply) => {
                 if gen != self.wizard_generation() {
-                    // S7: Stale reply from a cancelled wizard; discard.
+                    // A reply for a cancelled or replaced wizard.
                     return;
                 }
                 match reply {
@@ -782,7 +780,7 @@ impl App {
             // Remote variants route to the same wizard handlers.
             (ReplyTo::RemoteProjects(host, gen), Ok(Msg::Projects { dirs })) => {
                 if gen != self.wizard_generation() {
-                    // S7: stale reply from a cancelled or superseded wizard.
+                    // A reply for a cancelled or replaced wizard.
                     return;
                 }
                 let project_dirs = dirs;
@@ -801,7 +799,7 @@ impl App {
             }
             (ReplyTo::RemoteClaudeSessions(cwd, gen), reply) => {
                 if gen != self.wizard_generation() {
-                    // S7: Stale reply from a cancelled wizard; discard.
+                    // A reply for a cancelled or replaced wizard.
                     return;
                 }
                 match reply {

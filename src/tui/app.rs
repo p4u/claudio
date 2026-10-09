@@ -6,12 +6,17 @@
 //! state.json) is queued as [`Effect`]s that the event loop in `mod.rs`
 //! drains with [`App::take_effects`].
 //!
-//! Sub-modules hold the individual types (S1 split):
-//! - `sessions`      – SessionView, sanitize_label
-//! - `proxy_state`   – ProxyStatus
-//! - `notifications` – Notice, check_notifications
-//! - `interaction`   – Modal
-//! - `git_app`       – the history viewer's glue to `App`
+//! Sibling modules extend `App` with one concern each:
+//! - `sessions`      – SessionView; spawning, activation and recovery
+//! - `interaction`   – Modal; terminal input, wizard routing, daemon events
+//!                     and request replies
+//! - `confirm`       – the generic multiple-choice prompt
+//! - `claude_update` – keeping claude up to date on every host
+//! - `stats_view`    – the proxy stats popup (Alt+s)
+//! - `git_app`       – the history viewer's glue (its state is `git_view`)
+//! - `plain`         – `claudio --plain`, one session full screen
+//! - `proxy_state`   – ProxyStatus and session credentials
+//! - `notifications` – Notice and attention notifications
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -141,12 +146,12 @@ pub enum ReplyTo {
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
     DirEntries,
-    /// Wizard request tagged with the wizard's generation (S7).
+    /// Wizard request tagged with the wizard's generation.
     ClaudeSessions(String, u64),
     Projects,
     /// Wizard directory listing for a remote host (host, path).
     RemoteDirEntries,
-    /// Wizard claude sessions for a remote host (S7: generation-tagged).
+    /// Wizard claude sessions for a remote host, generation-tagged.
     RemoteClaudeSessions(String, u64),
     /// Wizard recent projects for a remote host (host, wizard generation).
     /// Both must match the current wizard or the reply is discarded.
@@ -497,9 +502,8 @@ impl App {
         self.modal = Some(Modal::ProxyStats(view));
     }
 
-    /// Build the `SpawnSpec.env` for a proxy profile name (M4 fix: fallible).
-    ///
-    /// Returns `Err(msg)` if a profile is selected but cannot be resolved.
+    /// Build the `SpawnSpec.env` for a proxy profile name. Fails when a
+    /// profile is selected but cannot be resolved.
     pub(super) fn proxy_env_for(
         &self,
         proxy_name: Option<&str>,
@@ -1137,7 +1141,7 @@ mod tests {
             },
         );
         assert_eq!(app.sessions.len(), 2);
-        // M1 fix: new unknown session must get host "local" (from on_incoming_from).
+        // A session another client created gets the host it came from.
         assert_eq!(app.sessions[1].host, "local");
         app.on_incoming_from(
             "local",
@@ -1778,7 +1782,7 @@ mod tests {
         assert!(!app.session_creds.contains_key(&id));
     }
 
-    // ── Wizard generation / S7 ────────────────────────────────────────────────
+    // ── Wizard generation ─────────────────────────────────────────────────────
 
     #[test]
     fn stale_wizard_reply_is_discarded() {

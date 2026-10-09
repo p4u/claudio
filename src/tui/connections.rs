@@ -1,4 +1,4 @@
-//! Per-host connection state and reconnect backoff (M6 fix).
+//! Per-host connection state and reconnect backoff.
 //!
 //! Each host (including "local") has exactly one `HostConn` entry created
 //! before the first connection attempt. A generation counter tags readers and

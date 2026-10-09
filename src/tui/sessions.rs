@@ -516,7 +516,7 @@ impl App {
         self.recover_host_inner("local", saved, live, true);
     }
 
-    /// Host-scoped recovery (M1 fix): reconcile only the given host's
+    /// Host-scoped recovery: reconcile only the given host's
     /// sessions against the current live list from that host's daemon.
     ///
     /// - Does NOT touch sessions belonging to other hosts.
@@ -643,7 +643,7 @@ impl App {
         self.recover_host("local", live);
     }
 
-    /// The local daemon connection dropped (M1 fix: only affects local sessions).
+    /// The local daemon connection dropped; only local sessions are affected.
     pub fn on_disconnected_local(&mut self) {
         self.connected = false;
         for v in &mut self.sessions {
