@@ -333,7 +333,7 @@ async fn upload_bytes(
     .map_err(|_| format!("upload to {host} timed out"))??;
 
     if !status.success() {
-        let _ = ssh_run(host, &format!("rm -f {tmp_quoted}")).await;
+        let _ = ssh_run(host, &format!("rm -f {tmp_quoted} 2>/dev/null; true")).await;
         return Err(format!(
             "upload command failed on {host} (exit {})",
             status.code().unwrap_or(-1)
@@ -341,8 +341,9 @@ async fn upload_bytes(
     }
 
     // Verify remote hash.
+    // tmp_quoted is single-quoted (absolute path from mktemp), safe to use directly.
     let verify_cmd = format!(
-        "sha256sum {tmp_quoted} 2>/dev/null || shasum -a 256 {tmp_quoted} 2>/dev/null"
+        "_tmp={tmp_quoted}; sha256sum \"$_tmp\" 2>/dev/null || shasum -a 256 \"$_tmp\" 2>/dev/null"
     );
     let hash_out = ssh_run(host, &verify_cmd).await.map_err(|e| {
         let _ = ssh_run_sync(host, &format!("rm -f {tmp_quoted}"));
@@ -350,7 +351,7 @@ async fn upload_bytes(
     })?;
     let remote_hash = hash_out.split_ascii_whitespace().next().unwrap_or("").to_owned();
     if remote_hash != expected_hash {
-        let _ = ssh_run(host, &format!("rm -f {tmp_quoted}")).await;
+        let _ = ssh_run(host, &format!("rm -f {tmp_quoted} 2>/dev/null; true")).await;
         return Err(format!(
             "remote hash mismatch after upload (expected {expected_hash}, got {remote_hash})"
         ));
@@ -358,15 +359,19 @@ async fn upload_bytes(
 
     // Serialize install with a remote flock (or mkdir fallback).
     // chmod and atomic rename under the lock.
-    let dest_quoted = shell_quote("$HOME/.local/bin/claudio");
-    let lock_quoted = shell_quote("$HOME/.local/bin/.claudio.install.lock");
+    // NOTE: $HOME-relative paths use double-quote expansion, not shell_quote,
+    // because shell_quote wraps in single quotes which suppress $HOME expansion.
+    // The tmp path (from mktemp) is single-quoted since it is absolute.
     let install_cmd = format!(
-        r#"if command -v flock >/dev/null 2>&1; then
-  flock {lock_quoted} sh -c 'chmod 755 {tmp_quoted} && mv -f {tmp_quoted} "$HOME"/.local/bin/claudio'
+        r#"_tmp={tmp_quoted}
+_dest="$HOME/.local/bin/claudio"
+_lock="$HOME/.local/bin/.claudio.install.lock"
+if command -v flock >/dev/null 2>&1; then
+  flock "$_lock" sh -c "chmod 755 '$_tmp' && mv -f '$_tmp' '$_dest'"
 else
   _lk="$HOME/.local/bin/.claudio.install.lock.d"
   for _i in 1 2 3 4 5; do mkdir "$_lk" 2>/dev/null && break; sleep 1; done
-  chmod 755 {tmp_quoted} && mv -f {tmp_quoted} {dest_quoted}
+  chmod 755 "$_tmp" && mv -f "$_tmp" "$_dest"
   rmdir "$_lk" 2>/dev/null; true
 fi"#
     );
