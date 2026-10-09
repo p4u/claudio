@@ -40,6 +40,8 @@ const ALT_N: &[u8] = b"\x1bn";
 const ALT_R: &[u8] = b"\x1br";
 const ALT_X: &[u8] = b"\x1bx";
 const ALT_Q: &[u8] = b"\x1bq";
+const ALT_G: &[u8] = b"\x1bg";
+const ALT_H: &[u8] = b"\x1bh";
 const ENTER: &[u8] = b"\r";
 const CTRL_U: &[u8] = b"\x15";
 const ESC: &[u8] = b"\x1b";
@@ -741,6 +743,186 @@ fn test_e2e_real_claude() {
         assert!(Instant::now() < quit_deadline, "TUI did not exit after Alt+q");
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+// ── P4: Overview, Help, daemon CLI ────────────────────────────────────────────
+
+/// Overview popup opens (Alt+g) with 2 sessions; ↑/↓ navigates; Enter switches.
+#[test]
+fn test_overview_opens_lists_and_switches() {
+    let env = Env::new();
+    let mut tui = start_tui(&env);
+
+    // Create first session.
+    wizard_pick_dir(&mut tui, &env.dirs[0]);
+    assert_banner(&tui, WAIT);
+    thread::sleep(Duration::from_millis(400));
+
+    // Open wizard for second session.
+    tui.key(ALT_N);
+    thread::sleep(Duration::from_millis(200));
+    wizard_pick_dir(&mut tui, &env.dirs[1]);
+    assert!(tui.wait_for("FAKE_CLAUDE_BANNER", WAIT), "second session banner");
+    thread::sleep(Duration::from_millis(400));
+
+    // Should now have two sessions; second is active.
+    let dir1_name = env.dirs[0].file_name().unwrap().to_str().unwrap();
+    let dir2_name = env.dirs[1].file_name().unwrap().to_str().unwrap();
+
+    // Open overview.
+    tui.key(ALT_G);
+    thread::sleep(Duration::from_millis(400));
+    // The overview body lists sessions; both names should appear.
+    // (The popup title may be mangled by ANSI stripping, so check body content.)
+    assert!(
+        tui.wait_for(dir1_name, WAIT),
+        "session 1 not listed in overview body"
+    );
+    assert!(
+        tui.wait_for(dir2_name, WAIT),
+        "session 2 not listed in overview body"
+    );
+
+    // Navigate up to select session 0, then Enter to switch.
+    tui.key(b"\x1b[A"); // Up arrow
+    thread::sleep(Duration::from_millis(200));
+    tui.key(ENTER);
+    thread::sleep(Duration::from_millis(300));
+
+    // Overview should close. Both session names should still appear in the tab bar.
+    assert!(
+        tui.wait_for(dir1_name, WAIT),
+        "session 1 tab not visible after Enter in overview"
+    );
+
+    tui.key(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// Help popup opens (Alt+h), shows key bindings, and closes on Esc.
+#[test]
+fn test_help_popup_opens_and_closes() {
+    let env = Env::new();
+    let mut tui = start_tui(&env);
+
+    // Need at least one session.
+    wizard_pick_dir(&mut tui, &env.dirs[0]);
+    assert_banner(&tui, WAIT);
+    thread::sleep(Duration::from_millis(300));
+
+    // Open help.
+    tui.key(ALT_H);
+    thread::sleep(Duration::from_millis(300));
+    // The popup title contains "any key closes"; the body lists binding descriptions.
+    // (Searching body text rather than the title to avoid ANSI-strip artifacts
+    //  where ratatui's block-border rendering can swallow single characters.)
+    assert!(
+        tui.wait_for("any key closes", WAIT),
+        "Help popup did not open (title 'any key closes' not found)"
+    );
+    // At least one binding description should be visible.
+    assert!(
+        tui.wait_for("previous session", WAIT),
+        "binding descriptions not found in help"
+    );
+
+    // Close with Esc.
+    tui.key(ESC);
+    thread::sleep(Duration::from_millis(200));
+    // The overview title should be gone; the normal status bar should be back.
+    assert!(
+        tui.wait_for("Alt+q", Duration::from_secs(3)),
+        "status bar hints should reappear after closing help"
+    );
+
+    tui.key(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// `claudio daemon status`: shows "running" and session count.
+#[test]
+fn test_daemon_status_cmd() {
+    let env = Env::new();
+    // Start the TUI to ensure the daemon is up and a session exists.
+    let mut tui = start_tui(&env);
+    wizard_pick_dir(&mut tui, &env.dirs[0]);
+    assert_banner(&tui, WAIT);
+    thread::sleep(Duration::from_millis(300));
+
+    // Run `claudio daemon status` in the same isolated env.
+    let out = std::process::Command::new(BINARY)
+        .arg("daemon")
+        .arg("status")
+        .env("XDG_RUNTIME_DIR", &env.runtime_dir)
+        .env("XDG_CONFIG_HOME", &env.config_home)
+        .env("HOME", &env.home)
+        .env("CLAUDIO_CLAUDE_PATH", &env.fake_claude)
+        .output()
+        .expect("claudio daemon status failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "daemon status should exit 0\nstdout: {stdout}");
+    assert!(stdout.contains("running"), "should say 'running'\nstdout: {stdout}");
+    assert!(stdout.contains("sessions:"), "should show session count\nstdout: {stdout}");
+
+    tui.key(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// `claudio daemon stop` terminates the daemon; `claudio daemon restart` brings it back.
+#[test]
+fn test_daemon_stop_and_restart_cmd() {
+    let env = Env::new();
+    // Start the TUI to bring up the daemon.
+    let mut tui = start_tui(&env);
+    wizard_pick_dir(&mut tui, &env.dirs[0]);
+    assert_banner(&tui, WAIT);
+    thread::sleep(Duration::from_millis(300));
+
+    let pid_before = env.daemon_pid().expect("daemon should have a pid");
+
+    // Stop the daemon.
+    let stop_out = std::process::Command::new(BINARY)
+        .args(["daemon", "stop"])
+        .env("XDG_RUNTIME_DIR", &env.runtime_dir)
+        .env("XDG_CONFIG_HOME", &env.config_home)
+        .env("HOME", &env.home)
+        .env("CLAUDIO_CLAUDE_PATH", &env.fake_claude)
+        .output()
+        .expect("claudio daemon stop failed to spawn");
+    let stop_stdout = String::from_utf8_lossy(&stop_out.stdout);
+    assert!(stop_out.status.success(), "daemon stop should exit 0\nstdout: {stop_stdout}");
+    assert!(stop_stdout.contains("dormant"), "should mention dormant sessions\nstdout: {stop_stdout}");
+
+    // Wait for the TUI to notice disconnection.
+    thread::sleep(Duration::from_millis(500));
+
+    // Restart.
+    let restart_out = std::process::Command::new(BINARY)
+        .args(["daemon", "restart"])
+        .env("XDG_RUNTIME_DIR", &env.runtime_dir)
+        .env("XDG_CONFIG_HOME", &env.config_home)
+        .env("HOME", &env.home)
+        .env("CLAUDIO_CLAUDE_PATH", &env.fake_claude)
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .output()
+        .expect("claudio daemon restart failed to spawn");
+    let restart_stdout = String::from_utf8_lossy(&restart_out.stdout);
+    assert!(
+        restart_out.status.success(),
+        "daemon restart should exit 0\nstdout: {restart_stdout}"
+    );
+
+    let pid_after = env.daemon_pid();
+    assert_ne!(Some(pid_before), pid_after, "daemon should have a new pid after restart");
+
+    // The TUI should reconnect automatically.
+    assert!(
+        tui.wait_for("FAKE_CLAUDE_BANNER", RECONNECT_WAIT),
+        "TUI should reconnect and re-spawn the session"
+    );
+
+    tui.key(ALT_Q);
+    tui.wait_exit(WAIT);
 }
 
 // ── SSH TUI test ───────────────────────────────────────────────────────────────
