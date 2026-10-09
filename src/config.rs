@@ -44,6 +44,25 @@ impl Default for UiSection {
     }
 }
 
+/// The `[update]` section of `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSection {
+    /// Whether to check for newer releases in the background (at most once per
+    /// 24 h).  Set to `false` or export `CLAUDIO_NO_UPDATE_CHECK=1` to opt out.
+    #[serde(default = "default_update_check")]
+    pub check: bool,
+}
+
+fn default_update_check() -> bool {
+    true
+}
+
+impl Default for UpdateSection {
+    fn default() -> Self {
+        UpdateSection { check: true }
+    }
+}
+
 /// The `[keys]` section of `config.toml`: action name → key spec string.
 ///
 /// Each entry overrides the default binding for that action. Unknown action
@@ -58,6 +77,8 @@ struct ConfigFile {
     pub ui: Option<UiSection>,
     #[serde(default)]
     pub keys: Option<KeysSection>,
+    #[serde(default)]
+    pub update: Option<UpdateSection>,
     /// All other TOML keys — preserved on write.
     #[serde(flatten)]
     extra: toml::Table,
@@ -70,6 +91,7 @@ pub struct Config {
     /// Raw key overrides (action name → key spec). Parsed into bindings by
     /// `keymap::apply_overrides`.
     pub keys: KeysSection,
+    pub update: UpdateSection,
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -121,6 +143,7 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
     Ok(Config {
         ui: file.ui.unwrap_or_default(),
         keys: file.keys.unwrap_or_default(),
+        update: file.update.unwrap_or_default(),
     })
 }
 

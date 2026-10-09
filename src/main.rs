@@ -24,6 +24,7 @@ mod proxy;
 mod remote;
 mod term;
 mod tui;
+mod upgrade;
 
 use std::io::{IsTerminal, Read, Write};
 
@@ -122,6 +123,12 @@ fn main() -> std::process::ExitCode {
     // Session daemon: `claudio --daemon` owns the PTYs of the manager sessions.
     if argv.get(1).map(String::as_str) == Some("--daemon") {
         return daemon::run();
+    }
+
+    // `claudio upgrade [--check]` — self-upgrade from the public releases repo.
+    if argv.get(1).map(String::as_str) == Some("upgrade") {
+        let check_only = argv.get(2).map(String::as_str) == Some("--check");
+        return upgrade::upgrade_cmd(check_only);
     }
 
     // `claudio proxy <subcommand>` — proxy profile management.
