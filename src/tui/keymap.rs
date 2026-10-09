@@ -225,13 +225,24 @@ fn goto_session(key: &KeyEvent) -> Option<Action> {
     }
 }
 
+/// The only actions `claudio --plain` keeps, in help order. Everything else
+/// (tabs, wizard, rename, quit, ...) belongs to the manager and goes to claude.
+pub const PLAIN_ACTIONS: [Action; 4] = [
+    Action::Help,
+    Action::ProxyStats,
+    Action::GitLog,
+    Action::Reset,
+];
+
 /// The effective keymap: defaults + config overrides.
 ///
 /// Owned by `App`; used for dispatch, help rendering, and status-bar hints.
-/// Build with [`Keymap::build`].
+/// Build with [`Keymap::build`] (the manager) or [`Keymap::build_plain`].
 #[derive(Debug, Clone)]
 pub struct Keymap {
     bindings: Vec<Binding>,
+    /// Whether `Alt+Shift+<digit>` jumps to a tab (the manager only).
+    goto_tabs: bool,
 }
 
 impl Default for Keymap {
@@ -246,9 +257,35 @@ impl Keymap {
         overrides: &std::collections::BTreeMap<String, String>,
         notices: &mut Vec<String>,
     ) -> Keymap {
+        Keymap::build_with(overrides, notices, |_| true, true)
+    }
+
+    /// The keymap of `claudio --plain`: only [`PLAIN_ACTIONS`] (in that order)
+    /// act, and the rest of the keyboard goes to claude. `[keys]` overrides of
+    /// those actions apply as in the manager; overrides of the manager-only
+    /// actions are ignored without a notice, since they stay valid for the
+    /// manager.
+    pub fn build_plain(
+        overrides: &std::collections::BTreeMap<String, String>,
+        notices: &mut Vec<String>,
+    ) -> Keymap {
+        let mut km = Keymap::build_with(overrides, notices, |a| PLAIN_ACTIONS.contains(&a), false);
+        km.bindings
+            .sort_by_key(|b| PLAIN_ACTIONS.iter().position(|a| *a == b.action));
+        km
+    }
+
+    /// Defaults restricted to the actions `keep` accepts, plus overrides.
+    fn build_with(
+        overrides: &std::collections::BTreeMap<String, String>,
+        notices: &mut Vec<String>,
+        keep: impl Fn(Action) -> bool,
+        goto_tabs: bool,
+    ) -> Keymap {
         // Start from defaults (clone the static slice into an owned Vec).
         let mut bindings: Vec<Binding> = DEFAULT_BINDINGS
             .iter()
+            .filter(|b| keep(b.action))
             .map(|b| Binding {
                 code: b.code,
                 mods: b.mods,
@@ -268,6 +305,9 @@ impl Keymap {
                 notices.push(format!("config.toml [keys]: unknown action '{name}'"));
                 continue;
             };
+            if !keep(action) {
+                continue;
+            }
             let (code, mods) = match parse_key_spec(spec) {
                 Ok(km) => km,
                 Err(e) => {
@@ -293,13 +333,15 @@ impl Keymap {
                 b.mods = mods;
             }
         }
-        Keymap { bindings }
+        Keymap { bindings, goto_tabs }
     }
 
     /// The global action bound to `key`, if any. Releases never trigger actions.
     pub fn lookup(&self, key: &KeyEvent) -> Option<Action> {
         self.lookup_scope(key, Scope::Global)
-            .or_else(|| goto_session(key).filter(|_| key.kind != KeyEventKind::Release))
+            .or_else(|| {
+                goto_session(key).filter(|_| self.goto_tabs && key.kind != KeyEventKind::Release)
+            })
     }
 
     /// The wizard-scoped action bound to `key`, if any.
@@ -333,13 +375,15 @@ impl Keymap {
             .iter()
             .map(|b| (key_str(b.code, b.mods), b.label))
             .collect();
-        // The fixed Alt+Shift+digit row sits right after "next session".
-        let at = self
-            .bindings
-            .iter()
-            .position(|b| b.action == Action::NextSession)
-            .map_or(entries.len(), |i| i + 1);
-        entries.insert(at, (GOTO_SESSION_HELP.0.to_owned(), GOTO_SESSION_HELP.1));
+        if self.goto_tabs {
+            // The fixed Alt+Shift+digit row sits right after "next session".
+            let at = self
+                .bindings
+                .iter()
+                .position(|b| b.action == Action::NextSession)
+                .map_or(entries.len(), |i| i + 1);
+            entries.insert(at, (GOTO_SESSION_HELP.0.to_owned(), GOTO_SESSION_HELP.1));
+        }
         entries
     }
 
@@ -766,6 +810,76 @@ mod tests {
         assert_eq!(km.lookup(&alt_dot), None);
         assert_eq!(km.key_for(Action::ToggleHidden).as_deref(), Some("Alt+."));
         assert!(km.help_entries().iter().any(|(k, _)| k == "Alt+."));
+    }
+
+    // ── Plain keymap ──────────────────────────────────────────────────────────
+
+    fn plain_keymap(overrides: &[(&str, &str)]) -> (Keymap, Vec<String>) {
+        let overrides = overrides
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut notices = Vec::new();
+        (Keymap::build_plain(&overrides, &mut notices), notices)
+    }
+
+    #[test]
+    fn plain_keymap_only_has_help_stats_git_and_reset() {
+        let (km, notices) = plain_keymap(&[]);
+        assert!(notices.is_empty());
+        let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(km.lookup(&alt('h')), Some(Action::Help));
+        assert_eq!(km.lookup(&alt('s')), Some(Action::ProxyStats));
+        assert_eq!(km.lookup(&alt('l')), Some(Action::GitLog));
+        assert_eq!(km.lookup(&alt('e')), Some(Action::Reset));
+        // Every other manager key goes to claude.
+        for c in ['n', 'x', 'r', 'g', 'c', 'a', 'q'] {
+            assert_eq!(km.lookup(&alt(c)), None, "Alt+{c}");
+        }
+        for code in [KeyCode::Left, KeyCode::Right] {
+            assert_eq!(km.lookup(&key(code, KeyModifiers::ALT)), None);
+        }
+        for d in '0'..='9' {
+            let mods = KeyModifiers::ALT | KeyModifiers::SHIFT;
+            assert_eq!(km.lookup(&key(KeyCode::Char(d), mods)), None, "Alt+Shift+{d}");
+        }
+        // The wizard key is not part of it either.
+        assert_eq!(km.lookup_wizard(&alt('.')), None);
+    }
+
+    #[test]
+    fn plain_help_lists_exactly_the_plain_keys_in_order() {
+        let (km, _) = plain_keymap(&[]);
+        let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+l", "Alt+e"]);
+    }
+
+    #[test]
+    fn plain_overrides_apply_and_manager_only_ones_are_ignored_quietly() {
+        let (km, notices) = plain_keymap(&[
+            ("proxy_stats", "alt+p"),
+            ("rename", "alt+j"),
+            ("bogus", "alt+k"),
+        ]);
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('p'), KeyModifiers::ALT)),
+            Some(Action::ProxyStats)
+        );
+        assert_eq!(km.lookup(&key(KeyCode::Char('s'), KeyModifiers::ALT)), None);
+        // Valid for the manager, so no notice and no effect; unknown still says so.
+        assert_eq!(km.lookup(&key(KeyCode::Char('j'), KeyModifiers::ALT)), None);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("unknown action 'bogus'"));
+    }
+
+    #[test]
+    fn plain_override_cannot_steal_another_plain_key() {
+        let (km, notices) = plain_keymap(&[("git_log", "alt+h")]);
+        assert!(notices[0].contains("already bound"), "{notices:?}");
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)),
+            Some(Action::Help)
+        );
     }
 
     #[test]

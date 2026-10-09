@@ -32,8 +32,41 @@ pub use super::notifications::Notice;
 pub use super::proxy_state::ProxyStatus;
 pub use super::sessions::SessionView;
 
-/// Rows taken by the tab bar and the two-line status bar.
-pub(super) const CHROME_ROWS: u16 = 3;
+/// What the UI is: the multi-session manager, or the single bare session of
+/// `claudio --plain` (see `plain.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Manager,
+    /// One session fills the screen: no tab bar, status bar or wizard, no
+    /// state.json, and only the [`PLAIN_ACTIONS`](super::keymap::PLAIN_ACTIONS)
+    /// keys are claudio's.
+    Plain,
+}
+
+impl Mode {
+    /// Rows above the session pane (the tab bar).
+    pub fn rows_above(self) -> u16 {
+        match self {
+            Mode::Manager => 1,
+            Mode::Plain => 0,
+        }
+    }
+
+    /// Rows taken by the chrome around the pane: the tab bar and the
+    /// two-line status bar.
+    pub fn chrome_rows(self) -> u16 {
+        match self {
+            Mode::Manager => 3,
+            Mode::Plain => 0,
+        }
+    }
+
+    /// Whether the session list is remembered in state.json.
+    pub fn persists(self) -> bool {
+        self == Mode::Manager
+    }
+}
 
 /// A single host-stats sample stored in the ring buffer.
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +161,9 @@ impl ReplyTo {
 
 /// The manager's state.
 pub struct App {
+    pub mode: Mode,
+    /// How the UI ends in [`Mode::Plain`]; read once `quit` is set.
+    pub exit: super::plain::Exit,
     pub sessions: Vec<SessionView>,
     pub active: Option<usize>,
     pub modal: Option<Modal>,
@@ -232,6 +268,8 @@ impl App {
     ) -> App {
         let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
         App {
+            mode: Mode::Manager,
+            exit: Default::default(),
             sessions: Vec::new(),
             active: None,
             modal: None,
@@ -393,7 +431,7 @@ impl App {
     /// The pane size as `(rows, cols)`.
     pub fn pane_size(&self) -> (u16, u16) {
         (
-            self.height.saturating_sub(CHROME_ROWS).max(1),
+            self.height.saturating_sub(self.mode.chrome_rows()).max(1),
             self.width.max(1),
         )
     }

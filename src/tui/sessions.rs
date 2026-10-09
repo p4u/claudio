@@ -117,7 +117,7 @@ pub(super) struct SpawnRequest {
 // These methods are spread into sessions.rs to keep app.rs focused on the
 // App struct, constructors, and proxy/persistence logic.
 
-use super::app::{App, Effect, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::interaction::Modal;
 use super::wizard::{self, Wizard};
 
@@ -155,6 +155,9 @@ impl App {
 
     /// Enqueue a Save effect (deduped: only one at a time at the tail).
     pub(super) fn save(&mut self) {
+        if !self.mode.persists() {
+            return;
+        }
         if !matches!(self.effects.last(), Some(Effect::Save)) {
             self.effects.push(Effect::Save);
         }
@@ -225,7 +228,7 @@ impl App {
             Some(a) if a > i => self.active = Some(a - 1),
             _ => {}
         }
-        if self.sessions.is_empty() && self.modal.is_none() {
+        if self.sessions.is_empty() && self.modal.is_none() && self.mode == Mode::Manager {
             self.open_wizard();
         }
         self.redraw = true;
@@ -247,7 +250,8 @@ impl App {
             .unwrap_or_default();
         state::push_recent(&mut self.recent_dirs, &host, &cwd);
         let at = self.sessions.len();
-        self.start(host, cwd, SessionKind::Claude, args, proxy, at);
+        self.start(Uuid::new_v4(), host, cwd, SessionKind::Claude, args, proxy, at)
+            .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
     }
 
     /// Open a terminal on the active session's host, in its launch directory
@@ -258,21 +262,24 @@ impl App {
             None => ("local".to_owned(), self.home.clone()),
         };
         let at = self.active.map_or(self.sessions.len(), |a| a + 1);
-        self.start(host, cwd, SessionKind::Shell, Vec::new(), None, at);
+        self.start(Uuid::new_v4(), host, cwd, SessionKind::Shell, Vec::new(), None, at)
+            .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
     }
 
-    /// Send the spawn, add its tab at `at` (never before the active tab) and
-    /// switch to it.
-    fn start(
+    /// Send the spawn of session `id`, add its tab at `at` (never before the
+    /// active tab) and switch to it. Fails when the spawn cannot be built
+    /// (an unresolvable proxy profile); nothing is added then.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start(
         &mut self,
+        id: SessionId,
         host: String,
         cwd: String,
         kind: SessionKind,
         args: Vec<String>,
         proxy: Option<String>,
         at: usize,
-    ) {
-        let id = Uuid::new_v4();
+    ) -> Result<(), String> {
         let req = SpawnRequest {
             id,
             kind,
@@ -280,10 +287,7 @@ impl App {
             name: None,
             args,
         };
-        if let Err(e) = self.send_spawn(&host, req, proxy.as_deref()) {
-            self.notify(format!("cannot spawn: {e}"));
-            return;
-        }
+        self.send_spawn(&host, req, proxy.as_deref())?;
         let (rows, cols) = self.pane_size();
         self.sessions.insert(
             at,
@@ -309,6 +313,7 @@ impl App {
             },
         );
         self.activate(at);
+        Ok(())
     }
 
     /// Queue the spawn request for `req` on `host`. The one place that knows
@@ -628,6 +633,11 @@ impl App {
         self.home = home;
         self.notice = None;
         self.connected = true;
+        if self.mode == Mode::Plain {
+            // Never adopt the manager's sessions: just re-attach our own.
+            self.plain_reconnected(live);
+            return;
+        }
         self.recover_host("local", live);
     }
 
