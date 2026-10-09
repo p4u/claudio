@@ -977,7 +977,6 @@ fn test_proxy_real_claude() {
     tui.wait_for("Kill session", Region::Screen, WAIT);
     tui.send_keys(b"y");
     tui.wait_until(|s| !s.contains("Kill session", Region::Screen), WAIT);
-    tui.send_keys(ESC);  // dismiss wizard that opened after last session closed
 
     tui.quit(WAIT);
 }

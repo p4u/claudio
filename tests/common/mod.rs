@@ -287,7 +287,11 @@ impl TuiProcess {
             if let Ok(Some(_)) = self.child.try_wait() {
                 return;
             }
-            assert!(Instant::now() < deadline, "wait_exit timeout: TUI did not exit");
+            assert!(
+                Instant::now() < deadline,
+                "wait_exit timeout: TUI did not exit; screen:\n{}",
+                self.screen_text(Region::Screen)
+            );
             thread::sleep(Duration::from_millis(50));
         }
     }
