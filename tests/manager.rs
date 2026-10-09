@@ -26,7 +26,7 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
-    TuiProcess, ALT_C, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1,
+    TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1,
     ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT,
     UP_ARROW, WAIT,
 };
@@ -1406,6 +1406,63 @@ fn test_terminal_survives_daemon_restart_as_a_shell() {
     tui.wait_for("$ term@local", Region::TabBar, WAIT);
 
     assert!(!claude_ran.exists(), "claude must never run for a terminal");
+    tui.quit(WAIT);
+}
+
+// ── Reset (Alt+e) ─────────────────────────────────────────────────────────────
+
+/// Alt+e then `n` restarts claude in the same tab (a new banner nonce shows up,
+/// no tab is added or lost); Esc cancels; `r` restarts again.
+#[test]
+fn test_reset_restarts_claude_in_the_same_tab() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &harness.dirs[1]);
+    let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    let n1 = harness.dirs[1].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(n1, Region::TabBar, WAIT);
+    let before = current_nonce(&tui);
+
+    // Esc leaves everything alone.
+    tui.send_keys(ALT_E);
+    tui.wait_for("new conversation", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("new conversation", Region::Screen), WAIT);
+    assert_eq!(current_nonce(&tui), before);
+
+    // `n`: a new claude process in the same tab.
+    tui.send_keys(ALT_E);
+    tui.wait_for("new conversation", Region::Screen, WAIT);
+    tui.send_keys(b"n");
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != before),
+        WAIT,
+    );
+    let after_new = current_nonce(&tui);
+
+    // `r`: restarted once more.
+    tui.send_keys(ALT_E);
+    tui.wait_for("restart & resume", Region::Screen, WAIT);
+    tui.send_keys(b"r");
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != after_new),
+        WAIT,
+    );
+
+    // Still two tabs, in the same order, and the other one is untouched.
+    let tabs = tui.screen_text(Region::TabBar);
+    assert_eq!(tabs.matches(n0).count(), 1, "{tabs:?}");
+    assert_eq!(tabs.matches(n1).count(), 1, "{tabs:?}");
+    assert!(tabs.find(n0) < tabs.find(n1), "{tabs:?}");
+    tui.send_keys(ALT_LEFT);
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != before),
+        WAIT,
+    );
+
     tui.quit(WAIT);
 }
 

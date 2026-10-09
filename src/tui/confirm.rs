@@ -1,12 +1,14 @@
-//! A small yes / no / skip popup, and what its answers do.
+//! A small multiple-choice popup, and what its answers do.
 //!
-//! [`ConfirmPrompt`] is generic: it carries the question, the action `y`
-//! performs and, optionally, a "skip this version" to remember in state.json.
-//! Prompts raised while another modal is open wait their turn in
-//! `App::confirms`, and ignore keys for a moment after appearing so a stray
-//! keystroke meant for a session cannot answer one.
+//! [`ConfirmPrompt`] is generic: it carries the question and the keys that
+//! answer it, each with the [`ConfirmAction`] it runs (or none, to just close).
+//! `Esc` always closes. Prompts raised while another modal is open wait their
+//! turn in `App::confirms`, and ignore keys for a moment after appearing so a
+//! stray keystroke meant for a session cannot answer one.
 
 use crossterm::event::{KeyCode, KeyEvent};
+
+use crate::proto::SessionId;
 
 use super::app::App;
 use super::interaction::Modal;
@@ -14,11 +16,15 @@ use super::interaction::Modal;
 /// Ticks (250 ms each) during which a new prompt ignores the keyboard.
 const ARM_TICKS: u8 = 4;
 
-/// What `y` does.
+/// What a key does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
     /// Run `claude update` (or the installer) on `host`.
     UpdateClaude { host: String, install: bool },
+    /// Remember not to ask about this version again.
+    SkipClaude(Skip),
+    /// Restart session `id` in its tab; `fresh` starts a new conversation.
+    Reset { id: SessionId, fresh: bool },
 }
 
 /// A host and the version the user may choose to skip for it.
@@ -28,42 +34,78 @@ pub struct Skip {
     pub version: String,
 }
 
+/// One key of a prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub key: KeyCode,
+    /// What the key is called in the hint: "update", "skip this version"…
+    pub label: &'static str,
+    /// `None` just closes the prompt.
+    pub action: Option<ConfirmAction>,
+}
+
+impl Choice {
+    /// A letter key (lowercase) that runs `action`, or just closes.
+    pub fn new(key: char, label: &'static str, action: Option<ConfirmAction>) -> Self {
+        Choice {
+            key: KeyCode::Char(key),
+            label,
+            action,
+        }
+    }
+
+    /// `Esc`, listed in the hint under `label`. `Esc` closes a prompt whether
+    /// or not it is listed.
+    pub fn esc(label: &'static str) -> Self {
+        Choice {
+            key: KeyCode::Esc,
+            label,
+            action: None,
+        }
+    }
+
+    /// The hint for this key: `[y] update` or `Esc cancel`.
+    pub fn hint(&self) -> String {
+        match self.key {
+            KeyCode::Char(c) => format!("[{c}] {}", self.label),
+            _ => format!("Esc {}", self.label),
+        }
+    }
+}
+
 pub struct ConfirmPrompt {
     pub title: String,
     /// The question; may span lines.
     pub text: String,
-    /// What `y` is called in the key hint: "update", "install"…
-    pub yes_label: &'static str,
-    pub yes: ConfirmAction,
-    /// When set, `s` remembers it and the prompt offers the key.
-    pub skip: Option<Skip>,
+    pub choices: Vec<Choice>,
     /// Remaining ticks before keys count.
     pub(super) armed: u8,
 }
 
 impl ConfirmPrompt {
-    pub fn new(
-        title: impl Into<String>,
-        text: impl Into<String>,
-        yes_label: &'static str,
-        yes: ConfirmAction,
-        skip: Option<Skip>,
-    ) -> Self {
+    pub fn new(title: impl Into<String>, text: impl Into<String>, choices: Vec<Choice>) -> Self {
         ConfirmPrompt {
             title: title.into(),
             text: text.into(),
-            yes_label,
-            yes,
-            skip,
+            choices,
             armed: ARM_TICKS,
         }
     }
-}
 
-enum Answer {
-    Yes,
-    No,
-    Skip,
+    /// Take keys at once: for a prompt the user just asked for.
+    pub fn ready(mut self) -> Self {
+        self.armed = 0;
+        self
+    }
+
+    /// The choice `code` selects. Letters match in either case.
+    fn choice_for(&self, code: KeyCode) -> Option<&Choice> {
+        let code = match code {
+            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+            other => other,
+        };
+        self.choices.iter().find(|c| c.key == code)
+    }
 }
 
 impl App {
@@ -94,27 +136,25 @@ impl App {
         let Some(Modal::Confirm(prompt)) = &self.modal else {
             return;
         };
-        let answer = match key.code {
-            _ if prompt.armed > 0 => return,
-            KeyCode::Char('y' | 'Y') => Answer::Yes,
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => Answer::No,
-            KeyCode::Char('s' | 'S') if prompt.skip.is_some() => Answer::Skip,
-            _ => return,
-        };
-        let Some(Modal::Confirm(prompt)) = self.modal.take() else {
+        if prompt.armed > 0 {
             return;
+        }
+        let action = match prompt.choice_for(key.code) {
+            Some(choice) => choice.action.clone(),
+            None if key.code == KeyCode::Esc => None,
+            None => return,
         };
-        match (answer, prompt.skip) {
-            (Answer::Yes, _) => match prompt.yes {
-                ConfirmAction::UpdateClaude { host, install } => {
-                    self.start_claude_update(&host, install)
-                }
-            },
-            (Answer::Skip, Some(skip)) => {
+        self.modal = None;
+        match action {
+            Some(ConfirmAction::UpdateClaude { host, install }) => {
+                self.start_claude_update(&host, install)
+            }
+            Some(ConfirmAction::SkipClaude(skip)) => {
                 self.claude_skipped.insert(skip.host, skip.version);
                 self.save();
             }
-            _ => {}
+            Some(ConfirmAction::Reset { id, fresh }) => self.reset_session(id, fresh),
+            None => {}
         }
         self.show_next_confirm();
     }

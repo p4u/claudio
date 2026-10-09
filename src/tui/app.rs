@@ -63,14 +63,14 @@ pub enum Effect {
     /// Fetch proxy stats for the active session's profile. Result goes to
     /// [`App::on_proxy_stats`].
     FetchProxyStats { profile_name: String },
-    /// Spawn a session with proxy config: the effect runner fetches the proxy
-    /// config (with a 5 s timeout), builds `SpawnSpec.env`, then sends the
-    /// Spawn request. This avoids silently using fallback model defaults when
-    /// the proxy-config cache is cold on the first spawn.
+    /// Spawn (or respawn) a session with proxy config: the effect runner
+    /// fetches the proxy config (with a 5 s timeout), builds the env, then
+    /// sends the request. This avoids silently using fallback model defaults
+    /// when the proxy-config cache is cold.
     SpawnWithProxy {
         host: String,
-        /// Partially-built spec; `env` is empty and will be filled by the runner.
-        spec: crate::proto::SpawnSpec,
+        /// A `Spawn` or `Respawn` whose `env` is empty; the runner fills it.
+        msg: Msg,
         proxy_name: String,
         to: ReplyTo,
     },
@@ -85,6 +85,9 @@ pub enum ReplyTo {
     /// A spawn sent after an async proxy-config fetch: any `Attach` issued
     /// meanwhile reached the daemon first and failed, so attach on success.
     SpawnedDeferred(SessionId),
+    /// A `Respawn`: the tab stays, and the active view re-attaches to the
+    /// new process.
+    Respawned(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
     DirEntries,
@@ -100,6 +103,16 @@ pub enum ReplyTo {
     RemoteProjects(String, u64),
     /// `UpdateClaude` on this host; the outcome becomes a notice.
     ClaudeUpdate(String),
+}
+
+impl ReplyTo {
+    /// The reply target for a request sent after an async proxy-config fetch.
+    pub(super) fn deferred(self) -> ReplyTo {
+        match self {
+            ReplyTo::Spawned(id) => ReplyTo::SpawnedDeferred(id),
+            other => other,
+        }
+    }
 }
 
 /// The manager's state.
@@ -420,8 +433,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::client::Incoming;
-    use crate::proto::{SessionEvent, SessionInfo, SessionKind};
+    use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::term::screen::Screen;
+    use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
@@ -1265,6 +1279,137 @@ mod tests {
         let id = app.sessions[1].id;
         app.on_reply(ReplyTo::Spawned(id), Err(std::io::Error::other("no such directory")));
         assert_eq!(app.sessions[1].state, SessionState::Exited);
+    }
+
+    fn respawn_of(effects: &[Effect]) -> Option<(&RespawnSpec, &ReplyTo)> {
+        effects.iter().find_map(|e| match e {
+            Effect::Request {
+                msg: Msg::Respawn(spec),
+                to,
+                ..
+            } => Some((spec, to)),
+            _ => None,
+        })
+    }
+
+    fn hints(app: &App) -> Vec<String> {
+        match &app.modal {
+            Some(Modal::Confirm(p)) => p.choices.iter().map(Choice::hint).collect(),
+            _ => panic!("expected a confirm prompt"),
+        }
+    }
+
+    #[test]
+    fn reset_without_a_session_is_a_notice() {
+        let mut app = app_with(&[]);
+        app.modal = None;
+        app.on_terminal(alt('e'));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("no session to reset")
+        );
+    }
+
+    #[test]
+    fn reset_asks_how_to_restart_a_claude_tab() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        let id = app.sessions[0].id;
+        app.on_terminal(alt('e'));
+        assert_eq!(
+            hints(&app),
+            [
+                "[r] restart & resume this conversation",
+                "[n] new conversation",
+                "Esc cancel"
+            ]
+        );
+        assert!(respawn_of(&app.take_effects()).is_none(), "nothing before the answer");
+
+        // `r` keeps the conversation, answered on the same tab.
+        app.on_terminal(plain(KeyCode::Char('r')));
+        assert!(app.modal.is_none());
+        let effects = app.take_effects();
+        let (spec, to) = respawn_of(&effects).expect("a Respawn request");
+        assert_eq!((spec.id, spec.fresh, (spec.rows, spec.cols)), (id, false, (27, 100)));
+        assert_eq!(*to, ReplyTo::Respawned(id));
+        assert_eq!(app.sessions.len(), 1);
+
+        // `n` starts a new conversation.
+        app.on_terminal(alt('e'));
+        app.on_terminal(plain(KeyCode::Char('N')));
+        let effects = app.take_effects();
+        assert!(respawn_of(&effects).is_some_and(|(spec, _)| spec.fresh));
+    }
+
+    #[test]
+    fn escape_cancels_a_reset() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.on_terminal(alt('e'));
+        app.on_terminal(plain(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert!(respawn_of(&app.take_effects()).is_none());
+    }
+
+    #[test]
+    fn a_terminal_only_offers_a_restart() {
+        let mut app = app_with(&[shell_info(Some(1))]);
+        app.on_terminal(alt('e'));
+        assert_eq!(hints(&app), ["[r] restart shell", "Esc cancel"]);
+        app.on_terminal(plain(KeyCode::Char('n')));
+        assert!(app.modal.is_some(), "there is no `n` here");
+        app.on_terminal(plain(KeyCode::Char('r')));
+        let effects = app.take_effects();
+        assert!(respawn_of(&effects).is_some_and(|(spec, _)| !spec.fresh));
+    }
+
+    #[test]
+    fn a_proxied_reset_waits_for_the_proxy_config() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.sessions[0].proxy = Some("work".into());
+        let id = app.sessions[0].id;
+        app.reset_session(id, false);
+        let effects = app.take_effects();
+        assert!(respawn_of(&effects).is_none(), "not sent before the env exists");
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::SpawnWithProxy { msg: Msg::Respawn(spec), proxy_name, to, .. }
+                if spec.id == id && proxy_name == "work" && *to == ReplyTo::Respawned(id)
+        )));
+    }
+
+    #[test]
+    fn a_successful_respawn_reattaches_the_active_tab() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let id = app.sessions[0].id;
+        app.on_reply(ReplyTo::Respawned(id), Ok(Msg::Spawned { id, pid: Some(9) }));
+        let effects = app.take_effects();
+        assert!(requests(&effects)
+            .iter()
+            .any(|m| matches!(m, Msg::Attach { id: i, .. } if *i == id)));
+        assert!(app.sessions[0].attached);
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_respawn_keeps_the_tab_and_explains() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let id = app.sessions[0].id;
+        let notice = |app: &App| app.notice.as_ref().map(|n| n.text.clone());
+
+        let old = std::io::Error::other("unsupported op: respawn");
+        app.on_reply(ReplyTo::Respawned(id), Err(old));
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some("daemon on local is older: run `claudio daemon restart`")
+        );
+        let other = std::io::Error::other("working directory /gone does not exist");
+        app.on_reply(ReplyTo::Respawned(id), Err(other));
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some("could not restart: working directory /gone does not exist")
+        );
+        assert_eq!(app.sessions.len(), 1);
     }
 
     #[test]

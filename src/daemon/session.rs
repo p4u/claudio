@@ -125,6 +125,13 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
     tokio::time::timeout(wait, rx).await.ok()?.ok()
 }
 
+/// Kill a live session's child and wait until its actor is gone. The actor
+/// stops on `Kill` without running `on_exit`, so nothing is announced.
+pub async fn stop(handle: &Handle) {
+    let _ = handle.tx.send(Cmd::Kill).await;
+    let _ = tokio::time::timeout(2 * KILL_GRACE, handle.tx.closed()).await;
+}
+
 /// Start claude (or, for `SessionKind::Shell`, the login shell) for `spec` under
 /// a new PTY and spawn its actor.
 /// Called from `spawn_blocking` — must not use tokio primitives.

@@ -13,7 +13,7 @@ use crate::config::UpdatePolicy;
 use crate::proto::Msg;
 
 use super::app::{App, ReplyTo};
-use super::confirm::{ConfirmAction, ConfirmPrompt, Skip};
+use super::confirm::{Choice, ConfirmAction, ConfirmPrompt, Skip};
 
 impl App {
     /// Record this machine's `claude --version` (from the local `Welcome`).
@@ -121,18 +121,22 @@ fn claude_prompt(host: &str, have: Option<&str>, want: &str) -> ConfirmPrompt {
             "install",
         ),
     };
+    let update = ConfirmAction::UpdateClaude {
+        host: host.to_owned(),
+        install: have.is_none(),
+    };
+    let skip = ConfirmAction::SkipClaude(Skip {
+        host: host.to_owned(),
+        version: want.to_owned(),
+    });
     ConfirmPrompt::new(
         "Claude is out of date",
         text,
-        yes_label,
-        ConfirmAction::UpdateClaude {
-            host: host.to_owned(),
-            install: have.is_none(),
-        },
-        Some(Skip {
-            host: host.to_owned(),
-            version: want.to_owned(),
-        }),
+        vec![
+            Choice::new('y', yes_label, Some(update)),
+            Choice::new('n', "not now", None),
+            Choice::new('s', "skip this version", Some(skip)),
+        ],
     )
 }
 
@@ -204,7 +208,7 @@ mod tests {
         assert!(
             p.text.contains("devbox") && p.text.contains("2.1.280") && p.text.contains("2.1.296")
         );
-        assert_eq!(p.yes_label, "update");
+        assert_eq!(p.choices[0].label, "update");
         assert!(
             update_requests(&mut app).is_empty(),
             "nothing before the answer"
@@ -227,7 +231,7 @@ mod tests {
     fn missing_remote_claude_offers_the_installer() {
         let mut app = new_app(UpdatePolicy::Ask);
         app.check_remote_claude("devbox", None);
-        assert_eq!(prompt(&app).yes_label, "install");
+        assert_eq!(prompt(&app).choices[0].label, "install");
         assert!(prompt(&app).text.contains("claude.ai/install.sh"));
         arm(&mut app);
         press(&mut app, KeyCode::Char('y'));
@@ -329,11 +333,11 @@ mod tests {
         let p = prompt(&app);
         assert!(p.text.contains("latest release (2.1.300)"));
         assert_eq!(
-            p.yes,
-            ConfirmAction::UpdateClaude {
+            p.choices[0].action,
+            Some(ConfirmAction::UpdateClaude {
                 host: "local".into(),
                 install: false
-            }
+            })
         );
         // The remote policy is separate.
         let mut split = new_app(UpdatePolicy::Ask);

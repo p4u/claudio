@@ -80,6 +80,12 @@ pub enum Msg {
     /// by `spec.id`, answered by `Spawned`. An older daemon answers `Error
     /// "unsupported op"`, so a terminal can never be mistaken for claude.
     SpawnShell(ShellSpec),
+    /// Restart a journaled session in place (same id, tab and journal entry):
+    /// kill its process if it has one, then start it again, resuming its
+    /// conversation unless `fresh`. Answered by `Spawned`; clients see
+    /// `Created`, never `Removed`. An older daemon answers `Error
+    /// "unsupported op…"`.
+    Respawn(RespawnSpec),
     /// Subscribe to a session's output (and resize it to the client's pane).
     /// Answered by `Attached`, immediately followed by `D` frames carrying the
     /// screen snapshot.
@@ -268,6 +274,21 @@ pub struct SpawnSpec {
     pub cols: u16,
 }
 
+/// How to restart a session. Everything else (cwd, name, claude arguments,
+/// kind) comes from the daemon's journal. `env` may carry secrets and is
+/// redacted from `Debug`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RespawnSpec {
+    pub id: SessionId,
+    /// Start a new conversation instead of resuming the journaled one.
+    #[serde(default)]
+    pub fresh: bool,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    pub rows: u16,
+    pub cols: u16,
+}
+
 /// How to start a terminal tab: the login shell, in `cwd`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellSpec {
@@ -287,6 +308,32 @@ pub enum SessionKind {
     Claude,
     /// A plain terminal: the user's login shell.
     Shell,
+}
+
+impl Msg {
+    /// `self` with the session env set, if it is a `Spawn` or `Respawn`; any
+    /// other message is returned unchanged.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Msg {
+        match &mut self {
+            Msg::Spawn(spec) => spec.env = env,
+            Msg::Respawn(spec) => spec.env = env,
+            _ => {}
+        }
+        self
+    }
+}
+
+impl std::fmt::Debug for RespawnSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("RespawnSpec")
+            .field("id", &self.id)
+            .field("fresh", &self.fresh)
+            .field("env", &env_keys)
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for SpawnSpec {
@@ -600,6 +647,33 @@ mod tests {
         assert_eq!(serde_json::from_str::<V02>(&json).unwrap(), V02::Unknown);
         let back: Envelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.msg, shell);
+    }
+
+    #[test]
+    fn respawn_roundtrips_and_keeps_secrets_out_of_debug() {
+        let respawn = Msg::Respawn(RespawnSpec {
+            id: Uuid::nil(),
+            fresh: true,
+            env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "sekrit".into())],
+            rows: 24,
+            cols: 80,
+        });
+        let json = serde_json::to_string(&Envelope::request(4, respawn.clone())).unwrap();
+        assert!(json.contains(r#""op":"respawn""#) && json.contains(r#""fresh":true"#));
+        let back: Envelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.msg, respawn);
+        let debug = format!("{respawn:?}");
+        assert!(debug.contains("ANTHROPIC_AUTH_TOKEN") && !debug.contains("sekrit"));
+        assert_eq!(
+            respawn.with_env(vec![]),
+            Msg::Respawn(RespawnSpec {
+                id: Uuid::nil(),
+                fresh: true,
+                env: vec![],
+                rows: 24,
+                cols: 80,
+            })
+        );
     }
 
     #[test]
