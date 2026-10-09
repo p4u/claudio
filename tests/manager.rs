@@ -614,6 +614,7 @@ fn test_ssh_remote_session() {
     for p in [&runtime_dir, &config_home] {
         fs::create_dir_all(p).expect("create test dir");
     }
+    common::write_test_config(&config_home);
 
     // ── Create a unique remote temp directory ────────────────────────────────
     // mktemp -d gives us an isolated dir so we never touch anything else in /tmp.
@@ -1120,6 +1121,7 @@ fn test_e2e_real_claude() {
     for p in [&runtime_dir, &config_home, &session_dir] {
         fs::create_dir_all(p).unwrap();
     }
+    common::write_test_config(&config_home);
 
     let runtime_dir_g = runtime_dir.clone();
     let cleanup_root = root.clone();
@@ -1236,6 +1238,7 @@ fn test_proxy_real_claude() {
     for p in [&runtime_dir, &config_home, &session_dir] {
         fs::create_dir_all(p).unwrap();
     }
+    common::write_test_config(&config_home);
 
     let runtime_dir_g = runtime_dir.clone();
     let cleanup_root = root.clone();

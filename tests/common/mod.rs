@@ -639,6 +639,18 @@ pub struct ManagerHarness {
     pub dirs: [PathBuf; 2],
 }
 
+/// The `config.toml` every test claudio starts with: no claude version
+/// checks, whose prompts would capture the keys a test types.
+pub fn write_test_config(config_home: &std::path::Path) {
+    let dir = config_home.join("claudio");
+    fs::create_dir_all(&dir).expect("create config dir");
+    fs::write(
+        dir.join("config.toml"),
+        "[claude]\nupdate_check = \"off\"\nremote_check = \"off\"\n",
+    )
+    .expect("write test config.toml");
+}
+
 impl ManagerHarness {
     /// Build a harness with the default fake claude (nonce banner, then exec cat).
     ///
@@ -655,6 +667,7 @@ impl ManagerHarness {
         for p in [&runtime_dir, &config_home, &home, &dirs[0], &dirs[1]] {
             fs::create_dir_all(p).expect("create test dir");
         }
+        write_test_config(&config_home);
 
         let h = ManagerHarness {
             root,
