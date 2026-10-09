@@ -196,35 +196,50 @@ fn expand_glob(pattern: &Path) -> Vec<PathBuf> {
             glob_match(file_pattern, &name)
         })
         .map(|e| e.path())
+        .take(MAX_GLOB_FILES) // bound file count
         .collect();
     matched.sort();
     matched
 }
 
-/// Minimal glob match: `*` matches any sequence of characters, `?` one.
+/// Maximum files returned per glob expansion (DoS protection).
+const MAX_GLOB_FILES: usize = 256;
+
+/// Minimal glob match: `*` matches any sequence of characters, `?` one char.
+///
+/// Uses an iterative O(n·m) algorithm with last-star backtracking.  A pattern
+/// with many `*`s followed by a non-matching suffix cannot cause exponential
+/// blow-up.
 fn glob_match(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
-    glob_match_inner(&p, &n)
-}
+    let (mut pi, mut ni) = (0, 0);
+    // `star_pi` / `star_ni`: position of the last `*` match.
+    let (mut star_pi, mut star_ni) = (usize::MAX, 0usize);
 
-fn glob_match_inner(p: &[char], n: &[char]) -> bool {
-    match (p.first(), n.first()) {
-        (None, None) => true,
-        (None, _) | (_, None) if !matches!(p.first(), Some('*')) => false,
-        (Some('*'), _) => {
-            // Try consuming 0 more chars, then 1 more, etc.
-            for skip in 0..=n.len() {
-                if glob_match_inner(&p[1..], &n[skip..]) {
-                    return true;
-                }
-            }
-            false
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            // Record where we saw the star and move pattern forward.
+            star_pi = pi;
+            star_ni = ni; // star matches 0 chars initially
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            // Backtrack: the star absorbs one more name char.
+            star_ni += 1;
+            ni = star_ni;
+            pi = star_pi + 1;
+        } else {
+            return false;
         }
-        (Some('?'), _) => glob_match_inner(&p[1..], &n[1..]),
-        (Some(pc), Some(nc)) => pc == nc && glob_match_inner(&p[1..], &n[1..]),
-        _ => false,
     }
+    // Skip trailing stars.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 #[cfg(test)]
@@ -345,5 +360,25 @@ mod tests {
         assert!(glob_match("10-*.conf", "10-work.conf"));
         assert!(glob_match("host?", "host1"));
         assert!(!glob_match("host?", "host10"));
+    }
+
+    #[test]
+    fn glob_worst_case_finishes_fast() {
+        // A pattern with many stars followed by a non-matching suffix.
+        // The recursive approach would be exponential; the iterative one is O(n*m).
+        let pattern = "*".repeat(20) + "x";
+        let name = "a".repeat(100);
+        let start = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &name));
+        assert!(start.elapsed().as_millis() < 10, "glob_match took too long");
+    }
+
+    #[test]
+    fn glob_match_multiple_stars() {
+        assert!(glob_match("a*b*c", "aXbYc"));
+        assert!(!glob_match("a*b*c", "aXbY"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("**", "anything"));
+        assert!(!glob_match("a*x", "abc"));
     }
 }
