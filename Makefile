@@ -94,10 +94,13 @@ docker:
 ## Install the static binary. NOTE: do NOT install it as `claude` — the wrapper
 ## must be able to find the real `claude` on PATH. Point your tooling at
 ## `claudio -p ...` (or alias it).
+## Copy to a temp name, then rename: a running daemon keeps the old binary
+## ("Text file busy" otherwise). Run `claudio daemon restart` to switch to it.
 install: static
 	@mkdir -p $(PREFIX)/bin
-	@cp $(DIST)/$(BIN) $(PREFIX)/bin/$(BIN)
-	@echo "installed $(PREFIX)/bin/$(BIN)"
+	@install -m755 $(DIST)/$(BIN) $(PREFIX)/bin/.$(BIN).new
+	@mv -f $(PREFIX)/bin/.$(BIN).new $(PREFIX)/bin/$(BIN)
+	@echo "installed $(PREFIX)/bin/$(BIN) — run 'claudio daemon restart' to use it"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN)
