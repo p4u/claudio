@@ -3,7 +3,7 @@ name: release
 # Build the portable static binary and publish it as a GitHub Release.
 #
 # Trigger by pushing a version tag:
-#     git tag v0.1.0 && git push origin v0.1.0
+#     git tag v0.2.0 && git push origin v0.2.0
 # `workflow_dispatch` also builds binaries (and uploads them as run artifacts)
 # without publishing a release — handy for testing the pipeline.
 #
@@ -13,6 +13,10 @@ name: release
 #   darwin/x86_64 — cross-compiled on the arm64 macos runner (Apple's toolchain
 #                   targets both archs); dynamically linked to libSystem
 #   darwin/aarch64 — macos-latest (M-series); dynamically linked to libSystem
+#
+# Releases are published to the PUBLIC repo p4u/claudio-releases so anyone
+# can install without a token.  This requires a fine-grained PAT stored as
+# RELEASES_TOKEN in p4u/claudio with Contents: Read+Write on claudio-releases.
 
 on:
   push:
@@ -20,15 +24,52 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create the release and upload assets
+  contents: read  # source repo only needs read access
 
 env:
   BIN: claudio
 
 jobs:
+  check-token:
+    name: verify RELEASES_TOKEN secret
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if RELEASES_TOKEN is missing
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "${RELEASES_TOKEN}" ]; then
+            echo "::error::RELEASES_TOKEN secret is not set." \
+              "Create a fine-grained PAT with Contents: Read+Write on p4u/claudio-releases" \
+              "and add it as a secret named RELEASES_TOKEN in p4u/claudio."
+            exit 1
+          fi
+          echo "RELEASES_TOKEN is present."
+
+  check-version:
+    name: verify tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag vs Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME}"   # e.g. v0.2.0
+          cargo_ver="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          echo "Tag:      $tag"
+          echo "Cargo:    $cargo_ver"
+          if [ "$tag" != "$cargo_ver" ]; then
+            echo "::error::Tag '$tag' does not match Cargo.toml version '$cargo_ver'." \
+              "Bump Cargo.toml, commit, then re-push the tag."
+            exit 1
+          fi
+          echo "Version check passed."
+
   build:
     name: build (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: [check-token]
     strategy:
       fail-fast: false
       matrix:
@@ -92,9 +133,11 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [check-token, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -108,10 +151,12 @@ jobs:
           cp assets/claudio-linux-x86_64 assets/claudio
           cd assets && sha256sum claudio > claudio.sha256
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release to p4u/claudio-releases
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          repository: p4u/claudio-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             assets/claudio-linux-x86_64
             assets/claudio-linux-x86_64.sha256
@@ -123,5 +168,6 @@ jobs:
             assets/claudio-darwin-aarch64.sha256
             assets/claudio
             assets/claudio.sha256
+            install.sh
           generate_release_notes: true
           fail_on_unmatched_files: true
