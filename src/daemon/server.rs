@@ -368,7 +368,7 @@ impl Client {
                 let id = spec.id;
                 match self.daemon.spawn(spec).await {
                     Ok(pid) => Msg::Spawned { id, pid },
-                    Err(message) => Msg::Error { message },
+                    Err(e) => Msg::Error { message: e.to_string() },
                 }
             }
             Msg::Attach { id, rows, cols } => match self.attach(req, id, rows, cols).await {
@@ -387,7 +387,7 @@ impl Client {
                 self.attached.remove(&id);
                 match self.daemon.kill(id).await {
                     Ok(()) => Msg::Ok,
-                    Err(message) => Msg::Error { message },
+                    Err(e) => Msg::Error { message: e.to_string() },
                 }
             }
             Msg::ListDir { path } => list_dir(path).await,

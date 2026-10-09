@@ -16,7 +16,7 @@
 //! therefore never blocks the PTY.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
@@ -118,30 +118,25 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
 
 /// Start claude for `spec` under a new PTY and spawn its actor.
 /// Called from `spawn_blocking` — must not use tokio primitives.
-pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> Result<Handle, String> {
+pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
     let cwd = host::expand_tilde(&spec.cwd);
     if !cwd.is_dir() {
-        return Err(format!(
+        return Err(io::Error::other(format!(
             "working directory {} does not exist",
             cwd.display()
-        ));
+        )));
     }
     let token = hooks::new_token();
     let cmd = command(&daemon.config, spec, &cwd, &token);
     let (rows, cols) = size_or_default(spec.rows, spec.cols);
 
     let pair = native_pty_system()
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("could not open a pty: {e}"))?;
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| io::Error::other(format!("could not open a pty: {e}")))?;
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("could not start {}: {e}", daemon.config.claude.display()))?;
+        .map_err(|e| io::Error::other(format!("could not start {}: {e}", daemon.config.claude.display())))?;
     drop(pair.slave);
 
     let pid = child.process_id();
@@ -150,7 +145,7 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> Result<Handle, String> {
         Ok(io) => io,
         Err(e) => {
             let _ = killer.kill();
-            return Err(format!("could not start session i/o: {e}"));
+            return Err(io::Error::other(format!("could not start session i/o: {e}")));
         }
     };
 

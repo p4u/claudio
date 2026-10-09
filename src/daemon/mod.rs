@@ -272,7 +272,7 @@ impl Daemon {
     /// PTY open, process spawn, and thread creation happen in a
     /// `spawn_blocking` task, outside the lock. Journal disk writes also
     /// happen outside the lock, serialized by `journal_write`.
-    async fn spawn(self: &Arc<Self>, spec: SpawnSpec) -> Result<Option<u32>, String> {
+    async fn spawn(self: &Arc<Self>, spec: SpawnSpec) -> io::Result<Option<u32>> {
         // Phase 1: idempotency check and reservation (fast, no I/O).
         {
             let mut reg = self.registry();
@@ -282,7 +282,7 @@ impl Daemon {
             if reg.in_flight.contains(&spec.id) {
                 // A concurrent spawn for this id is already in progress; the
                 // client will receive a Created event when it completes.
-                return Err(format!("spawn in progress for {}", spec.id));
+                return Err(io::Error::other(format!("spawn in progress for {}", spec.id)));
             }
             reg.in_flight.insert(spec.id);
         }
@@ -296,7 +296,7 @@ impl Daemon {
             session::spawn(&daemon, &spec_clone)
         })
         .await
-        .unwrap_or_else(|e| Err(format!("spawn task panicked: {e}")));
+        .unwrap_or_else(|e| Err(io::Error::other(format!("spawn task panicked: {e}"))));
 
         // Phase 3: commit or roll back under lock; snapshot journal entries
         // before releasing the lock (no disk I/O under the lock).
@@ -343,7 +343,7 @@ impl Daemon {
 
     /// Kill a live session (or just forget a dormant one) and announce
     /// `Removed`. The journal removal is durable before returning `Ok`.
-    async fn kill(&self, id: SessionId) -> Result<(), String> {
+    async fn kill(&self, id: SessionId) -> io::Result<()> {
         // Take the live handle and remove in-memory journal entry under lock.
         let (live, was_journaled, journal_snapshot) = {
             let mut reg = self.registry();
@@ -358,7 +358,7 @@ impl Daemon {
         };
 
         if live.is_none() && !was_journaled {
-            return Err(format!("no such session: {id}"));
+            return Err(io::Error::other(format!("no such session: {id}")));
         }
 
         // Write journal outside the lock; failure is a hard error for Kill.
@@ -369,7 +369,7 @@ impl Daemon {
                 // We cannot un-kill the live session, but at least the journal
                 // stays consistent with what we're about to announce.
                 tracing::error!(%id, error = %e, "kill journal write failed; not acking");
-                return Err(format!("could not durably remove session {id}: {e}"));
+                return Err(io::Error::other(format!("could not durably remove session {id}: {e}")));
             }
         }
 
