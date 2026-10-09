@@ -382,6 +382,34 @@ impl App {
                 self.request(&wizard_host, Msg::ListDir { path }, reply_to)
             }
             Outcome::ChooseDir(cwd) => {
+                // If ChooseDir comes from the first screen's LOCAL section,
+                // the wizard is still in host_step. Transition to directory
+                // step (local host) before recording pending.
+                let in_host_step = matches!(&self.modal,
+                    Some(Modal::Wizard(w)) if w.host_step.is_some());
+                if in_host_step {
+                    // Compute seeds before mutable borrow.
+                    let host_recent =
+                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
+                    let active_cwd_local = self.active_view()
+                        .filter(|v| v.host == "local")
+                        .map(|v| v.cwd.clone());
+                    let seeds = super::wizard::assemble(
+                        active_cwd_local.as_deref(),
+                        &host_recent,
+                        &[],
+                    );
+                    let local_home = self.home.clone();
+                    let pending_dir = cwd.clone();
+                    if let Some(Modal::Wizard(w)) = &mut self.modal {
+                        w.on_host_connected("local", &local_home, seeds);
+                        w.pending = Some(pending_dir);
+                    }
+                    self.request_local(
+                        Msg::RecentProjects { limit: PROJECTS_LIMIT },
+                        ReplyTo::Projects,
+                    );
+                }
                 let reply_to = if wizard_host == "local" {
                     ReplyTo::ClaudeSessions(cwd.clone(), wizard_gen)
                 } else {

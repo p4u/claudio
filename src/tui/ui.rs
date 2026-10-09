@@ -414,21 +414,77 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
         22.min(area.height.saturating_sub(2)),
     );
 
-    // Step 0: host selection.
+    // Step 0: first screen (LOCAL / REMOTE sections).
     if let Some(hs) = &w.host_step {
-        let inner = popup(frame, rect, "New session: where? (Enter pick · Esc cancel)");
-        let [head, list] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        use super::wizard::HostSection;
+        let inner = popup(
+            frame,
+            rect,
+            "New session (↑/↓ move · Tab switch section · Enter pick · Esc cancel)",
+        );
         if let Some(host) = &hs.connecting {
             frame.render_widget(
                 Paragraph::new(format!("Connecting to {host}…"))
                     .style(Style::default().fg(Color::Cyan)),
-                head,
+                inner,
             );
             return;
         }
-        draw_input(frame, head, "host> ", &hs.input);
-        draw_list(frame, list, &hs.items, hs.selected);
+        let height = inner.height as usize;
+        // Layout: filter (2) + LOCAL label (1) + local items + REMOTE label (1) + remote items.
+        let local_count = hs.local_len().min((height.saturating_sub(4)) / 2);
+        let [filter_area, rest] =
+            ratatui::layout::Layout::vertical([Constraint::Length(2), Constraint::Min(0)])
+                .areas(inner);
+        draw_input(frame, filter_area, "filter> ", &hs.input);
+        // Render LOCAL section header.
+        let sections = ratatui::layout::Layout::vertical([
+            Constraint::Length(1),              // LOCAL header
+            Constraint::Length(local_count as u16), // local items
+            Constraint::Length(1),              // REMOTE header
+            Constraint::Min(0),                 // remote items
+        ])
+        .split(rest);
+        let local_focused = hs.focus == HostSection::Local;
+        let remote_focused = hs.focus == HostSection::Remote;
+        let local_hdr_style = if local_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        let remote_hdr_style = if remote_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        frame.render_widget(
+            Paragraph::new("── LOCAL ──────────────────────────────────────────────────")
+                .style(local_hdr_style),
+            sections[0],
+        );
+        // LOCAL items: "Explore local dirs…" + recent dirs.
+        let local_rows: Vec<String> = std::iter::once("  Explore local dirs…".to_owned())
+            .chain(hs.local_items.iter().map(|d| format!("  {d}")))
+            .collect();
+        draw_list(
+            frame,
+            sections[1],
+            &local_rows,
+            if local_focused { hs.local_selected } else { usize::MAX },
+        );
+        frame.render_widget(
+            Paragraph::new("── REMOTE ─────────────────────────────────────────────────")
+                .style(remote_hdr_style),
+            sections[2],
+        );
+        // REMOTE items.
+        let remote_rows: Vec<String> = hs.items.iter().map(|h| format!("  {h}")).collect();
+        draw_list(
+            frame,
+            sections[3],
+            &remote_rows,
+            if remote_focused { hs.selected } else { usize::MAX },
+        );
         return;
     }
 

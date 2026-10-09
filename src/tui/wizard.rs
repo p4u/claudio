@@ -53,43 +53,104 @@ pub enum Outcome {
     },
 }
 
-// ── Step 0: host selection ────────────────────────────────────────────────────
+// ── Step 0: host / first screen ───────────────────────────────────────────────
 
-/// State for the "Where" (host selection) step of the wizard.
+/// Which section of the first screen has keyboard focus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostSection {
+    Local,
+    Remote,
+}
+
+/// State for the wizard's first screen.
+///
+/// Two scrollable sections:
+/// - **LOCAL** (top): "Explore local dirs…" + recent local dirs not already open
+/// - **REMOTE** (bottom): SSH host candidates
+///
+/// Tab switches focus between sections. ↑/↓ cross section edges. Typing
+/// filters both sections at once. Backspace edits the filter; Esc cancels.
 #[derive(Debug, Clone)]
 pub struct HostStep {
-    /// The typed filter string.
+    /// Shared filter string (applied to both sections).
     pub input: String,
-    /// Filtered candidate list (always starts with `"local"`).
-    pub items: Vec<String>,
+    /// Which section has keyboard focus.
+    pub focus: HostSection,
+    /// Selected row in the LOCAL section (0 = "Explore local dirs…").
+    pub local_selected: usize,
+    /// Filtered local dirs (does not include the "Explore" pseudo-entry).
+    pub local_items: Vec<String>,
+    /// All recent local dirs (unfiltered).
+    local_dirs: Vec<String>,
+    /// Selected row in the REMOTE section.
     pub selected: usize,
+    /// Filtered candidate list of SSH hosts.
+    pub items: Vec<String>,
     /// `Some(host)` while bootstrap + connect_ssh is running.
     pub connecting: Option<String>,
-    /// The full unfiltered candidate list.
+    /// The full unfiltered SSH host list.
     candidates: Vec<String>,
 }
 
 impl HostStep {
-    /// Build a host step. `active_host` pre-selects the current session's host.
+    /// Build a host step without local dirs.
+    ///
+    /// - `active_host`: pre-selects the active session's host.
+    /// - `extra`: SSH host candidates (from `hosts::candidates()`).
+    ///
+    /// Use [`with_local_dirs`] to also populate the LOCAL section.
+    #[allow(dead_code)]
     pub fn new(active_host: &str, extra: &[String]) -> HostStep {
-        let mut candidates = vec!["local".to_owned()];
-        for h in extra {
-            if h != "local" {
-                candidates.push(h.clone());
-            }
-        }
-        let selected = candidates
+        HostStep::with_local_dirs(active_host, extra, &[])
+    }
+
+    /// Like `new` but also populates the LOCAL section with recent dirs.
+    pub fn with_local_dirs(
+        active_host: &str,
+        extra: &[String],
+        local_dirs: &[String],
+    ) -> HostStep {
+        let candidates: Vec<String> = extra
             .iter()
-            .position(|h| h == active_host)
-            .unwrap_or(0);
+            .filter(|h| h.as_str() != "local")
+            .cloned()
+            .collect();
+        let remote_selected = if active_host != "local" {
+            candidates
+                .iter()
+                .position(|h| h == active_host)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let focus = if active_host != "local" && !candidates.is_empty() {
+            HostSection::Remote
+        } else {
+            HostSection::Local
+        };
         let items = candidates.clone();
+        let local_items = local_dirs.to_vec();
         HostStep {
             input: String::new(),
+            focus,
+            local_selected: 0,
+            local_items,
+            local_dirs: local_dirs.to_vec(),
+            selected: remote_selected,
             items,
-            selected,
             connecting: None,
             candidates,
         }
+    }
+
+    /// Total rows in the LOCAL section (including the "Explore" pseudo-entry).
+    pub fn local_len(&self) -> usize {
+        1 + self.local_items.len()
+    }
+
+    /// Total rows in the REMOTE section.
+    pub fn remote_len(&self) -> usize {
+        self.items.len()
     }
 
     /// Handle a key press on the host step.
@@ -107,28 +168,82 @@ impl HostStep {
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         match key.code {
             KeyCode::Esc => Outcome::Cancel,
+            KeyCode::Tab => {
+                // Switch focus between LOCAL and REMOTE.
+                self.focus = match self.focus {
+                    HostSection::Local => HostSection::Remote,
+                    HostSection::Remote => HostSection::Local,
+                };
+                Outcome::None
+            }
             KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
+                match self.focus {
+                    HostSection::Local => {
+                        if self.local_selected > 0 {
+                            self.local_selected -= 1;
+                        }
+                    }
+                    HostSection::Remote => {
+                        if self.selected > 0 {
+                            self.selected -= 1;
+                        } else if !self.local_items.is_empty() || true {
+                            // Cross edge: go to bottom of LOCAL section.
+                            self.focus = HostSection::Local;
+                            self.local_selected = self.local_len().saturating_sub(1);
+                        }
+                    }
+                }
                 Outcome::None
             }
             KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+                match self.focus {
+                    HostSection::Local => {
+                        let max = self.local_len().saturating_sub(1);
+                        if self.local_selected < max {
+                            self.local_selected += 1;
+                        } else if !self.items.is_empty() {
+                            // Cross edge: go to top of REMOTE section.
+                            self.focus = HostSection::Remote;
+                            self.selected = 0;
+                        }
+                    }
+                    HostSection::Remote => {
+                        let max = self.remote_len().saturating_sub(1);
+                        if self.selected < max {
+                            self.selected += 1;
+                        }
+                    }
+                }
                 Outcome::None
             }
-            KeyCode::Enter => {
-                let host = match self.items.get(self.selected) {
-                    Some(h) => h.clone(),
-                    None if !self.input.trim().is_empty() => self.input.trim().to_owned(),
-                    None => return Outcome::None,
-                };
-                if host == "local" {
-                    // Local needs no connection step.
-                    Outcome::ConnectHost(host)
-                } else {
-                    self.connecting = Some(host.clone());
-                    Outcome::ConnectHost(host)
+            KeyCode::Enter => match self.focus {
+                HostSection::Local => {
+                    if self.local_selected == 0 {
+                        // "Explore local dirs…" → directory step
+                        Outcome::ConnectHost("local".to_owned())
+                    } else {
+                        // A specific recent dir → go directly to that dir
+                        match self.local_items.get(self.local_selected - 1) {
+                            Some(dir) => Outcome::ChooseDir(dir.clone()),
+                            None => Outcome::ConnectHost("local".to_owned()),
+                        }
+                    }
                 }
-            }
+                HostSection::Remote => {
+                    match self.items.get(self.selected) {
+                        Some(h) => {
+                            self.connecting = Some(h.clone());
+                            Outcome::ConnectHost(h.clone())
+                        }
+                        None if !self.input.trim().is_empty() => {
+                            let h = self.input.trim().to_owned();
+                            self.connecting = Some(h.clone());
+                            Outcome::ConnectHost(h)
+                        }
+                        None => Outcome::None,
+                    }
+                }
+            },
             KeyCode::Backspace => {
                 self.input.pop();
                 self.refilter();
@@ -161,8 +276,9 @@ impl HostStep {
         let input = self.input.trim().to_lowercase();
         if input.is_empty() {
             self.items = self.candidates.clone();
+            self.local_items = self.local_dirs.clone();
         } else {
-            // Use the fuzzy scorer so host filtering matches the design spec.
+            // Filter remote hosts.
             let mut scored: Vec<(i64, &String)> = self
                 .candidates
                 .iter()
@@ -173,8 +289,22 @@ impl HostStep {
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));
             self.items = scored.into_iter().map(|(_, h)| h.clone()).collect();
+            // Filter local dirs.
+            let mut lscored: Vec<(i64, &String)> = self
+                .local_dirs
+                .iter()
+                .filter_map(|d| {
+                    let score = fuzzy_score(&input, d)?;
+                    Some((score, d))
+                })
+                .collect();
+            lscored.sort_by(|a, b| b.0.cmp(&a.0));
+            self.local_items = lscored.into_iter().map(|(_, d)| d.clone()).collect();
         }
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.local_selected = self
+            .local_selected
+            .min(self.local_len().saturating_sub(1).max(0));
     }
 }
 
@@ -249,6 +379,9 @@ pub struct Wizard {
     /// Carried in reply tags so stale replies from a cancelled wizard are
     /// discarded.
     pub generation: u64,
+    /// Saved first-screen state so Backspace in the directory step can
+    /// return to the previous screen (step E: back navigation).
+    pub saved_host_step: Option<HostStep>,
     /// Per-path enrichment metadata (git branch, claude_at, symlink, hidden,
     /// recently_used). Populated lazily from `ListDir` and `RecentProjects`
     /// replies.
@@ -347,7 +480,9 @@ impl Wizard {
         proxy_profiles: &[String],
         proxy_default: Option<&str>,
     ) -> Wizard {
-        let host_step = HostStep::new(active_host, host_candidates);
+        // Show recent local dirs in the LOCAL section so the user can jump
+        // directly to a recent dir without going through the directory step.
+        let host_step = HostStep::with_local_dirs(active_host, host_candidates, recent);
         let host = active_host.to_owned();
         // Build proxy options: ["none", "profile1", "profile2", …]
         let mut proxy_options = vec!["none".to_owned()];
@@ -379,6 +514,7 @@ impl Wizard {
             proxy_selected,
             generation,
             meta,
+            saved_host_step: None,
         };
         w.refilter();
         w
@@ -414,7 +550,8 @@ impl Wizard {
         new_seeds: Vec<String>,
         recent: &[String],
     ) {
-        self.host_step = None;
+        // Save first screen state so Backspace can return to it (item E).
+        self.saved_host_step = self.host_step.take();
         self.host = host.to_owned();
         self.home = home.to_owned();
         self.seeds = new_seeds;
@@ -650,6 +787,19 @@ impl Wizard {
                 Outcome::ChooseDir(dir)
             }
             KeyCode::Backspace => {
+                if self.input.is_empty() {
+                    // Backspace with empty input: return to the first screen
+                    // (item E: step history / back navigation).
+                    if let Some(hs) = self.saved_host_step.take() {
+                        self.host_step = Some(hs);
+                        self.input.clear();
+                        self.items.clear();
+                        self.selected = 0;
+                        self.completions.clear();
+                        self.listed = None;
+                        return Outcome::None;
+                    }
+                }
                 self.input.pop();
                 self.refilter()
             }
