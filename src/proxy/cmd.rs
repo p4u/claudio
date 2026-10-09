@@ -49,7 +49,8 @@ USAGE
   claudio proxy use NAME|none       Set the default profile
 
 OPTIONS (login)
-  --name NAME   Profile name (default: first DNS label of the host)
+  --name NAME    Profile name (default: first DNS label of the host)
+  --unverified   Save the profile even if token verification fails
 ";
 
 // ── login ─────────────────────────────────────────────────────────────────────
@@ -58,12 +59,16 @@ fn cmd_login(args: &[String]) -> ExitCode {
     // Parse flags.
     let mut name_override: Option<String> = None;
     let mut url_arg: Option<String> = None;
+    let mut unverified = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--name" => {
                 i += 1;
                 name_override = args.get(i).cloned();
+            }
+            "--unverified" => {
+                unverified = true;
             }
             a if !a.starts_with('-') => {
                 url_arg = Some(a.to_owned());
@@ -91,37 +96,34 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     };
 
-    // Normalize: if the URL contains '@', treat it as CLAUDIO_PROXY_URL format.
-    let (url, token) = if url_raw.contains('@') {
-        match profile::parse_proxy_url(&url_raw) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("claudio proxy login: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        // Normalize host string to a proper URL.
-        let url = match profile::normalize_url(&url_raw) {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("claudio proxy login: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let token = read_token_from_tty_or_stdin();
-        if token.is_empty() {
-            eprintln!("claudio proxy login: no token provided");
+    // Reject TOKEN@HOST format: tokens are never accepted as arguments.
+    // Tokens must come from the interactive prompt, stdin pipe, or CLAUDIO_PROXY_URL.
+    if url_raw.contains('@') {
+        eprintln!("claudio proxy login: tokens are never accepted as arguments;");
+        eprintln!("  use the interactive prompt, pipe it on stdin, or set CLAUDIO_PROXY_URL");
+        return ExitCode::FAILURE;
+    }
+
+    // Normalize host string to a proper URL.
+    let url = match profile::normalize_url(&url_raw) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("claudio proxy login: {e}");
             return ExitCode::FAILURE;
         }
-        (url, token)
     };
+
+    let token = read_token_from_tty_or_stdin();
+    if token.is_empty() {
+        eprintln!("claudio proxy login: no token provided");
+        return ExitCode::FAILURE;
+    }
 
     let name = name_override.unwrap_or_else(|| profile::name_from_url(&url));
 
     // Validate with the proxy.
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let ok = rt.block_on(async {
+    let verified = rt.block_on(async {
         match api::check_root(&url, &token).await {
             Ok(true) => {
                 println!("✓  Proxy responded at {url}");
@@ -149,8 +151,12 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     });
 
-    if !ok {
-        return ExitCode::FAILURE;
+    if !verified {
+        if unverified {
+            eprintln!("warning: token NOT verified — saving profile as unverified");
+        } else {
+            return ExitCode::FAILURE;
+        }
     }
 
     // Save.
@@ -193,43 +199,108 @@ fn read_token_from_tty_or_stdin() -> String {
     }
 }
 
+// ── No-echo token reader ───────────────────────────────────────────────────────
+//
+// Uses libc termios to disable echo. Portable across Linux and macOS via
+// MaybeUninit + tcgetattr (no struct literal with platform-specific fields).
+// An RAII guard restores the terminal on every exit path. A temporary SIGINT
+// handler restores the terminal before the process is terminated by Ctrl-C.
+
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// File descriptor saved for the SIGINT handler. -1 = handler not installed.
+static SIGINT_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Saved termios bytes for the SIGINT handler.
+struct TermCell(std::cell::UnsafeCell<std::mem::MaybeUninit<libc::termios>>);
+// SAFETY: written by the main thread before the handler is installed (Release
+// store on SIGINT_FD), read only by the handler (Acquire load). No concurrent
+// writes after initialization.
+unsafe impl Sync for TermCell {}
+static SIGINT_SAVED: TermCell =
+    TermCell(std::cell::UnsafeCell::new(std::mem::MaybeUninit::uninit()));
+
+/// SIGINT handler: restore terminal and re-raise with the default handler.
+extern "C" fn on_sigint(_: libc::c_int) {
+    let fd = SIGINT_FD.load(Ordering::Acquire);
+    if fd >= 0 {
+        // SAFETY: initialized before SIGINT_FD was set to a non-negative value.
+        unsafe {
+            let saved = (*SIGINT_SAVED.0.get()).assume_init_ref();
+            libc::tcsetattr(fd, libc::TCSANOW, saved);
+        }
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::raise(libc::SIGINT);
+    }
+}
+
+/// RAII guard: restores termios and the previous SIGINT handler on drop.
+struct NoEchoGuard {
+    fd: i32,
+    saved: libc::termios,
+    old_sigint: libc::sighandler_t,
+}
+
+impl Drop for NoEchoGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved);
+            libc::signal(libc::SIGINT, self.old_sigint);
+        }
+        SIGINT_FD.store(-1, Ordering::Release);
+    }
+}
+
 /// Read a line from stdin with echo disabled using libc termios.
+///
+/// Aborts the process (via `eprintln!` + `process::exit`) if echo cannot be
+/// disabled — we never fall back to echoing a secret token.
 fn read_token_no_echo() -> String {
+    use std::mem::MaybeUninit;
     use std::os::unix::io::AsRawFd;
 
     let stdin_fd = io::stdin().as_raw_fd();
 
-    // Save current termios.
-    let mut old = libc::termios {
-        c_iflag: 0,
-        c_oflag: 0,
-        c_cflag: 0,
-        c_lflag: 0,
-        c_line: 0,
-        c_cc: [0u8; 32],
-        c_ispeed: 0,
-        c_ospeed: 0,
-    };
-    // SAFETY: tcgetattr has well-defined semantics on a valid fd.
-    if unsafe { libc::tcgetattr(stdin_fd, &mut old) } != 0 {
-        // Not a real terminal — fall back to echo-on read.
-        let mut line = String::new();
-        let _ = io::stdin().lock().read_line(&mut line);
-        eprintln!();
-        return line.trim().to_owned();
+    // Fetch the current termios using MaybeUninit — avoids naming any
+    // platform-specific struct fields (c_line exists on Linux but not macOS).
+    let mut saved = MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: tcgetattr writes into the pointer on success.
+    if unsafe { libc::tcgetattr(stdin_fd, saved.as_mut_ptr()) } != 0 {
+        eprintln!("\nclaudio proxy login: cannot query terminal state; aborting");
+        std::process::exit(1);
+    }
+    // SAFETY: tcgetattr succeeded, so saved is fully initialized.
+    let saved = unsafe { saved.assume_init() };
+
+    // Store for the signal handler before installing it.
+    unsafe { (*SIGINT_SAVED.0.get()).write(saved); }
+    SIGINT_FD.store(stdin_fd, Ordering::Release);
+
+    // Install temporary SIGINT handler.
+    // SAFETY: on_sigint is a valid extern "C" fn.
+    let old_sigint = unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+
+    // Disable echo (keep ICANON so read_line still works line-by-line).
+    let mut raw = saved;
+    raw.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
+    if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) } != 0 {
+        // Restore signal handler — the RAII guard hasn't been created yet.
+        unsafe { libc::signal(libc::SIGINT, old_sigint); }
+        SIGINT_FD.store(-1, Ordering::Release);
+        eprintln!("\nclaudio proxy login: cannot disable echo; aborting");
+        std::process::exit(1);
     }
 
-    let mut raw = old;
-    raw.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
-    // SAFETY: tcsetattr restores the saved state after the read.
-    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) };
+    // RAII guard: restores termios and signal handler on every exit path
+    // (normal return, panic, early return, etc.).
+    let _guard = NoEchoGuard { fd: stdin_fd, saved, old_sigint };
 
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
+    eprintln!(); // newline after the hidden input
 
-    // Restore.
-    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old) };
-    eprintln!();
     line.trim().to_owned()
 }
 
@@ -327,7 +398,9 @@ async fn print_live_status(p: &Profile) {
     }
 }
 
-fn fmt_tokens(n: i64) -> String {
+/// Format a token count for display (e.g. `1.2M`, `340k`, `42`).
+/// Made `pub` so other modules (e.g. the TUI) can reuse this formatter.
+pub fn fmt_tokens(n: i64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
