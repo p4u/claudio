@@ -510,7 +510,7 @@ impl GitView {
         }
         match (key.code, plain_char(key)) {
             (KeyCode::Enter, _) => self.open_file_diff(),
-            (_, Some('d')) => self.open_diff(None, None),
+            (_, Some('d')) => self.open_diff(None),
             _ if is_back(key) => {
                 self.commit = None;
                 self.inflight.commit = None;
@@ -607,14 +607,22 @@ impl GitView {
     }
 
     fn open_file_diff(&mut self) -> GitOutcome {
-        let file = self.commit.as_ref().and_then(|c| c.selected_file());
-        match file.map(|f| (f.path.clone(), f.old_path.clone())) {
-            Some((path, old_path)) => self.open_diff(Some(path), old_path),
+        let Some(commit) = &self.commit else {
+            return GitOutcome::None;
+        };
+        let index = commit.files.selected;
+        match commit.selected_file() {
+            Some(file) => {
+                let (path, old_path) = (file.path.clone(), file.old_path.clone());
+                self.open_diff(Some((index as u32, path, old_path)))
+            }
             None => GitOutcome::None,
         }
     }
 
-    fn open_diff(&mut self, path: Option<String>, old_path: Option<String>) -> GitOutcome {
+    /// Open a diff page: one file (its position in the commit's list, with
+    /// its display names) or, with `None`, the whole commit.
+    fn open_diff(&mut self, file: Option<(u32, String, Option<String>)>) -> GitOutcome {
         let seq = self.next_seq();
         let Some(commit) = &mut self.commit else {
             return GitOutcome::None;
@@ -622,6 +630,12 @@ impl GitView {
         if !matches!(commit.info, Load::Ready(_)) {
             return GitOutcome::None;
         }
+        // The names are display text and only a fallback for daemons that
+        // predate `file`; the position is what identifies the file.
+        let (file, path, old_path) = match file {
+            Some((index, path, old_path)) => (Some(index), Some(path), old_path),
+            None => (None, None, None),
+        };
         commit.diff = Some(DiffPage::new(path.clone()));
         self.inflight.diff = Some(seq);
         GitOutcome::Request {
@@ -629,6 +643,7 @@ impl GitView {
             msg: Msg::GitDiff {
                 cwd: self.cwd.clone(),
                 id: commit.id.clone(),
+                file,
                 path,
                 old_path,
             },
@@ -675,6 +690,9 @@ impl GitView {
         };
         let log = &mut self.log;
         let keep = log.selected_id();
+        // "More" without a single commit would be asked for again, unchanged,
+        // for ever.
+        let stalled = page.more && page.commits.is_empty();
         if skip == 0 {
             log.commits = page.commits;
         } else if skip == log.commits.len() {
@@ -684,8 +702,8 @@ impl GitView {
         }
         log.root = page.root;
         log.head = page.head;
-        log.more = page.more;
-        log.error = None;
+        log.more = page.more && !stalled;
+        log.error = stalled.then(|| NO_PROGRESS.to_owned());
         log.refilter(keep.as_deref());
         // A short first page leaves room to fill, unless a filter hides most.
         if log.filter.is_empty() {
@@ -702,6 +720,7 @@ impl GitView {
 }
 
 const UNEXPECTED: &str = "unexpected reply from the daemon";
+const NO_PROGRESS: &str = "no further commits could be loaded";
 
 #[cfg(test)]
 mod tests {
@@ -1038,6 +1057,7 @@ mod tests {
             Msg::GitDiff {
                 cwd: "/repo".into(),
                 id: id(0),
+                file: Some(1),
                 path: Some("new.rs".into()),
                 old_path: Some("old.rs".into()),
             }
@@ -1059,10 +1079,48 @@ mod tests {
             Msg::GitDiff {
                 cwd: "/repo".into(),
                 id: id(0),
+                file: None,
                 path: None,
                 old_path: None
             }
         );
+    }
+
+    #[test]
+    fn files_with_the_same_label_are_told_apart_by_position() {
+        let mut v = loaded(1, false);
+        let open = v.on_key(&key(KeyCode::Enter), ROWS);
+        // Names that sanitize to one label: the position is the identity.
+        let twins = vec![file("a b", None), file("a b", None)];
+        v.on_reply(seq_of(&open), Ok(info(twins, "subject")));
+        let files_of = |outcome| match msg_of(outcome) {
+            Msg::GitDiff { file, .. } => file,
+            other => panic!("expected a diff request, got {other:?}"),
+        };
+        assert_eq!(files_of(v.on_key(&key(KeyCode::Enter), ROWS)), Some(0));
+        v.on_key(&key(KeyCode::Esc), ROWS);
+        v.on_key(&ch('j'), ROWS);
+        assert_eq!(files_of(v.on_key(&key(KeyCode::Enter), ROWS)), Some(1));
+    }
+
+    #[test]
+    fn a_page_without_progress_is_not_asked_for_again() {
+        let mut v = loaded(120, true);
+        let outcome = v.on_key(&key(KeyCode::End), ROWS);
+        assert!(matches!(msg_of(outcome), Msg::GitLog { skip: 120, .. }));
+        // The daemon claims more but sent nothing new.
+        let seq = v.inflight.log.unwrap().0;
+        let stalled = v.on_reply(seq, Ok(page(0..0, true)));
+        assert_eq!(stalled, GitOutcome::None);
+        assert!(!v.loading_log() && !v.log.more);
+        assert_eq!(v.log.error.as_deref(), Some(NO_PROGRESS));
+        assert_eq!(v.log.commits.len(), 120, "what was loaded stays");
+        assert_eq!(v.on_key(&key(KeyCode::End), ROWS), GitOutcome::None);
+        // `r` starts over.
+        assert!(matches!(
+            msg_of(v.on_key(&ch('r'), ROWS)),
+            Msg::GitLog { skip: 0, .. }
+        ));
     }
 
     #[test]
