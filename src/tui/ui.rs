@@ -9,9 +9,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::proxy::api::PoolStatus;
 use crate::proto::SessionState;
 
-use super::app::{App, Modal, SessionView};
+use super::app::{App, Modal, ProxyStatus, SessionView};
 use super::keymap;
 use super::wizard::{resume_label, Wizard};
 
@@ -34,6 +35,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             }
         }
         Some(Modal::Wizard(w)) => draw_wizard(frame, w, app.now),
+        Some(Modal::ProxyStats { profile_name }) => {
+            let status = app.proxy_status.get(profile_name.as_str());
+            draw_proxy_stats(frame, profile_name, status);
+        }
         None => {}
     }
 }
@@ -60,12 +65,26 @@ pub fn glyph(state: SessionState, tick: usize, reconnecting: bool) -> (&'static 
     }
 }
 
+/// Proxy badge shown in the tab bar when the session uses a proxy.
+const PROXY_BADGE: &str = "⇅";
+
 /// The text of one tab with its label cut to `cap` columns:
 /// ` {n} {glyph} {label} `, or ` {n} {glyph} ` when no label fits.
 pub fn tab_parts(index: usize, label: &str, cap: usize) -> (String, String) {
     let label = truncate(label, cap);
     let suffix = if label.is_empty() { " ".to_owned() } else { format!(" {label} ") };
     (format!(" {index} "), suffix)
+}
+
+/// Like [`tab_parts`] but appends a proxy badge when `proxied` is true.
+pub fn tab_parts_proxy(index: usize, label: &str, cap: usize, proxied: bool) -> (String, String) {
+    let (prefix, mut suffix) = tab_parts(index, label, cap);
+    if proxied {
+        // Insert badge before the trailing space.
+        let trimmed = suffix.trim_end_matches(' ');
+        suffix = format!("{trimmed}{PROXY_BADGE} ");
+    }
+    (prefix, suffix)
 }
 
 /// Per-tab label widths so that every tab fits in `width` columns (tabs are
@@ -125,7 +144,13 @@ pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16) -
     let labels: Vec<String> = sessions.iter().map(tab_label).collect();
     let widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
     let caps = fit_tabs(&widths, active, width as usize);
-    labels.iter().zip(caps).enumerate().map(|(i, (l, cap))| tab_parts(i + 1, l, cap)).collect()
+    labels
+        .iter()
+        .zip(caps)
+        .zip(sessions)
+        .enumerate()
+        .map(|(i, ((l, cap), view))| tab_parts_proxy(i + 1, l, cap, view.proxy.is_some()))
+        .collect()
 }
 
 /// Which tab is at column `col` of the bar, given its titles.
@@ -222,6 +247,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             parts.push(csid.chars().take(8).collect());
         }
         parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
+        // Proxy status.
+        if let Some((pname, status)) = app.active_proxy_status() {
+            let pool = status.pool.as_ref().map(|h| h.overall()).unwrap_or(PoolStatus::Unknown);
+            let mut proxy_parts = vec![format!("proxy:{pname} {}", pool.label())];
+            if let Some(stats) = &status.stats {
+                let total_tok = stats.totals.input_tokens + stats.totals.output_tokens;
+                proxy_parts.push(format!("{} tok/{}",
+                    fmt_tokens(total_tok), stats.period));
+                if let Some(lim) = &stats.limit {
+                    proxy_parts.push(format!("{:.0}%", lim.used_pct * 100.0));
+                }
+            }
+            parts.push(proxy_parts.join(" "));
+        }
         (parts.join(" · "), Style::default())
     } else {
         (String::new(), Style::default())
@@ -340,14 +379,32 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
 
     // Step 2: resume picker.
     if let Some(step) = &w.resume {
-        let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back)");
-        let [head, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        // Proxy toggle row takes 1 line when profiles are available.
+        let has_proxy = w.proxy_options.len() > 1;
+        let proxy_rows = if has_proxy { 1 } else { 0 };
+        let inner = popup(frame, rect, "New session: resume? (Enter pick · Esc back · ←/→ proxy)");
+        let constraints = if has_proxy {
+            vec![Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]
+        } else {
+            vec![Constraint::Length(1), Constraint::Min(0)]
+        };
+        let areas = Layout::vertical(constraints).split(inner);
         let cwd = Paragraph::new(w.display(&step.cwd)).style(Style::default().add_modifier(Modifier::DIM));
-        frame.render_widget(cwd, head);
+        frame.render_widget(cwd, areas[0]);
+        if has_proxy {
+            let sel = w.proxy_options.get(w.proxy_selected).map(String::as_str).unwrap_or("none");
+            let proxy_line = format!("Proxy: ◀ {} ▶", sel);
+            frame.render_widget(
+                Paragraph::new(proxy_line).style(Style::default().fg(Color::Cyan)),
+                areas[1],
+            );
+        }
+        let list_area = areas[if has_proxy { 2 } else { 1 }];
+        let _ = proxy_rows; // suppress unused warning
         let rows: Vec<String> = std::iter::once("+ New session".to_owned())
             .chain(step.sessions.iter().map(|s| resume_label(s, now)))
             .collect();
-        draw_list(frame, list, &rows, step.selected);
+        draw_list(frame, list_area, &rows, step.selected);
         return;
     }
 
@@ -437,6 +494,121 @@ pub fn fmt_age(secs: u64) -> String {
         _ => format!("{}d", secs / 86_400),
     }
 }
+
+/// Format a token count compactly: `1.2M`, `340k`, or the raw number.
+fn fmt_tokens(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// ── Proxy stats popup ─────────────────────────────────────────────────────────
+
+fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&ProxyStatus>) {
+    let area = frame.area();
+    let rect = centered(area, 70.min(area.width.saturating_sub(4)), 24.min(area.height.saturating_sub(2)));
+    let title = format!("Proxy stats: {} (Esc close)", profile_name);
+    let inner = popup(frame, rect, &title);
+
+    let Some(status) = status else {
+        frame.render_widget(
+            Paragraph::new("Fetching stats…").style(Style::default().add_modifier(Modifier::DIM)),
+            inner,
+        );
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Pool health.
+    if let Some(pool) = &status.pool {
+        let overall = pool.overall();
+        let color = match overall {
+            PoolStatus::Ok => Color::Green,
+            PoolStatus::Busy => Color::Yellow,
+            PoolStatus::Saturated | PoolStatus::Unavailable => Color::Red,
+            PoolStatus::Unknown => Color::DarkGray,
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Pool: "),
+            Span::styled(overall.label(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        ]));
+        for prov in &pool.providers {
+            let pcolor = match prov.status.as_str() {
+                "ok" => Color::Green,
+                "busy" => Color::Yellow,
+                "saturated" | "unavailable" => Color::Red,
+                _ => Color::DarkGray,
+            };
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {:20} ", prov.name)),
+                Span::styled(&prov.status, Style::default().fg(pcolor)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    // Stats totals.
+    if let Some(stats) = &status.stats {
+        let total_tok = stats.totals.input_tokens + stats.totals.output_tokens;
+        lines.push(Line::raw(format!(
+            "Stats ({}):  {} requests  {}  total tokens",
+            stats.period, stats.totals.requests, fmt_tokens(total_tok),
+        )));
+        lines.push(Line::raw(format!(
+            "  in: {}  out: {}  cache-read: {}  cache-create: {}",
+            fmt_tokens(stats.totals.input_tokens),
+            fmt_tokens(stats.totals.output_tokens),
+            fmt_tokens(stats.totals.cache_read),
+            fmt_tokens(stats.totals.cache_creation),
+        )));
+
+        // Limit bar.
+        if let Some(lim) = &stats.limit {
+            let bar_width = (inner.width as usize).saturating_sub(12).min(40);
+            let filled = ((lim.used_pct * bar_width as f64) as usize).min(bar_width);
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+            let color = if lim.used_pct >= 0.9 {
+                Color::Red
+            } else if lim.used_pct >= 0.7 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!("Limit: {:.0}% of {}", lim.used_pct * 100.0, fmt_tokens(lim.output_tokens))));
+            lines.push(Line::from(Span::styled(format!("[{bar}]"), Style::default().fg(color))));
+            if lim.blocked {
+                lines.push(Line::styled(
+                    format!("BLOCKED until {}", lim.blocked_until.as_deref().unwrap_or("?")),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        // By-model table.
+        if !stats.by_model.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("By model:", Style::default().add_modifier(Modifier::BOLD)));
+            for m in &stats.by_model {
+                let out_tok = fmt_tokens(m.output_tokens);
+                let model = truncate(&m.model, 40);
+                lines.push(Line::raw(format!("  {:42} {:>4} req  {:>8} out-tok",
+                    model, m.requests, out_tok)));
+            }
+        }
+    } else {
+        lines.push(Line::styled("Stats unavailable", Style::default().fg(Color::DarkGray)));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), inner);
+}
+
+// ── Wizard (proxy toggle) ─────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

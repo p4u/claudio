@@ -6,7 +6,9 @@
 //! state.json) is queued as [`Effect`]s that the event loop in `mod.rs`
 //! drains with [`App::take_effects`].
 
+use std::collections::HashMap;
 use std::io;
+use std::time::Instant;
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -14,6 +16,7 @@ use crossterm::event::{
 use uuid::Uuid;
 
 use crate::client::Incoming;
+use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
 use crate::proto::{Msg, SessionEvent, SessionId, SessionInfo, SessionState, SpawnSpec};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
@@ -43,6 +46,12 @@ pub enum Effect {
     Connect(String),
     /// Write state.json.
     Save,
+    /// Fetch proxy config (env) for a profile name. Result goes to
+    /// [`App::on_proxy_config`].
+    FetchProxyConfig { profile_name: String },
+    /// Fetch proxy stats for the active session's profile. Result goes to
+    /// [`App::on_proxy_stats`].
+    FetchProxyStats { profile_name: String },
 }
 
 /// What a request's reply is for.
@@ -75,6 +84,8 @@ pub struct SessionView {
     /// Mirror of the daemon's screen; fed only while attached.
     pub mirror: Screen,
     pub attached: bool,
+    /// Proxy profile name (None = no proxy). Only the name, never the token.
+    pub proxy: Option<String>,
 }
 
 impl SessionView {
@@ -95,8 +106,24 @@ impl SessionView {
             host: self.host.clone(),
             claude_session_id: self.claude_session_id.clone(),
             created_at: self.created_at,
+            proxy: self.proxy.clone(),
         }
     }
+}
+
+/// A transient status-bar message.
+pub struct Notice {
+    pub text: String,
+    ticks_left: u32,
+}
+
+/// Live proxy data shown in the status bar for the active session.
+#[derive(Debug, Clone, Default)]
+pub struct ProxyStatus {
+    pub pool: Option<PoolHealthResponse>,
+    pub stats: Option<StatsResponse>,
+    /// When the stats were last fetched.
+    pub fetched_at: Option<Instant>,
 }
 
 /// A popup that captures the keyboard.
@@ -105,12 +132,8 @@ pub enum Modal {
     /// Confirm killing a session.
     Close { id: SessionId },
     Wizard(Wizard),
-}
-
-/// A transient status-bar message.
-pub struct Notice {
-    pub text: String,
-    ticks_left: u32,
+    /// Proxy stats popup.
+    ProxyStats { profile_name: String },
 }
 
 /// The manager's state.
@@ -137,6 +160,14 @@ pub struct App {
     /// Set when the screen needs repainting.
     pub redraw: bool,
     effects: Vec<Effect>,
+    /// Cached proxy config (env vars) per profile name, with fetch time.
+    pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
+    /// Live proxy stats per profile name.
+    pub proxy_status: HashMap<String, ProxyStatus>,
+    /// Ordered list of available proxy profile names (empty = no proxy configured).
+    pub proxy_profiles: Vec<String>,
+    /// The default proxy profile from config.
+    pub proxy_default: Option<String>,
 }
 
 /// Current Unix time in seconds.
@@ -148,6 +179,8 @@ pub fn unix_now() -> u64 {
 
 impl App {
     pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
+        // Load proxy profiles once at startup.
+        let (proxy_profiles, proxy_default) = load_proxy_profiles();
         App {
             sessions: Vec::new(),
             active: None,
@@ -164,12 +197,84 @@ impl App {
             quit: false,
             redraw: true,
             effects: Vec::new(),
+            proxy_config: HashMap::new(),
+            proxy_status: HashMap::new(),
+            proxy_profiles,
+            proxy_default,
         }
     }
 
     /// Drain the queued effects, in order.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
+    }
+
+    // ── Proxy ─────────────────────────────────────────────────────────────────
+
+    /// Called when a `FetchProxyConfig` effect completes.
+    pub fn on_proxy_config(&mut self, profile_name: String, cfg: ConfigResponse) {
+        self.proxy_config.insert(profile_name, (cfg, Instant::now()));
+        self.redraw = true;
+    }
+
+    /// Called when a `FetchProxyStats` effect completes.
+    pub fn on_proxy_stats(
+        &mut self,
+        profile_name: String,
+        stats: Option<StatsResponse>,
+        pool: Option<PoolHealthResponse>,
+    ) {
+        let entry = self.proxy_status.entry(profile_name).or_default();
+        if let Some(s) = stats {
+            entry.stats = Some(s);
+        }
+        if let Some(p) = pool {
+            entry.pool = Some(p);
+        }
+        entry.fetched_at = Some(Instant::now());
+        self.redraw = true;
+    }
+
+    /// Proxy config for a profile, if cached and fresh (5 min).
+    pub fn proxy_config_cached(&self, name: &str) -> Option<&ConfigResponse> {
+        self.proxy_config.get(name).and_then(|(cfg, when)| {
+            if when.elapsed().as_secs() < 300 {
+                Some(cfg)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Schedule a proxy config fetch if the cache is stale.
+    pub fn maybe_fetch_proxy_config(&mut self, name: &str) {
+        if self.proxy_config_cached(name).is_none() {
+            self.effects.push(Effect::FetchProxyConfig { profile_name: name.to_owned() });
+        }
+    }
+
+    /// Schedule a proxy stats fetch for the named profile.
+    pub fn schedule_proxy_stats(&mut self, name: &str) {
+        self.effects.push(Effect::FetchProxyStats { profile_name: name.to_owned() });
+    }
+
+    /// The proxy status for the active session's profile, if any.
+    pub fn active_proxy_status(&self) -> Option<(&str, &ProxyStatus)> {
+        let name = self.active_view()?.proxy.as_deref()?;
+        let status = self.proxy_status.get(name)?;
+        Some((name, status))
+    }
+
+    /// Open the stats popup for the active session's proxy profile.
+    pub fn open_proxy_stats(&mut self) {
+        if let Some(name) = self.active_view().and_then(|v| v.proxy.as_deref()) {
+            let n = name.to_owned();
+            self.schedule_proxy_stats(&n);
+            self.modal = Some(Modal::ProxyStats { profile_name: n });
+            self.redraw = true;
+        } else {
+            self.notify("No proxy configured for this session (Alt+n → proxy toggle)");
+        }
     }
 
     /// The pane size as `(rows, cols)`.
@@ -235,6 +340,7 @@ impl App {
                 created_at: r.saved.created_at,
                 mirror: Screen::new(rows, cols),
                 attached: false,
+                proxy: r.saved.proxy,
             });
         }
         let restore = saved.active.and_then(|id| self.index_of(id));
@@ -351,11 +457,13 @@ impl App {
     }
 
     /// Spawn claude in `cwd` on `host` (optionally resuming) and switch to it.
-    fn spawn(&mut self, host: String, cwd: String, resume: Option<String>) {
+    fn spawn(&mut self, host: String, cwd: String, resume: Option<String>, proxy: Option<String>) {
         let (rows, cols) = self.pane_size();
         let id = Uuid::new_v4();
         let args = resume.map(|r| vec!["--resume".to_owned(), r]).unwrap_or_default();
-        let spec = SpawnSpec { id, cwd: cwd.clone(), name: None, args, env: Vec::new(), rows, cols };
+        // Build proxy env if a profile is selected.
+        let env = self.proxy_env_for(proxy.as_deref());
+        let spec = SpawnSpec { id, cwd: cwd.clone(), name: None, args, env, rows, cols };
         self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
         self.sessions.push(SessionView {
             id,
@@ -368,21 +476,48 @@ impl App {
             created_at: self.now,
             mirror: Screen::new(rows, cols),
             attached: false,
+            proxy: proxy.clone(),
         });
         state::push_recent(&mut self.recent_dirs, &cwd);
         self.activate(self.sessions.len() - 1);
     }
 
+    /// Build the `SpawnSpec.env` for a proxy profile name (or empty when none).
+    fn proxy_env_for(&self, proxy_name: Option<&str>) -> Vec<(String, String)> {
+        let name = match proxy_name {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        // Resolve the profile: env var overrides if name is "env".
+        let profile = if name == "env" {
+            crate::proxy::profile::from_env().map(|(_, p)| p)
+        } else {
+            crate::proxy::profile::load().ok()
+                .and_then(|sec| sec.profiles.get(name).cloned())
+        };
+        match profile {
+            Some(p) => {
+                let cfg = self.proxy_config_cached(name);
+                crate::proxy::env::session_env(&p, cfg)
+            }
+            None => Vec::new(),
+        }
+    }
+
     fn open_wizard(&mut self) {
         let active_cwd = self.active_view().map(|v| v.cwd.clone());
+        let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
         let active_host = self.active_host();
         let seeds = wizard::assemble(active_cwd.as_deref(), &self.recent_dirs, &self.projects);
         let host_candidates = crate::remote::hosts::candidates();
+        let proxy_default = active_proxy.as_deref().or(self.proxy_default.as_deref());
         self.modal = Some(Modal::Wizard(Wizard::new(
             seeds,
             self.home.clone(),
             &active_host,
             &host_candidates,
+            &self.proxy_profiles.clone(),
+            proxy_default,
         )));
         self.request_local(Msg::RecentProjects { limit: PROJECTS_LIMIT }, ReplyTo::Projects);
         self.redraw = true;
@@ -426,9 +561,13 @@ impl App {
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, reply_to)
             }
-            Outcome::Spawn { cwd, resume } => {
+            Outcome::Spawn { cwd, resume, proxy } => {
                 self.modal = None;
-                self.spawn(wizard_host, cwd, resume);
+                // If proxy was selected, ensure config is pre-fetched.
+                if let Some(ref pname) = proxy {
+                    self.maybe_fetch_proxy_config(pname);
+                }
+                self.spawn(wizard_host, cwd, resume, proxy);
             }
         }
         self.redraw = true;
@@ -528,6 +667,7 @@ impl App {
                 self.save();
                 self.quit = true;
             }
+            Action::ProxyStats => self.open_proxy_stats(),
             _ => {}
         }
         self.redraw = true;
@@ -577,6 +717,11 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
                 _ => {}
             },
+            Modal::ProxyStats { .. } => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                    self.modal = None;
+                }
+            }
         }
     }
 
@@ -590,7 +735,7 @@ impl App {
                 input.push_str(text.lines().next().unwrap_or(""));
                 self.redraw = true;
             }
-            Some(Modal::Close { .. }) => {}
+            Some(Modal::Close { .. }) | Some(Modal::ProxyStats { .. }) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
@@ -683,6 +828,7 @@ impl App {
                     created_at: info.created_at,
                     mirror: Screen::new(rows, cols),
                     attached: false,
+                    proxy: None,
                 });
                 self.save();
                 return;
@@ -800,6 +946,23 @@ impl App {
             }
         }
         self.redraw = true;
+    }
+}
+
+/// Load proxy profiles from config.toml and CLAUDIO_PROXY_URL. Returns
+/// `(profile_names, default_name)`. Never panics; returns empty on any error.
+fn load_proxy_profiles() -> (Vec<String>, Option<String>) {
+    // Check env var first — when set it overrides any saved default.
+    if let Some((name, _)) = crate::proxy::profile::from_env() {
+        // Return just the "env" profile, which is always the default.
+        return (vec![name.to_owned()], Some(name.to_owned()));
+    }
+    match crate::proxy::profile::load() {
+        Ok(sec) => {
+            let names: Vec<String> = sec.profiles.keys().cloned().collect();
+            (names, sec.default)
+        }
+        Err(_) => (Vec::new(), None),
     }
 }
 

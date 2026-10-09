@@ -23,8 +23,8 @@ pub enum Outcome {
     ListDir(String),
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
-    /// Start claude in `cwd`, resuming `resume` if set.
-    Spawn { cwd: String, resume: Option<String> },
+    /// Start claude in `cwd`, resuming `resume` if set, with optional proxy profile.
+    Spawn { cwd: String, resume: Option<String>, proxy: Option<String> },
 }
 
 // ── Step 0: host selection ────────────────────────────────────────────────────
@@ -162,6 +162,10 @@ pub struct Wizard {
     listed: Option<String>,
     /// The daemon host's home directory, for `~`.
     home: String,
+    /// Available proxy profile names (`"none"` prepended at index 0).
+    pub proxy_options: Vec<String>,
+    /// Currently selected index in `proxy_options` (0 = none).
+    pub proxy_selected: usize,
 }
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
@@ -228,14 +232,25 @@ impl Wizard {
     /// - `active_host` pre-selects the active session's host in step 0.
     /// - `host_candidates` is `hosts::candidates()` (MRU + ssh config).
     /// - `home` expands `~` on the chosen host.
+    /// - `proxy_profiles` is the list of saved proxy profile names; pass `&[]`
+    ///   when none are configured (the proxy toggle is hidden).
+    /// - `proxy_default` is the name of the profile that should be pre-selected.
     pub fn new(
         seeds: Vec<String>,
         home: String,
         active_host: &str,
         host_candidates: &[String],
+        proxy_profiles: &[String],
+        proxy_default: Option<&str>,
     ) -> Wizard {
         let host_step = HostStep::new(active_host, host_candidates);
         let host = active_host.to_owned();
+        // Build proxy options: ["none", "profile1", "profile2", …]
+        let mut proxy_options = vec!["none".to_owned()];
+        proxy_options.extend_from_slice(proxy_profiles);
+        let proxy_selected = proxy_default
+            .and_then(|d| proxy_options.iter().position(|o| o == d))
+            .unwrap_or(0);
         let mut w = Wizard {
             host_step: Some(host_step),
             host,
@@ -248,9 +263,18 @@ impl Wizard {
             completions: Vec::new(),
             listed: None,
             home,
+            proxy_options,
+            proxy_selected,
         };
         w.refilter();
         w
+    }
+
+    /// The currently selected proxy profile name, or `None` when "none".
+    pub fn selected_proxy(&self) -> Option<&str> {
+        self.proxy_options.get(self.proxy_selected).and_then(|s| {
+            if s == "none" { None } else { Some(s.as_str()) }
+        })
     }
 
     /// The host was chosen and the connection is ready. Advance to step 1
@@ -285,7 +309,11 @@ impl Wizard {
         }
         self.pending = None;
         if sessions.is_empty() {
-            return Outcome::Spawn { cwd: cwd.to_owned(), resume: None };
+            return Outcome::Spawn {
+                cwd: cwd.to_owned(),
+                resume: None,
+                proxy: self.selected_proxy().map(str::to_owned),
+            };
         }
         sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
         self.resume = Some(ResumeStep { cwd: cwd.to_owned(), sessions, selected: 0 });
@@ -316,9 +344,22 @@ impl Wizard {
                     step.selected = (step.selected + 1).min(step.sessions.len());
                     Outcome::None
                 }
+                KeyCode::Left if !self.proxy_options.is_empty() => {
+                    if self.proxy_selected > 0 {
+                        self.proxy_selected -= 1;
+                    } else {
+                        self.proxy_selected = self.proxy_options.len().saturating_sub(1);
+                    }
+                    Outcome::None
+                }
+                KeyCode::Right if !self.proxy_options.is_empty() => {
+                    self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
+                    Outcome::None
+                }
                 KeyCode::Enter => Outcome::Spawn {
                     cwd: step.cwd.clone(),
                     resume: step.selected.checked_sub(1).and_then(|i| step.sessions.get(i)).map(|s| s.id.clone()),
+                    proxy: self.selected_proxy().map(str::to_owned),
                 },
                 _ => Outcome::None,
             };
@@ -495,7 +536,7 @@ mod tests {
     /// the directory step). Convenience wrapper for tests that don't care
     /// about the host step.
     fn wizard_local(seeds: Vec<String>, home: &str) -> Wizard {
-        let mut w = Wizard::new(seeds, home.into(), "local", &[]);
+        let mut w = Wizard::new(seeds, home.into(), "local", &[], &[], None);
         // Advance past the host step by picking "local".
         w.on_host_connected("local", home);
         w
@@ -600,14 +641,14 @@ mod tests {
         assert_eq!(step.sessions[0].id, "new");
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
-            Outcome::Spawn { cwd: "/w".into(), resume: None },
+            Outcome::Spawn { cwd: "/w".into(), resume: None, proxy: None },
             "first row is `+ New session`"
         );
         w.on_key(&press(KeyCode::Down));
         w.on_key(&press(KeyCode::Down));
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
-            Outcome::Spawn { cwd: "/w".into(), resume: Some("old".into()) }
+            Outcome::Spawn { cwd: "/w".into(), resume: Some("old".into()), proxy: None }
         );
         // Esc goes back to the directory step.
         w.on_key(&press(KeyCode::Esc));
@@ -619,7 +660,7 @@ mod tests {
     fn no_sessions_spawns_directly() {
         let mut w = wizard_local(strings(&["/w"]), "/h");
         w.on_key(&press(KeyCode::Enter));
-        assert_eq!(w.set_claude_sessions("/w", vec![]), Outcome::Spawn { cwd: "/w".into(), resume: None });
+        assert_eq!(w.set_claude_sessions("/w", vec![]), Outcome::Spawn { cwd: "/w".into(), resume: None, proxy: None });
     }
 
     #[test]

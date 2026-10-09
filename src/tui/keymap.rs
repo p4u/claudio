@@ -18,6 +18,8 @@ pub enum Action {
     NextAttention,
     /// Leave the UI; sessions keep running in the daemon.
     Quit,
+    /// Open the proxy stats popup for the active session.
+    ProxyStats,
 }
 
 /// The binding table.
@@ -29,10 +31,12 @@ pub const BINDINGS: &[(KeyCode, KeyModifiers, Action)] = &[
     (KeyCode::Char('x'), KeyModifiers::ALT, Action::Close),
     (KeyCode::Char('a'), KeyModifiers::ALT, Action::NextAttention),
     (KeyCode::Char('q'), KeyModifiers::ALT, Action::Quit),
+    // Alt+s: proxy stats. Verified not used by claude (grep returned empty).
+    (KeyCode::Char('s'), KeyModifiers::ALT, Action::ProxyStats),
 ];
 
 /// Key hints shown in the status bar.
-pub const HINTS: &str = "Alt+←/→ switch · Alt+n new · Alt+r rename · Alt+x close · Alt+q quit";
+pub const HINTS: &str = "Alt+←/→ switch · Alt+n new · Alt+r rename · Alt+x close · Alt+s proxy · Alt+q quit";
 
 /// The action bound to `key`, if any. Releases never trigger actions.
 pub fn lookup(key: &KeyEvent) -> Option<Action> {

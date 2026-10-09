@@ -213,6 +213,17 @@ enum HostEvent {
     ConnectFailed { host: String, error: String },
     /// A local reconnect completed.
     LocalReconnected { client: Client, sessions: Vec<SessionInfo> },
+    /// Proxy config fetched (or failed).
+    ProxyConfig {
+        profile_name: String,
+        config: Option<crate::proxy::api::ConfigResponse>,
+    },
+    /// Proxy stats + pool health fetched (or failed).
+    ProxyStats {
+        profile_name: String,
+        stats: Option<crate::proxy::api::StatsResponse>,
+        pool: Option<crate::proxy::api::PoolHealthResponse>,
+    },
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -257,6 +268,9 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 60-second proxy stats refresh.
+    let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
+    proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - FRAME;
 
     loop {
@@ -357,10 +371,25 @@ async fn event_loop(
                     conns.add("local".to_owned(), client);
                     app.on_reconnected(&sessions, home);
                 }
+                Some(HostEvent::ProxyConfig { profile_name, config }) => {
+                    if let Some(cfg) = config {
+                        app.on_proxy_config(profile_name, cfg);
+                    }
+                }
+                Some(HostEvent::ProxyStats { profile_name, stats, pool }) => {
+                    app.on_proxy_stats(profile_name, stats, pool);
+                }
                 None => return Ok(()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
             _ = tick.tick() => app.on_tick(),
+            _ = proxy_tick.tick() => {
+                // Refresh proxy stats for the active session's profile.
+                let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
+                if let Some(name) = proxy_name {
+                    app.schedule_proxy_stats(&name);
+                }
+            }
             _ = tokio::time::sleep(wait), if app.redraw => {}
         }
     }
@@ -414,6 +443,59 @@ fn run_effect(
                 app.notify(format!("could not save state: {e}"));
             }
         }
+        Effect::FetchProxyConfig { profile_name } => {
+            let tx = ev_tx.clone();
+            let name = profile_name.clone();
+            tokio::spawn(async move {
+                let config = fetch_proxy_config(&name).await;
+                let _ = tx.send(HostEvent::ProxyConfig { profile_name: name, config }).await;
+            });
+        }
+        Effect::FetchProxyStats { profile_name } => {
+            let tx = ev_tx.clone();
+            let name = profile_name.clone();
+            tokio::spawn(async move {
+                let (stats, pool) = fetch_proxy_stats(&name).await;
+                let _ = tx.send(HostEvent::ProxyStats { profile_name: name, stats, pool }).await;
+            });
+        }
+    }
+}
+
+/// Fetch proxy config for a named profile. Returns `None` on any error.
+async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::ConfigResponse> {
+    let (url, token) = resolve_profile(profile_name)?;
+    match crate::proxy::api::fetch_config(&url, &token).await {
+        Ok(Some(cfg)) => Some(cfg),
+        Ok(None) => {
+            // Proxy doesn't have the Claudio API endpoint — use empty config
+            // so caller falls back to defaults.
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// Fetch proxy stats and pool health for a named profile.
+async fn fetch_proxy_stats(
+    profile_name: &str,
+) -> (Option<crate::proxy::api::StatsResponse>, Option<crate::proxy::api::PoolHealthResponse>) {
+    let Some((url, token)) = resolve_profile(profile_name) else {
+        return (None, None);
+    };
+    let stats = crate::proxy::api::fetch_stats(&url, &token, "24h").await.ok();
+    let pool = crate::proxy::api::fetch_pool_health(&url, &token).await.ok();
+    (stats, pool)
+}
+
+/// Look up a profile by name (handles "env" for CLAUDIO_PROXY_URL).
+fn resolve_profile(name: &str) -> Option<(String, String)> {
+    if name == "env" {
+        crate::proxy::profile::from_env().map(|(_, p)| (p.url, p.token))
+    } else {
+        crate::proxy::profile::load().ok().and_then(|sec| {
+            sec.profiles.get(name).map(|p| (p.url.clone(), p.token.clone()))
+        })
     }
 }
 

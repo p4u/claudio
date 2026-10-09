@@ -42,6 +42,9 @@ pub struct SavedSession {
     pub claude_session_id: Option<String>,
     #[serde(default)]
     pub created_at: u64,
+    /// The proxy profile name used by this session (profile name only, never the token).
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 fn local() -> String {
@@ -127,6 +130,7 @@ fn recover(saved: Option<&SavedSession>, info: &SessionInfo) -> Recovered {
             host: saved.map_or_else(local, |s| s.host.clone()),
             claude_session_id,
             created_at: info.created_at,
+            proxy: saved.and_then(|s| s.proxy.clone()),
         },
         state: info.state,
         title: info.title.clone(),
@@ -147,6 +151,7 @@ mod tests {
             host: "local".into(),
             claude_session_id: csid.map(Into::into),
             created_at: 1,
+            proxy: None,
         }
     }
 
