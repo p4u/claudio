@@ -20,6 +20,7 @@ use super::confirm::ConfirmPrompt;
 use super::keymap::Action;
 use super::sessions::SessionView;
 use super::state::KillTombstone;
+use super::stats_view::StatsView;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
 
@@ -36,10 +37,8 @@ pub enum Modal {
         id: SessionId,
     },
     Wizard(Wizard),
-    /// Proxy stats popup.
-    ProxyStats {
-        profile_name: String,
-    },
+    /// Proxy stats popup (see `stats_view.rs`).
+    ProxyStats(StatsView),
     /// Overview / "mission control": all sessions at a glance.
     Overview {
         selected: usize,
@@ -222,11 +221,7 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
                 _ => {}
             },
-            Modal::ProxyStats { .. } => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                    self.modal = None;
-                }
-            }
+            Modal::ProxyStats(_) => self.stats_key(key),
             Modal::Overview { selected, filter } => {
                 let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
                 match key.code {
@@ -293,7 +288,7 @@ impl App {
                 self.redraw = true;
             }
             Some(Modal::Close { .. })
-            | Some(Modal::ProxyStats { .. })
+            | Some(Modal::ProxyStats(_))
             | Some(Modal::Overview { .. })
             | Some(Modal::Help)
             | Some(Modal::Confirm(_)) => {}

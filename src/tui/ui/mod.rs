@@ -15,6 +15,7 @@ mod confirm;
 mod stats;
 mod status;
 
+pub use stats::stats_max_scroll;
 pub use status::state_name;
 use confirm::draw_confirm;
 use stats::draw_proxy_stats;
@@ -55,10 +56,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .unwrap_or_default();
             draw_wizard(frame, w, app.now, &toggle_key)
         }
-        Some(Modal::ProxyStats { profile_name }) => {
-            let status = app.proxy_status.get(profile_name.as_str());
-            draw_proxy_stats(frame, profile_name, status);
-        }
+        Some(Modal::ProxyStats(view)) => draw_proxy_stats(frame, app, view),
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
