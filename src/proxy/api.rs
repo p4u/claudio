@@ -85,6 +85,29 @@ pub struct LimitInfo {
     pub blocked_until: Option<String>,
 }
 
+/// `GET /v1/claudio/models` — the proxy's augmented model catalogue.
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ModelsResponse {
+    pub version: u32,
+    pub data: Vec<ModelEntry>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ModelEntry {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    /// `fable`, `opus`, `sonnet`, `haiku` or empty when unrecognised.
+    pub family: String,
+    /// 0 when the proxy does not know the context size.
+    pub max_input_tokens: i64,
+    /// The proxy's recommended default for this family.
+    pub recommended_default: bool,
+}
+
 /// `GET /v1/claudio/pool/health`
 #[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default)]
@@ -240,6 +263,20 @@ pub async fn fetch_pool_health(
     Ok(resp.json().await?)
 }
 
+/// `GET /v1/claudio/models` — the augmented model catalogue.
+pub async fn fetch_models(base_url: &str, token: &str) -> Result<ModelsResponse, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/models"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    Ok(resp.json().await?)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -358,6 +395,63 @@ mod tests {
             result.is_err(),
             "404 from /v1/models must not count as auth success"
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_models_200() {
+        let router = Router::new().route(
+            "/v1/claudio/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "version": 1,
+                    "refreshed_at": "2026-10-09T10:00:00Z",
+                    "data": [
+                        {"id": "claude-opus-5-5[1m]", "display_name": "Claude Opus 5.5",
+                         "provider": "anthropic", "family": "opus",
+                         "max_input_tokens": 1000000, "recommended_default": true},
+                        // An older proxy may omit optional fields entirely.
+                        {"id": "claude-glm-5", "provider": "glm", "recommended_default": false}
+                    ]
+                }))
+            }),
+        );
+        let base = serve(router).await;
+        let models = fetch_models(&base, "tok").await.unwrap();
+        assert_eq!(models.refreshed_at.as_deref(), Some("2026-10-09T10:00:00Z"));
+        assert_eq!(models.data.len(), 2);
+        assert_eq!(models.data[0].family, "opus");
+        assert_eq!(models.data[0].max_input_tokens, 1_000_000);
+        assert!(models.data[0].recommended_default);
+        assert_eq!(models.data[1].family, "");
+        assert_eq!(models.data[1].max_input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_403_is_error() {
+        let router = Router::new().route(
+            "/v1/claudio/models",
+            get(|| async { (axum::http::StatusCode::FORBIDDEN, "nope") }),
+        );
+        let base = serve(router).await;
+        assert!(matches!(
+            fetch_models(&base, "tok").await,
+            Err(ApiError::Http(s)) if s.as_u16() == 403
+        ));
+    }
+
+    /// An old proxy that omits `limit`, `errors` and `by_model` still parses.
+    #[test]
+    fn stats_parses_with_missing_fields() {
+        let s: StatsResponse = serde_json::from_str(
+            r#"{"version":1,"user_name":"pau","period":"24h",
+                "totals":{"requests":12,"input_tokens":100,"output_tokens":50}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.totals.requests, 12);
+        assert_eq!(s.totals.errors, 0);
+        assert_eq!(s.totals.cache_read, 0);
+        assert!(s.by_model.is_empty());
+        assert!(s.limit.is_none());
     }
 
     #[tokio::test]
