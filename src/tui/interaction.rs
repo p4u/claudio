@@ -15,7 +15,7 @@ use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
-use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
@@ -452,23 +452,13 @@ impl App {
                         _ => Outcome::None,
                     };
                     self.wizard_outcome(list_home);
-                    self.request_local(
-                        Msg::RecentProjects {
-                            limit: PROJECTS_LIMIT,
-                        },
-                        ReplyTo::Projects,
-                    );
+                    self.request_projects("local");
                 } else {
                     self.effects.push(Effect::Connect(host));
                 }
             }
             Outcome::ListDir(path) => {
-                let reply_to = if wizard_host == "local" {
-                    ReplyTo::DirEntries
-                } else {
-                    ReplyTo::RemoteDirEntries
-                };
-                self.request(&wizard_host, Msg::ListDir { path }, reply_to)
+                self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
             }
             Outcome::ChooseDir(cwd) => {
                 // If ChooseDir comes from the first screen's LOCAL section,
@@ -494,17 +484,14 @@ impl App {
                         w.on_host_connected("local", &local_home, seeds);
                         w.pending = Some(pending_dir);
                     }
-                    self.request_local(
-                        Msg::RecentProjects { limit: PROJECTS_LIMIT },
-                        ReplyTo::Projects,
-                    );
+                    self.request_projects("local");
                 }
-                let reply_to = if wizard_host == "local" {
-                    ReplyTo::ClaudeSessions(cwd.clone(), wizard_gen)
-                } else {
-                    ReplyTo::RemoteClaudeSessions(cwd.clone(), wizard_gen)
+                let to = ReplyTo::ClaudeSessions {
+                    host: wizard_host.clone(),
+                    cwd: cwd.clone(),
+                    gen: wizard_gen,
                 };
-                self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, reply_to)
+                self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
             Outcome::Spawn { cwd, resume, proxy } => {
                 self.modal = None;
@@ -533,15 +520,7 @@ impl App {
         if let Some(Modal::Wizard(w)) = &mut self.modal {
             w.on_host_connected(host, home, new_seeds);
             let list_home = w.browse_home();
-            let gen = w.generation;
-            let h = host.to_owned();
-            self.effects.push(Effect::Request {
-                host: h,
-                msg: Msg::RecentProjects {
-                    limit: PROJECTS_LIMIT,
-                },
-                to: ReplyTo::RemoteProjects(host.to_owned(), gen),
-            });
+            self.request_projects(host);
             self.wizard_outcome(list_home);
         }
         self.redraw = true;
@@ -673,32 +652,27 @@ impl App {
     pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
         self.redraw = true;
         match (to, reply) {
-            // The Kill was delivered: drop the tombstone.
-            (ReplyTo::Kill(id), Ok(Msg::Error { message }))
-                if message.contains("no such session") =>
-            {
-                self.killed.retain(|t| t.id != id);
-                self.save();
-            }
+            // Delivered (a session that is already gone answers "no such
+            // session"): the tombstone can go.
             (ReplyTo::Kill(id), Ok(_)) => {
                 self.killed.retain(|t| t.id != id);
                 self.save();
             }
-            (ReplyTo::Kill(id), Err(e)) => {
-                // Keep tombstone; will retry on next recovery.
-                self.notify(format!("kill failed (will retry): {e}"));
-                let _ = id; // tombstone stays
-            }
-            (ReplyTo::Projects, Ok(Msg::Projects { dirs })) => {
-                // Keep the full ProjectDir list for meta; extract paths for
-                // seed assembly and for App::projects cache.
-                let project_dirs = dirs;
-                self.projects = project_dirs.iter().map(|d| d.path.clone()).collect();
-                let projects = self.projects.clone();
+            // The tombstone stays, so the next recovery sends the Kill again.
+            (ReplyTo::Kill(_), Err(e)) => self.notify(format!("kill failed (will retry): {e}")),
+            (ReplyTo::Projects { host, gen }, Ok(Msg::Projects { dirs })) => {
+                let paths: Vec<String> = dirs.iter().map(|d| d.path.clone()).collect();
+                if host == "local" {
+                    // Seeds the next wizard at once.
+                    self.projects = paths.clone();
+                }
+                if gen != self.wizard_generation() {
+                    return;
+                }
                 if let Some(w) = self.wizard_mut() {
-                    // Local projects only apply when wizard is on "local".
-                    w.add_seeds_for_host("local", &projects);
-                    w.add_project_meta(&project_dirs);
+                    // Ignored unless the wizard is still on `host`.
+                    w.add_seeds_for_host(&host, &paths);
+                    w.add_project_meta(&dirs);
                 }
             }
             (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -706,10 +680,8 @@ impl App {
                     w.set_dir_entries(&path, &entries);
                 }
             }
-            // An error is not "no sessions": show it and let the user retry.
-            (ReplyTo::ClaudeSessions(cwd, gen), reply) => {
+            (ReplyTo::ClaudeSessions { host, cwd, gen }, reply) => {
                 if gen != self.wizard_generation() {
-                    // A reply for a cancelled or replaced wizard.
                     return;
                 }
                 match reply {
@@ -720,8 +692,11 @@ impl App {
                         }
                     }
                     Ok(_) => {}
+                    // An error is not "no sessions": say so and let the user
+                    // retry.
                     Err(e) => {
-                        self.notify(format!("could not list claude sessions: {e}"));
+                        let place = if host == "local" { "" } else { "remote " };
+                        self.notify(format!("could not list {place}claude sessions: {e}"));
                         if let Some(w) = self.wizard_mut() {
                             w.set_claude_sessions_error(&cwd);
                         }
@@ -761,54 +736,13 @@ impl App {
                     }
                 }
             }
-            // Remote variants route to the same wizard handlers.
-            (ReplyTo::RemoteProjects(host, gen), Ok(Msg::Projects { dirs })) => {
-                if gen != self.wizard_generation() {
-                    // A reply for a cancelled or replaced wizard.
-                    return;
-                }
-                let project_dirs = dirs;
-                let project_paths: Vec<String> =
-                    project_dirs.iter().map(|d| d.path.clone()).collect();
-                if let Some(w) = self.wizard_mut() {
-                    // Only apply if the wizard is still on that host.
-                    w.add_seeds_for_host(&host, &project_paths);
-                    w.add_project_meta(&project_dirs);
-                }
-            }
-            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
-                if let Some(w) = self.wizard_mut() {
-                    w.set_dir_entries(&path, &entries);
-                }
-            }
-            (ReplyTo::RemoteClaudeSessions(cwd, gen), reply) => {
-                if gen != self.wizard_generation() {
-                    // A reply for a cancelled or replaced wizard.
-                    return;
-                }
-                match reply {
-                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
-                        if let Some(w) = self.wizard_mut() {
-                            let outcome = w.set_claude_sessions(&cwd, sessions);
-                            self.wizard_outcome(outcome);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        self.notify(format!("could not list remote claude sessions: {e}"));
-                        if let Some(w) = self.wizard_mut() {
-                            w.set_claude_sessions_error(&cwd);
-                        }
-                    }
-                }
-            }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
             // Typing a path that doesn't exist (yet) is not an error.
-            (ReplyTo::DirEntries | ReplyTo::RemoteDirEntries, Err(_)) => {}
+            (ReplyTo::DirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {
                 let what = match to {
                     ReplyTo::Ack(what) => what,
-                    ReplyTo::Projects | ReplyTo::RemoteProjects(..) => "recent projects",
+                    ReplyTo::Projects { .. } => "recent projects",
                     _ => "request",
                 };
                 self.notify(format!("{what} failed: {e}"));

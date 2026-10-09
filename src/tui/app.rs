@@ -145,17 +145,14 @@ pub enum ReplyTo {
     Respawned(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
+    /// A directory listing for the wizard (which ignores one for a path it
+    /// no longer shows).
     DirEntries,
-    /// Wizard request tagged with the wizard's generation.
-    ClaudeSessions(String, u64),
-    Projects,
-    /// Wizard directory listing for a remote host (host, path).
-    RemoteDirEntries,
-    /// Wizard claude sessions for a remote host, generation-tagged.
-    RemoteClaudeSessions(String, u64),
-    /// Wizard recent projects for a remote host (host, wizard generation).
-    /// Both must match the current wizard or the reply is discarded.
-    RemoteProjects(String, u64),
+    /// The claude sessions in `cwd` on `host`, for the wizard of generation
+    /// `gen`; a reply for a cancelled or replaced wizard is dropped.
+    ClaudeSessions { host: String, cwd: String, gen: u64 },
+    /// The recent projects on `host`, for the wizard of generation `gen`.
+    Projects { host: String, gen: u64 },
     /// `UpdateClaude` on this host; the outcome becomes a notice.
     ClaudeUpdate(String),
     /// A request of the history viewer: the view's generation and the
@@ -1072,7 +1069,7 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
+        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
         let effects = app.take_effects();
         let reqs = requests(&effects);
         let Msg::Spawn(spec) = reqs[0] else {
@@ -1756,8 +1753,32 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
+        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
         // No modal opened (wizard was closed).
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn only_local_projects_are_cached_for_the_next_wizard() {
+        let mut app = app_with(&[]);
+        let gen = app.wizard_generation();
+        app.modal = None;
+        let reply = |path: &str| {
+            Ok(Msg::Projects {
+                dirs: vec![crate::proto::ProjectDir {
+                    path: path.into(),
+                    modified: 1,
+                    git: None,
+                    symlink: false,
+                    hidden: false,
+                }],
+            })
+        };
+        let to = |host: &str| ReplyTo::Projects { host: host.into(), gen };
+        app.on_reply(to("devbox"), reply("/remote"));
+        assert!(app.projects.is_empty());
+        // Even for a closed wizard: the next one starts with them.
+        app.on_reply(to("local"), reply("/local"));
+        assert_eq!(app.projects, ["/local"]);
     }
 }

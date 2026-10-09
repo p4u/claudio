@@ -230,9 +230,16 @@ impl App {
         });
     }
 
-    /// Send a request to the local daemon.
-    pub(super) fn request_local(&mut self, msg: Msg, to: ReplyTo) {
-        self.request("local", msg, to);
+    /// Ask `host` for its recent projects, to seed the open wizard.
+    pub(super) fn request_projects(&mut self, host: &str) {
+        let to = ReplyTo::Projects {
+            host: host.to_owned(),
+            gen: self.wizard_generation(),
+        };
+        let msg = Msg::RecentProjects {
+            limit: PROJECTS_LIMIT,
+        };
+        self.request(host, msg, to);
     }
 
     // ── Activate / remove ─────────────────────────────────────────────────────
@@ -535,12 +542,7 @@ impl App {
             &self.proxy_profiles.clone(),
             proxy_default,
         )));
-        self.request_local(
-            Msg::RecentProjects {
-                limit: PROJECTS_LIMIT,
-            },
-            ReplyTo::Projects,
-        );
+        self.request_projects("local");
         self.redraw = true;
     }
 
