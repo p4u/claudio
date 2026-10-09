@@ -17,6 +17,7 @@ use crate::term::screen::Screen;
 
 use super::app::{App, Effect, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::ConfirmPrompt;
+use super::git_view::GitView;
 use super::keymap::Action;
 use super::sessions::SessionView;
 use super::state::KillTombstone;
@@ -49,6 +50,36 @@ pub enum Modal {
     Help,
     /// A yes / no / skip question (see [`super::confirm`]).
     Confirm(ConfirmPrompt),
+    /// The commit-history viewer (full pane).
+    Git(Box<GitView>),
+}
+
+impl Modal {
+    /// Read-only views give way to a manager action: its key closes the view
+    /// and runs the action. Text-input modals swallow it instead.
+    pub fn yields_to_actions(&self) -> bool {
+        matches!(
+            self,
+            Modal::Git(_) | Modal::Overview { .. } | Modal::Help | Modal::ProxyStats { .. }
+        )
+    }
+
+    /// Whether `action` is the one that opens this modal; pressing its key
+    /// again closes the modal instead of reopening it.
+    fn opened_by(&self, action: Action) -> bool {
+        matches!(
+            (self, action),
+            (Modal::Git(_), Action::GitLog)
+                | (Modal::Overview { .. }, Action::Overview)
+                | (Modal::Help, Action::Help)
+                | (Modal::ProxyStats { .. }, Action::ProxyStats)
+        )
+    }
+
+    /// Whether the modal takes mouse wheel and clicks.
+    fn wants_mouse(&self) -> bool {
+        matches!(self, Modal::Git(_))
+    }
 }
 
 // ── Terminal input (impl App) ─────────────────────────────────────────────────
@@ -71,8 +102,19 @@ impl App {
             self.on_action(Action::Quit);
             return;
         }
-        if self.modal.is_some() {
-            self.modal_key(key);
+        if let Some(modal) = &self.modal {
+            match action.filter(|_| modal.yields_to_actions()) {
+                Some(action) => {
+                    let toggled_off = modal.opened_by(action);
+                    self.modal = None;
+                    if toggled_off {
+                        self.redraw = true;
+                    } else {
+                        self.on_action(action);
+                    }
+                }
+                None => self.modal_key(key),
+            }
             return;
         }
         if let Some(action) = action {
@@ -140,6 +182,7 @@ impl App {
             Action::ProxyStats => self.open_proxy_stats(),
             Action::Overview => self.open_overview(),
             Action::Help => self.open_help(),
+            Action::GitLog => self.open_git_log(),
             _ => {}
         }
         self.redraw = true;
@@ -161,6 +204,7 @@ impl App {
             return;
         }
         self.redraw = true;
+        let rows = self.pane_size().0 as usize;
         let Some(modal) = &mut self.modal else { return };
         match modal {
             Modal::Wizard(w) => {
@@ -274,7 +318,23 @@ impl App {
             }
             Modal::Help => self.modal = None,
             Modal::Confirm(_) => self.confirm_key(key),
+            Modal::Git(view) => {
+                let outcome = view.on_key(&key, rows);
+                self.git_outcome(outcome);
+            }
         }
+    }
+
+    /// A mouse event while a modal that wants the mouse is open.
+    fn modal_mouse(&mut self, m: MouseEvent) {
+        let rows = self.pane_size().0 as usize;
+        let Some(Modal::Git(view)) = &mut self.modal else { return };
+        // Pane rows start below the tab bar; the status bar is not the pane.
+        let Some(row) = (m.row as usize).checked_sub(1).filter(|&r| r < rows) else {
+            return;
+        };
+        let outcome = view.on_mouse(m.kind, row, rows);
+        self.git_outcome(outcome);
     }
 
     fn on_paste(&mut self, text: &str) {
@@ -285,6 +345,10 @@ impl App {
             }
             Some(Modal::Rename { input, .. }) => {
                 input.push_str(text.lines().next().unwrap_or(""));
+                self.redraw = true;
+            }
+            Some(Modal::Git(view)) => {
+                view.on_paste(text);
                 self.redraw = true;
             }
             Some(Modal::Close { .. })
@@ -302,7 +366,10 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
-        if self.modal.is_some() {
+        if let Some(modal) = &self.modal {
+            if modal.wants_mouse() {
+                self.modal_mouse(m);
+            }
             return;
         }
         if m.row == 0 {
@@ -659,6 +726,7 @@ impl App {
                     }
                 }
             }
+            (ReplyTo::Git { gen, seq }, reply) => self.on_git_reply(gen, seq, reply),
             (ReplyTo::SpawnedDeferred(id), Ok(_)) => {
                 // Re-attach the active view: its first Attach raced the Spawn.
                 if let Some(i) = self.index_of(id).filter(|&i| self.active == Some(i)) {

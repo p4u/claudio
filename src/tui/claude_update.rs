@@ -87,10 +87,10 @@ impl App {
                 self.notify(format!("claude update failed on {host}: {line}"));
             }
             Ok(_) => {}
-            Err(e) if e.to_string().contains("unsupported op") => self.notify(format!(
-                "daemon on {host} is older: run `claudio daemon restart` there"
-            )),
-            Err(e) => self.notify(format!("claude update failed on {host}: {e}")),
+            Err(e) => match App::older_daemon_notice(&host, &e) {
+                Some(notice) => self.notify(notice),
+                None => self.notify(format!("claude update failed on {host}: {e}")),
+            },
         }
     }
 }
@@ -384,7 +384,7 @@ mod tests {
         app.on_reply(ReplyTo::ClaudeUpdate("devbox".into()), Err(old));
         assert_eq!(
             notice(&app),
-            "daemon on devbox is older: run `claudio daemon restart` there"
+            "daemon on devbox is older: run `claudio daemon restart`"
         );
 
         let local = Msg::ClaudeUpdated {

@@ -33,6 +33,8 @@ pub enum Action {
     Help,
     /// Open a terminal tab next to the active session.
     Terminal,
+    /// Browse the commit history of the active session's directory.
+    GitLog,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
@@ -55,6 +57,7 @@ impl Action {
             Action::Overview => "overview",
             Action::Help => "help",
             Action::Terminal => "terminal",
+            Action::GitLog => "git_log",
             Action::ToggleHidden => "toggle_hidden",
             Action::GotoSession(_) => "goto_session",
         }
@@ -159,6 +162,15 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "new terminal (shell) next to this tab",
         action: Action::Terminal,
+        scope: Scope::Global,
+    },
+    // Alt+l: commit history. Verified free in Claude Code 2.1.280; readline's
+    // Alt+l (downcase-word) is shadowed in terminal tabs.
+    Binding {
+        code: KeyCode::Char('l'),
+        mods: KeyModifiers::ALT,
+        label: "git history of the session's directory",
+        action: Action::GitLog,
         scope: Scope::Global,
     },
     // Alt+.: show/hide dot-directories in the wizard's directory step. Wizard

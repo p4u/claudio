@@ -145,6 +145,33 @@ pub enum Msg {
         #[serde(default)]
         install: bool,
     },
+    // ── git viewer (read-only; see `daemon::git`) ────────────────────────
+    /// One page of `git log` for `cwd`, newest first. `limit` is capped at
+    /// [`GIT_LOG_MAX`]. Answered by `GitLogPage`.
+    GitLog {
+        cwd: String,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        skip: u32,
+        limit: u32,
+    },
+    /// One commit's metadata and file list. `id` must be a full object id.
+    /// Answered by `GitCommitInfo`.
+    GitCommit {
+        cwd: String,
+        id: String,
+    },
+    /// A patch: one file of a commit, or the whole commit when `path` is
+    /// `None`. `old_path` is the pre-rename name. Answered by `GitPatch`.
+    GitDiff {
+        cwd: String,
+        id: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        old_path: Option<String>,
+    },
 
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
@@ -184,6 +211,9 @@ pub enum Msg {
         ok: bool,
         tail: String,
     },
+    GitLogPage(GitLogPage),
+    GitCommitInfo(GitCommitInfo),
+    GitPatch(GitPatch),
     Ok,
     Error {
         message: String,
@@ -479,6 +509,82 @@ pub struct ClaudeSession {
     pub messages: u32,
 }
 
+/// The most commits one `GitLog` request may ask for.
+pub const GIT_LOG_MAX: u32 = 500;
+
+/// Reply to `GitLog`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogPage {
+    /// The repository's top-level directory.
+    pub root: String,
+    /// The checked-out branch; `None` for a detached HEAD.
+    #[serde(default)]
+    pub head: Option<String>,
+    pub commits: Vec<GitLogEntry>,
+    /// Whether commits exist beyond this page.
+    #[serde(default)]
+    pub more: bool,
+}
+
+/// One log row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogEntry {
+    /// Full object id.
+    pub id: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Author time, Unix seconds.
+    pub time: i64,
+    /// Decorations as `--decorate=full` prints them, one per entry:
+    /// `HEAD -> refs/heads/main`, `refs/remotes/origin/main`, `tag: refs/tags/v1`.
+    pub refs: Vec<String>,
+    pub subject: String,
+}
+
+/// Reply to `GitCommit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitInfo {
+    pub id: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub committer_time: i64,
+    pub refs: Vec<String>,
+    /// The full message, subject first.
+    pub message: String,
+    pub files: Vec<GitFile>,
+    /// Set for merges: `files` and patches are against the first parent only.
+    #[serde(default)]
+    pub first_parent: bool,
+}
+
+/// A file changed by a commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitFile {
+    pub path: String,
+    /// The previous name, for a rename.
+    #[serde(default)]
+    pub old_path: Option<String>,
+    /// Lines added; `None` for a binary file.
+    #[serde(default)]
+    pub added: Option<u32>,
+    /// Lines removed; `None` for a binary file.
+    #[serde(default)]
+    pub removed: Option<u32>,
+}
+
+/// Reply to `GitDiff`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPatch {
+    pub id: String,
+    pub path: Option<String>,
+    pub patch: String,
+    /// Set when the patch was cut to fit the size limits.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 impl Frame {
     /// Serialize into `[len][tag][payload]`.
     pub fn encode(&self) -> Vec<u8> {
@@ -718,6 +824,39 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, event);
+    }
+
+    #[test]
+    fn git_requests_default_optional_fields_and_replies_have_distinct_ops() {
+        let json = br#"J{"req":3,"op":"git_log","cwd":"/r","limit":5}"#;
+        let Frame::Control(env) = Frame::decode(json).unwrap() else {
+            panic!("control frame")
+        };
+        assert_eq!(
+            env.msg,
+            Msg::GitLog {
+                cwd: "/r".into(),
+                all: false,
+                skip: 0,
+                limit: 5
+            }
+        );
+        let reply = Msg::GitLogPage(GitLogPage {
+            root: "/r".into(),
+            head: None,
+            commits: vec![],
+            more: false,
+        });
+        let v = serde_json::to_value(Envelope::request(3, reply.clone())).unwrap();
+        assert_eq!(v["op"], "git_log_page");
+        let frame = Frame::Control(Envelope::request(3, reply));
+        assert_eq!(roundtrip(frame.clone()), frame);
+        // A daemon that predates the ops decodes them as `Unknown`.
+        let future = br#"J{"req":4,"op":"git_commit_future","x":1}"#;
+        let Frame::Control(env) = Frame::decode(future).unwrap() else {
+            panic!("control frame")
+        };
+        assert_eq!(env.msg, Msg::Unknown);
     }
 
     #[test]

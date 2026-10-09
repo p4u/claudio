@@ -1135,3 +1135,4 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
     let s = &c.sessions().await[0];
     assert_eq!((s.kind, s.created_at), (proto::SessionKind::Shell, 1700000000));
 }
+mod git;

@@ -11,6 +11,7 @@
 //! - `proxy_state`   – ProxyStatus
 //! - `notifications` – Notice, check_notifications
 //! - `interaction`   – Modal
+//! - `git_app`       – the history viewer's glue to `App`
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -107,6 +108,9 @@ pub enum ReplyTo {
     RemoteProjects(String, u64),
     /// `UpdateClaude` on this host; the outcome becomes a notice.
     ClaudeUpdate(String),
+    /// A request of the history viewer: the view's generation and the
+    /// request's sequence number (see `git_view`).
+    Git { gen: u64, seq: u64 },
 }
 
 /// The manager's state.

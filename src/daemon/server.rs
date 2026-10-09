@@ -23,10 +23,10 @@ use tokio::io::AsyncReadExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use super::session::{ClientId, Cmd};
-use super::{host, update, Config, Daemon};
+use super::{git, host, update, Config, Daemon};
 use crate::claude::projects;
 use crate::paths;
 use crate::proto::{
@@ -42,6 +42,9 @@ const CLIENT_QUEUE: usize = 512;
 
 /// Incoming frames buffered between the socket reader and the client loop.
 const INBOUND_QUEUE: usize = 64;
+
+/// Git requests one client may run at once; the rest wait their turn.
+const GIT_CONCURRENCY: usize = 2;
 
 /// How often the serve loop checks that the socket path still exists and
 /// re-binds if a tmp cleaner has removed it.
@@ -249,6 +252,7 @@ async fn client_loop(
         queue,
         events,
         attached: HashSet::new(),
+        git_slots: Arc::new(Semaphore::new(GIT_CONCURRENCY)),
     };
     let welcome = Welcome {
         claudio_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -369,6 +373,8 @@ struct Client {
     events: broadcast::Receiver<Frame>,
     /// Sessions this client is subscribed to, for cleanup on disconnect.
     attached: HashSet<SessionId>,
+    /// Bounds this client's concurrent git processes.
+    git_slots: Arc<Semaphore>,
 }
 
 impl Client {
@@ -445,6 +451,11 @@ impl Client {
                         message: format!("no such session: {id}"),
                     }
                 }
+            }
+            Msg::GitLog { .. } | Msg::GitCommit { .. } | Msg::GitDiff { .. } => {
+                // The task replies itself, so the loop never waits on git.
+                self.spawn_git(req, msg);
+                return;
             }
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
@@ -523,6 +534,25 @@ impl Client {
         tx.send(cmd).await.map_err(|_| not_running(id))?;
         self.attached.insert(id);
         Ok(())
+    }
+
+    /// Run a git request off the client loop and queue its reply when done.
+    /// Dropped without running if the client disconnects first.
+    fn spawn_git(&self, req: Option<u64>, request: Msg) {
+        let queue = self.queue.clone();
+        let slots = Arc::clone(&self.git_slots);
+        tokio::spawn(async move {
+            let work = async {
+                let _slot = slots.acquire().await;
+                git::handle(request).await
+            };
+            tokio::select! {
+                msg = work => {
+                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                }
+                _ = queue.closed() => {}
+            }
+        });
     }
 
     /// Send `cmd` to a live session; the reply is `Ok` or `Error`.
