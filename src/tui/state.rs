@@ -3,8 +3,8 @@
 //!
 //! state.json remembers what only the client knows: tab order, user-given
 //! names, the last active tab and recently used directories. The daemon
-//! journal is authoritative for which sessions exist; [`merge`] reconciles
-//! the two on every (re)connect.
+//! journal is authoritative for which sessions exist; [`merge`] and
+//! [`merge_for_host`] reconcile the two on every (re)connect.
 
 use std::io;
 use std::path::Path;
@@ -17,6 +17,14 @@ use crate::proto::{SessionId, SessionInfo, SessionState};
 /// Most recently used directories kept for the new-session wizard.
 pub const MAX_RECENT_DIRS: usize = 20;
 
+/// A session id and host that the user explicitly closed.
+/// Persisted before the Kill is sent so recovery never resurrects it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KillTombstone {
+    pub host: String,
+    pub id: SessionId,
+}
+
 /// Everything persisted in state.json.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClientState {
@@ -27,6 +35,9 @@ pub struct ClientState {
     /// Most recently used first.
     #[serde(default)]
     pub recent_dirs: Vec<String>,
+    /// Sessions the user explicitly closed; Kill is retried until acknowledged.
+    #[serde(default)]
+    pub killed: Vec<KillTombstone>,
 }
 
 /// One session as the client remembers it.
@@ -66,6 +77,11 @@ impl ClientState {
         let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         paths::write_atomic(path, &json)
     }
+
+    /// Whether `id` is in the kill tombstone list.
+    pub fn is_killed(&self, id: SessionId) -> bool {
+        self.killed.iter().any(|t| t.id == id)
+    }
 }
 
 /// Move `dir` to the front of a most-recently-used list, capped at
@@ -88,27 +104,35 @@ pub struct Recovered {
     pub respawn: Option<Vec<String>>,
 }
 
-/// Reconcile the saved client state with the daemon's `ListSessions` reply.
+/// Like [`merge_for_host`] but assigns the given `host` to live sessions that aren't
+/// in the saved list (instead of always defaulting to "local").
 ///
-/// - Order and names come from state.json; daemon sessions it doesn't know
-///   are appended in the daemon's order.
-/// - state.json entries the daemon doesn't know are dropped: the daemon
-///   journal is authoritative.
-/// - Dormant sessions (`pid == None`) are marked for re-spawn, resuming the
-///   newest known claude conversation (the daemon's id beats state.json's).
-pub fn merge(saved: &ClientState, live: &[SessionInfo]) -> Vec<Recovered> {
+/// Used when reconciling a specific remote host's session list.
+pub fn merge_for_host(host: &str, saved: &ClientState, live: &[SessionInfo]) -> Vec<Recovered> {
+    // Skip tombstoned sessions.
+    let live_non_killed: Vec<&SessionInfo> = live.iter().filter(|l| !saved.is_killed(l.id)).collect();
+
     let known = saved.sessions.iter().filter_map(|s| {
-        let info = live.iter().find(|l| l.id == s.id)?;
+        // Skip tombstoned.
+        if saved.is_killed(s.id) {
+            return None;
+        }
+        let info = live_non_killed.iter().find(|l| l.id == s.id)?;
         Some(recover(Some(s), info))
     });
-    let unknown = live
+    let unknown = live_non_killed
         .iter()
         .filter(|l| !saved.sessions.iter().any(|s| s.id == l.id))
-        .map(|info| recover(None, info));
+        .map(|info| recover_with_host(None, info, host));
     known.chain(unknown).collect()
 }
 
 fn recover(saved: Option<&SavedSession>, info: &SessionInfo) -> Recovered {
+    let host = saved.map_or_else(local, |s| s.host.clone());
+    recover_with_host(saved, info, &host)
+}
+
+fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &str) -> Recovered {
     let claude_session_id = info
         .claude_session_id
         .clone()
@@ -127,7 +151,7 @@ fn recover(saved: Option<&SavedSession>, info: &SessionInfo) -> Recovered {
                 None => info.name.clone(),
             },
             cwd: info.cwd.clone(),
-            host: saved.map_or_else(local, |s| s.host.clone()),
+            host: saved.map(|s| s.host.clone()).unwrap_or_else(|| host.to_owned()),
             claude_session_id,
             created_at: info.created_at,
             proxy: saved.and_then(|s| s.proxy.clone()),
@@ -175,6 +199,7 @@ mod tests {
             sessions: vec![saved(a, Some("api"), Some("c1"))],
             active: Some(a),
             recent_dirs: vec!["/srv".into(), "/tmp".into()],
+            killed: vec![],
         };
         let dir = std::env::temp_dir().join(format!("claudio-state-test-{}", Uuid::new_v4()));
         let path = dir.join("state.json");
@@ -193,6 +218,7 @@ mod tests {
         .unwrap();
         assert_eq!(partial.sessions[0].host, "local");
         assert!(partial.recent_dirs.is_empty());
+        assert!(partial.killed.is_empty());
     }
 
     #[test]
@@ -215,9 +241,10 @@ mod tests {
             sessions: vec![saved(b, Some("bee"), None), saved(stale, None, None), saved(a, None, None)],
             active: Some(a),
             recent_dirs: vec![],
+            killed: vec![],
         };
         let live = vec![info(a, Some(1), None), info(c, Some(2), None), info(b, Some(3), None)];
-        let merged = merge(&state, &live);
+        let merged = merge_for_host("local", &state, &live);
         let ids: Vec<Uuid> = merged.iter().map(|r| r.saved.id).collect();
         assert_eq!(ids, vec![b, a, c]);
         assert_eq!(merged[0].saved.name.as_deref(), Some("bee"));
@@ -242,10 +269,35 @@ mod tests {
             ..Default::default()
         };
         let live = vec![info(a, None, Some("new-a")), info(b, None, None), info(c, None, None)];
-        let merged = merge(&state, &live);
+        let merged = merge_for_host("local", &state, &live);
         assert_eq!(merged[0].respawn, Some(vec!["--resume".into(), "new-a".into()]));
         assert_eq!(merged[0].saved.claude_session_id.as_deref(), Some("new-a"));
         assert_eq!(merged[1].respawn, Some(vec!["--resume".into(), "only-saved".into()]));
         assert_eq!(merged[2].respawn, Some(vec![]));
+    }
+
+    #[test]
+    fn tombstoned_sessions_are_suppressed_in_merge() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let state = ClientState {
+            sessions: vec![saved(a, None, None), saved(b, None, None)],
+            killed: vec![KillTombstone { host: "local".into(), id: a }],
+            ..Default::default()
+        };
+        let live = vec![info(a, Some(1), None), info(b, Some(2), None)];
+        let merged = merge_for_host("local", &state, &live);
+        // Session `a` is tombstoned: must not appear.
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].saved.id, b);
+    }
+
+    #[test]
+    fn merge_for_host_assigns_correct_host_to_unknown_sessions() {
+        let id = Uuid::new_v4();
+        let state = ClientState::default();
+        let live = vec![info(id, Some(1), None)];
+        let merged = merge_for_host("myserver.example.com", &state, &live);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].saved.host, "myserver.example.com");
     }
 }
