@@ -95,12 +95,16 @@ docker:
 ## must be able to find the real `claude` on PATH. Point your tooling at
 ## `claudio -p ...` (or alias it).
 ## Copy to a temp name, then rename: a running daemon keeps the old binary
-## ("Text file busy" otherwise). Run `claudio daemon restart` to switch to it.
+## ("Text file busy" otherwise). A running daemon is then restarted on the new
+## binary; its sessions come back with `claude --resume`.
 install: static
 	@mkdir -p $(PREFIX)/bin
 	@install -m755 $(DIST)/$(BIN) $(PREFIX)/bin/.$(BIN).new
 	@mv -f $(PREFIX)/bin/.$(BIN).new $(PREFIX)/bin/$(BIN)
-	@echo "installed $(PREFIX)/bin/$(BIN) — run 'claudio daemon restart' to use it"
+	@echo "installed $(PREFIX)/bin/$(BIN)"
+	@if $(PREFIX)/bin/$(BIN) daemon status >/dev/null 2>&1; then \
+		$(PREFIX)/bin/$(BIN) daemon restart; \
+	fi
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN)
