@@ -54,6 +54,12 @@ const INPUT_QUEUE: usize = 256;
 /// How long after child exit to drain remaining PTY output before giving up.
 const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the actor waits for `Daemon::spawn` to commit the handle to
+/// `registry.live` after the child exits early. Phase 3 holds no I/O — just
+/// a mutex acquire and in-memory map operations — so this should be
+/// microseconds in practice. The ceiling is a safety net for extreme load.
+const COMMIT_SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// If claude exits with no SessionStart within this window, consider it a
 /// failed `--resume` (conversation gone) and retry once without `--resume`.
 const RESUME_RETRY_WINDOW: Duration = Duration::from_secs(3);
@@ -118,7 +124,12 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
 
 /// Start claude for `spec` under a new PTY and spawn its actor.
 /// Called from `spawn_blocking` — must not use tokio primitives.
-pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
+///
+/// Returns the registry [`Handle`] and a oneshot sender the caller must use to
+/// signal that the handle has been committed to `registry.live`. The actor
+/// awaits this signal before acting on child exit, which prevents the
+/// commit-before-exit race described in §Race.
+pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, oneshot::Sender<()>)> {
     let cwd = host::expand_tilde(&spec.cwd);
     if !cwd.is_dir() {
         return Err(io::Error::other(format!(
@@ -163,6 +174,11 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
     let spawn_time = std::time::Instant::now();
 
     let (tx, cmds) = mpsc::channel(CMD_QUEUE);
+    // The committed channel lets Daemon::spawn signal that the handle has been
+    // inserted into registry.live. The actor awaits this before running on_exit
+    // so it never calls forget_live or retry_spawn_fresh before the handle is
+    // visible — fixing the commit-before-exit race (§Race).
+    let (committed_tx, committed_rx) = oneshot::channel::<()>();
     let actor = Actor {
         id: spec.id,
         daemon: Arc::clone(daemon),
@@ -179,8 +195,8 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<Handle> {
         spawned_with_resume,
         spawn_time,
     };
-    tokio::spawn(actor.run(cmds, io.output, io.exit));
-    Ok(Handle { tx, token, pid })
+    tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
+    Ok((Handle { tx, token, pid }, committed_tx))
 }
 
 /// `<claude> --settings <hooks> [args…] [-n <name>]`, in `cwd`, with the
@@ -402,10 +418,14 @@ impl Actor {
         mut cmds: mpsc::Receiver<Cmd>,
         mut output: mpsc::Receiver<Vec<u8>>,
         mut exit: oneshot::Receiver<Option<i32>>,
+        committed: oneshot::Receiver<()>,
     ) {
         // Timer-based lag recovery: resync even when the child is silent.
         let mut lag_check = tokio::time::interval(LAG_CHECK_INTERVAL);
         lag_check.tick().await; // consume the immediate first tick
+
+        // Wrap in Option so we can .take() it in the exit branch (once).
+        let mut committed = Some(committed);
 
         loop {
             tokio::select! {
@@ -432,6 +452,32 @@ impl Actor {
                         match tokio::time::timeout_at(drain_deadline, output.recv()).await {
                             Ok(Some(bytes)) => self.on_output(&bytes),
                             Ok(None) | Err(_) => break,
+                        }
+                    }
+                    // §Race fix: wait for Daemon::spawn Phase 3 to commit the
+                    // handle to registry.live before running on_exit. Without
+                    // this, a child that exits before Phase 3 would find nothing
+                    // in registry.live, strand the in-flight id, and then have
+                    // Phase 3 insert a stale live handle for a dead process.
+                    if let Some(rx) = committed.take() {
+                        match tokio::time::timeout(COMMIT_SIGNAL_TIMEOUT, rx).await {
+                            Ok(Ok(())) => {
+                                // Handle committed; proceed normally.
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                // Sender was dropped (spawn failed after actor
+                                // start, extremely rare) or timed out. The handle
+                                // was never committed; skip registry mutations.
+                                tracing::warn!(
+                                    id = %self.id,
+                                    "child exited before spawn was committed; skipping registry ops"
+                                );
+                                self.daemon.broadcast(
+                                    self.id,
+                                    SessionEvent::Exited { code: exit_code },
+                                );
+                                return;
+                            }
                         }
                     }
                     self.on_exit(exit_code);

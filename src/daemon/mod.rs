@@ -307,12 +307,17 @@ impl Daemon {
         // Phase 3: commit or roll back under lock; snapshot journal entries
         // before releasing the lock (no disk I/O under the lock).
         // Also check whether this id was killed while in-flight.
-        let (pid_result, journal_snapshot, broadcast_info, kill_on_commit) = {
+        //
+        // §Race fix: `committed_tx` is extracted here and sent AFTER the
+        // `Created` broadcast below so the actor's on_exit (if it fires
+        // immediately because the child already exited) always runs AFTER the
+        // `Created` event is visible to clients — preserving protocol ordering.
+        let (pid_result, journal_snapshot, broadcast_info, kill_on_commit, committed_tx) = {
             let mut reg = self.registry();
             reg.in_flight.remove(&spec.id);
             let was_killed = reg.to_kill.remove(&spec.id);
             match spawn_result {
-                Ok(handle) => {
+                Ok((handle, committed_tx)) => {
                     let pid = handle.pid;
                     let entry = reg.journal.upsert_entry(&spec);
                     reg.live.insert(spec.id, handle);
@@ -322,9 +327,9 @@ impl Daemon {
                         pid,
                         ..dormant_info(&entry)
                     };
-                    (Ok(pid), Some(snap), Some(info), was_killed)
+                    (Ok(pid), Some(snap), Some(info), was_killed, Some(committed_tx))
                 }
-                Err(e) => (Err(e), None, None, false),
+                Err(e) => (Err(e), None, None, false, None),
             }
         };
         // Registry lock released.
@@ -344,6 +349,14 @@ impl Daemon {
                 args = spec.args.len(), "session spawned"
             );
             self.broadcast(spec.id, SessionEvent::Created { info });
+        }
+
+        // §Race fix: signal the actor that the handle is committed and Created
+        // has been broadcast. The actor awaits this before running on_exit so
+        // that `forget_live` and `retry_spawn_fresh` never run before Phase 3
+        // inserts the handle, and `Exited` is never broadcast before `Created`.
+        if let Some(tx) = committed_tx {
+            let _ = tx.send(());
         }
 
         // If a Kill arrived while we were in-flight, execute it now.

@@ -17,6 +17,27 @@ use crate::proto::{
 const BANNER: &str = "FAKE-CLAUDE-BANNER";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A variant of the fake claude that exits 0 immediately on any real invocation.
+/// Used to trigger the commit-before-exit race deterministically.
+fn fake_claude_exits_immediately() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "claudio-fake-claude-ei-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let script = "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             exit 0\n";
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        bin
+    })
+}
+
 /// A variant of the fake claude that exits 1 immediately when given `--resume`
 /// (simulating a deleted conversation), and otherwise behaves like the normal
 /// fake claude (prints banner + echoes input).
@@ -673,9 +694,15 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     })
     .await;
 
-    let mut c = Client::connect(&socket).await;
+    // Use TWO clients: `observer` subscribes first and receives every broadcast
+    // independently; `spawner` sends the Spawn request and waits for Spawned.
+    // This avoids a race where the actor broadcasts `Notice` (and the retry
+    // `Created`) concurrently with the daemon sending the `Spawned` reply, so
+    // `spawner.spawn`'s internal `until` loop might consume the Notice frame
+    // before the test gets to read it.
+    let mut observer = Client::connect(&socket).await;
+    let mut spawner = Client::connect(&socket).await;
 
-    // Spawn with --resume (the journal has a claude_session_id).
     let spec = SpawnSpec {
         id,
         cwd: dir.join("work").to_string_lossy().into_owned(),
@@ -685,10 +712,12 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         rows: 24,
         cols: 80,
     };
-    let initial_pid = c.spawn(spec).await;
+
+    // spawner handles the Spawn/Spawned handshake; observer watches events.
+    let initial_pid = spawner.spawn(spec).await;
 
     // Wait for the Notice event (resume failed → retry fresh).
-    let notice_text = c
+    let notice_text = observer
         .event(id, |e| match e {
             SessionEvent::Notice { text } => Some(text.clone()),
             _ => None,
@@ -700,7 +729,9 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     );
 
     // Wait for the new fresh session's Created event (different pid).
-    let new_info = c
+    // Skip the initial Created (if observer catches it before Spawned arrives
+    // on the spawner) by waiting for any Created that appears after the Notice.
+    let new_info = observer
         .event(id, |e| match e {
             SessionEvent::Created { info } => Some(info.clone()),
             _ => None,
@@ -714,14 +745,77 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     );
     assert_eq!(new_info.state, proto::SessionState::Starting);
 
-    // ListSessions must show exactly one live session.
-    let sessions = c.sessions().await;
+    // ListSessions must show exactly one live session (the fresh one).
+    let sessions = spawner.sessions().await;
     assert_eq!(sessions.len(), 1, "should have exactly one session");
-    // The session must be live (Starting state from the fresh spawn).
     assert!(
         sessions[0].pid.is_some(),
         "fresh session should be live (pid != None)"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A child that exits immediately (exit 0, no --resume) must leave the session
+/// dormant (pid=None) and must not strand a stale live handle for a dead pid.
+///
+/// This is a direct regression test for the commit-before-exit race: the fake
+/// claude exits before `Daemon::spawn` Phase 3 has a chance to commit the
+/// handle to `registry.live`. The §Race fix (committed oneshot signal) makes
+/// the actor wait for the commit before running on_exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn immediate_exit_leaves_session_dormant() {
+    let dir = TestDaemon::new_dir();
+    let config = Config {
+        socket: dir.join("rt/d.sock"),
+        lock: dir.join("rt/d.lock"),
+        journal: dir.join("state/journal.json"),
+        claude: fake_claude_exits_immediately().to_path_buf(),
+        claudio: PathBuf::from("/bin/true"),
+    };
+
+    let listening = server::start(config).unwrap().expect("lock is free");
+    tokio::spawn(listening.serve());
+    let socket = dir.join("rt/d.sock");
+    within(async {
+        loop {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    let mut c = Client::connect(&socket).await;
+    let id = Uuid::new_v4();
+    let spec = SpawnSpec {
+        id,
+        cwd: dir.join("work").to_string_lossy().into_owned(),
+        name: Some("immediate-exit".into()),
+        args: vec![],
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    c.spawn(spec).await;
+
+    // Session must become dormant (pid == None) — not stranded as "live" with
+    // a dead pid. We poll `sessions()` rather than waiting for the `Exited`
+    // event, because the event may have been consumed by `c.spawn`'s internal
+    // frame-draining loop (it arrives between `Created` and `Spawned`).
+    within(async {
+        loop {
+            let sessions = c.sessions().await;
+            let s = sessions.iter().find(|s| s.id == id).expect("session in list");
+            if s.pid.is_none() {
+                return; // dormant — correct
+            }
+            // Still reports a live pid — wait and retry.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
 
     let _ = std::fs::remove_dir_all(&dir);
 }
