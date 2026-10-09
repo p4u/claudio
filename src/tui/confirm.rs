@@ -6,7 +6,7 @@
 //! turn in `App::confirms`, and ignore keys for a moment after appearing so a
 //! stray keystroke meant for a session cannot answer one.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::proto::SessionId;
 
@@ -138,7 +138,8 @@ impl App {
         let Some(Modal::Confirm(prompt)) = &self.modal else {
             return;
         };
-        if prompt.armed > 0 {
+        // Ctrl+Y or Alt+N are not answers; Shift only makes a capital.
+        if prompt.armed > 0 || !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return;
         }
         let action = match prompt.choice_for(key.code) {

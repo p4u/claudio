@@ -829,6 +829,19 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_is_answered_by_plain_or_shifted_keys_only() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('x'));
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            app.on_terminal(key(KeyCode::Char('y'), mods));
+            app.on_terminal(key(KeyCode::Esc, mods));
+            assert!(matches!(app.modal, Some(Modal::Confirm(_))), "{mods:?}");
+        }
+        app.on_terminal(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.sessions.is_empty(), "Shift+Y kills");
+    }
+
+    #[test]
     fn tombstone_persisted_in_state_before_kill() {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
