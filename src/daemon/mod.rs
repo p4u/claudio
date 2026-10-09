@@ -36,8 +36,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::paths;
 use crate::proto::{
-    Envelope, Frame, HostInfo, Msg, SessionEvent, SessionId, SessionInfo, SessionKind, SessionState,
-    SpawnSpec,
+    Envelope, Frame, HostInfo, Msg, RespawnSpec, SessionEvent, SessionId, SessionInfo,
+    SessionKind, SessionState, SpawnSpec,
 };
 use journal::{Entry, Journal};
 use session::{Cmd, Handle};
@@ -622,24 +622,11 @@ impl Daemon {
         let spec_opt = {
             let reg = self.registry();
             reg.journal.entries().iter().find(|e| e.id == id).map(|e| {
-                let mut args: Vec<String> = Vec::new();
-                let mut skip_next = false;
-                for a in &e.args {
-                    if skip_next {
-                        skip_next = false;
-                        continue;
-                    }
-                    if a == "--resume" || a == "--session-id" {
-                        skip_next = true;
-                        continue;
-                    }
-                    args.push(a.clone());
-                }
                 let spec = crate::proto::SpawnSpec {
                     id,
                     cwd: e.cwd.clone(),
                     name: e.name.clone(),
-                    args,
+                    args: without_conversation(&e.args),
                     env: vec![], // env is not stored in journal (by design)
                     rows: 24,
                     cols: 80,
@@ -676,6 +663,48 @@ impl Daemon {
         }
     }
 
+    /// Restart a journaled session in place: stop its process (if any), then
+    /// spawn the same id again with its journaled cwd, name and args, resuming
+    /// the conversation unless `fresh` (or none was recorded yet). The journal
+    /// entry stays, and the old actor leaves silently (it is no longer in
+    /// `live`, and `Kill` skips its exit handling), so clients see `Created`
+    /// but never `Removed`.
+    async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
+        let id = req.id;
+        let (entry, old) = {
+            let mut reg = self.registry();
+            if reg.in_flight.contains(&id) {
+                return Err(io::Error::other(format!("spawn in progress for {id}")));
+            }
+            let entry = reg.journal.entries().iter().find(|e| e.id == id).cloned();
+            (entry, reg.live.remove(&id))
+        };
+        let entry = entry.ok_or_else(|| io::Error::other(format!("no such session: {id}")))?;
+        if let Some(old) = old {
+            session::stop(&old).await;
+        }
+        let mut args = without_conversation(&entry.args);
+        if let Some(conversation) = entry.claude_session_id.filter(|_| !req.fresh) {
+            args.extend(["--resume".to_owned(), conversation]);
+        }
+        let spec = SpawnSpec {
+            id,
+            cwd: entry.cwd,
+            name: entry.name,
+            args,
+            env: req.env,
+            rows: req.rows,
+            cols: req.cols,
+        };
+        let spawned = self.spawn(spec, entry.kind).await;
+        if spawned.is_err() {
+            // The old process is gone: the tab is dormant until the next try.
+            self.broadcast(id, SessionEvent::State { state: SessionState::Exited });
+            self.broadcast(id, SessionEvent::Exited { code: None });
+        }
+        spawned
+    }
+
     /// Drop a session from the live set when its process exits — unless it
     /// was already replaced by a newer spawn (different token). Returns
     /// whether it was dropped.
@@ -688,6 +717,24 @@ impl Daemon {
         ours
     }
 
+}
+
+/// `args` without the flags that pick a conversation (`--resume`,
+/// `--continue`, `--session-id`), so a respawn can choose its own.
+fn without_conversation(args: &[String]) -> Vec<String> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--resume" | "-r" | "--session-id" => {
+                args.next();
+            }
+            "--continue" | "-c" => {}
+            a if a.starts_with("--resume=") || a.starts_with("--session-id=") => {}
+            _ => kept.push(arg.clone()),
+        }
+    }
+    kept
 }
 
 /// A journal entry as seen while it has no process.

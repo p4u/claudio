@@ -414,6 +414,11 @@ impl Client {
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }
+            Msg::Respawn(spec) => {
+                self.attached.remove(&spec.id);
+                let id = spec.id;
+                spawned(id, self.daemon.respawn(spec).await)
+            }
             Msg::Attach { id, rows, cols } => match self.attach(req, id, rows, cols).await {
                 // The session actor replies `Attached` itself.
                 Ok(()) => return,
@@ -508,12 +513,7 @@ impl Client {
 
     async fn spawn(&self, spec: SpawnSpec, kind: SessionKind) -> Msg {
         let id = spec.id;
-        match self.daemon.spawn(spec, kind).await {
-            Ok(pid) => Msg::Spawned { id, pid },
-            Err(e) => Msg::Error {
-                message: e.to_string(),
-            },
-        }
+        spawned(id, self.daemon.spawn(spec, kind).await)
     }
 
     async fn attach(
@@ -688,6 +688,16 @@ async fn recent_projects(limit: u32) -> Msg {
 }
 
 /// The wire `op` of a message, for error text.
+/// The reply to a spawn or respawn of `id`.
+fn spawned(id: SessionId, result: io::Result<Option<u32>>) -> Msg {
+    match result {
+        Ok(pid) => Msg::Spawned { id, pid },
+        Err(e) => Msg::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
 fn op_name(msg: &Msg) -> String {
     serde_json::to_value(msg)
         .ok()

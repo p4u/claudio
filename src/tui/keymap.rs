@@ -35,6 +35,8 @@ pub enum Action {
     Terminal,
     /// Browse the commit history of the active session's directory.
     GitLog,
+    /// Restart the active session in its tab (asks how).
+    Reset,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
@@ -58,6 +60,7 @@ impl Action {
             Action::Help => "help",
             Action::Terminal => "terminal",
             Action::GitLog => "git_log",
+            Action::Reset => "reset",
             Action::ToggleHidden => "toggle_hidden",
             Action::GotoSession(_) => "goto_session",
         }
@@ -171,6 +174,15 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "git history of the session's directory",
         action: Action::GitLog,
+        scope: Scope::Global,
+    },
+    // Alt+e: restart ("e" for "restart"; r is rename). Verified free in Claude
+    // Code 2.1.280: it uses alt+b/d/f/y for readline word ops and o/p/t/w/j/m/k/v.
+    Binding {
+        code: KeyCode::Char('e'),
+        mods: KeyModifiers::ALT,
+        label: "restart / reset this session",
+        action: Action::Reset,
         scope: Scope::Global,
     },
     // Alt+.: show/hide dot-directories in the wizard's directory step. Wizard
@@ -493,6 +505,11 @@ mod tests {
             km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)),
             Some(Action::Help)
         );
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('e'), KeyModifiers::ALT)),
+            Some(Action::Reset)
+        );
+        assert_eq!(km.key_for(Action::Reset).as_deref(), Some("Alt+e"));
     }
 
     #[test]

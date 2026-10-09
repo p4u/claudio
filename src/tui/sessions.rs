@@ -7,9 +7,12 @@
 
 use uuid::Uuid;
 
-use crate::proto::{Msg, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec, SpawnSpec};
+use crate::proto::{
+    Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec, SpawnSpec,
+};
 use crate::term::screen::Screen;
 
+use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::state::{self, ClientState, SavedSession};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
@@ -343,30 +346,116 @@ impl App {
             self.request(host, Msg::SpawnShell(shell), ReplyTo::Spawned(id));
             return Ok(());
         }
-        let mut spec = SpawnSpec {
+        let spec = SpawnSpec {
             id,
             cwd,
             name,
             args,
-            env: vec![], // filled below, or by the effect runner
+            env: vec![], // filled by `send_with_proxy`
             rows,
             cols,
         };
+        self.send_with_proxy(host, Msg::Spawn(spec), proxy, ReplyTo::Spawned(id))
+    }
+
+    /// Send `msg` (a `Spawn` or `Respawn` with an empty env) to `host` with
+    /// the env of `proxy`. A cold proxy-config cache goes through the effect
+    /// runner, which fetches the config first and answers with
+    /// [`ReplyTo::deferred`]. Fails when the profile cannot be resolved.
+    fn send_with_proxy(
+        &mut self,
+        host: &str,
+        msg: Msg,
+        proxy: Option<&str>,
+        to: ReplyTo,
+    ) -> Result<(), String> {
         match proxy {
             Some(name) if self.proxy_config_cached(name).is_none() => {
                 self.effects.push(Effect::SpawnWithProxy {
                     host: host.to_owned(),
-                    spec,
+                    msg,
                     proxy_name: name.to_owned(),
-                    to: ReplyTo::SpawnedDeferred(id),
+                    to: to.deferred(),
                 });
             }
             _ => {
-                spec.env = self.proxy_env_for(proxy)?;
-                self.request(host, Msg::Spawn(spec), ReplyTo::Spawned(id));
+                let msg = msg.with_env(self.proxy_env_for(proxy)?);
+                self.request(host, msg, to);
             }
         }
         Ok(())
+    }
+
+    // ── Reset (Alt+e) ─────────────────────────────────────────────────────────
+
+    /// Ask how to restart the active session.
+    pub(super) fn ask_reset(&mut self) {
+        let Some(v) = self.active_view() else {
+            self.notify("no session to reset");
+            return;
+        };
+        let reset = |fresh| Some(ConfirmAction::Reset { id: v.id, fresh });
+        let prompt = match v.kind {
+            SessionKind::Claude => ConfirmPrompt::new(
+                "Restart session",
+                format!("Restart claude in {}?", v.label()),
+                vec![
+                    Choice::new('r', "restart & resume this conversation", reset(false)),
+                    Choice::new('n', "new conversation", reset(true)),
+                    Choice::esc("cancel"),
+                ],
+            ),
+            SessionKind::Shell => ConfirmPrompt::new(
+                "Restart terminal",
+                format!("Restart the shell in {}?", v.label()),
+                vec![
+                    Choice::new('r', "restart shell", reset(false)),
+                    Choice::esc("cancel"),
+                ],
+            ),
+        };
+        self.queue_confirm(prompt.ready());
+    }
+
+    /// Restart session `id` in place: the daemon kills its process and starts
+    /// the same session again (see [`Msg::Respawn`]); the tab stays.
+    pub(super) fn reset_session(&mut self, id: SessionId, fresh: bool) {
+        let Some(i) = self.index_of(id) else { return };
+        let (host, kind, proxy) = {
+            let v = &self.sessions[i];
+            (v.host.clone(), v.kind, v.proxy.clone())
+        };
+        let (rows, cols) = self.pane_size();
+        let msg = Msg::Respawn(RespawnSpec {
+            id,
+            fresh,
+            env: vec![], // filled by `send_with_proxy`
+            rows,
+            cols,
+        });
+        // A terminal never carries the proxy env.
+        let proxy = proxy.filter(|_| kind == SessionKind::Claude);
+        if let Err(e) = self.send_with_proxy(&host, msg, proxy.as_deref(), ReplyTo::Respawned(id)) {
+            self.notify(format!("cannot restart: {e}"));
+        }
+    }
+
+    /// The daemon's answer to [`App::reset_session`].
+    pub(super) fn on_respawned(&mut self, id: SessionId, reply: std::io::Result<Msg>) {
+        let Some(i) = self.index_of(id) else { return };
+        match reply {
+            Ok(_) => {
+                // The old process's output is gone: attach to the new one.
+                if self.active == Some(i) {
+                    self.sessions[i].attached = false;
+                    self.activate(i);
+                }
+            }
+            Err(e) => {
+                let notice = App::older_daemon_notice(&self.sessions[i].host, &e);
+                self.notify(notice.unwrap_or_else(|| format!("could not restart: {e}")));
+            }
+        }
     }
 
     pub(super) fn open_wizard(&mut self) {

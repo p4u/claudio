@@ -6,7 +6,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::{centered, popup, str_width};
-use crate::tui::confirm::ConfirmPrompt;
+use crate::tui::confirm::{Choice, ConfirmPrompt};
 
 /// Widest the popup gets, border included.
 const MAX_WIDTH: u16 = 76;
@@ -24,10 +24,12 @@ pub fn draw_confirm(frame: &mut Frame, prompt: &ConfirmPrompt) {
     let height = (text_rows + 4) as u16;
     let inner = popup(frame, centered(area, width, height), &prompt.title);
 
-    let mut keys = format!("[y] {} · [n] not now", prompt.yes_label);
-    if prompt.skip.is_some() {
-        keys.push_str(" · [s] skip this version");
-    }
+    let keys = prompt
+        .choices
+        .iter()
+        .map(Choice::hint)
+        .collect::<Vec<_>>()
+        .join(" · ");
     let mut lines: Vec<Line> = prompt.text.lines().map(Line::from).collect();
     lines.push(Line::default());
     lines.push(Line::styled(
@@ -59,19 +61,31 @@ mod tests {
     }
 
     fn prompt(skip: bool) -> ConfirmPrompt {
-        let skip = skip.then(|| Skip {
-            host: "devbox".into(),
-            version: "2.1.296".into(),
-        });
+        let mut choices = vec![
+            Choice::new(
+                'y',
+                "update",
+                Some(ConfirmAction::UpdateClaude {
+                    host: "devbox".into(),
+                    install: false,
+                }),
+            ),
+            Choice::new('n', "not now", None),
+        ];
+        if skip {
+            choices.push(Choice::new(
+                's',
+                "skip this version",
+                Some(ConfirmAction::SkipClaude(Skip {
+                    host: "devbox".into(),
+                    version: "2.1.296".into(),
+                })),
+            ));
+        }
         ConfirmPrompt::new(
             "Claude is out of date",
             "claude on devbox is 2.1.280, older than the 2.1.296 on this machine.\nRun `claude update` there?",
-            "update",
-            ConfirmAction::UpdateClaude {
-                host: "devbox".into(),
-                install: false,
-            },
-            skip,
+            choices,
         )
     }
 

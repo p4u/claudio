@@ -1136,3 +1136,239 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
     assert_eq!((s.kind, s.created_at), (proto::SessionKind::Shell, 1700000000));
 }
 mod git;
+
+// ── Respawn (reset a session in place) ───────────────────────────────────────
+
+/// A fake claude that appends its arguments, one per line and closed by a
+/// `---` line, to `argv.log` in its cwd, then behaves like the normal fake.
+fn fake_claude_logging_argv() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-av-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             printf '%s' \"$2\" > settings.json\n\
+             {{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo ---; }} >> argv.log\n\
+             echo {BANNER}\n\
+             exec cat\n"
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        bin
+    })
+}
+
+impl TestDaemon {
+    async fn start_logging_argv() -> TestDaemon {
+        Self::start_with_claude(Self::new_dir(), fake_claude_logging_argv().to_path_buf()).await
+    }
+
+    /// The arguments of every claude run so far, without the daemon's
+    /// `--settings <json>` prefix.
+    fn runs(&self) -> Vec<Vec<String>> {
+        let log = std::fs::read_to_string(self.work().join("argv.log")).unwrap_or_default();
+        log.split("---\n")
+            .filter(|run| !run.is_empty())
+            .map(|run| run.lines().skip(2).map(str::to_owned).collect())
+            .collect()
+    }
+
+    /// Wait until the fake claude has been started `n` times.
+    async fn runs_reach(&self, n: usize) {
+        within(async {
+            while self.runs().len() < n {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
+}
+
+impl Client {
+    /// Like `call`, also returning the session events seen until the reply.
+    async fn call_seen(&mut self, msg: Msg) -> (Msg, Vec<SessionEvent>) {
+        let mut seen = Vec::new();
+        let req = self.request(msg).await;
+        let reply = self
+            .until(|f| match f {
+                Frame::Control(env) if env.req == Some(req) => Some(env.msg.clone()),
+                Frame::Control(Envelope {
+                    req: None,
+                    msg: Msg::Event { event, .. },
+                }) => {
+                    seen.push(event.clone());
+                    None
+                }
+                _ => None,
+            })
+            .await;
+        (reply, seen)
+    }
+
+    async fn respawn(&mut self, id: SessionId, fresh: bool) -> (Option<u32>, Vec<SessionEvent>) {
+        let spec = proto::RespawnSpec {
+            id,
+            fresh,
+            env: vec![("SECRET_ENV".into(), "hunter2".into())],
+            rows: 24,
+            cols: 80,
+        };
+        match self.call_seen(Msg::Respawn(spec)).await {
+            (Msg::Spawned { id: spawned, pid }, seen) => {
+                assert_eq!(spawned, id);
+                (pid, seen)
+            }
+            (other, _) => panic!("respawn failed: {other:?}"),
+        }
+    }
+}
+
+/// The process is gone (or was never ours).
+fn is_dead(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid as i32, 0) != 0 }
+}
+
+fn assert_restarted_in_place(seen: &[SessionEvent]) {
+    assert!(
+        seen.iter().any(|e| matches!(e, SessionEvent::Created { .. })),
+        "a respawn is announced like a spawn: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, SessionEvent::Removed | SessionEvent::Exited { .. })),
+        "the tab must not close: {seen:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_resumes_the_journaled_conversation() {
+    let d = TestDaemon::start_logging_argv().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    spec.args = vec!["--model".into(), "m".into(), "--resume".into(), "stale".into()];
+    let old_pid = c.spawn(spec).await.unwrap();
+    c.attach_until(id, BANNER).await;
+    let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
+    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
+    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
+        .await;
+    let created_at = d.journal()["sessions"][0]["created_at"].clone();
+
+    let (pid, seen) = c.respawn(id, false).await;
+    assert_restarted_in_place(&seen);
+    assert_ne!(pid, Some(old_pid));
+    assert!(is_dead(old_pid), "the old process was stopped first");
+
+    d.runs_reach(2).await;
+    let runs = d.runs();
+    assert_eq!(runs[0], ["--model", "m", "--resume", "stale", "-n", "test"]);
+    assert_eq!(runs[1], ["--model", "m", "--resume", "conv-1", "-n", "test"]);
+
+    // Same id, same journal entry (with the conversation), now live again.
+    let journal = d.journal();
+    assert_eq!(journal["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(journal["sessions"][0]["claude_session_id"], "conv-1");
+    assert_eq!(journal["sessions"][0]["created_at"], created_at);
+    let (listed, seen) = c.call_seen(Msg::ListSessions).await;
+    let Msg::Sessions { sessions } = listed else {
+        panic!("expected sessions, got {listed:?}");
+    };
+    assert_eq!((sessions.len(), sessions[0].id, sessions[0].pid), (1, id, pid));
+    assert!(!seen.iter().any(|e| matches!(e, SessionEvent::Removed)));
+
+    // The tab works again after a re-attach.
+    c.attach_until(id, BANNER).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_respawn_starts_a_new_conversation() {
+    let d = TestDaemon::start_logging_argv().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    spec.args = vec!["--model".into(), "m".into()];
+    c.spawn(spec).await;
+    c.attach_until(id, BANNER).await;
+
+    // No conversation recorded yet (no SessionStart): nothing to resume.
+    let (_, seen) = c.respawn(id, false).await;
+    assert_restarted_in_place(&seen);
+    c.attach_until(id, BANNER).await;
+
+    let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
+    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
+    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
+        .await;
+
+    let (_, seen) = c.respawn(id, true).await;
+    assert_restarted_in_place(&seen);
+    d.runs_reach(3).await;
+    let runs = d.runs();
+    assert_eq!(runs[1], ["--model", "m", "-n", "test"]);
+    assert_eq!(runs[2], ["--model", "m", "-n", "test"], "fresh omits --resume");
+    assert_eq!(d.journal()["sessions"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_revives_a_dormant_session_and_rejects_unknown_ones() {
+    let d = TestDaemon::start_logging_argv().await;
+    let mut c = d.client().await;
+    let unknown = c
+        .call(Msg::Respawn(proto::RespawnSpec {
+            id: Uuid::new_v4(),
+            fresh: false,
+            env: vec![],
+            rows: 24,
+            cols: 80,
+        }))
+        .await;
+    assert!(matches!(unknown, Msg::Error { message } if message.contains("no such session")));
+
+    // A crash leaves the session dormant; a respawn brings it back.
+    let id = Uuid::new_v4();
+    c.spawn(d.spec(id)).await;
+    c.attach_until(id, BANNER).await;
+    c.send(Frame::Data {
+        session: id,
+        bytes: vec![3],
+    })
+    .await;
+    c.event(id, |e| matches!(e, SessionEvent::Exited { .. }).then_some(()))
+        .await;
+    assert_eq!(c.sessions().await[0].pid, None);
+    let (pid, _) = c.respawn(id, false).await;
+    assert!(pid.is_some());
+    assert_eq!(c.sessions().await[0].pid, pid);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_restarts_a_shell() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let old_pid = c.spawn_shell(d.shell_spec(id)).await.unwrap();
+    c.attach(id, 24, 80).await;
+    c.type_line(id, "FLAG=set; echo flag-[$FLAG]").await;
+    c.output_until(id, "flag-[set]").await;
+
+    let (pid, seen) = c.respawn(id, true).await;
+    assert_restarted_in_place(&seen);
+    assert_ne!(pid, Some(old_pid));
+    assert!(is_dead(old_pid));
+
+    // A new login shell: the variable is gone, and it is still a terminal.
+    c.attach(id, 24, 80).await;
+    c.type_line(id, "echo flag-[$FLAG]").await;
+    c.output_until(id, "flag-[]").await;
+    assert!(!d.work().join("settings.json").exists(), "claude was not run");
+    let journal = d.journal();
+    assert_eq!(journal["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(journal["sessions"][0]["kind"], "shell");
+}

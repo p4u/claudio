@@ -162,6 +162,7 @@ impl App {
             }
             Action::NewSession => self.open_wizard(),
             Action::Terminal => self.open_terminal(),
+            Action::Reset => self.ask_reset(),
             Action::Rename => {
                 if let Some(v) = self.active_view() {
                     self.modal = Some(Modal::Rename {
@@ -727,6 +728,7 @@ impl App {
                 }
             }
             (ReplyTo::Git { gen, seq }, reply) => self.on_git_reply(gen, seq, reply),
+            (ReplyTo::Respawned(id), reply) => self.on_respawned(id, reply),
             (ReplyTo::SpawnedDeferred(id), Ok(_)) => {
                 // Re-attach the active view: its first Attach raced the Spawn.
                 if let Some(i) = self.index_of(id).filter(|&i| self.active == Some(i)) {

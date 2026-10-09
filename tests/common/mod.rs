@@ -62,6 +62,7 @@ pub const ALT_G: &[u8] = b"\x1bg";
 pub const ALT_H: &[u8] = b"\x1bh";
 pub const ALT_C: &[u8] = b"\x1bc";
 pub const ALT_L: &[u8] = b"\x1bl";
+pub const ALT_E: &[u8] = b"\x1be";
 pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
 pub const ESC: &[u8] = b"\x1b";

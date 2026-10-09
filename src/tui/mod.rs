@@ -637,7 +637,7 @@ fn run_effect(
         }
         Effect::SpawnWithProxy {
             host,
-            mut spec,
+            msg,
             proxy_name,
             to,
         } => {
@@ -669,10 +669,9 @@ fn run_effect(
                         ));
                     }
                     Ok(env) => {
-                        spec.env = env;
                         match client {
                             Some(c) => {
-                                let reply = c.request(Msg::Spawn(spec));
+                                let reply = c.request(msg.with_env(env));
                                 let _ = tx.send((to, reply.await));
                             }
                             None => {
