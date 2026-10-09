@@ -68,46 +68,17 @@ impl App {
 mod tests {
     use super::*;
     use crate::client::Incoming;
-    use crate::proto::{GitLogEntry, GitLogPage, SessionInfo, SessionState};
+    use crate::proto::{GitLogEntry, GitLogPage, SessionInfo};
     use crate::tui::app::Effect;
-    use crate::tui::state::ClientState;
-    use crate::tui::test_support;
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-    use uuid::Uuid;
+    use crate::tui::test_support::{alt, app_with, info, key, press};
+    use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+    /// A running claude session in `cwd`.
     fn session(cwd: &str) -> SessionInfo {
         SessionInfo {
-            id: Uuid::new_v4(),
             cwd: cwd.into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(1),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: crate::proto::SessionKind::Claude,
+            ..info(Some(1), None)
         }
-    }
-
-    fn app(sessions: &[SessionInfo]) -> App {
-        let mut app = test_support::app();
-        app.recover(&ClientState::default(), sessions);
-        app.modal = None;
-        app.take_effects();
-        app
-    }
-
-    fn alt(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
-    }
-
-    fn plain(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
 
     fn id(n: usize) -> String {
@@ -154,7 +125,7 @@ mod tests {
 
     #[test]
     fn alt_l_opens_the_history_of_the_active_session() {
-        let mut app = app(&[session("/srv/app")]);
+        let mut app = app_with(&[session("/srv/app")]);
         app.on_terminal(alt('l'));
         let (host, msg, to) = first_request(&mut app);
         assert_eq!(host, "local");
@@ -165,7 +136,8 @@ mod tests {
 
     #[test]
     fn alt_l_without_a_session_says_so() {
-        let mut app = app(&[]);
+        let mut app = app_with(&[]);
+        app.modal = None;
         app.on_terminal(alt('l'));
         assert!(app.modal.is_none());
         assert!(app.notice.as_ref().unwrap().text.contains("no session"));
@@ -173,7 +145,7 @@ mod tests {
 
     #[test]
     fn replies_fill_the_view_and_stale_ones_are_dropped() {
-        let mut app = app(&[session("/srv/app")]);
+        let mut app = app_with(&[session("/srv/app")]);
         app.on_terminal(alt('l'));
         let (_, _, to) = first_request(&mut app);
         let ReplyTo::Git { gen, seq } = to else {
@@ -185,7 +157,7 @@ mod tests {
         app.on_reply(ReplyTo::Git { gen, seq }, Ok(page(3)));
         assert_eq!(git_view(&app).log.commits.len(), 3);
         // After the view is closed, a late reply is ignored (and harmless).
-        app.on_terminal(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_terminal(press(KeyCode::Esc));
         assert!(app.modal.is_none());
         app.on_reply(ReplyTo::Git { gen, seq }, Ok(page(3)));
         assert!(app.modal.is_none());
@@ -197,18 +169,15 @@ mod tests {
 
     #[test]
     fn keys_in_the_view_make_requests_for_the_sessions_host() {
-        let mut app = app(&[session("/srv/app")]);
+        let mut app = app_with(&[session("/srv/app")]);
         app.on_terminal(alt('l'));
         let (_, _, to) = first_request(&mut app);
         let ReplyTo::Git { gen, seq } = to else {
             panic!()
         };
         app.on_reply(ReplyTo::Git { gen, seq }, Ok(page(3)));
-        app.on_terminal(plain('j'));
-        app.on_terminal(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        )));
+        app.on_terminal(press(KeyCode::Char('j')));
+        app.on_terminal(press(KeyCode::Enter));
         let (host, msg, to) = first_request(&mut app);
         assert_eq!(host, "local");
         assert_eq!(
@@ -228,7 +197,7 @@ mod tests {
 
     #[test]
     fn an_older_daemon_closes_the_view_with_a_notice() {
-        let mut app = app(&[session("/srv/app")]);
+        let mut app = app_with(&[session("/srv/app")]);
         app.on_terminal(alt('l'));
         let (_, _, to) = first_request(&mut app);
         app.on_reply(to, Err(io::Error::other("unsupported op: unknown")));
@@ -242,7 +211,7 @@ mod tests {
 
     #[test]
     fn git_errors_stay_inside_the_view() {
-        let mut app = app(&[session("/srv/app")]);
+        let mut app = app_with(&[session("/srv/app")]);
         app.on_terminal(alt('l'));
         let (_, _, to) = first_request(&mut app);
         app.on_reply(to, Err(io::Error::other("not a git repository")));
@@ -255,11 +224,11 @@ mod tests {
     #[test]
     fn manager_actions_close_the_view_and_run() {
         let live = [session("/a"), session("/b")];
-        let mut app = app(&live);
+        let mut app = app_with(&live);
         app.on_terminal(alt('l'));
         app.take_effects();
         // Alt+→ switches tabs and closes the view.
-        app.on_terminal(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)));
+        app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
         assert!(app.modal.is_none());
         assert_eq!(app.active, Some(1));
         // Another action (overview) replaces the view.
@@ -270,7 +239,7 @@ mod tests {
 
     #[test]
     fn the_key_that_opened_a_modal_closes_it() {
-        let mut app = app(&[session("/a")]);
+        let mut app = app_with(&[session("/a")]);
         app.on_terminal(alt('l'));
         app.on_terminal(alt('l'));
         assert!(app.modal.is_none());
@@ -282,7 +251,7 @@ mod tests {
 
     #[test]
     fn quit_still_works_with_the_view_open() {
-        let mut app = app(&[session("/a")]);
+        let mut app = app_with(&[session("/a")]);
         app.on_terminal(alt('l'));
         app.on_terminal(alt('q'));
         assert!(app.quit);
@@ -290,11 +259,11 @@ mod tests {
 
     #[test]
     fn text_input_modals_keep_swallowing_manager_keys() {
-        let mut app = app(&[session("/a")]);
+        let mut app = app_with(&[session("/a")]);
         app.on_terminal(alt('r'));
         app.on_terminal(alt('l'));
         assert!(matches!(app.modal, Some(Modal::Rename { .. })));
-        app.on_terminal(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_terminal(press(KeyCode::Esc));
         app.on_terminal(alt('x'));
         app.on_terminal(alt('g'));
         assert!(matches!(app.modal, Some(Modal::Confirm(_))));
@@ -302,7 +271,7 @@ mod tests {
 
     #[test]
     fn the_mouse_goes_to_the_view_not_the_session() {
-        let mut app = app(&[session("/a")]);
+        let mut app = app_with(&[session("/a")]);
         app.on_terminal(alt('l'));
         let (_, _, to) = first_request(&mut app);
         let ReplyTo::Git { gen, seq } = to else {
@@ -331,7 +300,7 @@ mod tests {
 
     #[test]
     fn disconnects_do_not_panic_the_open_view() {
-        let mut app = app(&[session("/a")]);
+        let mut app = app_with(&[session("/a")]);
         app.on_terminal(alt('l'));
         app.on_incoming_from("local", Incoming::Disconnected);
         assert!(app.modal.is_some());

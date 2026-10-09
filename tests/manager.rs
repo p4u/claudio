@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, extract_nonce, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
+    current_nonce, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
     TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT,
     ALT_SHIFT_1, ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC,
     LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
@@ -1468,22 +1468,6 @@ fn test_terminal_survives_daemon_restart_as_a_shell() {
 }
 
 // ── Git viewer ────────────────────────────────────────────────────────────────
-
-/// Run git in `dir` (fixed identity); panics on failure.
-fn run_git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(["-c", "user.name=Tess", "-c", "user.email=tess@example.org"])
-        .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 /// Alt+l lists the session directory's commits; Enter opens one, Enter on a
 /// file shows its colored patch, and Esc steps back out, one page at a time.

@@ -621,45 +621,11 @@ mod tests {
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
-    use crate::tui::test_support;
+    use crate::tui::test_support::{
+        self, alt, app_with, info, key, press, shell_info,
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
-
-    fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
-        SessionInfo {
-            id: Uuid::new_v4(),
-            cwd: "/srv/app".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: csid.map(Into::into),
-            title: None,
-            pid,
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        }
-    }
-
-    fn key(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
-    }
-
-    fn alt(c: char) -> Event {
-        key(KeyCode::Char(c), KeyModifiers::ALT)
-    }
-
-    fn plain(code: KeyCode) -> Event {
-        key(code, KeyModifiers::NONE)
-    }
-
-    fn app_with(live: &[SessionInfo]) -> App {
-        let mut app = test_support::app();
-        app.recover(&ClientState::default(), live);
-        app.take_effects();
-        app
-    }
 
     fn requests(effects: &[Effect]) -> Vec<&Msg> {
         effects
@@ -732,7 +698,7 @@ mod tests {
         app.on_ssh_hosts(vec!["devbox".into(), "nas".into()]);
         assert_eq!(hosts(&app), ["devbox", "nas"]);
         // ...but not one the user is typing in.
-        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_terminal(press(KeyCode::Char('n')));
         app.on_ssh_hosts(vec!["other".into()]);
         assert_eq!(hosts(&app), ["nas"]);
         assert_eq!(app.ssh_hosts, ["other"], "the next wizard has it");
@@ -782,12 +748,12 @@ mod tests {
     fn keys_go_to_the_active_session_unless_a_modal_is_open() {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
-        app.on_terminal(plain(KeyCode::Char('h')));
+        app.on_terminal(press(KeyCode::Char('h')));
         assert!(
             matches!(&app.take_effects()[..], [Effect::Input(id, b)] if *id == live[0].id && b == b"h")
         );
         app.on_terminal(alt('r'));
-        app.on_terminal(plain(KeyCode::Char('h')));
+        app.on_terminal(press(KeyCode::Char('h')));
         assert!(app.take_effects().is_empty());
         assert!(matches!(&app.modal, Some(Modal::Rename { input, .. }) if input == "apph"));
     }
@@ -798,7 +764,7 @@ mod tests {
         app.on_terminal(alt('r'));
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.on_terminal(Event::Paste("api".into()));
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         assert_eq!(app.sessions[0].name.as_deref(), Some("api"));
         // Rename sends the change to the daemon (durable journal) and saves state.
         let effects = app.take_effects();
@@ -812,7 +778,7 @@ mod tests {
         );
         app.on_terminal(alt('r'));
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         assert_eq!(app.sessions[0].name, None);
         assert_eq!(app.to_state().sessions[0].name, None);
     }
@@ -826,10 +792,10 @@ mod tests {
         ];
         let mut app = app_with(&live);
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_terminal(press(KeyCode::Char('n')));
         assert!(app.modal.is_none() && app.sessions.len() == 3, "n cancels");
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         let effects = app.take_effects();
         let save = effects
             .iter()
@@ -856,7 +822,7 @@ mod tests {
             _ => panic!("expected the kill prompt"),
         }
         assert_eq!(hints(&app), ["[y] kill", "[n] cancel"]);
-        app.on_terminal(plain(KeyCode::Esc));
+        app.on_terminal(press(KeyCode::Esc));
         assert!(app.modal.is_none());
         assert_eq!(app.sessions.len(), 1);
         assert!(app.killed.is_empty());
@@ -881,7 +847,7 @@ mod tests {
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         // The tombstone must be in to_state() before Kill is sent.
         let effects = app.take_effects();
         let save_pos = effects
@@ -905,7 +871,7 @@ mod tests {
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         app.take_effects();
         assert!(!app.killed.is_empty());
         // Simulate a successful Kill reply.
@@ -922,7 +888,7 @@ mod tests {
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         app.take_effects();
         // Simulate "no such session" error.
         app.on_reply(
@@ -949,17 +915,7 @@ mod tests {
         // The daemon still lists the session as live.
         let live = [SessionInfo {
             id,
-            cwd: "/w".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(42),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..info(Some(42), None)
         }];
         let mut app = test_support::app();
         app.recover(&saved, &live);
@@ -984,17 +940,7 @@ mod tests {
 
         let local_live = vec![SessionInfo {
             id: local_id,
-            cwd: "/local".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(1),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..info(Some(1), None)
         }];
         let mut app = test_support::app();
         app.recover(&ClientState::default(), &local_live);
@@ -1110,7 +1056,7 @@ mod tests {
     fn wizard_spawns_into_the_chosen_dir_and_records_it() {
         let mut app = app_with(&[]);
         // Step 0: press Enter to select "local" host (empty host filter → picks local).
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         // The directory step opens in browse mode at `~/`: the home listing is requested.
         let effects = app.take_effects();
         assert!(requests(&effects)
@@ -1121,7 +1067,7 @@ mod tests {
         for c in "/w".chars() {
             app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         let effects = app.take_effects();
         assert!(requests(&effects)
             .iter()
@@ -1380,13 +1326,6 @@ mod tests {
 
     // ── Terminal tabs ─────────────────────────────────────────────────────────
 
-    fn shell_info(pid: Option<u32>) -> SessionInfo {
-        SessionInfo {
-            kind: SessionKind::Shell,
-            ..info(pid, None)
-        }
-    }
-
     #[test]
     fn terminal_opens_right_after_the_active_tab_and_is_activated() {
         let live = [info(Some(1), None), info(Some(2), None), info(Some(3), None)];
@@ -1548,7 +1487,7 @@ mod tests {
         assert!(respawn_of(&app.take_effects()).is_none(), "nothing before the answer");
 
         // `r` keeps the conversation, answered on the same tab.
-        app.on_terminal(plain(KeyCode::Char('r')));
+        app.on_terminal(press(KeyCode::Char('r')));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
         let (spec, to) = respawn_of(&effects).expect("a Respawn request");
@@ -1558,7 +1497,7 @@ mod tests {
 
         // `n` starts a new conversation.
         app.on_terminal(alt('e'));
-        app.on_terminal(plain(KeyCode::Char('N')));
+        app.on_terminal(press(KeyCode::Char('N')));
         let effects = app.take_effects();
         assert!(respawn_of(&effects).is_some_and(|(spec, _)| spec.fresh));
     }
@@ -1567,7 +1506,7 @@ mod tests {
     fn escape_cancels_a_reset() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
         app.on_terminal(alt('e'));
-        app.on_terminal(plain(KeyCode::Esc));
+        app.on_terminal(press(KeyCode::Esc));
         assert!(app.modal.is_none());
         assert!(respawn_of(&app.take_effects()).is_none());
     }
@@ -1577,9 +1516,9 @@ mod tests {
         let mut app = app_with(&[shell_info(Some(1))]);
         app.on_terminal(alt('e'));
         assert_eq!(hints(&app), ["[r] restart shell", "Esc cancel"]);
-        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_terminal(press(KeyCode::Char('n')));
         assert!(app.modal.is_some(), "there is no `n` here");
-        app.on_terminal(plain(KeyCode::Char('r')));
+        app.on_terminal(press(KeyCode::Char('r')));
         let effects = app.take_effects();
         assert!(respawn_of(&effects).is_some_and(|(spec, _)| !spec.fresh));
     }

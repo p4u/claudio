@@ -114,9 +114,8 @@ mod tests {
     use crate::tui::app::{AppConfig, Effect, ReplyTo};
     use crate::tui::interaction::Modal;
     use crate::tui::keymap::Keymap;
-    use crate::tui::test_support;
+    use crate::tui::test_support::{self, alt};
     use crate::tui::ui;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use uuid::Uuid;
@@ -137,10 +136,6 @@ mod tests {
             cwd: "/work".into(),
         });
         (app, id)
-    }
-
-    fn alt(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
     }
 
     fn event(app: &mut App, id: SessionId, event: SessionEvent) {
@@ -304,20 +299,7 @@ mod tests {
     fn foreign_sessions_never_appear() {
         let (mut app, _) = plain_app(&[]);
         app.take_effects();
-        let other = crate::proto::SessionInfo {
-            id: Uuid::new_v4(),
-            cwd: "/other".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(1),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        };
+        let other = test_support::info(Some(1), None);
         event(&mut app, other.id, SessionEvent::Created { info: other.clone() });
         assert_eq!(app.sessions.len(), 1);
         // A reconnect re-attaches ours and leaves the others alone.

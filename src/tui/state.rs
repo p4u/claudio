@@ -248,15 +248,9 @@ mod tests {
             id,
             cwd: "/srv".into(),
             name: Some("daemon-name".into()),
-            state: SessionState::Idle,
-            claude_session_id: csid.map(Into::into),
             title: Some("title".into()),
-            pid,
             created_at: 100,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..crate::tui::test_support::info(pid, csid)
         }
     }
 

@@ -157,7 +157,7 @@ mod tests {
     use crate::tui::app::AppConfig;
     use crate::tui::interaction::Modal;
     use crate::tui::test_support;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::KeyCode;
 
     const LOCAL: &str = "2.1.296 (Claude Code)";
 
@@ -172,7 +172,7 @@ mod tests {
     }
 
     fn press(app: &mut App, code: KeyCode) {
-        app.on_terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        app.on_terminal(test_support::press(code));
     }
 
     /// Let a freshly opened prompt start listening to the keyboard.

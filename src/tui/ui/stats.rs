@@ -1111,22 +1111,16 @@ mod tests {
     }
 
     fn session(name: &str, proxy: Option<&str>, model: Option<&str>) -> SessionView {
+        let kind = crate::proto::SessionKind::Claude;
         SessionView {
-            id: Uuid::new_v4(),
             name: Some(name.into()),
-            cwd: "/home/u/proj".into(),
-            host: "local".into(),
             state: SessionState::Working,
-            title: None,
-            claude_session_id: None,
             created_at: 1,
-            mirror: crate::term::screen::Screen::new(28, 100),
             attached: true,
             proxy: proxy.map(str::to_owned),
-            branch: None,
             model: model.map(str::to_owned),
             context_tokens: Some(123_000),
-            kind: crate::proto::SessionKind::Claude,
+            ..SessionView::new(Uuid::new_v4(), "local", "/home/u/proj", kind, (28, 100))
         }
     }
 
@@ -1191,13 +1185,9 @@ mod tests {
         out
     }
 
-    fn goto(app: &mut App, page: char) {
-        app.on_terminal(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(page),
-                crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+    /// Type `c` into the popup.
+    fn goto(app: &mut App, c: char) {
+        app.on_terminal(crate::tui::test_support::press(crossterm::event::KeyCode::Char(c)));
     }
 
     #[test]
