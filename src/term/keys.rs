@@ -56,7 +56,15 @@ pub fn encode_key(ev: &KeyEvent, modes: &Modes) -> Vec<u8> {
                         ']' => 0x1d,
                         '^' => 0x1e,
                         '_' => 0x1f,
-                        _ => c as u8,
+                        // Non-ASCII characters have no defined Ctrl+<ch>
+                        // encoding; emitting `c as u8` would truncate the
+                        // codepoint into arbitrary bytes. Ignore silently.
+                        _ => {
+                            if !c.is_ascii() {
+                                return out;
+                            }
+                            c as u8
+                        }
                     }
                 };
                 if alt {
@@ -661,5 +669,33 @@ mod tests {
         let m = modes_with(|m| m.focus_reporting = true);
         assert_eq!(encode_focus(true, &m).unwrap(), b"\x1b[I");
         assert_eq!(encode_focus(false, &m).unwrap(), b"\x1b[O");
+    }
+
+    // ── Fable S6: Ctrl+non-ASCII must produce no bytes ─────────────────────
+
+    /// Ctrl+non-ASCII (e.g. Ctrl+é) must produce an empty byte sequence, not
+    /// truncated garbage from `c as u8` on a multi-byte codepoint.
+    #[test]
+    fn ctrl_non_ascii_ignored() {
+        let m = modes_default();
+        // Ctrl+é (U+00E9) — non-ASCII, has no defined Ctrl encoding.
+        let out = encode_key(&press(KeyCode::Char('é'), KeyModifiers::CONTROL), &m);
+        assert!(out.is_empty(), "Ctrl+non-ASCII must produce empty output, got: {out:?}");
+
+        // Ctrl+€ (U+20AC) — another non-ASCII character.
+        let out2 = encode_key(&press(KeyCode::Char('€'), KeyModifiers::CONTROL), &m);
+        assert!(out2.is_empty(), "Ctrl+non-ASCII must produce empty output, got: {out2:?}");
+    }
+
+    /// Ctrl+ASCII characters must still work correctly.
+    #[test]
+    fn ctrl_ascii_still_works() {
+        let m = modes_default();
+        // Ctrl+C = 0x03
+        let out = encode_key(&press(KeyCode::Char('c'), KeyModifiers::CONTROL), &m);
+        assert_eq!(out, vec![0x03], "Ctrl+c must produce 0x03");
+        // Ctrl+A = 0x01
+        let out2 = encode_key(&press(KeyCode::Char('a'), KeyModifiers::CONTROL), &m);
+        assert_eq!(out2, vec![0x01], "Ctrl+a must produce 0x01");
     }
 }
