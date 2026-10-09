@@ -342,6 +342,12 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_API_SESSION_TTL=<n>       Drop an idle conversation mapping after n seconds (default: 600).\n\
 \x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n\
 \n\
+\x20Daemon commands:\n\
+\x20  claudio daemon status             Show whether the daemon is running, its version and session count.\n\
+\x20  claudio daemon stop               Send SIGTERM to the daemon; running sessions go dormant.\n\
+\x20  claudio daemon restart            Stop then start the daemon (use after installing a new binary).\n\
+\x20  claudio sessions                  List sessions as a table (id, state, name, cwd) for scripting.\n\
+\n\
 \x20Proxy commands (optional claude-proxy integration):\n\
 \x20  claudio proxy login [URL]         Add or update a proxy profile (prompts for token).\n\
 \x20  claudio proxy status              Show profiles, live stats and pool health.\n\
