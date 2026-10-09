@@ -51,6 +51,9 @@ pub const PTY_COLS: u16 = 120;
 
 pub const ALT_LEFT: &[u8] = b"\x1b[1;3D";
 pub const ALT_RIGHT: &[u8] = b"\x1b[1;3C";
+/// Kitty-protocol `Alt+Shift+<digit>`: `CSI <codepoint>;<1+shift(1)+alt(2)> u`.
+pub const ALT_SHIFT_1: &[u8] = b"\x1b[49;4u";
+pub const ALT_SHIFT_2: &[u8] = b"\x1b[50;4u";
 pub const ALT_N: &[u8] = b"\x1bn";
 pub const ALT_R: &[u8] = b"\x1br";
 pub const ALT_X: &[u8] = b"\x1bx";

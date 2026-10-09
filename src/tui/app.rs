@@ -817,6 +817,58 @@ mod tests {
         assert_eq!(app.active, Some(0));
     }
 
+    fn alt_shift(c: char) -> Event {
+        key(KeyCode::Char(c), KeyModifiers::ALT | KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn alt_shift_digit_goes_to_that_session() {
+        let live: Vec<_> = (1..=10).map(|p| info(Some(p), None)).collect();
+        let mut app = app_with(&live);
+        assert_eq!(app.active, Some(0));
+        app.on_terminal(alt_shift('3'));
+        assert_eq!(app.active, Some(2), "Alt+Shift+3 is tab 3");
+        assert!(app.sessions[2].attached && !app.sessions[0].attached);
+        app.on_terminal(alt_shift('0'));
+        assert_eq!(app.active, Some(9), "Alt+Shift+0 is tab 10");
+        app.on_terminal(alt_shift('1'));
+        assert_eq!(app.active, Some(0));
+        assert!(app.notice.is_none());
+    }
+
+    #[test]
+    fn alt_shift_digit_without_that_session_only_notifies() {
+        let mut app = app_with(&[info(Some(1), None), info(Some(2), None)]);
+        app.on_terminal(alt_shift('5'));
+        assert_eq!(app.active, Some(0));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("no session 5")
+        );
+        app.on_terminal(alt_shift('0'));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("no session 10")
+        );
+        assert_eq!(app.active, Some(0));
+    }
+
+    #[test]
+    fn alt_digit_and_shift_digit_are_forwarded_to_claude() {
+        let live = [info(Some(1), None), info(Some(2), None)];
+        let mut app = app_with(&live);
+        app.take_effects();
+        app.on_terminal(alt('2'));
+        app.on_terminal(key(KeyCode::Char('@'), KeyModifiers::SHIFT));
+        assert_eq!(app.active, Some(0), "neither combo switches tabs");
+        let inputs = app
+            .take_effects()
+            .iter()
+            .filter(|e| matches!(e, Effect::Input(id, _) if *id == live[0].id))
+            .count();
+        assert_eq!(inputs, 2, "both keys reach the active session");
+    }
+
     #[test]
     fn wizard_spawns_into_the_chosen_dir_and_records_it() {
         let mut app = app_with(&[]);

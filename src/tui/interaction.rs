@@ -110,6 +110,15 @@ impl App {
                     None => self.notify("no session needs attention"),
                 }
             }
+            Action::GotoSession(digit) => {
+                // Tabs are numbered from 1; 0 is tab 10.
+                let tab = if digit == 0 { 10 } else { usize::from(digit) };
+                if tab <= n {
+                    self.activate(tab - 1);
+                } else {
+                    self.notify(format!("no session {tab}"));
+                }
+            }
             Action::NewSession => self.open_wizard(),
             Action::Terminal => self.open_terminal(),
             Action::Rename => {
