@@ -313,12 +313,15 @@ impl App {
         self.active = None;
         for r in state::merge(saved, live) {
             if let Some(args) = r.respawn {
+                // Re-send proxy env so the respawned claude still routes
+                // through the proxy (fix: was Vec::new(), losing the token).
+                let env = self.proxy_env_for(r.saved.proxy.as_deref());
                 let spec = SpawnSpec {
                     id: r.saved.id,
                     cwd: r.saved.cwd.clone(),
                     name: r.saved.name.clone(),
                     args,
-                    env: Vec::new(),
+                    env,
                     rows,
                     cols,
                 };
@@ -1022,6 +1025,7 @@ mod tests {
         assert_eq!(app.active, Some(1));
         assert!(app.modal.is_none());
     }
+
 
     #[test]
     fn no_sessions_opens_the_wizard() {

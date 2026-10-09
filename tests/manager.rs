@@ -942,6 +942,447 @@ fn test_ssh_remote_session() {
     }
 }
 
+// ── Proxy helpers ─────────────────────────────────────────────────────────────
+
+/// Start a claudio TUI with a custom command setup (extra env vars etc.).
+/// The `setup` closure is called with the CommandBuilder before spawning.
+fn start_tui_custom<F: FnOnce(&mut CommandBuilder)>(setup: F) -> TuiSession {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .expect("open pty");
+    let mut cmd = CommandBuilder::new(BINARY);
+    setup(&mut cmd);
+    let child = pair.slave.spawn_command(cmd).expect("spawn claudio");
+    let writer = pair.master.take_writer().expect("pty writer");
+    let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let raw_clone = Arc::clone(&raw);
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let _reader = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw_clone.lock().unwrap().extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+    TuiSession { writer, child, raw, _reader }
+}
+
+// ── Proxy E2E tests ───────────────────────────────────────────────────────────
+
+/// Gated by `CLAUDIO_PROXY_TEST=1`. Builds the local Go proxy, starts it on a
+/// free port, creates a user token with its CLI, then verifies that claudio
+/// injects the full proxy env into the claude subprocess, shows the ⇅ badge,
+/// does not persist the token in state.json or the daemon journal, and that a
+/// recovery respawn (daemon restart) also carries the proxy env.
+#[test]
+fn test_proxy_env_injection() {
+    if std::env::var("CLAUDIO_PROXY_TEST").as_deref() != Ok("1") {
+        return;
+    }
+
+    // ── 1. Build the Go proxy ─────────────────────────────────────────────────
+    let proxy_tmp = std::env::temp_dir()
+        .join(format!("claudio-proxy-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&proxy_tmp).expect("create proxy tmp dir");
+    let proxy_bin = proxy_tmp.join("cp");
+    let db_path = proxy_tmp.join("proxy.db");
+
+    let build_out = std::process::Command::new("go")
+        .args(["build", "-o", proxy_bin.to_str().unwrap(), "./cmd/claude-proxy"])
+        .current_dir("/volumes/repos/claude-proxy-claudio-api")
+        .output()
+        .expect("go build (is go installed?)");
+    assert!(
+        build_out.status.success(),
+        "proxy build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build_out.stdout),
+        String::from_utf8_lossy(&build_out.stderr),
+    );
+
+    // ── 2. Find a free port and start the proxy ───────────────────────────────
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let mut proxy_proc = std::process::Command::new(&proxy_bin)
+        .args([
+            "serve",
+            "--addr", &format!("127.0.0.1:{}", port),
+            "--db", db_path.to_str().unwrap(),
+            "--log-format", "json",
+            "--log-level", "error",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start proxy");
+
+    let proxy_tmp_guard = proxy_tmp.clone();
+    let _proxy_guard = scopeguard(move || {
+        proxy_proc.kill().ok();
+        let _ = fs::remove_dir_all(&proxy_tmp_guard);
+    });
+
+    // Wait for the proxy to listen.
+    let proxy_addr = format!("127.0.0.1:{}", port);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::net::TcpStream::connect(&proxy_addr).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "proxy never started on :{}", port);
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // ── 3. Create a user token ────────────────────────────────────────────────
+    let create_out = std::process::Command::new(&proxy_bin)
+        .args(["users", "create", "--name", "testuser", "--db", db_path.to_str().unwrap()])
+        .output()
+        .expect("users create");
+    assert!(
+        create_out.status.success(),
+        "users create failed: {}",
+        String::from_utf8_lossy(&create_out.stderr)
+    );
+    let create_str = String::from_utf8_lossy(&create_out.stdout);
+    // Output: "created <id>  name="testuser"  token=<token>\n"
+    let token = create_str
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("token="))
+        .expect("token= not found in 'users create' output")
+        .to_owned();
+    assert!(!token.is_empty(), "token from proxy is empty");
+
+    let proxy_url = format!("{}@127.0.0.1:{}", token, port);
+    let expected_base_url = format!("http://127.0.0.1:{}", port);
+
+    // ── 4. Isolated env with a proxy-aware fake claude ────────────────────────
+    let env = Env::new();
+    let env_file = env.root.join("claude-env.txt");
+
+    // Overwrite fake claude: dump env first, then print banner, then exec cat.
+    let script = format!(
+        "#!/bin/sh\nenv > \"{env_file}\"\necho \"FAKE_CLAUDE_BANNER cwd=$PWD args=$*\"\nexec cat\n",
+        env_file = env_file.display(),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(&env.fake_claude, &script).unwrap();
+    fs::set_permissions(&env.fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // ── 5. Start claudio TUI with CLAUDIO_PROXY_URL ────────────────────────────
+    let mut tui = start_tui_custom(|cmd| {
+        env.apply(cmd);
+        cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+    });
+    assert!(tui.wait_for("Alt+q", DAEMON_WAIT), "TUI never started");
+
+    // ── 6. Wizard: pick a fresh dir (no sessions → skip resume step) ──────────
+    wizard_pick_dir(&mut tui, &env.dirs[0]);
+    assert_banner(&tui, WAIT);
+    thread::sleep(Duration::from_millis(500));
+
+    // ── 7. Read env.txt written by fake claude ────────────────────────────────
+    let env_contents = {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Ok(c) = fs::read_to_string(&env_file) {
+                if !c.is_empty() {
+                    break c;
+                }
+            }
+            assert!(Instant::now() < deadline, "env.txt never written by fake claude");
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+
+    // ── 8. Assert proxy env vars ──────────────────────────────────────────────
+    // Helper: find key=value line.
+    let env_get = |key: &str| -> Option<String> {
+        env_contents.lines().find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k == key).then(|| v.to_owned())
+        })
+    };
+
+    assert_eq!(
+        env_get("ANTHROPIC_BASE_URL").as_deref(),
+        Some(expected_base_url.as_str()),
+        "ANTHROPIC_BASE_URL wrong; env:\n{}", env_contents
+    );
+    assert_eq!(
+        env_get("ANTHROPIC_AUTH_TOKEN").as_deref(),
+        Some(token.as_str()),
+        "ANTHROPIC_AUTH_TOKEN wrong"
+    );
+    assert_eq!(env_get("CLAUDE_CODE_USE_GATEWAY").as_deref(), Some("1"),
+        "CLAUDE_CODE_USE_GATEWAY not set");
+    assert_eq!(env_get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY").as_deref(), Some("1"),
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY not set");
+    // Model defaults: just check they're present (no upstream creds → fallbacks).
+    assert!(env_get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_FABLE_MODEL missing");
+    assert!(env_get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_OPUS_MODEL missing");
+    assert!(env_get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_SONNET_MODEL missing");
+    assert!(env_get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_some(),
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL missing");
+    // ANTHROPIC_API_KEY must NOT appear (daemon scrubs it when AUTH_TOKEN is set).
+    assert!(
+        !env_contents.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        "ANTHROPIC_API_KEY leaked into session env"
+    );
+
+    // ── 9. Assert ⇅ badge in tab bar ─────────────────────────────────────────
+    assert!(tui.wait_for("⇅", WAIT), "proxy badge ⇅ not visible in tab bar");
+
+    // ── 10. Assert state.json: profile name present, token absent ─────────────
+    let state_json = fs::read_to_string(env.state_json()).unwrap_or_default();
+    assert!(
+        state_json.contains("\"env\""),
+        "state.json should contain proxy profile name \"env\"\nstate.json:\n{}", state_json
+    );
+    assert!(
+        !state_json.contains(&token),
+        "state.json must not contain the proxy token"
+    );
+
+    // ── 11. Assert daemon journal: token absent ───────────────────────────────
+    let journal_path = env.config_home.join("claudio").join("daemon-sessions.json");
+    if let Ok(journal) = fs::read_to_string(&journal_path) {
+        assert!(
+            !journal.contains(&token),
+            "daemon journal must not contain the proxy token"
+        );
+    }
+
+    // ── 12. Recovery respawn: quit → kill daemon → restart → assert proxy env ─
+    // Remove env.txt so we can detect the re-write by the respawned session.
+    let _ = fs::remove_file(&env_file);
+
+    tui.key(ALT_Q);
+    tui.wait_exit(WAIT).expect("TUI did not exit after Alt+q");
+    thread::sleep(Duration::from_millis(300));
+
+    // Kill the daemon so the session becomes dormant.
+    env.kill_daemon();
+    thread::sleep(Duration::from_millis(500));
+
+    // Restart claudio; it will spawn a new daemon, which reads the journal and
+    // sees the dormant session. recover() respawns it — with proxy env (bug fix).
+    let mut tui2 = start_tui_custom(|cmd| {
+        env.apply(cmd);
+        cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+    });
+    assert!(tui2.wait_for("Alt+q", DAEMON_WAIT), "restarted TUI never came up");
+
+    // Wait for the respawned fake claude to re-write env.txt.
+    let env_contents2 = {
+        let deadline = Instant::now() + RECONNECT_WAIT;
+        loop {
+            if let Ok(c) = fs::read_to_string(&env_file) {
+                if !c.is_empty() {
+                    break c;
+                }
+            }
+            assert!(Instant::now() < deadline, "env.txt not re-written after respawn");
+            thread::sleep(Duration::from_millis(200));
+        }
+    };
+
+    // The respawned session must also carry the proxy env.
+    let env_get2 = |key: &str| -> Option<String> {
+        env_contents2.lines().find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k == key).then(|| v.to_owned())
+        })
+    };
+    assert_eq!(
+        env_get2("ANTHROPIC_BASE_URL").as_deref(),
+        Some(expected_base_url.as_str()),
+        "respawned session: ANTHROPIC_BASE_URL wrong\nenv:\n{}", env_contents2
+    );
+    assert_eq!(
+        env_get2("ANTHROPIC_AUTH_TOKEN").as_deref(),
+        Some(token.as_str()),
+        "respawned session: ANTHROPIC_AUTH_TOKEN wrong"
+    );
+    assert_eq!(env_get2("CLAUDE_CODE_USE_GATEWAY").as_deref(), Some("1"),
+        "respawned session: CLAUDE_CODE_USE_GATEWAY not set");
+
+    tui2.key(ALT_Q);
+    tui2.wait_exit(WAIT);
+}
+
+/// Gated by both `CLAUDIO_E2E=1` and a `CLAUDIO_PROXY_URL` env var being
+/// present. Drives a real claude session through the proxy: creates a session,
+/// sends a prompt, asserts the answer appears and the session goes idle (✓).
+///
+/// Run with:
+///   CLAUDIO_E2E=1 CLAUDIO_PROXY_URL=<token>@<host> \
+///     cargo test --test manager test_proxy_real_claude -- --test-threads=1
+#[test]
+fn test_proxy_real_claude() {
+    if std::env::var("CLAUDIO_E2E").as_deref() != Ok("1") {
+        return;
+    }
+    // Read the proxy URL; skip silently if not set (never print the token).
+    let proxy_url = match std::env::var("CLAUDIO_PROXY_URL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            println!("SKIP test_proxy_real_claude: set CLAUDIO_PROXY_URL to run");
+            return;
+        }
+    };
+
+    let id = Uuid::new_v4();
+    let root = std::env::temp_dir().join(format!("claudio-proxy-e2e-{id}"));
+    let runtime_dir = root.join("run");
+    let config_home = root.join("config");
+    let session_dir = root.join("session");
+    for p in [&runtime_dir, &config_home, &session_dir] {
+        fs::create_dir_all(p).unwrap();
+    }
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    // Isolate claudio state but keep real HOME for claude credentials (~/.claude).
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+    cmd.env("ANTHROPIC_MODEL", "claude-haiku-4-5");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("COLORTERM");
+
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let child_pid = child.process_id();
+
+    let runtime_dir_g = runtime_dir.clone();
+    let cleanup_root = root.clone();
+    let _guard = scopeguard(move || {
+        if let Some(pid) = child_pid {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let lock = runtime_dir_g.join("claudio").join("daemon-v1.lock");
+        if let Some(pid) =
+            fs::read_to_string(&lock).ok().and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+        let _ = fs::remove_dir_all(&cleanup_root);
+    });
+
+    let mut writer = pair.master.take_writer().unwrap();
+    let raw: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let raw2 = Arc::clone(&raw);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let _rd = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw2.lock().unwrap().extend_from_slice(&buf[..n]),
+            }
+        }
+    });
+
+    let wait_for = |text: &str, timeout: Duration| -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if strip_ansi(&raw.lock().unwrap()).contains(text) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                let buf = strip_ansi(&raw.lock().unwrap());
+                eprintln!(
+                    "[proxy_e2e] timeout waiting for {:?}\nlast output (tail):\n{}",
+                    text,
+                    &buf[buf.len().saturating_sub(3000)..]
+                );
+                return false;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let write_bytes = |w: &mut Box<dyn Write + Send>, bytes: &[u8]| {
+        let _ = w.write_all(bytes);
+    };
+
+    // ── 1. Wait for TUI ───────────────────────────────────────────────────────
+    assert!(wait_for("Alt+q", Duration::from_secs(30)), "TUI never started");
+
+    // ── 2. Pick local host and session directory ──────────────────────────────
+    write_bytes(&mut writer, ENTER);
+    thread::sleep(Duration::from_millis(150));
+    write_bytes(&mut writer, b"\x1b[200~");
+    write_bytes(&mut writer, session_dir.to_str().unwrap().as_bytes());
+    write_bytes(&mut writer, b"\x1b[201~");
+    thread::sleep(Duration::from_millis(200));
+    write_bytes(&mut writer, ENTER);
+
+    // ── 3. Wait for claude to be ready (handle trust dialog) ─────────────────
+    let ready_deadline = Instant::now() + Duration::from_secs(90);
+    let mut trust_pressed = false;
+    loop {
+        let stripped = strip_ansi(&raw.lock().unwrap());
+        if !trust_pressed && stripped.contains("Do you trust") {
+            write_bytes(&mut writer, ENTER);
+            trust_pressed = true;
+            thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        if stripped.contains("Claude Code") {
+            break;
+        }
+        if Instant::now() >= ready_deadline {
+            eprintln!("[proxy_e2e] timeout waiting for claude banner; continuing");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    // ── 4. Send prompt via bracketed paste ───────────────────────────────────
+    write_bytes(&mut writer, b"\x1b[200~");
+    write_bytes(&mut writer, b"Reply with exactly: PROXY_E2E_OK");
+    write_bytes(&mut writer, b"\x1b[201~");
+    thread::sleep(Duration::from_millis(200));
+    write_bytes(&mut writer, ENTER);
+
+    // ── 5. Assert answer ──────────────────────────────────────────────────────
+    assert!(
+        wait_for("PROXY_E2E_OK", Duration::from_secs(90)),
+        "claude never replied with PROXY_E2E_OK"
+    );
+
+    // ── 6. Assert session returns to idle ─────────────────────────────────────
+    assert!(wait_for("✓", Duration::from_secs(30)), "session didn't return to idle");
+
+    // ── 7. Kill the session and quit ─────────────────────────────────────────
+    write_bytes(&mut writer, ALT_X);
+    thread::sleep(Duration::from_millis(300));
+    write_bytes(&mut writer, b"y");
+    thread::sleep(Duration::from_millis(600));
+
+    write_bytes(&mut writer, ALT_Q);
+    let quit_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        assert!(Instant::now() < quit_deadline, "TUI did not exit after Alt+q");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 // ── Scope guard ───────────────────────────────────────────────────────────────
 
 /// Minimal scope guard: runs `f` when dropped (used in the E2E test).
