@@ -53,6 +53,17 @@ pub enum Effect {
     /// Fetch proxy stats for the active session's profile. Result goes to
     /// [`App::on_proxy_stats`].
     FetchProxyStats { profile_name: String },
+    /// Spawn a session with proxy config: the effect runner fetches the proxy
+    /// config (with a 5 s timeout), builds `SpawnSpec.env`, then sends the
+    /// Spawn request. This avoids silently using fallback model defaults when
+    /// the proxy-config cache is cold on the first spawn.
+    SpawnWithProxy {
+        host: String,
+        /// Partially-built spec; `env` is empty and will be filled by the runner.
+        spec: crate::proto::SpawnSpec,
+        proxy_name: String,
+        to: ReplyTo,
+    },
 }
 
 /// What a request's reply is for.

@@ -200,6 +200,11 @@ impl App {
     // ── Spawn / wizard ────────────────────────────────────────────────────────
 
     /// Spawn claude in `cwd` on `host` (optionally resuming) and switch to it.
+    ///
+    /// When a proxy is selected and its config is cached, env is built
+    /// immediately. When the cache is cold (first spawn), the effect runner
+    /// fetches the config (5 s timeout) before building env so the proxy's
+    /// model/rate-limit overrides are applied even on the first session.
     pub(super) fn spawn(
         &mut self,
         host: String,
@@ -212,24 +217,47 @@ impl App {
         let args = resume
             .map(|r| vec!["--resume".to_owned(), r])
             .unwrap_or_default();
-        // Build proxy env; if it fails, notify and abort (M4 fix).
-        let env = match self.proxy_env_for(proxy.as_deref()) {
-            Ok(e) => e,
-            Err(e) => {
-                self.notify(format!("cannot spawn: {e}"));
-                return;
-            }
-        };
-        let spec = SpawnSpec {
-            id,
-            cwd: cwd.clone(),
-            name: None,
-            args,
-            env,
-            rows,
-            cols,
-        };
-        self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
+
+        // When a proxy is selected and the config cache is cold, defer env
+        // construction to the effect runner so it can await the fetch.
+        let cache_cold = proxy.as_deref().is_some_and(|n| self.proxy_config_cached(n).is_none());
+        if cache_cold {
+            let proxy_name = proxy.clone().unwrap();
+            let spec = SpawnSpec {
+                id,
+                cwd: cwd.clone(),
+                name: None,
+                args,
+                env: vec![], // runner fills this in
+                rows,
+                cols,
+            };
+            self.effects.push(Effect::SpawnWithProxy {
+                host: host.clone(),
+                spec,
+                proxy_name,
+                to: ReplyTo::Spawned(id),
+            });
+        } else {
+            // Cache is warm (or no proxy) — build env synchronously.
+            let env = match self.proxy_env_for(proxy.as_deref()) {
+                Ok(e) => e,
+                Err(e) => {
+                    self.notify(format!("cannot spawn: {e}"));
+                    return;
+                }
+            };
+            let spec = SpawnSpec {
+                id,
+                cwd: cwd.clone(),
+                name: None,
+                args,
+                env,
+                rows,
+                cols,
+            };
+            self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
+        }
         self.sessions.push(SessionView {
             id,
             name: None,
@@ -349,27 +377,50 @@ impl App {
 
         for r in merged {
             if let Some(ref args) = r.respawn {
-                // Build proxy env; if it fails, skip the respawn with a notice.
-                match self.proxy_env_for(r.saved.proxy.as_deref()) {
-                    Ok(env) => {
-                        let spec = SpawnSpec {
-                            id: r.saved.id,
-                            cwd: r.saved.cwd.clone(),
-                            name: r.saved.name.clone(),
-                            args: args.clone(),
-                            env,
-                            rows,
-                            cols,
-                        };
-                        let h = r.saved.host.clone();
-                        self.effects.push(Effect::Request {
-                            host: h,
-                            msg: Msg::Spawn(spec),
-                            to: ReplyTo::Spawned(r.saved.id),
-                        });
-                    }
-                    Err(e) => {
-                        self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
+                let proxy_name = r.saved.proxy.clone();
+                let cache_cold = proxy_name
+                    .as_deref()
+                    .is_some_and(|n| self.proxy_config_cached(n).is_none());
+                if cache_cold {
+                    // Proxy config not cached — defer env construction.
+                    let spec = SpawnSpec {
+                        id: r.saved.id,
+                        cwd: r.saved.cwd.clone(),
+                        name: r.saved.name.clone(),
+                        args: args.clone(),
+                        env: vec![], // runner fills in
+                        rows,
+                        cols,
+                    };
+                    self.effects.push(Effect::SpawnWithProxy {
+                        host: r.saved.host.clone(),
+                        spec,
+                        proxy_name: proxy_name.unwrap(),
+                        to: ReplyTo::Spawned(r.saved.id),
+                    });
+                } else {
+                    // Cache is warm (or no proxy) — build env now.
+                    match self.proxy_env_for(proxy_name.as_deref()) {
+                        Ok(env) => {
+                            let spec = SpawnSpec {
+                                id: r.saved.id,
+                                cwd: r.saved.cwd.clone(),
+                                name: r.saved.name.clone(),
+                                args: args.clone(),
+                                env,
+                                rows,
+                                cols,
+                            };
+                            let h = r.saved.host.clone();
+                            self.effects.push(Effect::Request {
+                                host: h,
+                                msg: Msg::Spawn(spec),
+                                to: ReplyTo::Spawned(r.saved.id),
+                            });
+                        }
+                        Err(e) => {
+                            self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
+                        }
                     }
                 }
             }

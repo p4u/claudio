@@ -554,6 +554,60 @@ fn run_effect(
                     .await;
             });
         }
+        Effect::SpawnWithProxy {
+            host,
+            mut spec,
+            proxy_name,
+            to,
+        } => {
+            // Resolve the client now (synchronous, cheap) so we can move it
+            // into the async task. Client is Clone + Send + 'static.
+            let client = conns.client(&host).cloned();
+            let tx = reply_tx.clone();
+            tokio::spawn(async move {
+                // Fetch proxy config with a 5 s timeout so the first spawn
+                // uses the real model/rate-limit overrides, not fallback defaults.
+                let cfg = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    fetch_proxy_config(&proxy_name),
+                )
+                .await
+                .ok()
+                .flatten();
+
+                // Build env from profile + (possibly fresh) config.
+                let env = proxy_state::proxy_env_for(
+                    Some(&proxy_name),
+                    cfg.as_ref(),
+                );
+                match env {
+                    Err(e) => {
+                        let _ = tx.send((
+                            to,
+                            Err(io::Error::other(format!("proxy env error: {e}"))),
+                        ));
+                    }
+                    Ok(env) => {
+                        spec.env = env;
+                        match client {
+                            Some(c) => {
+                                let reply = c.request(Msg::Spawn(spec));
+                                let _ = tx.send((to, reply.await));
+                            }
+                            None => {
+                                let _ = tx.send((
+                                    to,
+                                    Err(io::Error::new(
+                                        io::ErrorKind::NotConnected,
+                                        format!("{host}: not connected"),
+                                    )),
+                                ));
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
