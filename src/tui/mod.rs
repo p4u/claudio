@@ -249,6 +249,12 @@ enum HostEvent {
         profile_name: String,
         fetch: proxy_state::ProxyFetch,
     },
+    /// The credential claude-proxy reports for a session (or why not).
+    SessionCredential {
+        session: crate::proto::SessionId,
+        claude_session_id: String,
+        result: Result<Option<crate::proxy::api::SessionCredential>, String>,
+    },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
@@ -522,6 +528,9 @@ async fn event_loop(
                 Some(HostEvent::ProxyStats { profile_name, fetch }) => {
                     app.on_proxy_stats(profile_name, fetch);
                 }
+                Some(HostEvent::SessionCredential { session, claude_session_id, result }) => {
+                    app.on_session_credential(session, &claude_session_id, result);
+                }
                 Some(HostEvent::UpgradeAvailable(tag)) => {
                     if let Some(t) = tag {
                         app.upgrade_notice = Some(t);
@@ -635,6 +644,23 @@ fn run_effect(
                     .await;
             });
         }
+        Effect::FetchSessionCredential {
+            profile_name,
+            session,
+            claude_session_id,
+        } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = fetch_session_credential(&profile_name, &claude_session_id).await;
+                let _ = tx
+                    .send(HostEvent::SessionCredential {
+                        session,
+                        claude_session_id,
+                        result,
+                    })
+                    .await;
+            });
+        }
         Effect::SpawnWithProxy {
             host,
             msg,
@@ -727,6 +753,19 @@ async fn fetch_proxy_stats(
         out.models = api::fetch_models(&url, &token).await.ok();
     }
     out
+}
+
+/// Ask the proxy which credential a conversation uses. `Ok(None)` is "not
+/// known (yet)": no credential to show, not an error.
+async fn fetch_session_credential(
+    profile_name: &str,
+    claude_session_id: &str,
+) -> Result<Option<crate::proxy::api::SessionCredential>, String> {
+    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)
+        .ok_or_else(|| format!("proxy profile '{profile_name}' not found"))?;
+    crate::proxy::api::fetch_session(&url, &token, claude_session_id)
+        .await
+        .map_err(describe_api_error)
 }
 
 /// A one-line, user-facing description of a proxy API error.

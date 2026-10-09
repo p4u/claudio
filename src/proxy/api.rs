@@ -123,6 +123,109 @@ pub struct ProviderHealth {
     pub status: String,
 }
 
+/// `GET /v1/claudio/session?id=<claude_session_id>` — the upstream credential
+/// the proxy last used for one conversation.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SessionCredential {
+    pub session_id: String,
+    pub credential: CredentialInfo,
+    pub bound_at: Option<String>,
+    pub last_seen: Option<String>,
+    /// When the proxy last moved the conversation to another credential.
+    pub switched_at: Option<String>,
+    pub utilization: Option<CredentialUtilization>,
+}
+
+/// How long after a switch the UI keeps saying so.
+pub const SWITCH_NOTICE_SECS: u64 = 600;
+
+impl SessionCredential {
+    /// The credential's name for display: its label, else its id; `None`
+    /// when the proxy sent neither.
+    pub fn name(&self) -> Option<&str> {
+        let c = &self.credential;
+        [c.label.as_str(), c.id.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+    }
+
+    /// The plan (`max`, `pro`…), if known.
+    pub fn plan(&self) -> Option<&str> {
+        Some(self.credential.plan.as_str()).filter(|p| !p.is_empty())
+    }
+
+    /// The 5-hour window utilization in percent, if reported.
+    pub fn five_hour_pct(&self) -> Option<f64> {
+        self.utilization.as_ref()?.five_hour_pct
+    }
+
+    /// Seconds since the proxy moved the conversation to this credential,
+    /// while that is recent enough (see [`SWITCH_NOTICE_SECS`]) to mention.
+    pub fn recent_switch_age(&self, now: u64) -> Option<u64> {
+        let at = parse_rfc3339(self.switched_at.as_deref()?)?;
+        Some(now.saturating_sub(at)).filter(|age| *age < SWITCH_NOTICE_SECS)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct CredentialInfo {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub plan: String,
+}
+
+/// How much of the credential's rate-limit windows is used (0..=100).
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct CredentialUtilization {
+    pub five_hour_pct: Option<f64>,
+    pub seven_day_pct: Option<f64>,
+    pub captured_at: Option<String>,
+}
+
+/// Parse an RFC 3339 timestamp (`2026-10-09T10:07:02Z`, with optional
+/// fractional seconds and `±HH:MM` offset) to unix seconds.
+pub fn parse_rfc3339(ts: &str) -> Option<u64> {
+    let (date, rest) = ts.split_once(['T', 't', ' '])?;
+    let mut d = date.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    if d.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (clock, offset) = match rest.find(['Z', 'z', '+', '-']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "Z"),
+    };
+    let mut c = clock.split(':');
+    let hour: i64 = c.next()?.parse().ok()?;
+    let min: i64 = c.next()?.parse().ok()?;
+    let sec: i64 = c.next().unwrap_or("0").split('.').next()?.parse().ok()?;
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let offset_secs: i64 = if offset.eq_ignore_ascii_case("z") {
+        0
+    } else {
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
+        let (oh, om) = offset[1..].split_once(':')?;
+        sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60)
+    };
+    // Days since 1970-01-01 (Howard Hinnant's days-from-civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3600 + min * 60 + sec - offset_secs;
+    u64::try_from(secs).ok()
+}
+
 /// Overall pool status derived from individual providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolStatus {
@@ -275,6 +378,30 @@ pub async fn fetch_models(base_url: &str, token: &str) -> Result<ModelsResponse,
         return Err(ApiError::Http(resp.status()));
     }
     Ok(resp.json().await?)
+}
+
+/// `GET /v1/claudio/session?id=<claude_session_id>` — the credential the proxy
+/// last used for a conversation. `Ok(None)` for 404: unknown yet, another
+/// user's session, a deleted credential, or a proxy without the endpoint.
+pub async fn fetch_session(
+    base_url: &str,
+    token: &str,
+    claude_session_id: &str,
+) -> Result<Option<SessionCredential>, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/session"))
+        .query(&[("id", claude_session_id)])
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    Ok(Some(resp.json().await?))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -462,5 +589,94 @@ mod tests {
         );
         let base = serve(router).await;
         assert!(check_models_fallback(&base, "tok").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fetch_session_200_full() {
+        use axum::extract::Query;
+        use axum::http::HeaderMap;
+        let router = Router::new().route(
+            "/v1/claudio/session",
+            get(
+                |Query(q): Query<std::collections::HashMap<String, String>>, h: HeaderMap| async move {
+                    // The id and the bearer token must reach the proxy.
+                    assert_eq!(q.get("id").map(String::as_str), Some("0a1b"));
+                    assert_eq!(h["authorization"], "Bearer tok");
+                    Json(serde_json::json!({
+                        "session_id": "0a1b",
+                        "credential": {"id": "cred_ab12", "label": "work-max",
+                                       "provider": "anthropic", "plan": "max"},
+                        "bound_at": "2026-10-09T10:00:00Z",
+                        "last_seen": "2026-10-09T10:12:31Z",
+                        "switched_at": "2026-10-09T10:07:02Z",
+                        "utilization": {"five_hour_pct": 37.5, "seven_day_pct": 12,
+                                        "captured_at": "2026-10-09T10:11:00Z"}
+                    }))
+                },
+            ),
+        );
+        let base = serve(router).await;
+        let s = fetch_session(&base, "tok", "0a1b").await.unwrap().unwrap();
+        assert_eq!(s.credential.label, "work-max");
+        assert_eq!(s.credential.plan, "max");
+        assert_eq!(s.switched_at.as_deref(), Some("2026-10-09T10:07:02Z"));
+        let u = s.utilization.unwrap();
+        assert_eq!(u.five_hour_pct, Some(37.5));
+        assert_eq!(u.seven_day_pct, Some(12.0));
+    }
+
+    #[tokio::test]
+    async fn fetch_session_200_minimal() {
+        let router = Router::new().route(
+            "/v1/claudio/session",
+            get(|| async {
+                Json(serde_json::json!({
+                    "session_id": "0a1b",
+                    "credential": {"id": "cred_1", "label": "personal"}
+                }))
+            }),
+        );
+        let base = serve(router).await;
+        let s = fetch_session(&base, "tok", "0a1b").await.unwrap().unwrap();
+        assert_eq!(s.credential.label, "personal");
+        assert_eq!(s.credential.plan, "");
+        assert!(s.switched_at.is_none());
+        assert!(s.utilization.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_session_404_is_none() {
+        let base = serve(Router::new()).await;
+        assert_eq!(fetch_session(&base, "tok", "0a1b").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_session_429_and_401_are_errors() {
+        for code in [429u16, 401] {
+            let router = Router::new().route(
+                "/v1/claudio/session",
+                get(move || async move {
+                    (axum::http::StatusCode::from_u16(code).unwrap(), "no")
+                }),
+            );
+            let base = serve(router).await;
+            assert!(matches!(
+                fetch_session(&base, "tok", "x").await,
+                Err(ApiError::Http(s)) if s.as_u16() == code
+            ));
+        }
+    }
+
+    #[test]
+    fn rfc3339_parses_to_unix_seconds() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-09T10:07:02Z"), Some(1_791_540_422));
+        assert_eq!(parse_rfc3339("2026-10-09T10:07:02.123456Z"), Some(1_791_540_422));
+        // +02:00 is two hours ahead of UTC.
+        assert_eq!(parse_rfc3339("2026-10-09T12:07:02+02:00"), Some(1_791_540_422));
+        assert_eq!(parse_rfc3339("2026-10-09T05:37:02-04:30"), Some(1_791_540_422));
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(parse_rfc3339("soon"), None);
+        assert_eq!(parse_rfc3339("2026-13-09T10:07:02Z"), None);
     }
 }

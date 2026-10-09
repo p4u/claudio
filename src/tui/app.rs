@@ -17,12 +17,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::ConfigResponse;
+use crate::proxy::api::{ConfigResponse, SessionCredential};
 use crate::proxy::ProxyChoice;
 
 use super::confirm::ConfirmPrompt;
 use super::keymap::Keymap;
-use super::proxy_state::ProxyFetch;
+use super::proxy_state::{
+    ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
+};
 use super::state::{ClientState, KillTombstone};
 use super::stats_view::{StatsOutcome, StatsView, Window};
 
@@ -70,6 +72,13 @@ pub enum Effect {
         profile_name: String,
         windows: Vec<Window>,
         models: bool,
+    },
+    /// Ask the proxy which upstream credential a conversation uses. The
+    /// result goes to [`App::on_session_credential`].
+    FetchSessionCredential {
+        profile_name: String,
+        session: SessionId,
+        claude_session_id: String,
     },
     /// Spawn (or respawn) a session with proxy config: the effect runner
     /// fetches the proxy config (with a 5 s timeout), builds the env, then
@@ -157,6 +166,9 @@ pub struct App {
     pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
     pub proxy_status: HashMap<String, ProxyStatus>,
+    /// The upstream credential each proxied session last used, as reported by
+    /// the proxy. Only the active session is polled; the rest is a cache.
+    pub session_creds: HashMap<SessionId, SessionCred>,
     /// Ordered list of available proxy profile names (empty = no proxy configured).
     pub proxy_profiles: Vec<String>,
     /// The default proxy profile from config.
@@ -249,6 +261,7 @@ impl App {
             effects: Vec::new(),
             proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
+            session_creds: HashMap::new(),
             proxy_profiles,
             proxy_default,
             proxy_override,
@@ -293,6 +306,76 @@ impl App {
             .or_default()
             .apply(fetch);
         self.redraw = true;
+    }
+
+    /// Look up the credential of the active session when it uses a proxy and
+    /// has a claude session id. A changed claude session id always fetches;
+    /// otherwise a lookup newer than `min_age` seconds is reused.
+    pub(super) fn refresh_session_cred(&mut self, min_age: u64) {
+        let Some(v) = self.active_view() else { return };
+        let (Some(profile), Some(csid)) = (v.proxy.clone(), v.claude_session_id.clone()) else {
+            return;
+        };
+        if v.kind != crate::proto::SessionKind::Claude || csid.is_empty() {
+            return;
+        }
+        let id = v.id;
+        let now = self.now;
+        let fresh = self.session_creds.get(&id).is_some_and(|c| {
+            c.claude_session_id == csid && now.saturating_sub(c.asked_at) < min_age
+        });
+        if fresh {
+            return;
+        }
+        let cred = match self.session_creds.remove(&id) {
+            Some(old) if old.claude_session_id == csid => old.cred,
+            _ => None,
+        };
+        self.session_creds.insert(
+            id,
+            SessionCred {
+                claude_session_id: csid.clone(),
+                cred,
+                asked_at: now,
+            },
+        );
+        self.effects.push(Effect::FetchSessionCredential {
+            profile_name: profile,
+            session: id,
+            claude_session_id: csid,
+        });
+    }
+
+    /// Called when a `FetchSessionCredential` effect completes. `result` is
+    /// `Ok(None)` when the proxy does not know the conversation (yet); an
+    /// error (rate limit, network) keeps what is cached.
+    pub fn on_session_credential(
+        &mut self,
+        session: SessionId,
+        claude_session_id: &str,
+        result: Result<Option<SessionCredential>, String>,
+    ) {
+        let Some(entry) = self.session_creds.get_mut(&session) else {
+            return;
+        };
+        // A reply for a conversation the session has since left.
+        if entry.claude_session_id != claude_session_id {
+            return;
+        }
+        if let Ok(cred) = result {
+            entry.cred = cred;
+            self.redraw = true;
+        }
+    }
+
+    /// The credential to show for a session: cached, and for its current
+    /// claude session id.
+    pub fn session_credential(&self, v: &SessionView) -> Option<&SessionCredential> {
+        let entry = self.session_creds.get(&v.id)?;
+        if v.claude_session_id.as_deref() != Some(entry.claude_session_id.as_str()) {
+            return None;
+        }
+        entry.cred.as_ref()
     }
 
     /// Proxy config for a profile, if cached and fresh (5 min).
@@ -340,6 +423,7 @@ impl App {
             .or_else(|| self.proxy_profiles.first().cloned());
         let (view, outcome) = StatsView::open(profile, borrowed);
         self.stats_outcome(view, outcome);
+        self.refresh_session_cred(SESSION_CRED_MIN_GAP_SECS);
         self.redraw = true;
     }
 
@@ -467,6 +551,7 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.now = crate::paths::unix_now();
         self.confirm_tick();
+        self.refresh_session_cred(SESSION_CRED_POLL_SECS);
         if let Some(n) = &mut self.notice {
             n.ticks_left = n.ticks_left.saturating_sub(1);
             if n.ticks_left == 0 {
@@ -1473,6 +1558,166 @@ mod tests {
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(2));
         assert!(!app.sessions[1].state.wants_attention());
+    }
+
+    // ── Proxy credential of the active session ────────────────────────────────
+
+    fn cred_fetches(effects: &[Effect]) -> Vec<(&str, SessionId, &str)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::FetchSessionCredential {
+                    profile_name,
+                    session,
+                    claude_session_id,
+                } => Some((profile_name.as_str(), *session, claude_session_id.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn work_max() -> SessionCredential {
+        SessionCredential {
+            credential: crate::proxy::api::CredentialInfo {
+                label: "work-max".into(),
+                plan: "max".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Two claude sessions on proxy profile `p`; the first is active.
+    fn proxied_app() -> (App, [SessionInfo; 2]) {
+        let live = [info(Some(1), Some("c1")), info(Some(2), Some("c2"))];
+        let mut app = app_with(&live);
+        for v in &mut app.sessions {
+            v.proxy = Some("p".into());
+        }
+        assert_eq!(app.active, Some(0));
+        (app, live)
+    }
+
+    #[test]
+    fn active_proxied_session_fetches_its_credential_on_activation() {
+        let (mut app, live) = proxied_app();
+        app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
+        let effects = app.take_effects();
+        assert_eq!(cred_fetches(&effects), vec![("p", live[1].id, "c2")]);
+        // Back at the first one soon after: no second request inside the gap.
+        app.on_terminal(key(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
+        assert!(
+            cred_fetches(&app.take_effects()).is_empty(),
+            "c2 was asked a moment ago"
+        );
+    }
+
+    #[test]
+    fn credential_is_polled_every_30_seconds_while_active() {
+        let (mut app, live) = proxied_app();
+        app.refresh_session_cred(0);
+        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        app.on_tick();
+        assert!(cred_fetches(&app.take_effects()).is_empty(), "too soon");
+        app.session_creds.get_mut(&live[0].id).unwrap().asked_at -= 29;
+        app.on_tick();
+        assert!(cred_fetches(&app.take_effects()).is_empty(), "29 s");
+        app.session_creds.get_mut(&live[0].id).unwrap().asked_at -= 2;
+        app.on_tick();
+        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        // Only the active session is polled.
+        assert!(!app.session_creds.contains_key(&live[1].id));
+    }
+
+    #[test]
+    fn opening_the_stats_popup_refreshes_the_credential() {
+        let (mut app, live) = proxied_app();
+        app.refresh_session_cred(0);
+        app.take_effects();
+        app.session_creds.get_mut(&live[0].id).unwrap().asked_at -= 6;
+        app.open_proxy_stats();
+        let effects = app.take_effects();
+        assert_eq!(cred_fetches(&effects), vec![("p", live[0].id, "c1")]);
+    }
+
+    #[test]
+    fn no_credential_fetch_for_direct_sessions_terminals_or_missing_ids() {
+        // Direct session.
+        let live = [info(Some(1), Some("c1"))];
+        let mut app = app_with(&live);
+        app.refresh_session_cred(0);
+        app.on_tick();
+        assert!(cred_fetches(&app.take_effects()).is_empty());
+        // Proxied but no claude session id yet.
+        let live = [info(Some(1), None)];
+        let mut app = app_with(&live);
+        app.sessions[0].proxy = Some("p".into());
+        app.refresh_session_cred(0);
+        app.on_tick();
+        assert!(cred_fetches(&app.take_effects()).is_empty());
+        // A terminal tab.
+        let live = [shell_info(Some(1))];
+        let mut app = app_with(&live);
+        app.sessions[0].proxy = Some("p".into());
+        app.sessions[0].claude_session_id = Some("c1".into());
+        app.refresh_session_cred(0);
+        app.on_tick();
+        assert!(cred_fetches(&app.take_effects()).is_empty());
+        assert!(app.session_creds.is_empty());
+    }
+
+    #[test]
+    fn a_new_claude_session_id_fetches_again_at_once() {
+        let (mut app, live) = proxied_app();
+        app.refresh_session_cred(0);
+        app.take_effects();
+        app.on_incoming_from(
+            "local",
+            Incoming::Event {
+                id: live[0].id,
+                event: SessionEvent::ClaudeSession {
+                    claude_session_id: "c1-reset".into(),
+                },
+            },
+        );
+        assert_eq!(
+            cred_fetches(&app.take_effects()),
+            vec![("p", live[0].id, "c1-reset")]
+        );
+    }
+
+    #[test]
+    fn credential_replies_are_matched_to_the_claude_session_id() {
+        let (mut app, live) = proxied_app();
+        let id = live[0].id;
+        app.refresh_session_cred(0);
+        app.take_effects();
+        assert!(app.session_credential(&app.sessions[0]).is_none());
+
+        // A reply for another conversation is dropped.
+        app.on_session_credential(id, "other", Ok(Some(work_max())));
+        assert!(app.session_credential(&app.sessions[0]).is_none());
+
+        app.on_session_credential(id, "c1", Ok(Some(work_max())));
+        let name = app.session_credential(&app.sessions[0]).and_then(|c| c.name());
+        assert_eq!(name, Some("work-max"));
+
+        // An error (429, network) keeps what is shown; a 404 clears it.
+        app.on_session_credential(id, "c1", Err("rate limited".into()));
+        assert!(app.session_credential(&app.sessions[0]).is_some());
+        app.on_session_credential(id, "c1", Ok(None));
+        assert!(app.session_credential(&app.sessions[0]).is_none());
+
+        // After the claude session id changes, the old credential is not shown.
+        app.on_session_credential(id, "c1", Ok(Some(work_max())));
+        app.sessions[0].claude_session_id = Some("c1-reset".into());
+        assert!(app.session_credential(&app.sessions[0]).is_none());
+
+        // Closing the session forgets it.
+        app.remove(0);
+        assert!(!app.session_creds.contains_key(&id));
     }
 
     // ── Wizard generation / S7 ────────────────────────────────────────────────

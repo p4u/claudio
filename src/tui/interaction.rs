@@ -647,6 +647,7 @@ impl App {
             SessionEvent::ClaudeSession { claude_session_id } => {
                 v.claude_session_id = Some(claude_session_id);
                 self.save();
+                self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
             }
             SessionEvent::Title { title } => v.title = Some(title),
             SessionEvent::Exited { .. } => v.state = SessionState::Exited,
