@@ -7,3 +7,6 @@ pub mod api;
 pub mod cmd;
 pub mod env;
 pub mod profile;
+pub mod resolve;
+
+pub use resolve::ProxyChoice;

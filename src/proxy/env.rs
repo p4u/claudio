@@ -77,6 +77,33 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
     env
 }
 
+/// How to alter the environment a `claude` process inherits.
+///
+/// Returned by [`env_diff`] so every launcher (the daemon's PTY builder,
+/// `--plain`'s `std::process::Command`) applies the same rules with its own
+/// builder type.
+#[derive(Debug, PartialEq)]
+pub struct EnvDiff<'a> {
+    /// Variables to remove from the inherited environment.
+    pub remove: Vec<&'static str>,
+    /// Variables to set.
+    pub set: &'a [(String, String)],
+}
+
+/// The env changes for a claude session that carries `env` (a proxy's
+/// [`session_env`], or empty).
+///
+/// Scrubs the markers of a parent claude session (see
+/// [`crate::claude::SESSION_MARKERS`]). A proxy token replaces any
+/// `ANTHROPIC_API_KEY`, which would otherwise win over it.
+pub fn env_diff(env: &[(String, String)]) -> EnvDiff<'_> {
+    let mut remove = crate::claude::SESSION_MARKERS.to_vec();
+    if env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
+        remove.push("ANTHROPIC_API_KEY");
+    }
+    EnvDiff { remove, set: env }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -173,6 +200,25 @@ mod tests {
         let env = session_env(&p, None);
         // ANTHROPIC_API_KEY must not appear (the daemon removes it separately).
         assert!(env_get(&env, "ANTHROPIC_API_KEY").is_none());
+    }
+
+    #[test]
+    fn env_diff_scrubs_markers_and_keeps_api_key_without_token() {
+        let diff = env_diff(&[]);
+        assert_eq!(diff.remove, crate::claude::SESSION_MARKERS);
+        assert!(diff.set.is_empty());
+    }
+
+    #[test]
+    fn env_diff_drops_api_key_only_with_auth_token() {
+        let env = session_env(&profile("https://x.net", "tok"), None);
+        let diff = env_diff(&env);
+        assert!(diff.remove.contains(&"CLAUDECODE"));
+        assert!(diff.remove.contains(&"ANTHROPIC_API_KEY"));
+        assert_eq!(diff.set, env.as_slice());
+        // Other entries alone don't count as a token.
+        let other = [("API_TIMEOUT_MS".to_owned(), "1".to_owned())];
+        assert!(!env_diff(&other).remove.contains(&"ANTHROPIC_API_KEY"));
     }
 
     #[test]

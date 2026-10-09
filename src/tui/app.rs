@@ -8,7 +8,7 @@
 //!
 //! Sub-modules hold the individual types (S1 split):
 //! - `sessions`      – SessionView, sanitize_label
-//! - `proxy_state`   – ProxyStatus, load_proxy_profiles, proxy_env_for
+//! - `proxy_state`   – ProxyStatus
 //! - `notifications` – Notice, check_notifications
 //! - `interaction`   – Modal
 
@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
 use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
+use crate::proxy::ProxyChoice;
 
 use super::keymap::Keymap;
 use super::state::{ClientState, KillTombstone};
@@ -26,21 +27,6 @@ pub use super::interaction::Modal;
 pub use super::notifications::Notice;
 pub use super::proxy_state::ProxyStatus;
 pub use super::sessions::SessionView;
-
-/// How the manager should apply a proxy for new sessions.
-///
-/// Resolved once at startup (from `--proxy`/`--no-proxy` flags or config)
-/// and used as the pre-selected proxy in the new-session wizard.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum ProxyChoice {
-    /// Use the profile named in `config.toml [proxy] default` (the default).
-    #[default]
-    Default,
-    /// Explicitly no proxy, even when a default is configured (--no-proxy).
-    Direct,
-    /// Use a specific named profile (--proxy <name>).
-    Profile(String),
-}
 
 /// Rows taken by the tab bar and the two-line status bar.
 pub(super) const CHROME_ROWS: u16 = 3;
@@ -207,7 +193,7 @@ impl App {
         keymap: Keymap,
         proxy_override: ProxyChoice,
     ) -> App {
-        let (proxy_profiles, proxy_default) = super::proxy_state::load_proxy_profiles();
+        let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
         App {
             sessions: Vec::new(),
             active: None,
@@ -317,7 +303,7 @@ impl App {
         &self,
         proxy_name: Option<&str>,
     ) -> Result<Vec<(String, String)>, String> {
-        super::proxy_state::proxy_env_for(
+        crate::proxy::resolve::proxy_env_for(
             proxy_name,
             proxy_name.and_then(|n| self.proxy_config_cached(n)),
         )

@@ -18,6 +18,7 @@ mod config;
 mod daemon;
 mod msglog;
 mod paths;
+mod plain;
 mod print;
 mod proto;
 mod proxy;
@@ -146,17 +147,23 @@ fn main() -> std::process::ExitCode {
         return sessions_cmd();
     }
 
+    // `claudio --plain [--proxy <name>|--no-proxy] [claude args…]` — plain
+    // claude with the manager's proxy environment, no daemon or TUI.
+    if argv.get(1).map(String::as_str) == Some("--plain") {
+        return plain::run(&argv[2..]);
+    }
+
     // `claudio [--proxy <name>|--no-proxy]` — open the session manager with a
     // proxy override applied to every new session.
     if argv.len() == 1 {
         return tui::run();
     }
     if argv.get(1).map(String::as_str) == Some("--no-proxy") && argv.len() == 2 {
-        return tui::run_with_proxy(tui::app::ProxyChoice::Direct);
+        return tui::run_with_proxy(proxy::ProxyChoice::Direct);
     }
     if argv.get(1).map(String::as_str) == Some("--proxy") {
         if let Some(name) = argv.get(2).cloned() {
-            return tui::run_with_proxy(tui::app::ProxyChoice::Profile(name));
+            return tui::run_with_proxy(proxy::ProxyChoice::Profile(name));
         }
         eprintln!("claudio: --proxy requires a profile name");
         return std::process::ExitCode::FAILURE;
@@ -328,29 +335,9 @@ fn sessions_cmd() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// Replace this process with the real `claude`, forwarding argv verbatim. On
-/// Unix this is a true `execvp` (transparent signals, exit code, TTY). On other
-/// platforms we spawn, wait, and propagate the exit code.
+/// Replace this process with the real `claude`, forwarding argv verbatim.
 fn exec_claude_transparently(args: &[String]) -> std::process::ExitCode {
-    let claude = std::env::var("CLAUDIO_CLAUDE_PATH").unwrap_or_else(|_| "claude".into());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(&claude).args(args).exec();
-        // exec only returns on failure.
-        eprintln!("claudio: could not exec '{claude}': {err}");
-        std::process::ExitCode::from(127)
-    }
-
-    #[cfg(not(unix))]
-    {
-        match std::process::Command::new(&claude).args(args).status() {
-            Ok(status) => std::process::ExitCode::from(status.code().unwrap_or(1) as u8),
-            Err(e) => {
-                eprintln!("claudio: could not run '{claude}': {e}");
-                std::process::ExitCode::from(127)
-            }
-        }
-    }
+    let mut cmd = std::process::Command::new(claude::binary());
+    cmd.args(args);
+    claude::exec(cmd)
 }

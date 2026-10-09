@@ -31,6 +31,7 @@ use super::{host, Daemon};
 use crate::claude::hooks;
 use crate::claude::state::Tracker;
 use crate::proto::{Envelope, Frame, Msg, SessionEvent, SessionId, SessionState, SpawnSpec};
+use crate::proxy::env::env_diff;
 use crate::term::probe::ProbeResponder;
 use crate::term::screen::Screen;
 
@@ -219,20 +220,19 @@ fn command(cfg: &super::Config, spec: &SpawnSpec, cwd: &Path, token: &str) -> Co
     cmd
 }
 
-/// Start from the daemon's env (the builder's default), scrub what would leak
-/// from a daemon started inside claude, set the terminal type, then apply the
-/// spec's env. A proxy token replaces any API key.
+/// Start from the daemon's env (the builder's default), apply the shared
+/// [`env_diff`] (scrubs what would leak from a daemon started inside claude;
+/// a proxy token replaces any API key), set the terminal type, then set the
+/// spec's env.
 fn apply_env(cmd: &mut CommandBuilder, env: &[(String, String)]) {
-    for marker in CLAUDE_SESSION_MARKERS {
-        cmd.env_remove(marker);
+    let diff = env_diff(env);
+    for key in diff.remove {
+        cmd.env_remove(key);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    for (k, v) in env {
+    for (k, v) in diff.set {
         cmd.env(k, v);
-    }
-    if env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
-        cmd.env_remove("ANTHROPIC_API_KEY");
     }
 }
 
@@ -244,26 +244,6 @@ fn clean_title(title: &str) -> &str {
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim()
 }
-
-/// Variables a running claude sets for its own children. A daemon started
-/// from inside a claude session inherits them, and a session spawned with them
-/// believes it is a child: it turns off transcript saving (breaking `--resume`)
-/// and talks to the parent's messaging socket. User settings such as
-/// `CLAUDE_CODE_USE_GATEWAY` are deliberately kept.
-const CLAUDE_SESSION_MARKERS: &[&str] = &[
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
-    "CLAUDE_CODE_EXECPATH",
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_SESSION_ID",
-    "CLAUDE_PID",
-    "CLAUDE_EFFORT",
-];
 
 fn size_or_default(rows: u16, cols: u16) -> (u16, u16) {
     if rows == 0 || cols == 0 {

@@ -1317,3 +1317,102 @@ fn scopeguard<F: FnOnce()>(f: F) -> ScopeGuard<F> {
 fn shell_quote_ssh(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
+
+// ── `claudio --plain` ─────────────────────────────────────────────────────────
+
+/// A fake claude that records its argv and environment, then exits 7.
+fn write_recording_claude(harness: &ManagerHarness) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let out = harness.root.join("plain-out");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.args'\nenv > '{0}.env'\nexit 7\n",
+        out.display()
+    );
+    fs::write(&harness.fake_claude, script).expect("write recording claude");
+    fs::set_permissions(&harness.fake_claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod recording claude");
+    out
+}
+
+/// `claudio --plain …` run to completion with the harness's isolated env,
+/// as if started from inside a claude session with an API key.
+fn run_plain(
+    harness: &ManagerHarness,
+    args: &[&str],
+    proxy_url: Option<&str>,
+) -> std::process::Output {
+    let mut cmd = std::process::Command::new(BINARY);
+    cmd.arg("--plain")
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("XDG_RUNTIME_DIR", &harness.runtime_dir)
+        .env("XDG_CONFIG_HOME", &harness.config_home)
+        .env("HOME", &harness.home)
+        .env("CLAUDIO_CLAUDE_PATH", &harness.fake_claude)
+        .env("CLAUDECODE", "1")
+        .env("ANTHROPIC_API_KEY", "test-key-not-real");
+    if let Some(url) = proxy_url {
+        cmd.env("CLAUDIO_PROXY_URL", url);
+    }
+    cmd.output().expect("claudio --plain failed to spawn")
+}
+
+/// With a proxy profile (here an unreachable one, so the built-in model
+/// defaults apply), claude gets the gateway env, loses the parent-session
+/// marker and the API key, keeps the user's args, and its exit code is
+/// claudio's.
+#[test]
+fn test_plain_injects_proxy_env() {
+    let harness = ManagerHarness::new();
+    let out = write_recording_claude(&harness);
+
+    let res = run_plain(&harness, &["-c", "hello"], Some("sekret@127.0.0.1:1"));
+    assert_eq!(res.status.code(), Some(7), "exit code should be claude's");
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(
+        stderr.contains("built-in model defaults"),
+        "fallback should be announced on stderr: {stderr}"
+    );
+
+    let args = fs::read_to_string(out.with_extension("args")).expect("argv recorded");
+    assert_eq!(args, "-c\nhello\n", "the token must never reach argv");
+    let env = fs::read_to_string(out.with_extension("env")).expect("env recorded");
+    assert!(env.contains("ANTHROPIC_AUTH_TOKEN=sekret"), "{env}");
+    assert!(env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"), "{env}");
+    assert!(env.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus"), "{env}");
+    assert!(!env.contains("ANTHROPIC_API_KEY"), "api key must be removed: {env}");
+    assert!(!env.contains("CLAUDECODE"), "session marker must be scrubbed: {env}");
+}
+
+/// `--no-proxy` is plain passthrough plus the marker scrub: the API key stays
+/// and no gateway env appears.
+#[test]
+fn test_plain_no_proxy_keeps_api_key() {
+    let harness = ManagerHarness::new();
+    let out = write_recording_claude(&harness);
+
+    let res = run_plain(&harness, &["--no-proxy", "-c"], Some("sekret@127.0.0.1:1"));
+    assert_eq!(res.status.code(), Some(7));
+    assert!(res.stderr.is_empty(), "no proxy, nothing to report");
+
+    let args = fs::read_to_string(out.with_extension("args")).expect("argv recorded");
+    assert_eq!(args, "-c\n");
+    let env = fs::read_to_string(out.with_extension("env")).expect("env recorded");
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN"), "{env}");
+    assert!(!env.contains("CLAUDECODE"), "{env}");
+}
+
+/// `--plain -p` is rejected with a hint, without starting claude.
+#[test]
+fn test_plain_rejects_print_mode() {
+    let harness = ManagerHarness::new();
+    let out = write_recording_claude(&harness);
+
+    let res = run_plain(&harness, &["-p", "hi"], None);
+    assert_eq!(res.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(stderr.contains("-p is not supported with --plain"), "{stderr}");
+    assert!(!out.with_extension("args").exists(), "claude must not run");
+}

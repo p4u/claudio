@@ -335,6 +335,9 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20Flags (consumed by claudio, not forwarded to claude):\n\
 \x20  -p, --print                 Emulate print mode via the interactive PTY (claudio never runs `claude -p`).\n\
 \x20  --api                       Run the OpenAI-compatible API server (POST /v1/chat/completions, /v1/models).\n\
+\x20  --plain [--proxy NAME|--no-proxy] [claude args…]\n\
+\x20                              Run plain interactive claude with the proxy env of a manager session\n\
+\x20                              (no daemon, no TUI). Must be the first argument; -p/--api are rejected.\n\
 \x20  --fast                      Strip human-like typing/quiescence delays for lowest latency.\n\
 \x20  --log-messages              Log the full CLI⇄claudio⇄claude message flow to stderr (colorized).\n\
 \x20  --log-messages-file <path>  Also append the raw message flow to <path> as JSON Lines (untruncated).\n\

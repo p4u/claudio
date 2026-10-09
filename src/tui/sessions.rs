@@ -312,13 +312,9 @@ impl App {
         let host_candidates = crate::remote::hosts::candidates();
         // Determine effective proxy default for the wizard:
         // active session's proxy > startup override > config default.
-        let proxy_default = active_proxy.as_deref().or_else(|| {
-            match &self.proxy_override {
-                crate::tui::app::ProxyChoice::Direct => None,
-                crate::tui::app::ProxyChoice::Profile(p) => Some(p.as_str()),
-                crate::tui::app::ProxyChoice::Default => self.proxy_default.as_deref(),
-            }
-        });
+        let proxy_default = active_proxy
+            .as_deref()
+            .or_else(|| self.proxy_override.pick(self.proxy_default.as_deref()));
         self.modal = Some(Modal::Wizard(Wizard::new(
             seeds,
             self.home.clone(),

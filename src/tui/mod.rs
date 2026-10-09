@@ -68,7 +68,7 @@ fn emit_notification(label: &str) {
 
 /// Run the manager until the user quits.
 pub fn run() -> ExitCode {
-    run_with_proxy(app::ProxyChoice::Default)
+    run_with_proxy(crate::proxy::ProxyChoice::Default)
 }
 
 /// Like [`run`] but applies a startup proxy override to every new session.
@@ -76,7 +76,7 @@ pub fn run() -> ExitCode {
 /// - `Direct`  → new sessions never use a proxy (--no-proxy).
 /// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
 /// - `Default` → wizard pre-selects the config.toml default, if any.
-pub fn run_with_proxy(proxy_override: app::ProxyChoice) -> ExitCode {
+pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -92,7 +92,7 @@ pub fn run_with_proxy(proxy_override: app::ProxyChoice) -> ExitCode {
     code
 }
 
-async fn main(proxy_override: app::ProxyChoice) -> ExitCode {
+async fn main(proxy_override: crate::proxy::ProxyChoice) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let cfg = crate::config::load();
     let mut key_notices = Vec::new();
@@ -255,7 +255,7 @@ async fn event_loop(
     update_check_enabled: bool,
     km: keymap::Keymap,
     key_notices: Vec<String>,
-    proxy_override: app::ProxyChoice,
+    proxy_override: crate::proxy::ProxyChoice,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
@@ -624,7 +624,7 @@ fn run_effect(
                 .flatten();
 
                 // Build env from profile + (possibly fresh) config.
-                let env = proxy_state::proxy_env_for(
+                let env = crate::proxy::resolve::proxy_env_for(
                     Some(&proxy_name),
                     cfg.as_ref(),
                 );
@@ -661,7 +661,7 @@ fn run_effect(
 
 /// Fetch proxy config for a named profile. Returns `None` on any error.
 async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::ConfigResponse> {
-    let (url, token) = proxy_state::resolve_profile(profile_name)?;
+    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)?;
     match crate::proxy::api::fetch_config(&url, &token).await {
         Ok(Some(cfg)) => Some(cfg),
         Ok(None) => None,
@@ -676,7 +676,7 @@ async fn fetch_proxy_stats(
     Option<crate::proxy::api::StatsResponse>,
     Option<crate::proxy::api::PoolHealthResponse>,
 ) {
-    let Some((url, token)) = proxy_state::resolve_profile(profile_name) else {
+    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
         return (None, None);
     };
     let stats = crate::proxy::api::fetch_stats(&url, &token, "24h")
