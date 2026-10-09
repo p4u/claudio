@@ -17,7 +17,6 @@ mod stats;
 mod status;
 
 pub use stats::stats_max_scroll;
-pub use status::state_name;
 use confirm::draw_confirm;
 use git::draw_git;
 use stats::draw_proxy_stats;
@@ -792,7 +791,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
             let age = fmt_age(app.now.saturating_sub(v.created_at));
             let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
             let state = match v.kind {
-                SessionKind::Claude => state_name(v.state),
+                SessionKind::Claude => v.state.name(),
                 SessionKind::Shell => "terminal",
             };
             let label = v.label();

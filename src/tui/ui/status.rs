@@ -82,20 +82,6 @@ fn state_color(state: SessionState) -> Color {
 
 // ── Status bar ────────────────────────────────────────────────────────────────
 
-/// Human name of a session state.
-pub fn state_name(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Starting => "starting",
-        SessionState::Working => "working",
-        SessionState::NeedsApproval => "needs approval",
-        SessionState::NeedsInput => "needs input",
-        SessionState::Idle => "idle",
-        SessionState::Error => "error",
-        SessionState::Exited => "exited",
-        SessionState::Unknown => "unknown",
-    }
-}
-
 /// Line 1: session info — host:cwd, branch, model, context tokens, state, proxy.
 pub(super) fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
     let spans = if !app.connected {
@@ -133,7 +119,7 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
     if let Some(ctx) = v.context_tokens {
         segments.push(vec![colored(fmt_tokens_k(ctx), CYAN)]);
     }
-    segments.push(vec![colored(state_name(v.state), state_color(v.state))]);
+    segments.push(vec![colored(v.state.name(), state_color(v.state))]);
     if v.created_at > 0 && app.now >= v.created_at {
         segments.push(vec![dim(fmt_age(app.now.saturating_sub(v.created_at)))]);
     }

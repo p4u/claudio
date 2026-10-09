@@ -441,6 +441,20 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    /// The state's human name: "needs approval", "idle"…
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Working => "working",
+            Self::NeedsApproval => "needs approval",
+            Self::NeedsInput => "needs input",
+            Self::Idle => "idle",
+            Self::Error => "error",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// Whether the user should be pulled to this session.
     pub fn wants_attention(self) -> bool {
         matches!(self, Self::NeedsApproval | Self::NeedsInput | Self::Error)

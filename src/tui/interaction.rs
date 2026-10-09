@@ -846,6 +846,6 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
     let label = v.label().to_lowercase();
     let cwd = v.cwd.to_lowercase();
     let host = v.host.to_lowercase();
-    let state = super::ui::state_name(v.state).to_lowercase();
+    let state = v.state.name();
     label.contains(&f) || cwd.contains(&f) || host.contains(&f) || state.contains(&f)
 }

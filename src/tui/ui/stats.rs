@@ -20,7 +20,7 @@ use super::super::stats_view::{
     bar, delta, family, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, short_model, Family, Page,
     StatsView, Window,
 };
-use super::{centered, fmt_age, popup, state_name, str_width, truncate};
+use super::{centered, fmt_age, popup, str_width, truncate};
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;
@@ -416,7 +416,7 @@ fn session_summary(v: &SessionView, now: u64) -> Vec<Span<'static>> {
         spans.push(Span::styled(" · ctx ".to_owned(), dim()));
         spans.push(Span::raw(fmt_tokens(ctx as i64)));
     }
-    spans.push(Span::styled(format!(" · {}", state_name(v.state)), dim()));
+    spans.push(Span::styled(format!(" · {}", v.state.name()), dim()));
     if v.created_at > 0 && now >= v.created_at {
         spans.push(Span::styled(
             format!(" · up {}", fmt_age(now - v.created_at)),
@@ -830,7 +830,7 @@ fn sessions_lines(app: &App, profile: &str, lines: &mut Vec<Line<'static>>) {
                 fg(family_color(family(model))),
             ),
             Span::raw(format!("{ctx:>6}  ")),
-            Span::raw(format!("{:<10} ", state_name(v.state))),
+            Span::raw(format!("{:<10} ", v.state.name())),
             Span::styled(format!("{up:>4}"), dim()),
         ]));
     }
