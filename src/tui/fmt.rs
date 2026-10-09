@@ -3,6 +3,8 @@
 
 use ratatui::text::Span;
 
+use crate::proxy::api::parse_rfc3339;
+
 /// Token counts as `claudio proxy status` prints them: `1.2M`, `340k`, `42`.
 pub use crate::proxy::cmd::fmt_tokens;
 
@@ -162,14 +164,12 @@ pub fn fmt_utc(secs: i64) -> String {
     )
 }
 
-/// `2026-10-09T15:00:00Z` → `2026-10-09 15:00 UTC`; other strings unchanged.
+/// `2026-10-09T15:00:00Z` → `2026-10-09 15:00 UTC`; anything that is not an
+/// RFC 3339 timestamp is shown as it is.
 pub fn fmt_rfc3339(ts: &str) -> String {
-    match ts.split_once('T') {
-        Some((date, rest)) if ts.ends_with('Z') && rest.len() >= 6 => {
-            format!("{date} {} UTC", &rest[..5])
-        }
-        _ => ts.to_owned(),
-    }
+    parse_rfc3339(ts)
+        .and_then(|secs| i64::try_from(secs).ok())
+        .map_or_else(|| ts.to_owned(), fmt_utc)
 }
 
 #[cfg(test)]
@@ -239,6 +239,15 @@ mod tests {
         assert_eq!(short_model("claude-opus-5-5[1m]"), "opus-5-5[1m]");
         assert_eq!(short_model("gpt-x"), "gpt-x");
         assert_eq!(fmt_rfc3339("2026-10-09T15:00:00Z"), "2026-10-09 15:00 UTC");
+        assert_eq!(fmt_rfc3339("2026-10-09T15:00:59.5+02:00"), "2026-10-09 13:00 UTC");
         assert_eq!(fmt_rfc3339("soon"), "soon");
+    }
+
+    #[test]
+    fn a_malformed_timestamp_is_shown_as_is() {
+        // Slicing this by bytes would split `é` and panic.
+        assert_eq!(fmt_rfc3339("2026-10-09T1234éZ"), "2026-10-09T1234éZ");
+        assert_eq!(fmt_rfc3339("2026-10-09Té"), "2026-10-09Té");
+        assert_eq!(fmt_rfc3339(""), "");
     }
 }
