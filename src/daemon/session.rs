@@ -43,10 +43,20 @@ const CHUNK: usize = 64 * 1024;
 /// A lagging subscriber is resynced once this many queue slots are free.
 const RESYNC_ROOM: usize = 64;
 
+/// Timer-based lag recovery: check for resyncs this often even without new output.
+const LAG_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Queue depths: actor commands, PTY output chunks, PTY input writes.
 const CMD_QUEUE: usize = 256;
 const OUTPUT_QUEUE: usize = 64;
 const INPUT_QUEUE: usize = 256;
+
+/// How long after child exit to drain remaining PTY output before giving up.
+const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// If claude exits with no SessionStart within this window, consider it a
+/// failed `--resume` (conversation gone) and retry once without `--resume`.
+const RESUME_RETRY_WINDOW: Duration = Duration::from_secs(3);
 
 /// After `Kill`'s SIGHUP, how long the child gets before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
@@ -107,6 +117,7 @@ pub async fn status(tx: &mpsc::Sender<Cmd>, wait: Duration) -> Option<Status> {
 }
 
 /// Start claude for `spec` under a new PTY and spawn its actor.
+/// Called from `spawn_blocking` — must not use tokio primitives.
 pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> Result<Handle, String> {
     let cwd = host::expand_tilde(&spec.cwd);
     if !cwd.is_dir() {
@@ -143,6 +154,10 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> Result<Handle, String> {
         }
     };
 
+    // Detect whether this spawn uses --resume (for retry logic, §2.3).
+    let spawned_with_resume = spec.args.iter().any(|a| a == "--resume");
+    let spawn_time = std::time::Instant::now();
+
     let (tx, cmds) = mpsc::channel(CMD_QUEUE);
     let actor = Actor {
         id: spec.id,
@@ -157,6 +172,8 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> Result<Handle, String> {
         tracker: Tracker::new(),
         title: None,
         subs: HashMap::new(),
+        spawned_with_resume,
+        spawn_time,
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit));
     Ok(Handle { tx, token, pid })
@@ -346,6 +363,10 @@ struct Actor {
     tracker: Tracker,
     title: Option<String>,
     subs: HashMap<ClientId, Subscriber>,
+    /// Whether this spawn included `--resume` (for retry logic on quick exit).
+    spawned_with_resume: bool,
+    /// When the child was spawned, for measuring quick-exit window.
+    spawn_time: std::time::Instant,
 }
 
 impl Actor {
@@ -355,6 +376,10 @@ impl Actor {
         mut output: mpsc::Receiver<Vec<u8>>,
         mut exit: oneshot::Receiver<Option<i32>>,
     ) {
+        // Timer-based lag recovery: resync even when the child is silent.
+        let mut lag_check = tokio::time::interval(LAG_CHECK_INTERVAL);
+        lag_check.tick().await; // consume the immediate first tick
+
         loop {
             tokio::select! {
                 // Commands first: keystrokes and attaches must not queue
@@ -370,15 +395,45 @@ impl Actor {
                 },
                 Some(bytes) = output.recv() => self.on_output(&bytes),
                 code = &mut exit => {
-                    // Output still queued was written before the exit.
-                    while let Ok(bytes) = output.try_recv() {
-                        self.on_output(&bytes);
+                    let exit_code = code.ok().flatten();
+                    // Drain until the reader thread closes the channel (PTY EOF)
+                    // so final output is never lost. A deadline prevents blocking
+                    // forever if another process holds the PTY slave open.
+                    let drain_deadline =
+                        tokio::time::Instant::now() + EXIT_DRAIN_TIMEOUT;
+                    loop {
+                        match tokio::time::timeout_at(drain_deadline, output.recv()).await {
+                            Ok(Some(bytes)) => self.on_output(&bytes),
+                            Ok(None) | Err(_) => break,
+                        }
                     }
-                    self.on_exit(code.ok().flatten());
+                    self.on_exit(exit_code);
                     return;
                 }
+                _ = lag_check.tick() => self.resync_lagging(),
             }
         }
+    }
+
+    /// Timer-driven resync for lagging subscribers.
+    ///
+    /// Called on every lag-check tick regardless of new PTY output, so a
+    /// subscriber that overflowed during a burst gets resynced even if the
+    /// child subsequently goes silent (e.g. waiting for input).
+    fn resync_lagging(&mut self) {
+        if !self.subs.values().any(Subscriber::can_resync) {
+            return;
+        }
+        let id = self.id;
+        let size = self.screen.size();
+        let snapshot = self.screen.snapshot();
+        self.subs.retain(|_, sub| {
+            if sub.can_resync() {
+                sub.sync(id, size, &snapshot)
+            } else {
+                !sub.queue.is_closed()
+            }
+        });
     }
 
     fn on_cmd(&mut self, cmd: Cmd) {
@@ -506,17 +561,43 @@ impl Actor {
     }
 
     /// The child exited: the session goes dormant (it stays journaled).
+    ///
+    /// **Resume-failure retry (design §2.3):** if this spawn used `--resume`
+    /// and the child exited within [`RESUME_RETRY_WINDOW`] with a non-zero
+    /// exit code before any `SessionStart` hook fired, we broadcast a notice
+    /// and re-spawn without `--resume` (the conversation may have been deleted).
+    /// The retry happens at most once per spawn.
     fn on_exit(&mut self, code: Option<i32>) {
         tracing::info!(id = %self.id, ?code, "session exited");
+
+        // Check resume-retry condition (§2.3).
+        let quick_exit = self.spawn_time.elapsed() < RESUME_RETRY_WINDOW;
+        let no_session_start = self.tracker.state == crate::proto::SessionState::Starting;
+        let nonzero_exit = code.map(|c| c != 0).unwrap_or(true);
+
+        if self.spawned_with_resume && quick_exit && no_session_start && nonzero_exit {
+            tracing::info!(id = %self.id, "resume failed (conversation gone?); will retry fresh");
+            // Emit a notice so the client can show a message.
+            self.daemon.broadcast(
+                self.id,
+                SessionEvent::Title {
+                    title: "conversation not found; started fresh".to_owned(),
+                },
+            );
+            // Attempt a fresh spawn (no --resume) via the daemon.
+            // This is best-effort; we proceed to dormant on failure.
+            let id = self.id;
+            let daemon = Arc::clone(&self.daemon);
+            tokio::spawn(async move {
+                daemon.retry_spawn_fresh(id).await;
+            });
+            return;
+        }
+
         self.daemon.forget_live(self.id, &self.token);
-        self.daemon.broadcast(
-            self.id,
-            SessionEvent::State {
-                state: SessionState::Exited,
-            },
-        );
         self.daemon
-            .broadcast(self.id, SessionEvent::Exited { code });
+            .broadcast(self.id, SessionEvent::State { state: SessionState::Exited });
+        self.daemon.broadcast(self.id, SessionEvent::Exited { code });
     }
 
     /// SIGHUP the child; SIGKILL it if it is still around after a grace
