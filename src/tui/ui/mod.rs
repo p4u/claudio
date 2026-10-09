@@ -503,10 +503,10 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
 
     // Step 1: directory picker.
     let title = if w.host == "local" {
-        "New session: directory (Tab complete · Enter pick · Esc cancel)".to_owned()
+        "New session: directory (↑/↓ move · Tab open · Enter pick · Esc cancel)".to_owned()
     } else {
         format!(
-            "New session on {} (Tab complete · Enter pick · Esc cancel)",
+            "New session on {} (↑/↓ move · Tab open · Enter pick · Esc cancel)",
             w.host
         )
     };
@@ -520,11 +520,16 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         return;
     }
     draw_input(frame, head, "> ", &w.input);
-    // Second head row: the hidden-dirs toggle state.
+    // Second head row: browse-mode key hints and the hidden-dirs toggle state.
     if head.height > 1 {
         let state = if w.hidden_visible() { "on" } else { "off" };
+        let hint = if w.browsing() {
+            "→ open · ← up · Enter start session · "
+        } else {
+            ""
+        };
         frame.render_widget(
-            Paragraph::new(format!("{toggle_key} hidden: {state}"))
+            Paragraph::new(format!("{hint}{toggle_key} hidden: {state}"))
                 .style(Style::default().add_modifier(Modifier::DIM)),
             Rect { y: head.y + 1, height: 1, ..head },
         );
@@ -550,13 +555,24 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
     let offset = selected.saturating_sub(visible - 1);
     let width = area.width as usize;
 
-    let lines: Vec<Line> = w
-        .items
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible)
-        .map(|(i, path)| {
+    // In browse mode row 0 is the "start here" pseudo-entry, ahead of the items.
+    let here = w.here_dir().map(|dir| {
+        let style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let style = if w.here_selected() {
+            style.add_modifier(Modifier::REVERSED)
+        } else {
+            style
+        };
+        let text = truncate(&format!("▸ start here: {}", w.display(&dir)), width);
+        let pad = " ".repeat(width.saturating_sub(str_width(&text)));
+        Line::from(vec![Span::styled(text, style), Span::styled(pad, style)])
+    });
+    let first_item_row = usize::from(here.is_some());
+
+    let lines: Vec<Line> = here
+        .into_iter()
+        .chain(w.items.iter().enumerate().map(|(i, path)| {
+            let i = i + first_item_row;
             let meta = w.meta.get(path.as_str());
             let display = w.display(path);
             let is_hidden = meta.map_or(false, |m| m.hidden);
@@ -615,7 +631,9 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
                 spans.push(Span::styled(text, style));
             }
             Line::from(spans)
-        })
+        }))
+        .skip(offset)
+        .take(visible)
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
 }

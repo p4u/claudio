@@ -66,6 +66,8 @@ pub const CTRL_U: &[u8] = b"\x15";
 pub const ESC: &[u8] = b"\x1b";
 pub const UP_ARROW: &[u8] = b"\x1b[A";
 pub const DOWN_ARROW: &[u8] = b"\x1b[B";
+pub const RIGHT_ARROW: &[u8] = b"\x1b[C";
+pub const LEFT_ARROW: &[u8] = b"\x1b[D";
 
 // ── Region ───────────────────────────────────────────────────────────────────
 

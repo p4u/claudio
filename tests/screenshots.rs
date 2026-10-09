@@ -72,13 +72,13 @@ fn capture_screenshots() {
 
         // Navigate to the directory picker: Enter on "Explore local dirs…".
         tui.send_keys(ENTER);
-        // Wait for dir-picker popup (title contains "Tab complete").
-        tui.wait_for("Tab complete", Region::Screen, WAIT);
+        // Wait for the dir picker, which opens browsing HOME (`~/`).
+        tui.wait_for("start here", Region::Screen, WAIT);
         thread::sleep(Duration::from_millis(300));
 
-        // Type "~/pro" — the "~/" prefix triggers an async ListDir of HOME so
-        // the dir picker populates with real filesystem entries.
-        tui.send_keys(b"~/pro");
+        // The picker opened at "~/" and listed HOME asynchronously, so it is
+        // populated with real filesystem entries. Type "pro" after it.
+        tui.send_keys(b"pro");
         // Wait for the typed text to appear in the filter field.
         tui.wait_for("~/pro", Region::Screen, Duration::from_secs(5));
 
@@ -538,8 +538,8 @@ fn wizard_navigate_to_dir(tui: &mut TuiProcess, dir: &PathBuf) {
     tui.send_keys(ENTER);
     thread::sleep(Duration::from_millis(100));
 
-    // Step 1: wait for the directory picker (popup title contains "Tab complete").
-    tui.wait_for("Tab complete", Region::Screen, WAIT);
+    // Step 1: wait for the directory picker (browsing `~/`, "start here" row).
+    tui.wait_for("start here", Region::Screen, WAIT);
 
     // Clear any existing filter text, then paste the full path.
     tui.send_keys(common::CTRL_U);
