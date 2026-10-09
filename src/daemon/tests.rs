@@ -889,3 +889,5 @@ async fn kill_in_flight_session_succeeds() {
     })
     .await;
 }
+
+mod git;

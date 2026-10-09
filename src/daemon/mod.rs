@@ -8,11 +8,13 @@
 //! - [`session`] — one actor task per live session (PTY, screen, hooks).
 //! - [`journal`] — the durable session list (dormant sessions survive restarts).
 //! - [`host`] — host facts for `Welcome`, directory listing.
+//! - [`git`] — the read-only git queries behind the TUI's git viewer.
 //!
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
 
 pub mod ctl;
+mod git;
 mod host;
 mod journal;
 mod server;
