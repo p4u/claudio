@@ -520,7 +520,7 @@ impl Daemon {
     /// etc.) so the session is resumed with the same configuration it was
     /// originally spawned with. The `--resume <claude_session_id>` pair is
     /// always appended from the journal entry.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // planned for daemon upgrade command (§2.6 of design doc)
     pub(crate) fn resolve_respawn_args(&self, spec: &SpawnSpec) -> Vec<String> {
         let reg = self.registry();
         let Some(entry) = reg.journal.entries().iter().find(|e| e.id == spec.id) else {

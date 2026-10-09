@@ -37,7 +37,7 @@ pub fn project_dir(cwd: &Path) -> PathBuf {
 }
 
 /// The absolute path of a transcript file for a given (cwd, claude_session_id).
-#[allow(dead_code)]
+#[allow(dead_code)] // used in tests; kept pub for potential future scripting CLI
 pub fn transcript_path(cwd: &Path, claude_session_id: &str) -> PathBuf {
     project_dir(cwd).join(format!("{claude_session_id}.jsonl"))
 }

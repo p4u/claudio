@@ -159,7 +159,7 @@ impl Journal {
     /// Record a spawn and persist immediately (convenience for tests and
     /// non-hot paths). A failed write is returned; the caller decides whether
     /// to propagate or log. Hot paths should use the split protocol instead.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by unit tests; kept pub for future non-hot-path callers
     pub fn record_spawn(&mut self, spec: &SpawnSpec) -> (Entry, io::Result<()>) {
         let entry = self.upsert_entry(spec);
         let snap = self.snapshot();
@@ -195,7 +195,7 @@ impl Journal {
 
     /// Forget a session and persist. Returns the write result; callers that
     /// need durability (Kill) must propagate the error.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // durable variant of remove_in_memory; kept for Kill-ack path (M2 design)
     pub fn remove(&mut self, id: SessionId) -> io::Result<bool> {
         if !self.remove_in_memory(id) {
             return Ok(false);

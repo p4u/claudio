@@ -8,18 +8,21 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use crate::proto::Msg;
+use std::io;
+
+use crate::client::Incoming;
+use crate::proto::{Msg, SessionEvent, SessionId, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
+use crate::term::screen::Screen;
 
 use super::app::{App, Effect, ReplyTo, PROJECTS_LIMIT};
 use super::keymap::Action;
+use super::sessions::SessionView;
 use super::state::KillTombstone;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
-
-use crate::proto::SessionId;
 
 /// A popup that captures the keyboard.
 pub enum Modal {
@@ -365,6 +368,196 @@ impl App {
         match &mut self.modal {
             Some(Modal::Wizard(w)) => Some(w),
             _ => None,
+        }
+    }
+}
+
+// ── Daemon events (impl App) ──────────────────────────────────────────────────
+
+impl App {
+    /// Handle an incoming event from the daemon, tagged with the originating host.
+    pub fn on_incoming_from(&mut self, host: &str, inc: Incoming) {
+        match inc {
+            Incoming::Data { id, bytes } => {
+                if let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].attached) {
+                    self.sessions[i].mirror.feed(&bytes);
+                    if self.active == Some(i) {
+                        self.redraw = true;
+                    }
+                }
+            }
+            Incoming::Attached { id, rows, cols } => {
+                if let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].attached) {
+                    self.sessions[i].mirror = Screen::new(rows, cols);
+                    self.redraw = true;
+                }
+            }
+            Incoming::Event { id, event } => self.on_event(host, id, event),
+            Incoming::Disconnected => {
+                if host == "local" {
+                    self.on_disconnected_local();
+                } else {
+                    self.on_disconnected_remote(host);
+                }
+            }
+        }
+    }
+
+    fn on_event(&mut self, host: &str, id: SessionId, event: SessionEvent) {
+        self.redraw = true;
+        if let SessionEvent::Created { info } = &event {
+            if self.index_of(id).is_none() {
+                let (rows, cols) = self.pane_size();
+                self.sessions.push(SessionView {
+                    id,
+                    name: info.name.clone(),
+                    cwd: info.cwd.clone(),
+                    // M1 fix: use the originating host, not "local".
+                    host: host.to_owned(),
+                    state: info.state,
+                    title: info.title.clone(),
+                    claude_session_id: info.claude_session_id.clone(),
+                    created_at: info.created_at,
+                    mirror: Screen::new(rows, cols),
+                    attached: false,
+                    proxy: None,
+                });
+                self.save();
+                return;
+            }
+        }
+        let Some(i) = self.index_of(id) else { return };
+        let v = &mut self.sessions[i];
+        match event {
+            SessionEvent::Created { info } => {
+                v.cwd = info.cwd;
+                v.state = info.state;
+                v.title = info.title.or(v.title.take());
+                v.created_at = info.created_at;
+                if info.claude_session_id.is_some() {
+                    v.claude_session_id = info.claude_session_id;
+                }
+                self.save();
+            }
+            SessionEvent::Removed => self.remove(i),
+            SessionEvent::State { state } => v.state = state,
+            SessionEvent::ClaudeSession { claude_session_id } => {
+                v.claude_session_id = Some(claude_session_id);
+                self.save();
+            }
+            SessionEvent::Title { title } => v.title = Some(title),
+            SessionEvent::Exited { .. } => v.state = SessionState::Exited,
+            SessionEvent::Notice { text } => self.notify(text),
+            SessionEvent::Unknown => {}
+        }
+    }
+
+    /// A reply (or failure) for a request made through [`Effect::Request`].
+    pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
+        self.redraw = true;
+        match (to, reply) {
+            // M2: Kill acknowledged → clear tombstone.
+            (ReplyTo::Kill(id), Ok(Msg::Error { message }))
+                if message.contains("no such session") =>
+            {
+                self.killed.retain(|t| t.id != id);
+                self.save();
+            }
+            (ReplyTo::Kill(id), Ok(_)) => {
+                self.killed.retain(|t| t.id != id);
+                self.save();
+            }
+            (ReplyTo::Kill(id), Err(e)) => {
+                // Keep tombstone; will retry on next recovery.
+                self.notify(format!("kill failed (will retry): {e}"));
+                let _ = id; // tombstone stays
+            }
+            (ReplyTo::Projects, Ok(Msg::Projects { dirs })) => {
+                self.projects = dirs.into_iter().map(|d| d.path).collect();
+                let projects = self.projects.clone();
+                if let Some(w) = self.wizard_mut() {
+                    w.add_seeds(&projects);
+                }
+            }
+            (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
+                if let Some(w) = self.wizard_mut() {
+                    w.set_dir_entries(&path, &entries);
+                }
+            }
+            // M12: ListClaudeSessions error must NOT be treated as "no sessions".
+            // Show the error and let the user retry.
+            (ReplyTo::ClaudeSessions(cwd, gen), reply) => {
+                if gen != self.wizard_generation() {
+                    // S7: Stale reply from a cancelled wizard; discard.
+                    return;
+                }
+                match reply {
+                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
+                        if let Some(w) = self.wizard_mut() {
+                            let outcome = w.set_claude_sessions(&cwd, sessions);
+                            self.wizard_outcome(outcome);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.notify(format!("could not list claude sessions: {e}"));
+                        if let Some(w) = self.wizard_mut() {
+                            w.set_claude_sessions_error(&cwd);
+                        }
+                    }
+                }
+            }
+            (ReplyTo::Spawned(id), Err(e)) => {
+                if let Some(i) = self.index_of(id) {
+                    self.sessions[i].state = SessionState::Exited;
+                }
+                self.notify(format!("could not start claude: {e}"));
+            }
+            // Remote variants route to the same wizard handlers.
+            (ReplyTo::RemoteProjects, Ok(Msg::Projects { dirs })) => {
+                self.projects = dirs.into_iter().map(|d| d.path).collect();
+                let projects = self.projects.clone();
+                if let Some(w) = self.wizard_mut() {
+                    w.add_seeds(&projects);
+                }
+            }
+            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
+                if let Some(w) = self.wizard_mut() {
+                    w.set_dir_entries(&path, &entries);
+                }
+            }
+            (ReplyTo::RemoteClaudeSessions(cwd, gen), reply) => {
+                if gen != self.wizard_generation() {
+                    // S7: Stale reply from a cancelled wizard; discard.
+                    return;
+                }
+                match reply {
+                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
+                        if let Some(w) = self.wizard_mut() {
+                            let outcome = w.set_claude_sessions(&cwd, sessions);
+                            self.wizard_outcome(outcome);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.notify(format!("could not list remote claude sessions: {e}"));
+                        if let Some(w) = self.wizard_mut() {
+                            w.set_claude_sessions_error(&cwd);
+                        }
+                    }
+                }
+            }
+            // Typing a path that doesn't exist (yet) is not an error.
+            (ReplyTo::DirEntries | ReplyTo::RemoteDirEntries, Err(_)) => {}
+            (to, Err(e)) if self.connected => {
+                let what = match to {
+                    ReplyTo::Ack(what) => what,
+                    ReplyTo::Projects | ReplyTo::RemoteProjects => "recent projects",
+                    _ => "request",
+                };
+                self.notify(format!("{what} failed: {e}"));
+            }
+            _ => {}
         }
     }
 }

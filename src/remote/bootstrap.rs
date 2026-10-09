@@ -34,7 +34,7 @@ const CURL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Information returned after a successful bootstrap.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // fields read by callers via pattern matching; struct kept for future upgrade command
 pub struct RemoteInfo {
     /// `true` when the remote binary was already up to date.
     pub was_current: bool,

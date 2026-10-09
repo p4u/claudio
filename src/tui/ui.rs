@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use crate::proto::SessionState;
 use crate::proxy::api::PoolStatus;
+use crate::proxy::cmd::fmt_tokens;
 
 use super::app::{App, Modal, ProxyStatus, SessionView};
 use super::wizard::{resume_label, Wizard};
@@ -590,11 +591,6 @@ pub fn fmt_age(secs: u64) -> String {
         3600..=86_399 => format!("{}h", secs / 3600),
         _ => format!("{}d", secs / 86_400),
     }
-}
-
-/// Format a token count compactly: `1.2M`, `340k`, or the raw number.
-fn fmt_tokens(n: i64) -> String {
-    crate::proxy::cmd::fmt_tokens(n)
 }
 
 // ── Overview popup ────────────────────────────────────────────────────────────
