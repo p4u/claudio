@@ -201,15 +201,69 @@ incompatible daemon versions can coexist.
 - Hook relay commands include a per-spawn token bound to a session generation
   so that a compromised child cannot forge hook events for another session.
 
+### Installing
+
+**Quick install (Linux and macOS):**
+
+```bash
+curl -fsSL https://github.com/p4u/claudio-releases/releases/latest/download/install.sh | bash
+```
+
+Options:
+- `CLAUDIO_VERSION=v0.2.0` — install a specific release (default: latest).
+- `CLAUDIO_INSTALL_DIR=~/.local/bin` — where to put the binary (default: `~/.local/bin`).
+
+**From source:**
+
+```bash
+make install      # builds a static musl binary, installs it, and restarts a running daemon
+```
+
+A running daemon is restarted automatically; its sessions come back via `claude --resume`.
+
 ### Upgrading
 
-To upgrade the local binary: replace it, then run `claudio daemon restart`.
-The daemon will pick up the new version on restart, and running sessions are
-recovered with `claude --resume`.
+The TUI status bar shows a quiet `↑ vX.Y.Z` indicator (dim cyan, at the right)
+when a newer claudio release is available. The check is anonymous, cached for 24
+hours, and never blocks. It can be disabled:
+
+```toml
+# ~/.config/claudio/config.toml
+[update]
+check = false
+```
+
+or with `CLAUDIO_NO_UPDATE_CHECK=1`.
+
+To upgrade:
+
+```bash
+claudio upgrade          # download, verify checksum, install, restart daemon
+claudio upgrade --check  # report only; do not install
+```
 
 Remote binaries are upgraded automatically: when the local SHA-256 of the
 claudio binary changes, the next connection to that host re-bootstraps the
 remote binary without any manual step.
+
+### Maintainer notes (releasing)
+
+Releases are published to the public repo **`p4u/claudio-releases`** from the
+private source repo `p4u/claudio`. This requires a **`RELEASES_TOKEN`** secret
+in `p4u/claudio`: a fine-grained PAT with **Contents: Read and write** on
+`p4u/claudio-releases` only (no other scopes needed).
+
+To cut a release:
+
+1. Bump `version` in `Cargo.toml` (e.g. `0.2.0 → 0.3.0`).
+2. Run `cargo build` (or `cargo update -p claudio`) to update `Cargo.lock`.
+3. Commit both files.
+4. Tag and push:
+   ```bash
+   git tag v0.3.0 && git push origin v0.3.0
+   ```
+5. The release workflow builds all 4 platform binaries, verifies the tag
+   matches `Cargo.toml`, and publishes them to `p4u/claudio-releases`.
 
 ## Drop-in behavior
 
