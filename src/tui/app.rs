@@ -972,7 +972,7 @@ impl App {
                     w.add_seeds(&projects);
                 }
             }
-            (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries })) => {
+            (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
                 if let Some(w) = self.wizard_mut() {
                     w.set_dir_entries(&path, &entries);
                 }
@@ -1005,7 +1005,7 @@ impl App {
                     w.add_seeds(&projects);
                 }
             }
-            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries })) => {
+            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
                 if let Some(w) = self.wizard_mut() {
                     w.set_dir_entries(&path, &entries);
                 }

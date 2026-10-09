@@ -550,7 +550,7 @@ async fn list_dir_sorts_dirs_first() {
 
     let path = root.to_string_lossy().into_owned();
     match c.call(Msg::ListDir { path: path.clone() }).await {
-        Msg::DirEntries { path: p, entries } => {
+        Msg::DirEntries { path: p, entries, .. } => {
             assert_eq!(p, path);
             let got: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
             assert_eq!(got, [("bdir", true), ("zdir", true), ("afile", false)]);
