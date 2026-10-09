@@ -11,14 +11,18 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
-use crate::claude::SESSION_MARKERS;
 use super::Daemon;
+use crate::claude::SESSION_MARKERS;
 use crate::proto::Msg;
+use crate::term::strip_escapes;
 
 /// How long the update may run.
 const TIMEOUT: Duration = Duration::from_secs(300);
+
+/// After a timeout's SIGTERM, how long the update gets before SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Output kept, counted from the end.
 const TAIL_BYTES: usize = 4096;
@@ -34,7 +38,7 @@ pub async fn run(daemon: &Daemon, install: bool) -> Msg {
             message: "a claude update is already running on this host".into(),
         };
     };
-    let (ok, tail) = match execute(&daemon.config.claude_bin(), install).await {
+    let (ok, tail) = match execute(&daemon.config.claude_bin(), install, TIMEOUT).await {
         Ok(done) => done,
         Err(e) => (false, e),
     };
@@ -46,7 +50,15 @@ pub async fn run(daemon: &Daemon, install: bool) -> Msg {
 }
 
 /// `(succeeded, output tail)`, or a description of why it could not run.
-async fn execute(claude: &Path, install: bool) -> Result<(bool, String), String> {
+///
+/// The command runs in a process group of its own: the installer is a
+/// pipeline (`curl | bash`) whose `bash` starts more processes, and killing
+/// only `sh` on timeout would leave those running, still installing.
+async fn execute(
+    claude: &Path,
+    install: bool,
+    timeout: Duration,
+) -> Result<(bool, String), String> {
     let mut cmd = Command::new("sh");
     cmd.arg("-c");
     if install {
@@ -62,13 +74,13 @@ async fn execute(claude: &Path, install: bool) -> Result<(bool, String), String>
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("could not start the update: {e}"))?;
     let mut out = child.stdout.take().ok_or("no output pipe")?;
 
-    // Dropping the future on timeout kills the child (`kill_on_drop`).
-    let finished = tokio::time::timeout(TIMEOUT, async {
+    let finished = tokio::time::timeout(timeout, async {
         let mut tail = Vec::new();
         let mut buf = [0u8; 1024];
         loop {
@@ -86,13 +98,34 @@ async fn execute(claude: &Path, install: bool) -> Result<(bool, String), String>
     .await;
     match finished {
         Ok((ok, tail)) => Ok((ok, printable(&tail))),
-        Err(_) => Err(format!("timed out after {} s", TIMEOUT.as_secs())),
+        Err(_) => {
+            kill_group(&mut child).await;
+            Err(format!("timed out after {} s", timeout.as_secs()))
+        }
     }
 }
 
-/// Output as text with control characters (ANSI escapes included) dropped.
+/// Stop the update's whole process group: SIGTERM, a grace period for the
+/// leader to exit, then SIGKILL for whatever is left. Reaps the leader.
+async fn kill_group(child: &mut Child) {
+    // The leader's pid is the group id (`process_group(0)`); `None` once
+    // it has been reaped, and then its pid may already be reused.
+    let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
+        return;
+    };
+    // SAFETY: kill(2) has no memory-safety preconditions.
+    unsafe { libc::kill(-pgid, libc::SIGTERM) };
+    let _ = tokio::time::timeout(KILL_GRACE, child.wait()).await;
+    // The leader may have exited while its descendants did not. A group id
+    // is not reused while any member is alive, so this reaches only them.
+    // SAFETY: as above.
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    let _ = child.wait().await;
+}
+
+/// Output as text: escape sequences and other control characters dropped.
 fn printable(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
+    strip_escapes(bytes)
         .chars()
         .filter(|&c| c == '\n' || !c.is_control())
         .collect::<String>()
@@ -105,11 +138,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_is_stripped_of_control_characters() {
+    fn output_is_stripped_of_escapes_and_control_characters() {
         assert_eq!(
-            printable(b"\x1b[1mUpdated\x1b[0m\r\nto 2.1.296\n"),
-            "[1mUpdated[0m\nto 2.1.296"
+            printable(b"\x1b[1mUpdated\x1b[0m\r\nto 2.1.296\x1b]0;title\x07\n"),
+            "Updated\nto 2.1.296"
         );
         assert_eq!(printable(b"  \n"), "");
+    }
+
+    /// On timeout the whole process group goes, not just `sh`: a descendant
+    /// that would write a file later never gets to.
+    #[tokio::test]
+    async fn timeout_kills_the_updaters_descendants() {
+        let dir = std::env::temp_dir().join(format!("claudio-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("late");
+        let claude = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\n\
+             ( sleep 1; touch '{}' ) &\n\
+             echo updating\n\
+             sleep 30\n",
+            marker.display()
+        );
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = execute(&claude, false, Duration::from_millis(300)).await;
+        assert!(matches!(&result, Err(e) if e.contains("timed out")), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "the leader was reaped promptly");
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!marker.exists(), "a descendant outlived the timeout");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
