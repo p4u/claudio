@@ -274,7 +274,7 @@ impl ScreenModel {
 
             // ── Text runs ─────────────────────────────────────────────────
             let ty = TITLE_H + row as f64 * LINE_H + LINE_H * 0.78;
-            text_rows.push_str(&format!("<text y=\"{ty:.1}\" class=\"t\">"));
+            text_rows.push_str(&format!("<text y=\"{ty:.1}\" class=\"t\" xml:space=\"preserve\">"));
 
             col = 0;
             while col < cols {
@@ -367,7 +367,7 @@ impl ScreenModel {
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{svg_w:.0}\" height=\"{svg_h:.0}\" viewBox=\"0 0 {svg_w:.0} {svg_h:.0}\">\n"
         ));
         svg.push_str("  <defs>\n");
-        svg.push_str("    <style>.t { font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Source Code Pro', 'Consolas', 'Courier New', monospace; font-size: 13px; font-feature-settings: 'liga' 0; }</style>\n");
+        svg.push_str("    <style>.t { font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Source Code Pro', 'Consolas', 'Courier New', monospace; font-size: 13px; font-feature-settings: 'liga' 0; white-space: pre; }</style>\n");
         svg.push_str(&format!(
             "    <clipPath id=\"wc\"><rect width=\"{win_w:.0}\" height=\"{win_h:.0}\" rx=\"12\" ry=\"12\"/></clipPath>\n"
         ));
