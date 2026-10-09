@@ -86,13 +86,41 @@ fn which(cmd: &Path) -> Option<PathBuf> {
 
 /// First line of `<claude> --version`, or `None` on failure or timeout.
 fn run_version(claude: &Path) -> Option<String> {
+    run_capture(claude, "--version")?
+        .lines()
+        .next()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+}
+
+/// Lets claude offer bypass-permissions mode (Shift+Tab); it does not start
+/// in it.
+pub const ALLOW_SKIP_PERMISSIONS: &str = "--allow-dangerously-skip-permissions";
+
+/// Whether `<claude> --help` mentions `flag`. Blocking (≤ 3 s); `false` on
+/// failure or timeout, so an old or broken claude never gets the flag.
+pub fn claude_supports(claude: &Path, flag: &str) -> bool {
+    run_capture(claude, "--help").is_some_and(|help| help.contains(flag))
+}
+
+/// Stdout of `<claude> <arg>` when it exits 0 within [`VERSION_TIMEOUT`].
+/// Stdout is drained on a thread so long output can't fill the pipe and stall
+/// the child.
+fn run_capture(claude: &Path, arg: &str) -> Option<String> {
     let mut child = Command::new(claude)
-        .arg("--version")
+        .arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        io::Read::read_to_string(&mut stdout, &mut out)
+            .ok()
+            .map(|_| out)
+    });
     let deadline = Instant::now() + VERSION_TIMEOUT;
     loop {
         match child.try_wait() {
@@ -105,12 +133,7 @@ fn run_version(claude: &Path) -> Option<String> {
             }
         }
     }
-    let mut out = String::new();
-    io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    out.lines()
-        .next()
-        .map(|l| l.trim().to_owned())
-        .filter(|l| !l.is_empty())
+    reader.join().ok().flatten()
 }
 
 /// Detect the git branch for a directory without running `git`.
@@ -196,5 +219,28 @@ mod tests {
         assert_eq!(info.os, std::env::consts::OS);
         assert!(!info.hostname.is_empty());
         assert!(info.claude.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_supports_reads_help() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claudio-help-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        // Long help output: more than a pipe buffer, so draining must not stall.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nseq 1 20000\necho '  --allow-dangerously-skip-permissions  Enable bypass'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(claude_supports(&bin, ALLOW_SKIP_PERMISSIONS));
+        assert!(!claude_supports(&bin, "--no-such-flag"));
+        assert!(!claude_supports(
+            Path::new("/nonexistent/claude"),
+            ALLOW_SKIP_PERMISSIONS
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

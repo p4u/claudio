@@ -28,7 +28,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -64,6 +64,9 @@ pub struct Config {
     pub claude: PathBuf,
     /// This binary, used as the hook relay command.
     pub claudio: PathBuf,
+    /// `[claude] allow_skip_permissions` from this host's `config.toml`:
+    /// launch claude with `--allow-dangerously-skip-permissions`.
+    pub skip_permissions: bool,
 }
 
 impl Config {
@@ -79,6 +82,7 @@ impl Config {
             journal: paths::daemon_journal(),
             claude,
             claudio: std::env::current_exe()?,
+            skip_permissions: crate::config::load().claude.allow_skip_permissions,
         })
     }
 }
@@ -215,6 +219,9 @@ pub(crate) struct Daemon {
     host: tokio::sync::Mutex<Option<HostInfo>>,
     /// Held while `claude update` runs: one at a time.
     updating: tokio::sync::Mutex<()>,
+    /// Whether this claude knows `--allow-dangerously-skip-permissions`
+    /// (it runs `claude --help`, once).
+    skip_permissions_supported: OnceLock<bool>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
@@ -254,6 +261,7 @@ impl Daemon {
             events,
             host: tokio::sync::Mutex::new(None),
             updating: tokio::sync::Mutex::new(()),
+            skip_permissions_supported: OnceLock::new(),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
         }
@@ -287,6 +295,16 @@ impl Daemon {
         tokio::task::spawn_blocking(move || host::probe(&claude))
             .await
             .unwrap_or_else(|_| host::basic())
+    }
+
+    /// Whether to launch claude with `--allow-dangerously-skip-permissions`:
+    /// enabled in the config and supported by this claude. Blocking the first
+    /// time (it runs `claude --help`); call it off the async runtime.
+    pub(crate) fn skip_permissions(&self) -> bool {
+        self.config.skip_permissions
+            && *self.skip_permissions_supported.get_or_init(|| {
+                host::claude_supports(&self.config.claude, host::ALLOW_SKIP_PERMISSIONS)
+            })
     }
 
     /// Send a session event to every connected client.
@@ -384,7 +402,13 @@ impl Daemon {
                         pid,
                         ..dormant_info(&entry)
                     };
-                    (Ok(pid), Some(snap), Some(info), was_killed, Some(committed_tx))
+                    (
+                        Ok(pid),
+                        Some(snap),
+                        Some(info),
+                        was_killed,
+                        Some(committed_tx),
+                    )
                 }
                 Err(e) => (Err(e), None, None, false, None),
             }
@@ -466,12 +490,7 @@ impl Daemon {
             }
             let live = reg.live.remove(&id);
             // Save a copy of the journal entry so we can re-insert on failure.
-            let saved_entry = reg
-                .journal
-                .entries()
-                .iter()
-                .find(|e| e.id == id)
-                .cloned();
+            let saved_entry = reg.journal.entries().iter().find(|e| e.id == id).cloned();
             let was_journaled = reg.journal.remove_in_memory(id);
             let was_known = was_journaled || live.is_some();
             let snap = if was_known {
@@ -716,7 +735,6 @@ impl Daemon {
         }
         ours
     }
-
 }
 
 /// `args` without the flags that pick a conversation (`--resume`,

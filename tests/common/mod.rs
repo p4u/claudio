@@ -718,6 +718,8 @@ if [ "$1" = "--version" ]; then
     echo "claude 0.0.0-fake"
     exit 0
 fi
+# The daemon's one-off `--help` probe is not a session.
+if [ "$1" = "--help" ]; then exit 0; fi
 touch "{marker}"
 echo "FAKE_CLAUDE_BANNER pid=$$"
 exec cat
