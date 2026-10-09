@@ -12,6 +12,7 @@ mod notifications;
 mod proxy_state;
 mod sessions;
 mod state;
+mod stats_view;
 mod ui;
 mod wizard;
 
@@ -233,11 +234,10 @@ enum HostEvent {
         profile_name: String,
         config: Option<crate::proxy::api::ConfigResponse>,
     },
-    /// Proxy stats + pool health fetched (or failed).
+    /// Proxy stats, pool health and model catalogue fetched (or failed).
     ProxyStats {
         profile_name: String,
-        stats: Option<crate::proxy::api::StatsResponse>,
-        pool: Option<crate::proxy::api::PoolHealthResponse>,
+        fetch: proxy_state::ProxyFetch,
     },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
@@ -489,8 +489,8 @@ async fn event_loop(
                         app.on_proxy_config(profile_name, cfg);
                     }
                 }
-                Some(HostEvent::ProxyStats { profile_name, stats, pool }) => {
-                    app.on_proxy_stats(profile_name, stats, pool);
+                Some(HostEvent::ProxyStats { profile_name, fetch }) => {
+                    app.on_proxy_stats(profile_name, fetch);
                 }
                 Some(HostEvent::UpgradeAvailable(tag)) => {
                     if let Some(t) = tag {
@@ -506,7 +506,7 @@ async fn event_loop(
                 // Refresh proxy stats for the active session's profile.
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
                 if let Some(name) = proxy_name {
-                    app.schedule_proxy_stats(&name);
+                    app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
                 }
             }
             _ = tokio::time::sleep(wait), if app.redraw => {}
@@ -588,16 +588,18 @@ fn run_effect(
                     .await;
             });
         }
-        Effect::FetchProxyStats { profile_name } => {
+        Effect::FetchProxyStats {
+            profile_name,
+            windows,
+            models,
+        } => {
             let tx = ev_tx.clone();
-            let name = profile_name.clone();
             tokio::spawn(async move {
-                let (stats, pool) = fetch_proxy_stats(&name).await;
+                let fetch = fetch_proxy_stats(&profile_name, &windows, models).await;
                 let _ = tx
                     .send(HostEvent::ProxyStats {
-                        profile_name: name,
-                        stats,
-                        pool,
+                        profile_name,
+                        fetch,
                     })
                     .await;
             });
@@ -669,23 +671,49 @@ async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::Con
     }
 }
 
-/// Fetch proxy stats and pool health for a named profile.
+/// Fetch proxy stats for `windows`, pool health, and (when `models`) the
+/// model catalogue for a named profile. Requests run sequentially to stay
+/// well inside the proxy's per-user rate limit (1 req/s, burst 10).
 async fn fetch_proxy_stats(
     profile_name: &str,
-) -> (
-    Option<crate::proxy::api::StatsResponse>,
-    Option<crate::proxy::api::PoolHealthResponse>,
-) {
+    windows: &[stats_view::Window],
+    models: bool,
+) -> proxy_state::ProxyFetch {
+    use crate::proxy::api;
+    let mut out = proxy_state::ProxyFetch::default();
     let Some((url, token)) = proxy_state::resolve_profile(profile_name) else {
-        return (None, None);
+        let err = format!("proxy profile '{profile_name}' not found");
+        out.stats = windows.iter().map(|w| (*w, Err(err.clone()))).collect();
+        return out;
     };
-    let stats = crate::proxy::api::fetch_stats(&url, &token, "24h")
-        .await
-        .ok();
-    let pool = crate::proxy::api::fetch_pool_health(&url, &token)
-        .await
-        .ok();
-    (stats, pool)
+    for w in windows {
+        let result = api::fetch_stats(&url, &token, w.param())
+            .await
+            .map_err(describe_api_error);
+        out.stats.push((*w, result));
+    }
+    out.pool = api::fetch_pool_health(&url, &token).await.ok();
+    if models {
+        out.models = api::fetch_models(&url, &token).await.ok();
+    }
+    out
+}
+
+/// A one-line, user-facing description of a proxy API error.
+fn describe_api_error(e: crate::proxy::api::ApiError) -> String {
+    use crate::proxy::api::ApiError;
+    match e {
+        ApiError::Http(s) if s.as_u16() == 403 => {
+            "stats need a user token (admin and anonymous tokens are refused)".to_owned()
+        }
+        ApiError::Http(s) if s.as_u16() == 404 => {
+            "this proxy has no claudio API (upgrade claude-proxy)".to_owned()
+        }
+        ApiError::Http(s) if s.as_u16() == 429 => {
+            "rate limited by the proxy; wait a few seconds".to_owned()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// Spawn a task that reads incoming items from `rx` and forwards them,

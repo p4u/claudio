@@ -14,6 +14,7 @@ use crate::proto::SessionState;
 mod stats;
 mod status;
 
+pub use stats::stats_max_scroll;
 pub use status::state_name;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
@@ -53,10 +54,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .unwrap_or_default();
             draw_wizard(frame, w, app.now, &toggle_key)
         }
-        Some(Modal::ProxyStats { profile_name }) => {
-            let status = app.proxy_status.get(profile_name.as_str());
-            draw_proxy_stats(frame, profile_name, status);
-        }
+        Some(Modal::ProxyStats(view)) => draw_proxy_stats(frame, app, view),
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
         None => {}

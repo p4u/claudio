@@ -16,10 +16,12 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
+use crate::proxy::api::ConfigResponse;
 
 use super::keymap::Keymap;
+use super::proxy_state::ProxyFetch;
 use super::state::{ClientState, KillTombstone};
+use super::stats_view::{StatsOutcome, StatsView, Window};
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
 pub use super::interaction::Modal;
@@ -73,9 +75,14 @@ pub enum Effect {
     /// Fetch proxy config (env) for a profile name. Result goes to
     /// [`App::on_proxy_config`].
     FetchProxyConfig { profile_name: String },
-    /// Fetch proxy stats for the active session's profile. Result goes to
+    /// Fetch proxy stats (one request per window) plus pool health, and the
+    /// model catalogue when `models` is set. Result goes to
     /// [`App::on_proxy_stats`].
-    FetchProxyStats { profile_name: String },
+    FetchProxyStats {
+        profile_name: String,
+        windows: Vec<Window>,
+        models: bool,
+    },
     /// Spawn a session with proxy config: the effect runner fetches the proxy
     /// config (with a 5 s timeout), builds `SpawnSpec.env`, then sends the
     /// Spawn request. This avoids silently using fallback model defaults when
@@ -254,20 +261,16 @@ impl App {
     }
 
     /// Called when a `FetchProxyStats` effect completes.
-    pub fn on_proxy_stats(
-        &mut self,
-        profile_name: String,
-        stats: Option<StatsResponse>,
-        pool: Option<PoolHealthResponse>,
-    ) {
-        let entry = self.proxy_status.entry(profile_name).or_default();
-        if let Some(s) = stats {
-            entry.stats = Some(s);
+    pub fn on_proxy_stats(&mut self, profile_name: String, fetch: ProxyFetch) {
+        if let Some(Modal::ProxyStats(view)) = &mut self.modal {
+            if view.profile.as_deref() == Some(profile_name.as_str()) {
+                view.on_fetched();
+            }
         }
-        if let Some(p) = pool {
-            entry.pool = Some(p);
-        }
-        entry.fetched_at = Some(Instant::now());
+        self.proxy_status
+            .entry(profile_name)
+            .or_default()
+            .apply(fetch);
         self.redraw = true;
     }
 
@@ -291,23 +294,64 @@ impl App {
         }
     }
 
-    /// Schedule a proxy stats fetch for the named profile.
-    pub fn schedule_proxy_stats(&mut self, name: &str) {
+    /// Schedule a proxy stats fetch for the named profile. The model
+    /// catalogue is fetched along when it is not cached yet.
+    pub fn schedule_proxy_stats(&mut self, name: &str, windows: Vec<Window>) {
+        let models = self
+            .proxy_status
+            .get(name)
+            .is_none_or(|s| s.models.is_none());
         self.effects.push(Effect::FetchProxyStats {
             profile_name: name.to_owned(),
+            windows,
+            models,
         });
     }
 
-    /// Open the stats popup for the active session's proxy profile.
+    /// Open the stats popup. Shows the active session's proxy profile, else
+    /// the default profile (so a direct session can still look at the
+    /// account), else a hint on how to configure a proxy.
     pub fn open_proxy_stats(&mut self) {
-        if let Some(name) = self.active_view().and_then(|v| v.proxy.as_deref()) {
-            let n = name.to_owned();
-            self.schedule_proxy_stats(&n);
-            self.modal = Some(Modal::ProxyStats { profile_name: n });
-            self.redraw = true;
-        } else {
-            self.notify("No proxy configured for this session (Alt+n → proxy toggle)");
+        let session_profile = self.active_view().and_then(|v| v.proxy.clone());
+        let borrowed = session_profile.is_none();
+        let profile = session_profile
+            .or_else(|| self.proxy_default.clone())
+            .or_else(|| self.proxy_profiles.first().cloned());
+        let (view, outcome) = StatsView::open(profile, borrowed);
+        self.stats_outcome(view, outcome);
+        self.redraw = true;
+    }
+
+    /// A key press while the stats popup is open.
+    pub(super) fn stats_key(&mut self, key: crossterm::event::KeyEvent) {
+        let Some(Modal::ProxyStats(mut view)) = self.modal.take() else {
+            return;
+        };
+        let cached = view
+            .profile
+            .as_deref()
+            .and_then(|p| self.proxy_status.get(p))
+            .map(|s| s.cached_windows())
+            .unwrap_or_default();
+        let max_scroll = super::ui::stats_max_scroll(self, &view);
+        let outcome = view.on_key(&key, &cached, max_scroll);
+        self.stats_outcome(view, outcome);
+        self.redraw = true;
+    }
+
+    /// Apply a [`StatsOutcome`]: close the popup or keep it (fetching if asked).
+    fn stats_outcome(&mut self, mut view: StatsView, outcome: StatsOutcome) {
+        match outcome {
+            StatsOutcome::Close => return,
+            StatsOutcome::Fetch(windows) => {
+                if let Some(name) = view.profile.clone() {
+                    view.loading = true;
+                    self.schedule_proxy_stats(&name, windows);
+                }
+            }
+            StatsOutcome::Nothing => {}
         }
+        self.modal = Some(Modal::ProxyStats(view));
     }
 
     /// Build the `SpawnSpec.env` for a proxy profile name (M4 fix: fallible).
