@@ -493,8 +493,95 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64) {
         return;
     }
     draw_input(frame, head, "> ", &w.input);
-    let rows: Vec<String> = w.items.iter().map(|p| w.display(p)).collect();
-    draw_list(frame, list, &rows, w.selected);
+    draw_dir_list(frame, list, w, now);
+}
+
+/// Render the directory candidate list with right-aligned metadata badges.
+///
+/// Badges (right-aligned, only shown when metadata is available):
+///   `⎇ <branch>` green   – git repo
+///   `✻ <age>`   magenta  – last claude session
+///   `↻`         cyan     – recently used via claudio
+///   `↪`         dim      – symlink
+///
+/// Hidden directories are rendered with DIM. The selected row is reversed.
+fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
+    let visible = area.height as usize;
+    if visible == 0 {
+        return;
+    }
+    let selected = w.selected;
+    let offset = selected.saturating_sub(visible - 1);
+    let width = area.width as usize;
+
+    let lines: Vec<Line> = w
+        .items
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(i, path)| {
+            let meta = w.meta.get(path.as_str());
+            let display = w.display(path);
+            let is_hidden = meta.map_or(false, |m| m.hidden);
+            let is_selected = i == selected;
+
+            // Build badge text pieces (right-aligned).
+            let mut badges: Vec<(String, Style)> = Vec::new();
+            if let Some(m) = meta {
+                if m.symlink {
+                    badges.push((" ↪".to_owned(), Style::default().add_modifier(Modifier::DIM)));
+                }
+                if m.recently_used {
+                    badges.push((" ↻".to_owned(), Style::default().fg(Color::Cyan)));
+                }
+                if let Some(at) = m.claude_at {
+                    let age = fmt_age(now.saturating_sub(at));
+                    badges.push((
+                        format!(" ✻ {age}"),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+                if let Some(branch) = &m.git {
+                    badges.push((
+                        format!(" ⎇ {branch}"),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+            }
+
+            let badge_width: usize = badges.iter().map(|(s, _)| str_width(s)).sum();
+            let label_max = width.saturating_sub(badge_width);
+            let label = truncate(&display, label_max);
+            let label_w = str_width(&label);
+
+            let base_style = if is_selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if is_hidden {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+
+            let mut spans = vec![Span::styled(label, base_style)];
+            // Padding between label and badges.
+            let pad = width.saturating_sub(label_w + badge_width);
+            if pad > 0 {
+                spans.push(Span::styled(" ".repeat(pad), base_style));
+            }
+            for (text, badge_style) in badges {
+                let style = if is_selected {
+                    // Merge reversed background onto badge colour.
+                    badge_style.patch(Style::default().add_modifier(Modifier::REVERSED))
+                } else {
+                    badge_style
+                };
+                spans.push(Span::styled(text, style));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 // ── Text helpers ──────────────────────────────────────────────────────────────

@@ -10,10 +10,29 @@
 //! from a cancelled wizard are discarded (S7 fix).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::collections::HashMap;
 
 use crate::proto::{ClaudeSession, DirEntry};
 
 use super::ui::{abbreviate_home, fmt_age};
+
+/// Enrichment metadata for a candidate directory.
+///
+/// Carried in `Wizard::meta` keyed by absolute path. Populated from
+/// `ListDir` replies and `RecentProjects` replies.
+#[derive(Debug, Clone, Default)]
+pub struct DirMeta {
+    /// Git branch name (`None` = not a git repo, `Some("")` = detached HEAD).
+    pub git: Option<String>,
+    /// Unix seconds of the last claude session in this directory.
+    pub claude_at: Option<u64>,
+    /// Whether the path is a symlink.
+    pub symlink: bool,
+    /// Whether the path's basename starts with `.`.
+    pub hidden: bool,
+    /// Whether this directory is in the host's `recent_dirs` list.
+    pub recently_used: bool,
+}
 
 /// What the app should do after the wizard handled an input.
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +220,10 @@ pub struct Wizard {
     /// Carried in reply tags so stale replies from a cancelled wizard are
     /// discarded.
     pub generation: u64,
+    /// Per-path enrichment metadata (git branch, claude_at, symlink, hidden,
+    /// recently_used). Populated lazily from `ListDir` and `RecentProjects`
+    /// replies.
+    pub meta: HashMap<String, DirMeta>,
 }
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
@@ -281,6 +304,20 @@ impl Wizard {
         proxy_profiles: &[String],
         proxy_default: Option<&str>,
     ) -> Wizard {
+        Self::new_with_recent(seeds, &[], home, active_host, host_candidates, proxy_profiles, proxy_default)
+    }
+
+    /// Like [`Wizard::new`] but also accepts the `recent` slice so seeds that
+    /// came from `recent_dirs` are marked `recently_used` in `meta`.
+    pub fn new_with_recent(
+        seeds: Vec<String>,
+        recent: &[String],
+        home: String,
+        active_host: &str,
+        host_candidates: &[String],
+        proxy_profiles: &[String],
+        proxy_default: Option<&str>,
+    ) -> Wizard {
         let host_step = HostStep::new(active_host, host_candidates);
         let host = active_host.to_owned();
         // Build proxy options: ["none", "profile1", "profile2", …]
@@ -290,6 +327,13 @@ impl Wizard {
             .and_then(|d| proxy_options.iter().position(|o| o == d))
             .unwrap_or(0);
         let generation = WIZARD_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut meta: HashMap<String, DirMeta> = HashMap::new();
+        for r in recent {
+            let r = trim_slash(r);
+            if !r.is_empty() {
+                meta.entry(r.to_owned()).or_default().recently_used = true;
+            }
+        }
         let mut w = Wizard {
             host_step: Some(host_step),
             host,
@@ -305,6 +349,7 @@ impl Wizard {
             proxy_options,
             proxy_selected,
             generation,
+            meta,
         };
         w.refilter();
         w
@@ -328,6 +373,18 @@ impl Wizard {
     /// active cwd (if on that host). The caller supplies this so the wizard
     /// state machine stays pure.
     pub fn on_host_connected(&mut self, host: &str, home: &str, new_seeds: Vec<String>) {
+        self.on_host_connected_with_recent(host, home, new_seeds, &[]);
+    }
+
+    /// Like [`on_host_connected`] but also marks `recent` seeds as
+    /// `recently_used` in `meta`.
+    pub fn on_host_connected_with_recent(
+        &mut self,
+        host: &str,
+        home: &str,
+        new_seeds: Vec<String>,
+        recent: &[String],
+    ) {
         self.host_step = None;
         self.host = host.to_owned();
         self.home = home.to_owned();
@@ -336,6 +393,14 @@ impl Wizard {
         self.listed = None;
         self.input.clear();
         self.selected = 0;
+        // Reset meta for the new host but preserve recently_used marks.
+        self.meta.clear();
+        for r in recent {
+            let r = trim_slash(r);
+            if !r.is_empty() {
+                self.meta.entry(r.to_owned()).or_default().recently_used = true;
+            }
+        }
         self.refilter();
     }
 
@@ -360,7 +425,39 @@ impl Wizard {
             .filter(|e| e.dir)
             .map(|e| join(path, &e.name))
             .collect();
+        // Populate enrichment metadata from the daemon reply.
+        for e in entries.iter().filter(|e| e.dir) {
+            let full = join(path, &e.name);
+            let m = self.meta.entry(full).or_default();
+            if e.git.is_some() {
+                m.git = e.git.clone();
+            }
+            if e.claude_at.is_some() {
+                m.claude_at = e.claude_at;
+            }
+            m.symlink = e.symlink;
+            m.hidden = e.hidden;
+        }
         self.refilter();
+    }
+
+    /// Populate enrichment metadata from a `RecentProjects` reply.
+    ///
+    /// Call this after `add_seeds_for_host` so the meta is available for the
+    /// frecency scorer and badge renderer.
+    pub fn add_project_meta(&mut self, projects: &[crate::proto::ProjectDir]) {
+        for p in projects {
+            let path = trim_slash(&p.path);
+            if path.is_empty() {
+                continue;
+            }
+            let m = self.meta.entry(path.to_owned()).or_default();
+            if p.git.is_some() {
+                m.git = p.git.clone();
+            }
+            m.symlink = p.symlink;
+            m.hidden = p.hidden;
+        }
     }
 
     /// A `ListClaudeSessions` reply for `cwd`. With no sessions there is
@@ -572,8 +669,21 @@ impl Wizard {
             .iter()
             .filter_map(|s| {
                 let display = abbreviate_home(s, &self.home);
-                let score = fuzzy_score(&input, s).max(fuzzy_score(&input, &display))?;
-                Some((score, s))
+                let fuzzy = fuzzy_score(&input, s).max(fuzzy_score(&input, &display))?;
+                // Layer frecency bonus on top of fuzzy score.  When the query
+                // is empty every fuzzy score is 0, so frecency dominates and
+                // dirs sort as: claude-active > recently-used > git-repo >
+                // other > hidden.  When typing, fuzzy dominates and frecency
+                // is a tie-breaker.
+                let frecency = self.meta.get(s.as_str()).map_or(0i64, |m| {
+                    let mut bonus = 0i64;
+                    if m.hidden { bonus -= 100_000; }
+                    if m.claude_at.is_some() { bonus += 200; }
+                    if m.recently_used { bonus += 100; }
+                    if m.git.is_some() { bonus += 50; }
+                    bonus
+                });
+                Some((fuzzy + frecency, s))
             })
             .collect();
         // Stable: equal scores keep seed (recency) order.
@@ -922,5 +1032,67 @@ mod tests {
         let w1 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
         let w2 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
         assert_ne!(w1.generation, w2.generation);
+    }
+
+    #[test]
+    fn frecency_hidden_sorts_last() {
+        let seeds = strings(&["/visible", "/hidden-dir"]);
+        let mut w = wizard_local(seeds, "/h");
+        // Mark /hidden-dir as hidden in meta.
+        w.meta.entry("/hidden-dir".to_owned()).or_default().hidden = true;
+        // Trigger refilter with empty input so frecency dominates.
+        w.input.clear();
+        w.refilter();
+        // /visible should appear before /hidden-dir.
+        let pos_visible = w.items.iter().position(|p| p == "/visible");
+        let pos_hidden = w.items.iter().position(|p| p == "/hidden-dir");
+        assert!(
+            pos_visible < pos_hidden,
+            "visible should sort before hidden: {:?}",
+            w.items
+        );
+    }
+
+    #[test]
+    fn frecency_claude_active_sorts_first() {
+        let seeds = strings(&["/regular", "/claude-active", "/git-only"]);
+        let mut w = wizard_local(seeds, "/h");
+        // /claude-active has a recent claude session.
+        w.meta.entry("/claude-active".to_owned()).or_default().claude_at = Some(1_000_000);
+        // /git-only has a git repo.
+        w.meta.entry("/git-only".to_owned()).or_default().git = Some("main".to_owned());
+        w.input.clear();
+        w.refilter();
+        // Order should be: claude-active, git-only, regular.
+        let pos_claude = w.items.iter().position(|p| p == "/claude-active").unwrap();
+        let pos_git = w.items.iter().position(|p| p == "/git-only").unwrap();
+        let pos_regular = w.items.iter().position(|p| p == "/regular").unwrap();
+        assert!(
+            pos_claude < pos_git,
+            "claude-active should sort before git-only: {:?}",
+            w.items
+        );
+        assert!(
+            pos_git < pos_regular,
+            "git-only should sort before regular: {:?}",
+            w.items
+        );
+    }
+
+    #[test]
+    fn recently_used_badge_set_from_new_with_recent() {
+        let seeds = strings(&["/a", "/b", "/c"]);
+        let recent = strings(&["/b"]);
+        let w = Wizard::new_with_recent(
+            seeds, &recent, "/h".into(), "local", &[], &[], None,
+        );
+        assert!(
+            w.meta.get("/b").map_or(false, |m| m.recently_used),
+            "/b should be marked recently_used"
+        );
+        assert!(
+            !w.meta.get("/a").map_or(false, |m| m.recently_used),
+            "/a should not be recently_used"
+        );
     }
 }

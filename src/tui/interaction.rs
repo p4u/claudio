@@ -157,9 +157,17 @@ impl App {
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Enter => {
                     let (id, name) = (*id, input.trim().to_owned());
+                    let name = (!name.is_empty()).then_some(name);
                     self.modal = None;
                     if let Some(i) = self.index_of(id) {
-                        self.sessions[i].name = (!name.is_empty()).then_some(name);
+                        let host = self.sessions[i].host.clone();
+                        self.sessions[i].name = name.clone();
+                        // Persist to daemon journal so the name survives reconnects.
+                        self.request(
+                            &host,
+                            Msg::Rename { id, name },
+                            ReplyTo::Ack("rename"),
+                        );
                         self.save();
                     }
                 }
@@ -477,6 +485,10 @@ impl App {
             SessionEvent::Title { title } => v.title = Some(title),
             SessionEvent::Exited { .. } => v.state = SessionState::Exited,
             SessionEvent::Notice { text } => self.notify(text),
+            SessionEvent::Renamed { name } => {
+                v.name = name;
+                self.save();
+            }
             SessionEvent::Unknown => {}
         }
     }
@@ -502,11 +514,15 @@ impl App {
                 let _ = id; // tombstone stays
             }
             (ReplyTo::Projects, Ok(Msg::Projects { dirs })) => {
-                self.projects = dirs.into_iter().map(|d| d.path).collect();
+                // Keep the full ProjectDir list for meta; extract paths for
+                // seed assembly and for App::projects cache.
+                let project_dirs = dirs;
+                self.projects = project_dirs.iter().map(|d| d.path.clone()).collect();
                 let projects = self.projects.clone();
                 if let Some(w) = self.wizard_mut() {
                     // Local projects only apply when wizard is on "local".
                     w.add_seeds_for_host("local", &projects);
+                    w.add_project_meta(&project_dirs);
                 }
             }
             (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -556,11 +572,13 @@ impl App {
                     // S7: stale reply from a cancelled or superseded wizard.
                     return;
                 }
+                let project_dirs = dirs;
                 let project_paths: Vec<String> =
-                    dirs.into_iter().map(|d| d.path).collect();
+                    project_dirs.iter().map(|d| d.path.clone()).collect();
                 if let Some(w) = self.wizard_mut() {
                     // Only apply if the wizard is still on that host.
                     w.add_seeds_for_host(&host, &project_paths);
+                    w.add_project_meta(&project_dirs);
                 }
             }
             (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {

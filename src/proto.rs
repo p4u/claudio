@@ -95,6 +95,12 @@ pub enum Msg {
     Kill {
         id: SessionId,
     },
+    /// Update the human-readable name for a session. `None` clears the name.
+    /// The daemon persists the rename in its journal so it survives restarts.
+    Rename {
+        id: SessionId,
+        name: Option<String>,
+    },
     ListDir {
         path: String,
     },
@@ -302,6 +308,10 @@ pub enum SessionEvent {
     },
     Exited {
         code: Option<i32>,
+    },
+    /// The session's human-readable name was updated (or cleared).
+    Renamed {
+        name: Option<String>,
     },
     /// A transient user-visible notice (e.g. resume-fallback).
     Notice {
