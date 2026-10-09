@@ -13,7 +13,6 @@ use crate::proxy::api::PoolStatus;
 use crate::proto::SessionState;
 
 use super::app::{App, Modal, ProxyStatus, SessionView};
-use super::keymap;
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
