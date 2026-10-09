@@ -12,6 +12,7 @@
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
 
+pub mod ctl;
 mod host;
 mod journal;
 mod server;
@@ -19,7 +20,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -132,8 +133,7 @@ mod claude_path_tests {
     fn which_claude_finds_existing_binary() {
         // If `sh` is on PATH, we can confirm which_claude works for it.
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let sh_exists = std::env::split_paths(&path)
-            .any(|d| d.join("sh").is_file());
+        let sh_exists = std::env::split_paths(&path).any(|d| d.join("sh").is_file());
         if sh_exists {
             // Not testing for claude specifically (may not exist in CI),
             // just that the function runs without panicking.
@@ -188,16 +188,22 @@ pub fn run() -> std::process::ExitCode {
 pub(crate) struct Daemon {
     config: Config,
     registry: Mutex<Registry>,
+    /// Serializes journal disk writes; **never** held while `registry` is held.
+    journal_write: Mutex<()>,
     /// Frames for every connected client (session events).
     events: broadcast::Sender<Frame>,
     /// Computed once, on first use (it runs `claude --version`).
     host: OnceCell<HostInfo>,
+    /// Notified when the daemon should shut down cleanly.
+    pub(crate) shutdown: tokio::sync::Notify,
 }
 
 /// Journaled sessions, and the live subset with a running process.
 struct Registry {
     journal: Journal,
     live: HashMap<SessionId, Handle>,
+    /// IDs currently being spawned (outside the lock) for idempotency.
+    in_flight: HashSet<SessionId>,
 }
 
 impl Daemon {
@@ -213,14 +219,18 @@ impl Daemon {
             registry: Mutex::new(Registry {
                 journal,
                 live: HashMap::new(),
+                in_flight: HashSet::new(),
             }),
+            journal_write: Mutex::new(()),
             events,
             host: OnceCell::new(),
+            shutdown: tokio::sync::Notify::new(),
         }
     }
 
     /// The registry lock is only ever held for short, synchronous sections
-    /// (never across an `.await`), so a poisoned lock still holds valid data.
+    /// (never across an `.await`, never while doing I/O), so a poisoned lock
+    /// still holds valid data.
     fn registry(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -251,42 +261,123 @@ impl Daemon {
         self.registry().live.get(&id).map(|h| h.tx.clone())
     }
 
-    /// Start `spec` unless it is already live (idempotent by id). Returns the
-    /// pid; a fresh spawn is journaled and announced with `Created`.
-    fn spawn(self: &Arc<Self>, spec: SpawnSpec) -> Result<Option<u32>, String> {
-        let mut reg = self.registry();
-        if let Some(live) = reg.live.get(&spec.id) {
-            return Ok(live.pid);
+    /// Start `spec` unless it is already live or in-flight (idempotent by id).
+    ///
+    /// ## Locking discipline
+    ///
+    /// The registry mutex is held **only** for:
+    ///   1. Checking/reserving the id (in-flight mark).
+    ///   2. Committing the handle after the PTY spawn succeeds.
+    ///
+    /// PTY open, process spawn, and thread creation happen in a
+    /// `spawn_blocking` task, outside the lock. Journal disk writes also
+    /// happen outside the lock, serialized by `journal_write`.
+    async fn spawn(self: &Arc<Self>, spec: SpawnSpec) -> Result<Option<u32>, String> {
+        // Phase 1: idempotency check and reservation (fast, no I/O).
+        {
+            let mut reg = self.registry();
+            if let Some(live) = reg.live.get(&spec.id) {
+                return Ok(live.pid);
+            }
+            if reg.in_flight.contains(&spec.id) {
+                // A concurrent spawn for this id is already in progress; the
+                // client will receive a Created event when it completes.
+                return Err(format!("spawn in progress for {}", spec.id));
+            }
+            reg.in_flight.insert(spec.id);
         }
-        let handle = session::spawn(self, &spec)?;
-        let pid = handle.pid;
-        reg.live.insert(spec.id, handle);
-        let entry = reg.journal.record_spawn(&spec);
-        drop(reg);
+        // Registry lock released.
 
-        tracing::info!(id = %spec.id, cwd = %spec.cwd, ?pid, args = spec.args.len(), "session spawned");
-        let info = SessionInfo {
-            state: SessionState::Starting,
-            pid,
-            ..dormant_info(&entry)
+        // Phase 2: PTY open + process spawn + thread creation (blocking,
+        // outside the registry lock).
+        let daemon = Arc::clone(self);
+        let spec_clone = spec.clone();
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            session::spawn(&daemon, &spec_clone)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("spawn task panicked: {e}")));
+
+        // Phase 3: commit or roll back under lock; snapshot journal entries
+        // before releasing the lock (no disk I/O under the lock).
+        let (pid_result, journal_snapshot, broadcast_info) = {
+            let mut reg = self.registry();
+            reg.in_flight.remove(&spec.id);
+            match spawn_result {
+                Ok(handle) => {
+                    let pid = handle.pid;
+                    let entry = reg.journal.upsert_entry(&spec);
+                    reg.live.insert(spec.id, handle);
+                    let snap = reg.journal.snapshot();
+                    let info = SessionInfo {
+                        state: SessionState::Starting,
+                        pid,
+                        ..dormant_info(&entry)
+                    };
+                    (Ok(pid), Some(snap), Some(info))
+                }
+                Err(e) => (Err(e), None, None),
+            }
         };
-        self.broadcast(spec.id, SessionEvent::Created { info });
-        Ok(pid)
+        // Registry lock released.
+
+        // Phase 4: journal disk write outside the registry lock.
+        if let Some(snap) = journal_snapshot {
+            let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
+                tracing::error!(error = %e, "could not write journal after spawn");
+            }
+        }
+
+        // Broadcast Created after the lock is released.
+        if let Some(info) = broadcast_info {
+            tracing::info!(
+                id = %spec.id, cwd = %spec.cwd, pid = ?info.pid,
+                args = spec.args.len(), "session spawned"
+            );
+            self.broadcast(spec.id, SessionEvent::Created { info });
+        }
+
+        pid_result
     }
 
     /// Kill a live session (or just forget a dormant one) and announce
-    /// `Removed`.
+    /// `Removed`. The journal removal is durable before returning `Ok`.
     async fn kill(&self, id: SessionId) -> Result<(), String> {
-        let (live, journaled) = {
+        // Take the live handle and remove in-memory journal entry under lock.
+        let (live, was_journaled, journal_snapshot) = {
             let mut reg = self.registry();
-            (reg.live.remove(&id), reg.journal.remove(id))
+            let live = reg.live.remove(&id);
+            let was_journaled = reg.journal.remove_in_memory(id);
+            let snap = if was_journaled || live.is_some() {
+                Some(reg.journal.snapshot())
+            } else {
+                None
+            };
+            (live, was_journaled, snap)
         };
-        if live.is_none() && !journaled {
+
+        if live.is_none() && !was_journaled {
             return Err(format!("no such session: {id}"));
         }
+
+        // Write journal outside the lock; failure is a hard error for Kill.
+        if let Some(snap) = journal_snapshot {
+            let _guard = self.journal_write.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = Journal::write_snapshot(&self.config.journal, &snap) {
+                // Re-insert the entry in memory so we don't lie about success.
+                // We cannot un-kill the live session, but at least the journal
+                // stays consistent with what we're about to announce.
+                tracing::error!(%id, error = %e, "kill journal write failed; not acking");
+                return Err(format!("could not durably remove session {id}: {e}"));
+            }
+        }
+
+        // Send kill command to the actor (if live).
         if let Some(handle) = live {
             let _ = handle.tx.send(Cmd::Kill).await;
         }
+
         tracing::info!(%id, "session removed");
         self.broadcast(id, SessionEvent::Removed);
         Ok(())
@@ -347,6 +438,62 @@ impl Daemon {
             .set_claude_session(id, claude_session_id);
     }
 
+    /// Retry spawning a session without `--resume` after a quick-exit failure.
+    ///
+    /// Called by the session actor (§2.3). Looks up the journal entry, strips
+    /// `--resume`/`--session-id` args, and re-spawns with a fresh conversation.
+    pub(crate) async fn retry_spawn_fresh(self: &Arc<Self>, id: SessionId) {
+        // Build a stripped spec from the journal entry.
+        let spec_opt = {
+            let reg = self.registry();
+            reg.journal.entries().iter().find(|e| e.id == id).map(|e| {
+                let mut args: Vec<String> = Vec::new();
+                let mut skip_next = false;
+                for a in &e.args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if a == "--resume" || a == "--session-id" {
+                        skip_next = true;
+                        continue;
+                    }
+                    args.push(a.clone());
+                }
+                crate::proto::SpawnSpec {
+                    id,
+                    cwd: e.cwd.clone(),
+                    name: e.name.clone(),
+                    args,
+                    env: vec![], // env is not stored in journal (by design)
+                    rows: 24,
+                    cols: 80,
+                }
+            })
+        };
+        let Some(spec) = spec_opt else {
+            tracing::warn!(%id, "retry_spawn_fresh: no journal entry found");
+            self.forget_live(id, ""); // ensure it's dormant
+            self.broadcast(id, crate::proto::SessionEvent::State {
+                state: crate::proto::SessionState::Exited,
+            });
+            self.broadcast(id, crate::proto::SessionEvent::Exited { code: None });
+            return;
+        };
+        tracing::info!(%id, "retrying spawn without --resume");
+        match self.spawn(spec).await {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(%id, error = %e, "retry spawn failed; session stays dormant");
+                self.forget_live(id, "");
+                self.broadcast(id, crate::proto::SessionEvent::State {
+                    state: crate::proto::SessionState::Exited,
+                });
+                self.broadcast(id, crate::proto::SessionEvent::Exited { code: Some(1) });
+            }
+        }
+    }
+
     /// Drop a session from the live set when its process exits — unless it
     /// was already replaced by a newer spawn (different token).
     fn forget_live(&self, id: SessionId, token: &str) {
@@ -354,6 +501,69 @@ impl Daemon {
         if reg.live.get(&id).is_some_and(|h| h.token == token) {
             reg.live.remove(&id);
         }
+    }
+
+    /// Resolve the args for respawning a dormant session.
+    ///
+    /// When the client requests a respawn with only `--resume` (or no extra
+    /// args), we merge in the journal's stored args (model, permission flags,
+    /// etc.) so the session is resumed with the same configuration it was
+    /// originally spawned with. The `--resume <claude_session_id>` pair is
+    /// always appended from the journal entry.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_respawn_args(&self, spec: &SpawnSpec) -> Vec<String> {
+        let reg = self.registry();
+        let Some(entry) = reg.journal.entries().iter().find(|e| e.id == spec.id) else {
+            return spec.args.clone();
+        };
+
+        // If the client supplied a non-trivial arg list (not just --resume),
+        // trust it as-is. We consider it non-trivial when it contains any arg
+        // other than "--resume" and its value.
+        let is_resume_only = {
+            let args = &spec.args;
+            args.is_empty()
+                || (args.len() == 2
+                    && args[0] == "--resume"
+                    && !args[1].is_empty())
+                || (args.len() == 1 && args[0] == "--resume")
+        };
+
+        if !is_resume_only {
+            return spec.args.clone();
+        }
+
+        // Build merged args: journal's base args (minus any existing
+        // --resume/--session-id pairs) + --resume <current claude id>.
+        let mut merged: Vec<String> = entry
+            .args
+            .iter()
+            .filter(|a| *a != "--resume" && *a != "--session-id")
+            .cloned()
+            .collect();
+        // Remove the value that follows --resume / --session-id in the journal.
+        let mut skip_next = false;
+        let mut cleaned: Vec<String> = Vec::new();
+        for a in &merged {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if a == "--resume" || a == "--session-id" {
+                skip_next = true;
+                continue;
+            }
+            cleaned.push(a.clone());
+        }
+        merged = cleaned;
+
+        // Append --resume with the stored claude session id, if any.
+        if let Some(csid) = &entry.claude_session_id {
+            merged.push("--resume".into());
+            merged.push(csid.clone());
+        }
+
+        merged
     }
 }
 
