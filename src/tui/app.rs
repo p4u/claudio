@@ -623,11 +623,17 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
+        let action = keymap::lookup(&key);
+        // Quitting always works, even from a dialog: sessions keep running.
+        if action == Some(Action::Quit) {
+            self.on_action(Action::Quit);
+            return;
+        }
         if self.modal.is_some() {
             self.modal_key(key);
             return;
         }
-        if let Some(action) = keymap::lookup(&key) {
+        if let Some(action) = action {
             self.on_action(action);
             return;
         }
