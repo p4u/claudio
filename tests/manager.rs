@@ -496,9 +496,10 @@ fn test_ssh_remote_session() {
     tui.send_keys(host.as_bytes());
     tui.send_keys(ENTER);
 
-    // Bootstrap may take time; wait for the directory step.
+    // Bootstrap may upload the binary first; a debug build is ~150 MB, so give
+    // the first run after a rebuild plenty of time.
     let dir_step = format!("on {host}");
-    tui.wait_for(&dir_step, Region::Screen, Duration::from_secs(90));
+    tui.wait_for(&dir_step, Region::Screen, Duration::from_secs(300));
 
     // ── 3. Directory step: paste /tmp and confirm. ───────────────────────────
     tui.send_paste("/tmp");
@@ -1036,7 +1037,12 @@ fn test_proxy_real_claude() {
             trust_pressed = true;
             continue;
         }
-        if screen.contains("Claude Code") || screen.contains(">") {
+        // Ready = claude's input prompt is drawn AND the SessionStart hook
+        // marked the tab "needs input". In gateway mode claude keeps
+        // initializing (model discovery) after its banner first appears, and
+        // keys typed in that window are dropped.
+        let tabs = tui.screen_text(Region::TabBar);
+        if screen.contains("❯") && tabs.contains('?') {
             break;
         }
         assert!(
