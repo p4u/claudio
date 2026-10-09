@@ -1,25 +1,34 @@
-//! Diagnostic / test-harness CLI subcommands.
+//! Diagnostic / test-harness CLI subcommands — only compiled with `--features diag`.
 //!
 //! These are invoked with a `__` prefix so they are clearly internal and not
 //! part of the user-facing interface. They exist primarily for the integration
 //! tests in `tests/remote.rs` and for manual debugging.
+//!
+//! Kept behind the `diag` feature so release builds don't ship these
+//! subcommands, which install binaries and spawn real sessions on remote
+//! hosts.
 
 use std::process::ExitCode;
 use std::time::Duration;
+
+/// Build a single-threaded Tokio runtime (factored out to avoid the same
+/// boilerplate in every command).
+fn make_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
+    tokio::runtime::Runtime::new().map_err(|e| {
+        eprintln!("failed to create tokio runtime: {e}");
+        ExitCode::FAILURE
+    })
+}
 
 /// `claudio __bootstrap HOST`
 ///
 /// Runs `ensure_remote(host)` and prints the result in a human-readable form.
 /// Exits 0 on success, 1 on error.
 pub fn bootstrap_cmd(host: &str) -> ExitCode {
-    let rt = match tokio::runtime::Runtime::new() {
+    let rt = match make_runtime() {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("failed to create tokio runtime: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
-
     let host = host.to_owned();
     rt.block_on(async move {
         match super::bootstrap::ensure_remote(&host).await {
@@ -50,14 +59,10 @@ pub fn bootstrap_cmd(host: &str) -> ExitCode {
 /// Connects via SSH (which performs the handshake and reads the Welcome), then
 /// prints the Welcome fields as JSON to stdout. Exits 0 on success, 1 on error.
 pub fn connect_check_cmd(host: &str) -> ExitCode {
-    let rt = match tokio::runtime::Runtime::new() {
+    let rt = match make_runtime() {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("failed to create tokio runtime: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
-
     let host = host.to_owned();
     rt.block_on(async move {
         let client = match crate::client::connect_ssh(&host).await {
@@ -92,14 +97,10 @@ pub fn connect_check_cmd(host: &str) -> ExitCode {
 /// frame (the session output), kills the session, and exits. Prints a summary
 /// to stdout.
 pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
-    let rt = match tokio::runtime::Runtime::new() {
+    let rt = match make_runtime() {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("failed to create tokio runtime: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
-
     let host = host.to_owned();
     let cwd = cwd.to_owned();
     rt.block_on(async move {
@@ -143,10 +144,7 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
         }
 
         // Attach to get terminal data.
-        match client
-            .request(Msg::Attach { id: session_id, rows: 24, cols: 80 })
-            .await
-        {
+        match client.request(Msg::Attach { id: session_id, rows: 24, cols: 80 }).await {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("Attach request failed: {e}");
@@ -192,4 +190,13 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
         let _ = client.request(Msg::Kill { id: session_id }).await;
         ExitCode::SUCCESS
     })
+}
+
+/// `claudio __ssh-hosts` — print all known SSH host aliases, one per line.
+pub fn ssh_hosts_cmd() -> ExitCode {
+    let hosts = super::hosts::candidates();
+    for h in &hosts {
+        println!("{h}");
+    }
+    ExitCode::SUCCESS
 }

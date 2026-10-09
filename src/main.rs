@@ -47,8 +47,10 @@ fn main() -> std::process::ExitCode {
     }
 
     // Test-harness / diagnostic subcommands (undocumented `__` prefix).
+    // These are only compiled in when the `diag` cargo feature is enabled.
     //
     // `claudio __bootstrap HOST` – run ensure_remote and print the result.
+    #[cfg(feature = "diag")]
     if argv.get(1).map(String::as_str) == Some("__bootstrap") {
         if let Some(host) = argv.get(2) {
             return remote::diag::bootstrap_cmd(host);
@@ -58,6 +60,7 @@ fn main() -> std::process::ExitCode {
     }
 
     // `claudio __connect-check HOST` – connect via SSH, print the Welcome JSON.
+    #[cfg(feature = "diag")]
     if argv.get(1).map(String::as_str) == Some("__connect-check") {
         if let Some(host) = argv.get(2) {
             return remote::diag::connect_check_cmd(host);
@@ -68,6 +71,7 @@ fn main() -> std::process::ExitCode {
 
     // `claudio __remote-session HOST CWD` – spawn a session on HOST in CWD,
     // attach, wait for a snapshot, kill and exit.
+    #[cfg(feature = "diag")]
     if argv.get(1).map(String::as_str) == Some("__remote-session") {
         if let (Some(host), Some(cwd)) = (argv.get(2), argv.get(3)) {
             return remote::diag::remote_session_cmd(host, cwd);
@@ -77,12 +81,9 @@ fn main() -> std::process::ExitCode {
     }
 
     // `claudio __ssh-hosts` – print all known SSH host aliases, one per line.
+    #[cfg(feature = "diag")]
     if argv.get(1).map(String::as_str) == Some("__ssh-hosts") {
-        let hosts = remote::hosts::candidates();
-        for h in &hosts {
-            println!("{h}");
-        }
-        return std::process::ExitCode::SUCCESS;
+        return remote::diag::ssh_hosts_cmd();
     }
 
     // §4.9.2 concealed relay: invoked as `<neutral-binary> <EventName> <port>`.
