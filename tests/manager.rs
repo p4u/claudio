@@ -204,7 +204,9 @@ fn test_6_close_session() {
     tui.wait_until(|s| !s.contains("Kill session", Region::Screen), WAIT);
 
     // After closing the only session the wizard opens again; dismiss it.
+    // Wait until the wizard is actually closed before quitting.
     tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("where?", Region::Screen), WAIT);
 
     // state.json should no longer contain the closed session's cwd.
     let dir_path = harness.dirs[0].to_str().unwrap();
