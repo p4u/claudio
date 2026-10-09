@@ -5,6 +5,12 @@
 //! methods and everything it wants done (daemon requests, PTY input, saving
 //! state.json) is queued as [`Effect`]s that the event loop in `mod.rs`
 //! drains with [`App::take_effects`].
+//!
+//! Sub-modules hold the individual types (S1 split):
+//! - `sessions`      – SessionView, sanitize_label
+//! - `proxy_state`   – ProxyStatus, load_proxy_profiles, proxy_env_for
+//! - `notifications` – Notice, check_notifications
+//! - `interaction`   – Modal
 
 use std::collections::HashMap;
 use std::io;
@@ -22,9 +28,15 @@ use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
 use super::keymap::{self, Action};
-use super::state::{self, ClientState, SavedSession};
+use super::state::{self, ClientState, KillTombstone};
 use super::ui;
 use super::wizard::{self, Outcome, Wizard};
+
+// Re-export split types so ui.rs and mod.rs can still import from `app`.
+pub use super::interaction::Modal;
+pub use super::notifications::Notice;
+pub use super::proxy_state::ProxyStatus;
+pub use super::sessions::SessionView;
 
 /// Rows taken by the tab bar and the status bar.
 const CHROME_ROWS: u16 = 2;
@@ -60,84 +72,18 @@ pub enum ReplyTo {
     /// Only errors matter; they are shown as a notice prefixed with this.
     Ack(&'static str),
     Spawned(SessionId),
+    /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
+    Kill(SessionId),
     DirEntries,
-    ClaudeSessions(String),
+    /// Wizard request tagged with the wizard's generation (S7).
+    ClaudeSessions(String, u64),
     Projects,
     /// Wizard directory listing for a remote host (host, path).
     RemoteDirEntries,
-    /// Wizard claude sessions for a remote host.
-    RemoteClaudeSessions(String),
+    /// Wizard claude sessions for a remote host (S7: generation-tagged).
+    RemoteClaudeSessions(String, u64),
     /// Wizard recent projects for a remote host.
     RemoteProjects,
-}
-
-/// The client-side view of one session.
-pub struct SessionView {
-    pub id: SessionId,
-    pub name: Option<String>,
-    pub cwd: String,
-    pub host: String,
-    pub state: SessionState,
-    pub title: Option<String>,
-    pub claude_session_id: Option<String>,
-    pub created_at: u64,
-    /// Mirror of the daemon's screen; fed only while attached.
-    pub mirror: Screen,
-    pub attached: bool,
-    /// Proxy profile name (None = no proxy). Only the name, never the token.
-    pub proxy: Option<String>,
-}
-
-impl SessionView {
-    /// The tab label: the user's name, else claude's title, else the cwd's
-    /// basename.
-    pub fn label(&self) -> String {
-        self.name
-            .clone()
-            .or_else(|| self.title.clone())
-            .unwrap_or_else(|| self.cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/").to_owned())
-    }
-
-    fn saved(&self) -> SavedSession {
-        SavedSession {
-            id: self.id,
-            name: self.name.clone(),
-            cwd: self.cwd.clone(),
-            host: self.host.clone(),
-            claude_session_id: self.claude_session_id.clone(),
-            created_at: self.created_at,
-            proxy: self.proxy.clone(),
-        }
-    }
-}
-
-/// A transient status-bar message.
-pub struct Notice {
-    pub text: String,
-    ticks_left: u32,
-}
-
-/// Live proxy data shown in the status bar for the active session.
-#[derive(Debug, Clone, Default)]
-pub struct ProxyStatus {
-    pub pool: Option<PoolHealthResponse>,
-    pub stats: Option<StatsResponse>,
-    /// When the stats were last fetched.
-    pub fetched_at: Option<Instant>,
-}
-
-/// A popup that captures the keyboard.
-pub enum Modal {
-    Rename { id: SessionId, input: String },
-    /// Confirm killing a session.
-    Close { id: SessionId },
-    Wizard(Wizard),
-    /// Proxy stats popup.
-    ProxyStats { profile_name: String },
-    /// Overview / "mission control": all sessions at a glance.
-    Overview { selected: usize },
-    /// Help popup: all key bindings.
-    Help,
 }
 
 /// The manager's state.
@@ -174,12 +120,15 @@ pub struct App {
     pub proxy_default: Option<String>,
     /// Last state for which a desktop notification was sent per session.
     /// Used to debounce: only one notification per session per state change.
-    pub notified: HashMap<SessionId, crate::proto::SessionState>,
+    pub notified: HashMap<SessionId, SessionState>,
     /// Whether to emit desktop notifications (from config.toml [ui] notify).
     pub notify_enabled: bool,
     /// Sessions that need a notification emitted after the next draw.
     /// Populated by `check_notifications`; drained by the event loop.
     pub pending_notifs: Vec<String>,
+    /// Kill tombstones: sessions the user explicitly closed. Persisted before
+    /// Kill is sent, and cleared only when the daemon acknowledges.
+    pub killed: Vec<KillTombstone>,
 }
 
 /// Current Unix time in seconds.
@@ -204,8 +153,7 @@ impl App {
         recent_dirs: Vec<String>,
         notify_enabled: bool,
     ) -> App {
-        // Load proxy profiles once at startup.
-        let (proxy_profiles, proxy_default) = load_proxy_profiles();
+        let (proxy_profiles, proxy_default) = super::proxy_state::load_proxy_profiles();
         App {
             sessions: Vec::new(),
             active: None,
@@ -229,6 +177,7 @@ impl App {
             notified: HashMap::new(),
             notify_enabled,
             pending_notifs: Vec::new(),
+            killed: Vec::new(),
         }
     }
 
@@ -305,6 +254,15 @@ impl App {
         }
     }
 
+    /// Build the `SpawnSpec.env` for a proxy profile name (M4 fix: fallible).
+    ///
+    /// Returns `Err(msg)` if a profile is selected but cannot be resolved.
+    fn proxy_env_for(&self, proxy_name: Option<&str>) -> Result<Vec<(String, String)>, String> {
+        super::proxy_state::proxy_env_for(proxy_name, proxy_name.and_then(|n| self.proxy_config_cached(n)))
+    }
+
+    // ── Geometry ──────────────────────────────────────────────────────────────
+
     /// The pane size as `(rows, cols)`.
     pub fn pane_size(&self) -> (u16, u16) {
         (self.height.saturating_sub(CHROME_ROWS).max(1), self.width.max(1))
@@ -314,12 +272,15 @@ impl App {
         self.active.and_then(|i| self.sessions.get(i))
     }
 
+    // ── Persistence ───────────────────────────────────────────────────────────
+
     /// What state.json should contain now.
     pub fn to_state(&self) -> ClientState {
         ClientState {
             sessions: self.sessions.iter().map(SessionView::saved).collect(),
             active: self.active_view().map(|v| v.id),
             recent_dirs: self.recent_dirs.clone(),
+            killed: self.killed.clone(),
         }
     }
 
@@ -331,34 +292,96 @@ impl App {
 
     // ── Recovery ─────────────────────────────────────────────────────────────
 
-    /// Rebuild the session list from `saved` and the daemon's `live`
-    /// sessions: re-spawn dormant ones, attach the saved active session, and
-    /// open the wizard when there is nothing to show.
+    /// Full recovery: rebuild the entire session list from `saved` and the
+    /// daemon's `live` sessions (initial local startup).
+    ///
+    /// Only call once at startup. For reconnects, use [`recover_host`].
     pub fn recover(&mut self, saved: &ClientState, live: &[SessionInfo]) {
+        // Merge in tombstones from saved state.
+        self.killed = saved.killed.clone();
+        self.recover_host_inner("local", saved, live, true);
+    }
+
+    /// Host-scoped recovery (M1 fix): reconcile only the given host's
+    /// sessions against the current live list from that host's daemon.
+    ///
+    /// - Does NOT touch sessions belonging to other hosts.
+    /// - Assigns unknown live sessions the correct originating host (not "local").
+    /// - Preserves offline hosts' tabs, names and proxy associations.
+    /// - Re-sends Kill for any tombstone that is still in the live list.
+    pub fn recover_host(&mut self, host: &str, live: &[SessionInfo]) {
+        // Build a synthetic ClientState from current in-memory sessions for this host.
+        let saved_for_host = ClientState {
+            sessions: self.sessions.iter().filter(|v| v.host == host).map(SessionView::saved).collect(),
+            active: self.active_view().filter(|v| v.host == host).map(|v| v.id),
+            recent_dirs: self.recent_dirs.clone(),
+            killed: self.killed.clone(),
+        };
+        // Remove existing sessions for this host (they'll be re-added after merge).
+        let active_id = self.active_view().map(|v| v.id);
+        self.sessions.retain(|v| v.host != host);
+        // Adjust active index (may now point into a shrunk vec).
+        self.active = active_id.and_then(|id| self.sessions.iter().position(|v| v.id == id));
+
+        self.recover_host_inner(host, &saved_for_host, live, false);
+    }
+
+    /// Internal: merge `saved` + `live` for `host` and add the resulting
+    /// sessions to `self.sessions`. When `is_full` is true (initial startup),
+    /// sessions.clear() is called first and active/wizard logic runs.
+    fn recover_host_inner(
+        &mut self,
+        host: &str,
+        saved: &ClientState,
+        live: &[SessionInfo],
+        is_full: bool,
+    ) {
         let (rows, cols) = self.pane_size();
-        self.connected = true;
-        self.sessions.clear();
-        self.active = None;
-        for r in state::merge(saved, live) {
-            if let Some(args) = r.respawn {
-                // Re-send proxy env so the respawned claude still routes
-                // through the proxy (fix: was Vec::new(), losing the token).
-                let env = self.proxy_env_for(r.saved.proxy.as_deref());
-                let spec = SpawnSpec {
-                    id: r.saved.id,
-                    cwd: r.saved.cwd.clone(),
-                    name: r.saved.name.clone(),
-                    args,
-                    env,
-                    rows,
-                    cols,
-                };
-                let host = r.saved.host.clone();
+        if is_full {
+            self.connected = true;
+            self.sessions.clear();
+            self.active = None;
+        }
+
+        let merged = state::merge_for_host(host, saved, live);
+
+        // Re-send Kill for tombstoned sessions that are still live.
+        for live_info in live {
+            if self.killed.iter().any(|t| t.id == live_info.id && t.host == host) {
+                let id = live_info.id;
                 self.effects.push(Effect::Request {
-                    host,
-                    msg: Msg::Spawn(spec),
-                    to: ReplyTo::Spawned(r.saved.id),
+                    host: host.to_owned(),
+                    msg: Msg::Kill { id },
+                    to: ReplyTo::Kill(id),
                 });
+            }
+        }
+
+        for r in merged {
+            if let Some(ref args) = r.respawn {
+                // Build proxy env; if it fails, skip the respawn with a notice.
+                match self.proxy_env_for(r.saved.proxy.as_deref()) {
+                    Ok(env) => {
+                        let spec = SpawnSpec {
+                            id: r.saved.id,
+                            cwd: r.saved.cwd.clone(),
+                            name: r.saved.name.clone(),
+                            args: args.clone(),
+                            env,
+                            rows,
+                            cols,
+                        };
+                        let h = r.saved.host.clone();
+                        self.effects.push(Effect::Request {
+                            host: h,
+                            msg: Msg::Spawn(spec),
+                            to: ReplyTo::Spawned(r.saved.id),
+                        });
+                    }
+                    Err(e) => {
+                        self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
+                    }
+                }
             }
             self.sessions.push(SessionView {
                 id: r.saved.id,
@@ -374,28 +397,50 @@ impl App {
                 proxy: r.saved.proxy,
             });
         }
-        let restore = saved.active.and_then(|id| self.index_of(id));
-        match restore.or((!self.sessions.is_empty()).then_some(0)) {
-            Some(i) => self.activate(i),
-            None if self.modal.is_none() => self.open_wizard(),
-            None => {}
+
+        if is_full {
+            let restore = saved.active.and_then(|id| self.index_of(id));
+            match restore.or((!self.sessions.is_empty()).then_some(0)) {
+                Some(i) => self.activate(i),
+                None if self.modal.is_none() => self.open_wizard(),
+                None => {}
+            }
+        } else {
+            // After a per-host recovery, activate the first session for this
+            // host if nothing is currently active.
+            if self.active.is_none() && !self.sessions.is_empty() {
+                self.activate(0);
+            }
         }
         self.save();
     }
 
-    /// Re-run recovery after a reconnect, from the current in-memory state.
-    pub fn on_reconnected(&mut self, live: &[SessionInfo], home: String) {
+    /// Re-run recovery after the local daemon reconnects.
+    pub fn on_reconnected_local(&mut self, live: &[SessionInfo], home: String) {
         self.home = home;
         self.notice = None;
-        let saved = self.to_state();
-        self.recover(&saved, live);
+        self.connected = true;
+        self.recover_host("local", live);
     }
 
-    /// The daemon connection dropped.
-    pub fn on_disconnected(&mut self) {
+    /// The local daemon connection dropped (M1 fix: only affects local sessions).
+    pub fn on_disconnected_local(&mut self) {
         self.connected = false;
         for v in &mut self.sessions {
-            v.attached = false;
+            if v.host == "local" {
+                v.attached = false;
+            }
+        }
+        self.redraw = true;
+    }
+
+    /// A remote daemon connection dropped (only affects that host's sessions).
+    pub fn on_disconnected_remote(&mut self, host: &str) {
+        for v in &mut self.sessions {
+            if v.host == host {
+                v.state = SessionState::Unknown;
+                v.attached = false;
+            }
         }
         self.redraw = true;
     }
@@ -432,6 +477,14 @@ impl App {
         match &self.modal {
             Some(Modal::Wizard(w)) => w.host.clone(),
             _ => "local".to_owned(),
+        }
+    }
+
+    /// The current wizard's generation (0 if no wizard is open).
+    fn wizard_generation(&self) -> u64 {
+        match &self.modal {
+            Some(Modal::Wizard(w)) => w.generation,
+            _ => 0,
         }
     }
 
@@ -492,8 +545,14 @@ impl App {
         let (rows, cols) = self.pane_size();
         let id = Uuid::new_v4();
         let args = resume.map(|r| vec!["--resume".to_owned(), r]).unwrap_or_default();
-        // Build proxy env if a profile is selected.
-        let env = self.proxy_env_for(proxy.as_deref());
+        // Build proxy env; if it fails, notify and abort (M4 fix).
+        let env = match self.proxy_env_for(proxy.as_deref()) {
+            Ok(e) => e,
+            Err(e) => {
+                self.notify(format!("cannot spawn: {e}"));
+                return;
+            }
+        };
         let spec = SpawnSpec { id, cwd: cwd.clone(), name: None, args, env, rows, cols };
         self.request(&host, Msg::Spawn(spec), ReplyTo::Spawned(id));
         self.sessions.push(SessionView {
@@ -511,28 +570,6 @@ impl App {
         });
         state::push_recent(&mut self.recent_dirs, &cwd);
         self.activate(self.sessions.len() - 1);
-    }
-
-    /// Build the `SpawnSpec.env` for a proxy profile name (or empty when none).
-    fn proxy_env_for(&self, proxy_name: Option<&str>) -> Vec<(String, String)> {
-        let name = match proxy_name {
-            Some(n) => n,
-            None => return Vec::new(),
-        };
-        // Resolve the profile: env var overrides if name is "env".
-        let profile = if name == "env" {
-            crate::proxy::profile::from_env().map(|(_, p)| p)
-        } else {
-            crate::proxy::profile::load().ok()
-                .and_then(|sec| sec.profiles.get(name).cloned())
-        };
-        match profile {
-            Some(p) => {
-                let cfg = self.proxy_config_cached(name);
-                crate::proxy::env::session_env(&p, cfg)
-            }
-            None => Vec::new(),
-        }
     }
 
     fn open_wizard(&mut self) {
@@ -557,6 +594,7 @@ impl App {
     /// Act on what the wizard decided.
     fn wizard_outcome(&mut self, outcome: Outcome) {
         let wizard_host = self.wizard_host();
+        let wizard_gen = self.wizard_generation();
         match outcome {
             Outcome::None => {}
             Outcome::Cancel => self.modal = None,
@@ -586,9 +624,9 @@ impl App {
             }
             Outcome::ChooseDir(cwd) => {
                 let reply_to = if wizard_host == "local" {
-                    ReplyTo::ClaudeSessions(cwd.clone())
+                    ReplyTo::ClaudeSessions(cwd.clone(), wizard_gen)
                 } else {
-                    ReplyTo::RemoteClaudeSessions(cwd.clone())
+                    ReplyTo::RemoteClaudeSessions(cwd.clone(), wizard_gen)
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, reply_to)
             }
@@ -635,6 +673,25 @@ impl App {
             Some(Modal::Wizard(w)) => Some(w),
             _ => None,
         }
+    }
+
+    // ── Notifications ─────────────────────────────────────────────────────────
+
+    /// Check for background sessions that entered a notification-worthy state
+    /// since the last check, and populate `pending_notifs` with their labels.
+    ///
+    /// The caller (event loop) emits the OS notifications after each draw,
+    /// outside the ratatui buffer, to avoid corrupting the terminal state.
+    pub fn check_notifications(&mut self) {
+        if !self.notify_enabled {
+            return;
+        }
+        super::notifications::check_notifications(
+            &self.sessions,
+            self.active,
+            &mut self.notified,
+            &mut self.pending_notifs,
+        );
     }
 
     // ── Terminal input ───────────────────────────────────────────────────────
@@ -725,35 +782,7 @@ impl App {
         self.redraw = true;
     }
 
-    /// Check for background sessions that entered a notification-worthy state
-    /// since the last check, and populate `pending_notifs` with their labels.
-    ///
-    /// The caller (event loop) emits the OS notifications after each draw,
-    /// outside the ratatui buffer, to avoid corrupting the terminal state.
-    pub fn check_notifications(&mut self) {
-        if !self.notify_enabled {
-            return;
-        }
-        for (i, v) in self.sessions.iter().enumerate() {
-            if Some(i) == self.active {
-                // Never notify for the session the user is currently watching.
-                continue;
-            }
-            if !v.state.wants_attention() {
-                // Clear debounce state so a later attention state triggers again.
-                self.notified.remove(&v.id);
-                continue;
-            }
-            // Only notify once per (session, state) combination.
-            if self.notified.get(&v.id) == Some(&v.state) {
-                continue;
-            }
-            self.notified.insert(v.id, v.state);
-            self.pending_notifs.push(v.label());
-        }
-    }
-
-    fn modal_key(&mut self, key: KeyEvent) {
+    pub fn modal_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
@@ -786,12 +815,16 @@ impl App {
                     let id = *id;
                     self.modal = None;
                     if let Some(i) = self.index_of(id) {
-                        // Persist the kill intent before sending `Kill`, so
-                        // recovery never resurrects a closed session.
                         let host = self.sessions[i].host.clone();
+                        // M2: Add tombstone to killed list BEFORE sending Kill.
+                        self.killed.push(KillTombstone { host: host.clone(), id });
+                        // Remove from session list (also queues Save via remove()).
                         self.remove(i);
+                        // Save includes the tombstone since to_state() includes killed.
                         self.save();
-                        self.request(&host, Msg::Kill { id }, ReplyTo::Ack("kill"));
+                        // Kill is queued AFTER Save in the effects list, so the
+                        // tombstone is durably persisted before Kill reaches the daemon.
+                        self.request(&host, Msg::Kill { id }, ReplyTo::Kill(id));
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
@@ -894,7 +927,8 @@ impl App {
 
     // ── Daemon input ─────────────────────────────────────────────────────────
 
-    pub fn on_incoming(&mut self, inc: Incoming) {
+    /// Handle an incoming event from the daemon, tagged with the originating host.
+    pub fn on_incoming_from(&mut self, host: &str, inc: Incoming) {
         match inc {
             Incoming::Data { id, bytes } => {
                 if let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].attached) {
@@ -910,12 +944,18 @@ impl App {
                     self.redraw = true;
                 }
             }
-            Incoming::Event { id, event } => self.on_event(id, event),
-            Incoming::Disconnected => self.on_disconnected(),
+            Incoming::Event { id, event } => self.on_event(host, id, event),
+            Incoming::Disconnected => {
+                if host == "local" {
+                    self.on_disconnected_local();
+                } else {
+                    self.on_disconnected_remote(host);
+                }
+            }
         }
     }
 
-    fn on_event(&mut self, id: SessionId, event: SessionEvent) {
+    fn on_event(&mut self, host: &str, id: SessionId, event: SessionEvent) {
         self.redraw = true;
         if let SessionEvent::Created { info } = &event {
             if self.index_of(id).is_none() {
@@ -924,7 +964,8 @@ impl App {
                     id,
                     name: info.name.clone(),
                     cwd: info.cwd.clone(),
-                    host: "local".to_owned(),
+                    // M1 fix: use the originating host, not "local".
+                    host: host.to_owned(),
                     state: info.state,
                     title: info.title.clone(),
                     claude_session_id: info.claude_session_id.clone(),
@@ -965,6 +1006,20 @@ impl App {
     pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
         self.redraw = true;
         match (to, reply) {
+            // M2: Kill acknowledged → clear tombstone.
+            (ReplyTo::Kill(id), Ok(Msg::Error { message })) if message.contains("no such session") => {
+                self.killed.retain(|t| t.id != id);
+                self.save();
+            }
+            (ReplyTo::Kill(id), Ok(_)) => {
+                self.killed.retain(|t| t.id != id);
+                self.save();
+            }
+            (ReplyTo::Kill(id), Err(e)) => {
+                // Keep tombstone; will retry on next recovery.
+                self.notify(format!("kill failed (will retry): {e}"));
+                let _ = id; // tombstone stays
+            }
             (ReplyTo::Projects, Ok(Msg::Projects { dirs })) => {
                 self.projects = dirs.into_iter().map(|d| d.path).collect();
                 let projects = self.projects.clone();
@@ -977,18 +1032,27 @@ impl App {
                     w.set_dir_entries(&path, &entries);
                 }
             }
-            (ReplyTo::ClaudeSessions(cwd), reply) => {
-                let sessions = match reply {
-                    Ok(Msg::ClaudeSessions { sessions, .. }) => sessions,
-                    Ok(_) => Vec::new(),
+            // M12: ListClaudeSessions error must NOT be treated as "no sessions".
+            // Show the error and let the user retry.
+            (ReplyTo::ClaudeSessions(cwd, gen), reply) => {
+                if gen != self.wizard_generation() {
+                    // S7: Stale reply from a cancelled wizard; discard.
+                    return;
+                }
+                match reply {
+                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
+                        if let Some(w) = self.wizard_mut() {
+                            let outcome = w.set_claude_sessions(&cwd, sessions);
+                            self.wizard_outcome(outcome);
+                        }
+                    }
+                    Ok(_) => {}
                     Err(e) => {
                         self.notify(format!("could not list claude sessions: {e}"));
-                        Vec::new()
+                        if let Some(w) = self.wizard_mut() {
+                            w.set_claude_sessions_error(&cwd);
+                        }
                     }
-                };
-                if let Some(w) = self.wizard_mut() {
-                    let outcome = w.set_claude_sessions(&cwd, sessions);
-                    self.wizard_outcome(outcome);
                 }
             }
             (ReplyTo::Spawned(id), Err(e)) => {
@@ -1010,18 +1074,25 @@ impl App {
                     w.set_dir_entries(&path, &entries);
                 }
             }
-            (ReplyTo::RemoteClaudeSessions(cwd), reply) => {
-                let sessions = match reply {
-                    Ok(Msg::ClaudeSessions { sessions, .. }) => sessions,
-                    Ok(_) => Vec::new(),
+            (ReplyTo::RemoteClaudeSessions(cwd, gen), reply) => {
+                if gen != self.wizard_generation() {
+                    // S7: Stale reply from a cancelled wizard; discard.
+                    return;
+                }
+                match reply {
+                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
+                        if let Some(w) = self.wizard_mut() {
+                            let outcome = w.set_claude_sessions(&cwd, sessions);
+                            self.wizard_outcome(outcome);
+                        }
+                    }
+                    Ok(_) => {}
                     Err(e) => {
                         self.notify(format!("could not list remote claude sessions: {e}"));
-                        Vec::new()
+                        if let Some(w) = self.wizard_mut() {
+                            w.set_claude_sessions_error(&cwd);
+                        }
                     }
-                };
-                if let Some(w) = self.wizard_mut() {
-                    let outcome = w.set_claude_sessions(&cwd, sessions);
-                    self.wizard_outcome(outcome);
                 }
             }
             // Typing a path that doesn't exist (yet) is not an error.
@@ -1052,26 +1123,10 @@ impl App {
     }
 }
 
-/// Load proxy profiles from config.toml and CLAUDIO_PROXY_URL. Returns
-/// `(profile_names, default_name)`. Never panics; returns empty on any error.
-fn load_proxy_profiles() -> (Vec<String>, Option<String>) {
-    // Check env var first — when set it overrides any saved default.
-    if let Some((name, _)) = crate::proxy::profile::from_env() {
-        // Return just the "env" profile, which is always the default.
-        return (vec![name.to_owned()], Some(name.to_owned()));
-    }
-    match crate::proxy::profile::load() {
-        Ok(sec) => {
-            let names: Vec<String> = sec.profiles.keys().cloned().collect();
-            (names, sec.default)
-        }
-        Err(_) => (Vec::new(), None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::SessionInfo;
 
     fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
         SessionInfo {
@@ -1126,7 +1181,6 @@ mod tests {
         assert!(app.modal.is_none());
     }
 
-
     #[test]
     fn no_sessions_opens_the_wizard() {
         let mut app = App::new(100, 30, "/home/u".into(), vec![]);
@@ -1148,9 +1202,9 @@ mod tests {
         assert_eq!(app.active, Some(1), "wraps around");
         assert!(!app.sessions[0].attached && app.sessions[1].attached);
         // Attached resets the mirror, but only for the attached session.
-        app.on_incoming(Incoming::Attached { id: live[1].id, rows: 10, cols: 40 });
+        app.on_incoming_from("local", Incoming::Attached { id: live[1].id, rows: 10, cols: 40 });
         assert_eq!(app.sessions[1].mirror.size(), (10, 40));
-        app.on_incoming(Incoming::Attached { id: live[0].id, rows: 5, cols: 5 });
+        app.on_incoming_from("local", Incoming::Attached { id: live[0].id, rows: 5, cols: 5 });
         assert_eq!(app.sessions[0].mirror.size(), (28, 100));
     }
 
@@ -1197,10 +1251,140 @@ mod tests {
             .iter()
             .position(|e| matches!(e, Effect::Request { msg: Msg::Kill { id }, .. } if *id == live[0].id))
             .unwrap();
-        assert!(save < kill);
+        assert!(save < kill, "Save must come before Kill");
         assert_eq!(app.sessions.len(), 2);
         assert_eq!(app.active_view().map(|v| v.id), Some(live[1].id));
         assert!(!app.to_state().sessions.iter().any(|s| s.id == live[0].id));
+    }
+
+    #[test]
+    fn tombstone_persisted_in_state_before_kill() {
+        let live = [info(Some(1), None)];
+        let mut app = app_with(&live);
+        let id = live[0].id;
+        app.on_terminal(alt('x'));
+        app.on_terminal(plain(KeyCode::Char('y')));
+        // The tombstone must be in to_state() before Kill is sent.
+        let effects = app.take_effects();
+        let save_pos = effects.iter().position(|e| matches!(e, Effect::Save)).unwrap();
+        let kill_pos = effects
+            .iter()
+            .position(|e| matches!(e, Effect::Request { msg: Msg::Kill { id: k }, .. } if *k == id))
+            .unwrap();
+        assert!(save_pos < kill_pos, "tombstone must be saved before Kill");
+        assert!(app.killed.iter().any(|t| t.id == id), "tombstone must be in app.killed");
+    }
+
+    #[test]
+    fn tombstone_cleared_on_kill_ok_reply() {
+        let live = [info(Some(1), None)];
+        let mut app = app_with(&live);
+        let id = live[0].id;
+        app.on_terminal(alt('x'));
+        app.on_terminal(plain(KeyCode::Char('y')));
+        app.take_effects();
+        assert!(!app.killed.is_empty());
+        // Simulate a successful Kill reply.
+        app.on_reply(ReplyTo::Kill(id), Ok(Msg::Pong));
+        assert!(app.killed.is_empty(), "tombstone must be cleared after Kill OK");
+    }
+
+    #[test]
+    fn tombstone_cleared_on_no_such_session_reply() {
+        let live = [info(Some(1), None)];
+        let mut app = app_with(&live);
+        let id = live[0].id;
+        app.on_terminal(alt('x'));
+        app.on_terminal(plain(KeyCode::Char('y')));
+        app.take_effects();
+        // Simulate "no such session" error.
+        app.on_reply(
+            ReplyTo::Kill(id),
+            Ok(Msg::Error { message: "no such session".into() }),
+        );
+        assert!(app.killed.is_empty(), "tombstone cleared on 'no such session'");
+    }
+
+    #[test]
+    fn dropped_kill_is_resent_on_recovery() {
+        // Simulate: session was killed, tombstone saved, but Kill never delivered.
+        let id = Uuid::new_v4();
+        let mut saved = ClientState::default();
+        saved.killed.push(KillTombstone { host: "local".into(), id });
+        // The daemon still lists the session as live.
+        let live = [SessionInfo {
+            id,
+            cwd: "/w".into(),
+            name: None,
+            state: SessionState::Idle,
+            claude_session_id: None,
+            title: None,
+            pid: Some(42),
+            created_at: 1,
+        }];
+        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        app.recover(&saved, &live);
+        let effects = app.take_effects();
+        // Kill must be re-sent.
+        let kill_re_sent = effects.iter().any(|e| {
+            matches!(e, Effect::Request { msg: Msg::Kill { id: k }, .. } if *k == id)
+        });
+        assert!(kill_re_sent, "dropped Kill must be re-sent on recovery");
+        // The tombstoned session must NOT appear in the session list.
+        assert!(!app.sessions.iter().any(|v| v.id == id), "tombstoned session must not appear");
+    }
+
+    #[test]
+    fn recover_host_does_not_wipe_other_hosts_sessions() {
+        // Set up two sessions: one local, one remote.
+        let local_id = Uuid::new_v4();
+        let remote_id = Uuid::new_v4();
+
+        let local_live = vec![SessionInfo {
+            id: local_id,
+            cwd: "/local".into(),
+            name: None,
+            state: SessionState::Idle,
+            claude_session_id: None,
+            title: None,
+            pid: Some(1),
+            created_at: 1,
+        }];
+        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        app.recover(&ClientState::default(), &local_live);
+        app.take_effects();
+        assert_eq!(app.sessions.len(), 1);
+
+        // Manually add a fake "remote" session (simulating a previous recover_host call).
+        app.sessions.push(SessionView {
+            id: remote_id,
+            name: None,
+            cwd: "/remote".into(),
+            host: "myserver".into(),
+            state: SessionState::Idle,
+            title: None,
+            claude_session_id: None,
+            created_at: 1,
+            mirror: crate::term::screen::Screen::new(28, 100),
+            attached: false,
+            proxy: None,
+        });
+        assert_eq!(app.sessions.len(), 2);
+
+        // Now simulate a second local reconnect: recover_host("local", ...) must
+        // NOT remove the "myserver" session.
+        app.recover_host("local", &local_live);
+        app.take_effects();
+
+        // The remote session must still be there.
+        assert!(
+            app.sessions.iter().any(|v| v.id == remote_id),
+            "remote session must survive local recover_host"
+        );
+        assert!(
+            app.sessions.iter().any(|v| v.id == local_id),
+            "local session must still be there"
+        );
     }
 
     #[test]
@@ -1213,7 +1397,7 @@ mod tests {
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(2), "nothing else wants attention");
         let event = SessionEvent::State { state: SessionState::NeedsInput };
-        app.on_incoming(Incoming::Event { id: live[0].id, event });
+        app.on_incoming_from("local", Incoming::Event { id: live[0].id, event });
         app.on_terminal(alt('a'));
         assert_eq!(app.active, Some(0));
     }
@@ -1221,16 +1405,19 @@ mod tests {
     #[test]
     fn wizard_spawns_into_the_chosen_dir_and_records_it() {
         let mut app = app_with(&[]);
-        // Step 0: paste the target directory, then press Enter to confirm "local" host.
-        app.on_terminal(Event::Paste("/w".into()));
-        app.on_terminal(plain(KeyCode::Enter)); // selects local → advances to directory step
-        app.take_effects(); // consume ListDir + RecentProjects requests
-        // Step 1: press Enter again to confirm the pre-filled directory "/w".
+        // Step 0: press Enter to select "local" host (empty host filter → picks local).
+        app.on_terminal(plain(KeyCode::Enter));
+        app.take_effects(); // consume RecentProjects request
+        // Step 1: type "/w" into the directory input, then press Enter.
+        for c in "/w".chars() {
+            app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
         app.on_terminal(plain(KeyCode::Enter));
         let effects = app.take_effects();
-        assert!(requests(&effects).contains(&&Msg::ListClaudeSessions { cwd: "/w".into() }));
+        assert!(requests(&effects).iter().any(|m| **m == Msg::ListClaudeSessions { cwd: "/w".into() }));
+        let gen = app.wizard_generation();
         let reply = Msg::ClaudeSessions { cwd: "/w".into(), sessions: vec![] };
-        app.on_reply(ReplyTo::ClaudeSessions("/w".into()), Ok(reply));
+        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
         let effects = app.take_effects();
         let reqs = requests(&effects);
         let Msg::Spawn(spec) = reqs[0] else { panic!("expected Spawn, got {reqs:?}") };
@@ -1246,17 +1433,82 @@ mod tests {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
         let id = live[0].id;
-        app.on_incoming(Incoming::Event { id, event: SessionEvent::Title { title: "Refactor".into() } });
+        app.on_incoming_from(
+            "local",
+            Incoming::Event { id, event: SessionEvent::Title { title: "Refactor".into() } },
+        );
         let event = SessionEvent::ClaudeSession { claude_session_id: "c9".into() };
-        app.on_incoming(Incoming::Event { id, event });
+        app.on_incoming_from("local", Incoming::Event { id, event });
         assert_eq!(app.sessions[0].label(), "Refactor");
         assert_eq!(app.to_state().sessions[0].claude_session_id.as_deref(), Some("c9"));
         let other = info(Some(5), None);
-        app.on_incoming(Incoming::Event { id: other.id, event: SessionEvent::Created { info: other.clone() } });
+        let other_id = other.id;
+        app.on_incoming_from(
+            "local",
+            Incoming::Event { id: other_id, event: SessionEvent::Created { info: other.clone() } },
+        );
         assert_eq!(app.sessions.len(), 2);
-        app.on_incoming(Incoming::Event { id: other.id, event: SessionEvent::Removed });
+        // M1 fix: new unknown session must get host "local" (from on_incoming_from).
+        assert_eq!(app.sessions[1].host, "local");
+        app.on_incoming_from("local", Incoming::Event { id: other_id, event: SessionEvent::Removed });
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.active, Some(0));
+    }
+
+    #[test]
+    fn on_incoming_from_remote_tags_created_sessions_correctly() {
+        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        app.recover(&ClientState::default(), &[]);
+        // Close wizard.
+        app.modal = None;
+        app.take_effects();
+
+        let new_session = info(Some(99), None);
+        let new_id = new_session.id;
+        app.on_incoming_from(
+            "myserver",
+            Incoming::Event { id: new_id, event: SessionEvent::Created { info: new_session } },
+        );
+        let sv = app.sessions.iter().find(|v| v.id == new_id).unwrap();
+        assert_eq!(sv.host, "myserver", "remote session must have host=myserver");
+    }
+
+    #[test]
+    fn local_disconnect_does_not_affect_remote_sessions() {
+        let local_id = Uuid::new_v4();
+        let remote_id = Uuid::new_v4();
+        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        app.sessions.push(SessionView {
+            id: local_id,
+            name: None,
+            cwd: "/l".into(),
+            host: "local".into(),
+            state: SessionState::Idle,
+            title: None,
+            claude_session_id: None,
+            created_at: 1,
+            mirror: Screen::new(28, 100),
+            attached: true,
+            proxy: None,
+        });
+        app.sessions.push(SessionView {
+            id: remote_id,
+            name: None,
+            cwd: "/r".into(),
+            host: "myserver".into(),
+            state: SessionState::Idle,
+            title: None,
+            claude_session_id: None,
+            created_at: 1,
+            mirror: Screen::new(28, 100),
+            attached: true,
+            proxy: None,
+        });
+        app.on_incoming_from("local", Incoming::Disconnected);
+        // Local session detached.
+        assert!(!app.sessions.iter().find(|v| v.id == local_id).unwrap().attached);
+        // Remote session NOT affected.
+        assert!(app.sessions.iter().find(|v| v.id == remote_id).unwrap().attached);
     }
 
     // ── Overview ──────────────────────────────────────────────────────────────
@@ -1320,7 +1572,7 @@ mod tests {
 
         // State change: new notification.
         let ev = SessionEvent::State { state: SessionState::NeedsInput };
-        app.on_incoming(Incoming::Event { id: live[1].id, event: ev });
+        app.on_incoming_from("local", Incoming::Event { id: live[1].id, event: ev });
         app.check_notifications();
         assert_eq!(app.pending_notifs.len(), 1, "new state → new notification");
     }
@@ -1345,5 +1597,20 @@ mod tests {
         app.take_effects();
         app.check_notifications();
         assert!(app.pending_notifs.is_empty(), "notifications disabled");
+    }
+
+    // ── Wizard generation / S7 ────────────────────────────────────────────────
+
+    #[test]
+    fn stale_wizard_reply_is_discarded() {
+        let mut app = app_with(&[]);
+        let gen = app.wizard_generation();
+        // Simulate wizard being cancelled.
+        app.modal = None;
+        // Now a reply with the old gen arrives; it must be silently dropped.
+        let reply = Msg::ClaudeSessions { cwd: "/w".into(), sessions: vec![] };
+        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
+        // No modal opened (wizard was closed).
+        assert!(app.modal.is_none());
     }
 }
