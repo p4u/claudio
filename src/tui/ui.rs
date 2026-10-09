@@ -87,6 +87,10 @@ pub fn tab_parts(index: usize, label: &str, cap: usize) -> (String, String) {
 }
 
 /// Like [`tab_parts`] but appends a proxy badge when `proxied` is true.
+///
+/// Kept for completeness; the tab bar no longer shows the badge (it was
+/// removed to reduce visual noise — the status bar shows proxy info instead).
+#[allow(dead_code)]
 pub fn tab_parts_proxy(index: usize, label: &str, cap: usize, proxied: bool) -> (String, String) {
     let (prefix, mut suffix) = tab_parts(index, label, cap);
     if proxied {
@@ -156,45 +160,23 @@ pub fn tab_label(view: &SessionView) -> String {
 
 /// The tab texts as laid out for a bar `width` columns wide.
 ///
-/// Each tab may optionally show the session age (e.g. `12m`). Age is shown
-/// when there is enough room; it is the first thing dropped when space shrinks.
+/// Tabs show only the session label (e.g. `api@z6`). Age and proxy badges
+/// are intentionally omitted to keep the bar uncluttered — the status bar
+/// already shows host:cwd, state, and proxy info for the active session.
 pub fn tab_titles(
     sessions: &[SessionView],
     active: Option<usize>,
     width: u16,
-    now: u64,
+    _now: u64,
 ) -> Vec<(String, String)> {
     let labels: Vec<String> = sessions.iter().map(tab_label).collect();
-    let ages: Vec<String> = sessions
-        .iter()
-        .map(|v| fmt_age(now.saturating_sub(v.created_at)))
-        .collect();
-    // Two-pass fitting: first try label+age, then label only.
-    let combined: Vec<String> = labels
-        .iter()
-        .zip(&ages)
-        .map(|(l, a)| format!("{l} {a}"))
-        .collect();
-    let combined_widths: Vec<usize> = combined.iter().map(|l| str_width(l)).collect();
     let label_widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
-    let caps_with_age = fit_tabs(&combined_widths, active, width as usize);
-    // Determine whether showing ages fits (all caps >= combined label widths).
-    let show_age = caps_with_age
-        .iter()
-        .zip(&combined_widths)
-        .all(|(&cap, &need)| cap >= need);
-    let (effective_labels, caps) = if show_age {
-        (combined, caps_with_age)
-    } else {
-        let caps = fit_tabs(&label_widths, active, width as usize);
-        (labels, caps)
-    };
-    effective_labels
+    let caps = fit_tabs(&label_widths, active, width as usize);
+    labels
         .iter()
         .zip(caps)
-        .zip(sessions)
         .enumerate()
-        .map(|(i, ((l, cap), view))| tab_parts_proxy(i + 1, l, cap, view.proxy.is_some()))
+        .map(|(i, (l, cap))| tab_parts(i + 1, l, cap))
         .collect()
 }
 
@@ -229,10 +211,18 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
         let (g, gstyle) = glyph(view.state, app.tick, reconnecting);
         let base = if Some(i) == app.active {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-        } else if view.state.wants_attention() {
-            Style::default().add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
         } else {
-            Style::default()
+            // Steady color signals attention — no blinking which terminals
+            // render inconsistently and users find aggressive.
+            match view.state {
+                SessionState::NeedsApproval | SessionState::Error => {
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+                }
+                SessionState::NeedsInput => {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                }
+                _ => Style::default(),
+            }
         };
         spans.push(Span::styled(prefix, base));
         spans.push(Span::styled(g, base.patch(gstyle)));
@@ -302,26 +292,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             format!("{}:{}", v.host, cwd)
         };
         let mut parts = vec![location, state_name(v.state).to_owned()];
-        if let Some(csid) = &v.claude_session_id {
-            parts.push(csid.chars().take(8).collect());
-        }
-        parts.push(fmt_age(app.now.saturating_sub(v.created_at)));
-        // Proxy status.
-        if let Some((pname, status)) = app.active_proxy_status() {
-            let pool = status
-                .pool
-                .as_ref()
-                .map(|h| h.overall())
-                .unwrap_or(PoolStatus::Unknown);
-            let mut proxy_parts = vec![format!("proxy:{pname} {}", pool.label())];
-            if let Some(stats) = &status.stats {
-                let total_tok = stats.totals.input_tokens + stats.totals.output_tokens;
-                proxy_parts.push(format!("{} tok/{}", fmt_tokens(total_tok), stats.period));
-                if let Some(lim) = &stats.limit {
-                    proxy_parts.push(format!("{:.0}%", lim.used_pct * 100.0));
-                }
-            }
-            parts.push(proxy_parts.join(" "));
+        // Show proxy name when one is active (pool status and token counts
+        // are available in the overview popup; keep the status bar terse).
+        if let Some((pname, _)) = app.active_proxy_status() {
+            parts.push(format!("proxy:{pname}"));
         }
         (parts.join(" · "), Style::default())
     } else {
@@ -887,13 +861,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_titles_with_age_show_age_when_room() {
+    fn tab_titles_show_label_only() {
         use super::super::super::proto::SessionState;
         use super::super::super::term::screen::Screen;
         use super::super::app::SessionView;
         use uuid::Uuid;
-        let now = 600u64; // 600 seconds
-        let make_view = |name: &str, created_at: u64| SessionView {
+        let now = 600u64;
+        let make_view = |name: &str| SessionView {
             id: Uuid::new_v4(),
             name: Some(name.to_owned()),
             cwd: "/srv".into(),
@@ -901,26 +875,20 @@ mod tests {
             state: SessionState::Idle,
             title: None,
             claude_session_id: None,
-            created_at,
+            created_at: 0,
             mirror: Screen::new(24, 80),
             attached: false,
             proxy: None,
         };
-        let sessions = vec![make_view("api", 0), make_view("docs", 0)];
-        // Wide bar: ages should appear.
+        let sessions = vec![make_view("api"), make_view("docs")];
+        // Wide bar: labels appear, no age.
         let titles_wide = tab_titles(&sessions, Some(0), 200, now);
         let wide_text: String = titles_wide.iter().map(|(p, s)| format!("{p}{s}")).collect();
-        assert!(
-            wide_text.contains("10m") || wide_text.contains("m"),
-            "age should appear with wide bar"
-        );
-        // Very narrow bar: ages dropped.
+        assert!(wide_text.contains("api"), "label should appear");
+        assert!(!wide_text.contains("10m"), "age should not appear in tab bar");
+        // Narrow bar: labels still present, just shorter.
         let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
-        let narrow_text: String = titles_narrow
-            .iter()
-            .map(|(p, s)| format!("{p}{s}"))
-            .collect();
-        // Narrow bar may still show partial, but should be shorter.
+        let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
         assert!(str_width(&narrow_text) <= 21);
     }
 
