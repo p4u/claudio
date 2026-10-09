@@ -298,13 +298,6 @@ impl App {
         });
     }
 
-    /// The proxy status for the active session's profile, if any.
-    pub fn active_proxy_status(&self) -> Option<(&str, &ProxyStatus)> {
-        let name = self.active_view()?.proxy.as_deref()?;
-        let status = self.proxy_status.get(name)?;
-        Some((name, status))
-    }
-
     /// Open the stats popup for the active session's proxy profile.
     pub fn open_proxy_stats(&mut self) {
         if let Some(name) = self.active_view().and_then(|v| v.proxy.as_deref()) {
