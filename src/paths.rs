@@ -12,8 +12,16 @@ use std::path::{Path, PathBuf};
 
 use crate::proto::PROTO;
 
-fn home() -> PathBuf {
+/// The current user's home directory (honours `$HOME`).
+pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Current Unix time in seconds.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 pub fn uid() -> u32 {

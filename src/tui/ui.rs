@@ -517,13 +517,7 @@ pub fn fmt_age(secs: u64) -> String {
 
 /// Format a token count compactly: `1.2M`, `340k`, or the raw number.
 fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
+    crate::proxy::cmd::fmt_tokens(n)
 }
 
 // ── Overview popup ────────────────────────────────────────────────────────────

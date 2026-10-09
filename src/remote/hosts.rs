@@ -86,8 +86,7 @@ pub fn candidates() -> Vec<String> {
 }
 
 fn home_ssh() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    home.join(".ssh")
+    crate::paths::home().join(".ssh")
 }
 
 /// Parse one ssh config file, recursing into `Include`s.

@@ -131,13 +131,6 @@ pub struct App {
     pub killed: Vec<KillTombstone>,
 }
 
-/// Current Unix time in seconds.
-pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 impl App {
     /// Create an App with default settings (notify enabled). Tests and the
     /// daemon-status command use this.
@@ -163,7 +156,7 @@ impl App {
             width,
             height,
             tick: 0,
-            now: unix_now(),
+            now: crate::paths::unix_now(),
             notice: None,
             connected: true,
             home,
@@ -1112,7 +1105,7 @@ impl App {
     /// Advance animations, the clock and notice timeouts.
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
-        self.now = unix_now();
+        self.now = crate::paths::unix_now();
         if let Some(n) = &mut self.notice {
             n.ticks_left = n.ticks_left.saturating_sub(1);
             if n.ticks_left == 0 {

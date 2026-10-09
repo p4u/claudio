@@ -143,7 +143,7 @@ impl Journal {
                     name: spec.name.clone(),
                     args: spec.args.clone(),
                     claude_session_id: None,
-                    created_at: now(),
+                    created_at: crate::paths::unix_now(),
                 };
                 self.sessions.push(e.clone());
                 e
@@ -202,12 +202,6 @@ impl Journal {
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 #[cfg(test)]
 mod tests {

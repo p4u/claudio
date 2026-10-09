@@ -17,18 +17,12 @@ const TAIL_READ_BYTES: u64 = 256 * 1024;
 /// Maximum number of `type:"user"` records we'll count before giving up.
 const MAX_USER_SCAN: usize = 10_000;
 
-// ── Directory helpers ─────────────────────────────────────────────────────────
-
-fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
-}
-
 /// `~/.claude` (honours `$CLAUDE_CONFIG_DIR`).
 pub fn projects_root() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".claude"))
+        .unwrap_or_else(|| crate::paths::home().join(".claude"))
         .join("projects")
 }
 
