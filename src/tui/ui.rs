@@ -289,7 +289,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let left = truncate(&format!(" {left}"), width);
     let mut spans = vec![Span::styled(left.clone(), left_style)];
     // Hints fill what's left, losing their head first so `Alt+q quit` stays.
-    let hints = format!("{} ", keymap::HINTS);
+    let hints = format!("{} ", keymap::hints());
     let room = width.saturating_sub(str_width(&left) + 2);
     let hints = if str_width(&hints) <= room {
         hints
