@@ -196,10 +196,10 @@ impl App {
         }
     }
 
-    /// The current wizard's generation (0 if no wizard is open).
+    /// The open wizard's generation (0 if no wizard is open).
     pub(super) fn wizard_generation(&self) -> u64 {
         match &self.modal {
-            Some(Modal::Wizard(w)) => w.generation,
+            Some(Modal::Wizard(_)) => self.modal_gen,
             _ => 0,
         }
     }
@@ -529,6 +529,7 @@ impl App {
         let proxy_default = active_proxy
             .as_deref()
             .or_else(|| self.proxy_override.pick(self.proxy_default.as_deref()));
+        self.modal_gen += 1;
         self.modal = Some(Modal::Wizard(Wizard::new(
             seeds,
             self.home.clone(),

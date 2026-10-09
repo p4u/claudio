@@ -2,9 +2,10 @@
 //! turning its outcomes into daemon requests, and routing replies back.
 //!
 //! The state machine is in `git_view`; like the wizard, it never sees the
-//! `App`. A request leaves tagged with the view's generation and its own
-//! sequence number ([`ReplyTo::Git`]); a reply for a view that was closed or
-//! reopened in the meantime finds the generation changed and is dropped.
+//! `App`. A request leaves tagged with the open view's generation
+//! (`App::modal_gen`) and its own sequence number ([`ReplyTo::Git`]); a reply
+//! for a view that was closed or reopened in the meantime finds the
+//! generation changed and is dropped.
 
 use std::io;
 
@@ -22,6 +23,7 @@ impl App {
             return;
         };
         let (view, first) = GitView::open(view.host.clone(), view.cwd.clone());
+        self.modal_gen += 1;
         self.modal = Some(Modal::Git(Box::new(view)));
         self.git_outcome(first);
     }
@@ -33,7 +35,8 @@ impl App {
             GitOutcome::Close => self.modal = None,
             GitOutcome::Request { seq, msg } => {
                 if let Some(Modal::Git(view)) = &self.modal {
-                    let (host, gen) = (view.host.clone(), view.gen);
+                    let host = view.host.clone();
+                    let gen = self.modal_gen;
                     self.request(&host, msg, ReplyTo::Git { gen, seq });
                 }
             }
@@ -43,12 +46,12 @@ impl App {
 
     /// The reply (or failure) to a request made by the view of generation `gen`.
     pub(super) fn on_git_reply(&mut self, gen: u64, seq: u64, reply: io::Result<Msg>) {
+        if gen != self.modal_gen {
+            return;
+        }
         let Some(Modal::Git(view)) = &mut self.modal else {
             return;
         };
-        if view.gen != gen {
-            return;
-        }
         if let Some(notice) = reply
             .as_ref()
             .err()
@@ -130,7 +133,7 @@ mod tests {
         let (host, msg, to) = first_request(&mut app);
         assert_eq!(host, "local");
         assert!(matches!(&msg, Msg::GitLog { cwd, all: false, skip: 0, .. } if cwd == "/srv/app"));
-        let gen = git_view(&app).gen;
+        let gen = app.modal_gen;
         assert!(matches!(to, ReplyTo::Git { gen: g, .. } if g == gen));
     }
 

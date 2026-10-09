@@ -4,10 +4,8 @@
 //! The wizard is a pure state machine. Key handling returns an [`Outcome`]
 //! telling the app what to do next (connect to a host, ask the daemon for
 //! directory or session data, or spawn a new session). Replies are fed back
-//! through the `set_*` and `on_host_connected` methods.
-//!
-//! Each wizard instance carries a `generation` counter so that async replies
-//! from a cancelled wizard are discarded.
+//! through the `set_*` and `on_host_connected` methods; the app drops replies
+//! meant for a wizard that was closed since (see `App::wizard_generation`).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::HashMap;
@@ -456,9 +454,6 @@ pub struct Wizard {
     pub proxy_options: Vec<String>,
     /// Currently selected index in `proxy_options` (0 = none).
     pub proxy_selected: usize,
-    /// Unique per wizard. Carried in reply tags so stale replies from a cancelled wizard are
-    /// discarded.
-    pub generation: u64,
     /// Saved first-screen state so Backspace in the directory step can
     /// return to the previous screen.
     pub saved_host_step: Option<HostStep>,
@@ -531,9 +526,6 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     Some(score)
 }
 
-/// Gives each wizard a unique generation.
-static WIZARD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 impl Wizard {
     /// A wizard over `seeds` (see [`assemble`]) with a host-selection step.
     ///
@@ -575,7 +567,6 @@ impl Wizard {
         let proxy_selected = proxy_default
             .and_then(|d| proxy_options.iter().position(|o| o == d))
             .unwrap_or(0);
-        let generation = WIZARD_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut meta: HashMap<String, DirMeta> = HashMap::new();
         for r in recent {
             let r = trim_slash(r);
@@ -597,7 +588,6 @@ impl Wizard {
             home,
             proxy_options,
             proxy_selected,
-            generation,
             meta,
             saved_host_step: None,
             show_hidden: false,
@@ -1481,13 +1471,6 @@ mod tests {
             "expected my-server in items: {:?}",
             hs.items
         );
-    }
-
-    #[test]
-    fn each_wizard_gets_unique_generation() {
-        let w1 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
-        let w2 = Wizard::new(vec![], "/h".into(), "local", &[], &[], None);
-        assert_ne!(w1.generation, w2.generation);
     }
 
     #[test]

@@ -249,6 +249,10 @@ pub struct App {
     /// The SSH hosts the wizard offers: recently used ones, then
     /// `~/.ssh/config` aliases.
     pub(super) ssh_hosts: Vec<String>,
+    /// The generation of the open wizard or history view, raised each time
+    /// one opens. Their requests carry it, so a reply meant for one that
+    /// was closed (or replaced) since is recognised and dropped.
+    pub(super) modal_gen: u64,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -321,6 +325,7 @@ impl App {
             claude_checked: HashSet::new(),
             confirms: VecDeque::new(),
             ssh_hosts: cfg.ssh_hosts,
+            modal_gen: 0,
         }
     }
 
@@ -1764,6 +1769,16 @@ mod tests {
     }
 
     // ── Wizard generation ─────────────────────────────────────────────────────
+
+    #[test]
+    fn each_wizard_gets_its_own_generation() {
+        let mut app = app_with(&[]);
+        let first = app.wizard_generation();
+        app.modal = None;
+        assert_eq!(app.wizard_generation(), 0, "no wizard");
+        app.on_terminal(alt('n'));
+        assert!(app.wizard_generation() > first);
+    }
 
     #[test]
     fn stale_wizard_reply_is_discarded() {
