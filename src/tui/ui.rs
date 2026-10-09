@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_proxy_stats(frame, profile_name, status);
         }
         Some(Modal::Overview { selected }) => draw_overview(frame, app, *selected),
-        Some(Modal::Help) => draw_help(frame),
+        Some(Modal::Help) => draw_help(frame, app),
         None => {}
     }
 }
@@ -289,7 +289,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let left = truncate(&format!(" {left}"), width);
     let mut spans = vec![Span::styled(left.clone(), left_style)];
     // Hints fill what's left, losing their head first so `Alt+q quit` stays.
-    let hints = format!("{} ", keymap::hints());
+    let hints = format!("{} ", app.keymap.hints());
     let room = width.saturating_sub(str_width(&left) + 2);
     let hints = if str_width(&hints) <= room {
         hints
@@ -573,8 +573,8 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
 // ── Help popup ────────────────────────────────────────────────────────────────
 
 /// Render the help popup listing all key bindings.
-pub fn draw_help(frame: &mut Frame) {
-    let entries = super::keymap::help_entries();
+pub fn draw_help(frame: &mut Frame, app: &App) {
+    let entries = app.keymap.help_entries();
     let height = (entries.len() as u16 + 4).min(frame.area().height.saturating_sub(2));
     let area = frame.area();
     let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);

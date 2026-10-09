@@ -27,7 +27,7 @@ use crate::proto::{Msg, SessionEvent, SessionId, SessionInfo, SessionState, Spaw
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
-use super::keymap::{self, Action};
+use super::keymap::{Action, Keymap};
 use super::state::{self, ClientState, KillTombstone};
 use super::ui;
 use super::wizard::{self, Outcome, Wizard};
@@ -129,14 +129,18 @@ pub struct App {
     /// Kill tombstones: sessions the user explicitly closed. Persisted before
     /// Kill is sent, and cleared only when the daemon acknowledges.
     pub killed: Vec<KillTombstone>,
+    /// The effective keymap (defaults + config.toml overrides).
+    /// Owned here so rendering always reflects the current bindings.
+    pub keymap: Keymap,
 }
 
 impl App {
     /// Create an App with default settings (notify enabled). Tests and the
     /// daemon-status command use this.
-    #[allow(dead_code)]
+    /// Create an App with default settings (notify enabled, default keymap).
+    /// Tests and the daemon-status command use this.
     pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
-        App::new_with_config(width, height, home, recent_dirs, true)
+        App::new_with_config(width, height, home, recent_dirs, true, Keymap::default())
     }
 
     pub fn new_with_config(
@@ -145,6 +149,7 @@ impl App {
         home: String,
         recent_dirs: Vec<String>,
         notify_enabled: bool,
+        keymap: Keymap,
     ) -> App {
         let (proxy_profiles, proxy_default) = super::proxy_state::load_proxy_profiles();
         App {
@@ -171,6 +176,7 @@ impl App {
             notify_enabled,
             pending_notifs: Vec::new(),
             killed: Vec::new(),
+            keymap,
         }
     }
 
@@ -701,7 +707,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        let action = keymap::lookup(&key);
+        let action = self.keymap.lookup(&key);
         // Quitting always works, even from a dialog: sessions keep running.
         if action == Some(Action::Quit) {
             self.on_action(Action::Quit);
@@ -1585,7 +1591,7 @@ mod tests {
     fn notifications_disabled_when_flag_is_off() {
         let mut live = [info(Some(1), None), info(Some(2), None)];
         live[1].state = SessionState::NeedsApproval;
-        let mut app = App::new_with_config(100, 30, "/home/u".into(), vec![], false);
+        let mut app = App::new_with_config(100, 30, "/home/u".into(), vec![], false, Keymap::default());
         app.recover(&ClientState::default(), &live);
         app.take_effects();
         app.check_notifications();

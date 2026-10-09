@@ -220,39 +220,6 @@ impl Keymap {
     }
 }
 
-/// Global keymap, initialized once at startup from config.
-/// Falls back to defaults when `init` has not been called.
-static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
-
-/// Initialize the global keymap from defaults + config overrides.
-///
-/// Must be called once, at startup, before any `lookup` calls. Returns
-/// notices for any config problems. Safe to call multiple times (subsequent
-/// calls are no-ops).
-pub fn init(overrides: &std::collections::BTreeMap<String, String>) -> Vec<String> {
-    let mut notices = Vec::new();
-    KEYMAP.get_or_init(|| Keymap::build(overrides, &mut notices));
-    notices
-}
-
-/// The action bound to `key`, if any (uses the global keymap).
-///
-/// Releases never trigger actions. Falls back to defaults when `init` has not
-/// been called.
-pub fn lookup(key: &KeyEvent) -> Option<Action> {
-    if let Some(km) = KEYMAP.get() {
-        return km.lookup(key);
-    }
-    // Fallback: defaults only.
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    DEFAULT_BINDINGS
-        .iter()
-        .find(|b| b.code == key.code && b.mods == key.modifiers)
-        .map(|b| b.action)
-}
-
 /// Parse a key spec string like `"alt+right"`, `"alt+g"`, `"ctrl+x"`.
 ///
 /// Supported modifiers: `alt`, `ctrl`, `shift`. Supported keys: letter/digit
@@ -363,27 +330,6 @@ pub fn key_str(code: KeyCode, mods: KeyModifiers) -> String {
     };
     parts.push(&key);
     parts.join("+")
-}
-
-/// Generate the help lines from the current global effective bindings.
-/// Each entry is `(key_str, label)`.
-pub fn help_entries() -> Vec<(String, &'static str)> {
-    if let Some(km) = KEYMAP.get() {
-        return km.help_entries();
-    }
-    DEFAULT_BINDINGS
-        .iter()
-        .map(|b| (key_str(b.code, b.mods), b.label))
-        .collect()
-}
-
-/// Key hints for the status bar, generated from the current effective bindings.
-pub fn hints() -> String {
-    if let Some(km) = KEYMAP.get() {
-        return km.hints();
-    }
-    // Fallback: defaults.
-    Keymap::default().hints()
 }
 
 #[cfg(test)]

@@ -79,9 +79,10 @@ pub fn run() -> ExitCode {
 }
 
 async fn main() -> ExitCode {
-    // Load config and initialize the keymap (must happen before the TUI starts).
+    // Load config and build the keymap from defaults + overrides.
     let cfg = crate::config::load();
-    let key_notices = keymap::init(&cfg.keys);
+    let mut key_notices = Vec::new();
+    let km = keymap::Keymap::build(&cfg.keys, &mut key_notices);
 
     let saved = ClientState::load(&paths::client_state());
     let (local_client, live) = match connect_local().await {
@@ -99,7 +100,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = event_loop(&mut terminal, saved, local_client, live, cfg.ui.notify, key_notices).await;
+    let result = event_loop(&mut terminal, saved, local_client, live, cfg.ui.notify, km, key_notices).await;
     restore_terminal();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -197,11 +198,12 @@ async fn event_loop(
     local_client: Client,
     live: Vec<SessionInfo>,
     notify_enabled: bool,
+    km: keymap::Keymap,
     key_notices: Vec<String>,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
-    let mut app = App::new_with_config(size.width, size.height, local_home, saved.recent_dirs.clone(), notify_enabled);
+    let mut app = App::new_with_config(size.width, size.height, local_home, saved.recent_dirs.clone(), notify_enabled, km);
     app.recover(&saved, &live);
 
     // Show any config parse notices in the status bar at startup.
