@@ -86,6 +86,9 @@ pub enum Msg {
     /// new-session directory picker).
     RecentProjects { limit: u32 },
     Ping,
+    /// Request a clean shutdown. Served only to our own uid; the daemon kills
+    /// all live sessions and exits. Sessions remain journaled as dormant.
+    Shutdown,
 
     // ── hook relay (`claudio __hook`) → daemon ───────────────────────────
     /// A Claude Code hook fired. `token` identifies the session generation it
@@ -99,7 +102,13 @@ pub enum Msg {
     /// snapshot that follows. Also re-sent unprompted when the session is
     /// resized by another client or the subscriber fell behind.
     Attached { id: SessionId, rows: u16, cols: u16 },
-    DirEntries { path: String, entries: Vec<DirEntry> },
+    DirEntries {
+        path: String,
+        entries: Vec<DirEntry>,
+        /// Set when the entry list was capped to fit within the frame size limit.
+        #[serde(default)]
+        truncated: bool,
+    },
     ClaudeSessions { cwd: String, sessions: Vec<ClaudeSession> },
     Projects { dirs: Vec<ProjectDir> },
     Ok,
