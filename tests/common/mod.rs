@@ -503,6 +503,7 @@ exec cat
         cmd.env("HOME", &self.home);
         cmd.env("CLAUDIO_CLAUDE_PATH", &self.fake_claude);
         cmd.env("ANTHROPIC_API_KEY", "test-key-not-real");
+        cmd.env("CLAUDIO_NO_UPDATE_CHECK", "1"); // never check for updates in tests
         cmd.env("TERM", "xterm-256color");
         cmd.env_remove("COLORTERM");
     }

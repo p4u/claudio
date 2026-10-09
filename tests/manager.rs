@@ -460,10 +460,43 @@ fn test_ssh_remote_session() {
         fs::create_dir_all(p).expect("create test dir");
     }
 
+    // ── Create a unique remote temp directory ────────────────────────────────
+    // mktemp -d gives us an isolated dir so we never touch anything else in /tmp.
+    let remote_tmp = std::process::Command::new("ssh")
+        .args([
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=30",
+            &host,
+            "mktemp -d /tmp/cl-ssh-XXXXXX",
+        ])
+        .output()
+        .expect("ssh mktemp -d failed");
+    assert!(
+        remote_tmp.status.success(),
+        "ssh mktemp -d failed on {host}: {}",
+        String::from_utf8_lossy(&remote_tmp.stderr)
+    );
+    let remote_dir = String::from_utf8(remote_tmp.stdout)
+        .expect("mktemp output is not UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        remote_dir.starts_with("/tmp/cl-ssh-"),
+        "unexpected mktemp output: {remote_dir:?}"
+    );
+    // The encoded project-dir name: Claude replaces non-alphanumeric chars with '-'.
+    // e.g. /tmp/cl-ssh-abc123 → -tmp-cl-ssh-abc123
+    let encoded_project = remote_dir
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+
     // Cleanup guard.
     let runtime_dir_g = runtime_dir.clone();
     let cleanup_root = root.clone();
     let host_g = host.clone();
+    let remote_dir_g = remote_dir.clone();
+    let encoded_g = encoded_project.clone();
     let _guard = scopeguard(move || {
         let lock = runtime_dir_g.join("claudio").join("daemon-v1.lock");
         if let Some(pid) = fs::read_to_string(&lock)
@@ -473,17 +506,19 @@ fn test_ssh_remote_session() {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
         let _ = fs::remove_dir_all(&cleanup_root);
-        // Remove the claude project dir for /tmp on the remote host.
-        // /tmp encodes to -tmp under Claude's non-alphanumeric → '-' scheme.
-        let remote_path = "'~/.claude/projects/-tmp'";
+        // Remove ONLY the unique remote dir and its encoded project entry.
+        // $HOME expands on the remote; single-quote the literal paths.
+        let cleanup_cmd = format!(
+            r#"rm -rf "$HOME/.claude/projects/{encoded_g}" {remote_dir_g_q}"#,
+            encoded_g = encoded_g,
+            remote_dir_g_q = shell_quote_ssh(&remote_dir_g),
+        );
         let _ = std::process::Command::new("ssh")
             .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
                 &host_g,
-                &format!("rm -rf {remote_path}"),
+                &cleanup_cmd,
             ])
             .status();
     });
@@ -494,6 +529,8 @@ fn test_ssh_remote_session() {
     // Keep real HOME for SSH keys and known_hosts.
     cmd.env("TERM", "xterm-256color");
     cmd.env_remove("COLORTERM");
+    // Never check for updates during the SSH test.
+    cmd.env("CLAUDIO_NO_UPDATE_CHECK", "1");
     // Clear any inherited CLAUDIO_* vars.
     for (k, _) in std::env::vars() {
         if k.starts_with("CLAUDIO_") {
@@ -515,8 +552,8 @@ fn test_ssh_remote_session() {
     let dir_step = format!("on {host}");
     tui.wait_for(&dir_step, Region::Screen, Duration::from_secs(300));
 
-    // ── 3. Directory step: paste /tmp and confirm. ───────────────────────────
-    tui.send_paste("/tmp");
+    // ── 3. Directory step: paste the unique remote dir and confirm. ──────────
+    tui.send_paste(&remote_dir);
     tui.send_keys(ENTER);
 
     // ── 4. Resume step or auto-spawn. ────────────────────────────────────────
@@ -1178,4 +1215,10 @@ impl<F: FnOnce()> Drop for ScopeGuard<F> {
 }
 fn scopeguard<F: FnOnce()>(f: F) -> ScopeGuard<F> {
     ScopeGuard(Some(f))
+}
+
+/// Single-quote a string for safe inclusion in an SSH remote command.
+/// Any embedded single quote is escaped as `'\''`.
+fn shell_quote_ssh(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
