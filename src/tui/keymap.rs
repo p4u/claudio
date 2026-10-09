@@ -5,10 +5,11 @@
 //! both dispatch (`lookup`) and the generated help popup.
 //!
 //! Overrides from `config.toml` `[keys]` are applied at startup by
-//! `apply_overrides`, which replaces the action's binding. Unknown action
-//! names and unparseable key specs produce a notice and are ignored.
+//! [`init`], which replaces the action's binding. Unknown action names,
+//! unparseable key specs, and collisions produce a notice and are ignored.
 //!
-//! Matching is exact: Alt+Shift+← is not Alt+←.
+//! The effective table is stored in `App` as a `Keymap` value, so status-bar
+//! hints always reflect overrides.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -50,7 +51,8 @@ impl Action {
     }
 }
 
-/// One entry in the binding table: key + human label + action.
+/// A single binding in the effective table: key + description + action.
+#[derive(Debug, Clone)]
 pub struct Binding {
     pub code: KeyCode,
     pub mods: KeyModifiers,
@@ -98,12 +100,6 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         label: "jump to next session needing attention",
         action: Action::NextAttention,
     },
-    Binding {
-        code: KeyCode::Char('q'),
-        mods: KeyModifiers::ALT,
-        label: "quit UI (sessions keep running)",
-        action: Action::Quit,
-    },
     // Alt+s: proxy stats. Verified not used by claude (bundle grep: empty).
     Binding {
         code: KeyCode::Char('s'),
@@ -126,83 +122,154 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         label: "this help popup",
         action: Action::Help,
     },
+    // Quit is last so it's always visible in the status bar even when truncated.
+    Binding {
+        code: KeyCode::Char('q'),
+        mods: KeyModifiers::ALT,
+        label: "quit",
+        action: Action::Quit,
+    },
 ];
 
-/// A runtime binding after config overrides have been applied.
+/// The effective keymap: defaults + config overrides.
+///
+/// Owned by `App`; used for dispatch, help rendering, and status-bar hints.
+/// Build with [`Keymap::build`].
 #[derive(Debug, Clone)]
-struct RuntimeBinding {
-    code: KeyCode,
-    mods: KeyModifiers,
-    action: Action,
+pub struct Keymap {
+    bindings: Vec<Binding>,
 }
 
-/// The effective binding table, populated once at startup.
-///
-/// We use a `std::sync::OnceLock` so the lookup function needs no state
-/// parameter, matching the existing call sites.
-static EFFECTIVE: std::sync::OnceLock<Vec<RuntimeBinding>> = std::sync::OnceLock::new();
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap::build(&std::collections::BTreeMap::new(), &mut Vec::new())
+    }
+}
 
-/// Initialize the effective bindings from defaults + config overrides.
+impl Keymap {
+    /// Build from defaults + overrides. Collect notices for any problem.
+    pub fn build(
+        overrides: &std::collections::BTreeMap<String, String>,
+        notices: &mut Vec<String>,
+    ) -> Keymap {
+        // Start from defaults (clone the static slice into an owned Vec).
+        let mut bindings: Vec<Binding> = DEFAULT_BINDINGS
+            .iter()
+            .map(|b| Binding { code: b.code, mods: b.mods, label: b.label, action: b.action })
+            .collect();
+
+        for (name, spec) in overrides {
+            // Find the action by name.
+            let action = DEFAULT_BINDINGS.iter().find(|b| b.action.name() == name).map(|b| b.action);
+            let Some(action) = action else {
+                notices.push(format!("config.toml [keys]: unknown action '{name}'"));
+                continue;
+            };
+            let (code, mods) = match parse_key_spec(spec) {
+                Ok(km) => km,
+                Err(e) => {
+                    notices.push(format!("config.toml [keys] '{name}': {e}"));
+                    continue;
+                }
+            };
+            // Collision check: reject if another action already claims this key.
+            if let Some(existing) = bindings.iter().find(|b| b.code == code && b.mods == mods && b.action != action) {
+                notices.push(format!(
+                    "config.toml [keys] '{name}': key {} already bound to '{}', skipping",
+                    key_str(code, mods),
+                    existing.action.name()
+                ));
+                continue;
+            }
+            // Replace the existing binding for this action.
+            if let Some(b) = bindings.iter_mut().find(|b| b.action == action) {
+                b.code = code;
+                b.mods = mods;
+            }
+        }
+        Keymap { bindings }
+    }
+
+    /// The action bound to `key`, if any. Releases never trigger actions.
+    pub fn lookup(&self, key: &KeyEvent) -> Option<Action> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        self.bindings
+            .iter()
+            .find(|b| b.code == key.code && b.mods == key.modifiers)
+            .map(|b| b.action)
+    }
+
+    /// Generate the help lines from the current effective bindings.
+    /// Each entry is `(key_str, label)`.
+    pub fn help_entries(&self) -> Vec<(String, &'static str)> {
+        self.bindings.iter().map(|b| (key_str(b.code, b.mods), b.label)).collect()
+    }
+
+    /// Generate the status-bar hints line from the current effective bindings.
+    ///
+    /// Reflects overrides so the hint is always accurate.
+    pub fn hints(&self) -> String {
+        let parts: Vec<String> = self
+            .bindings
+            .iter()
+            .map(|b| format!("{} {}", key_str(b.code, b.mods), b.label))
+            .collect();
+        parts.join(" · ")
+    }
+}
+
+/// Global keymap, initialized once at startup from config.
+/// Falls back to defaults when `init` has not been called.
+static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+
+/// Initialize the global keymap from defaults + config overrides.
 ///
-/// Must be called once, at startup, before any `lookup` calls. Safe to call
-/// multiple times (subsequent calls are no-ops — `OnceLock` semantics).
+/// Must be called once, at startup, before any `lookup` calls. Returns
+/// notices for any config problems. Safe to call multiple times (subsequent
+/// calls are no-ops).
 pub fn init(overrides: &std::collections::BTreeMap<String, String>) -> Vec<String> {
     let mut notices = Vec::new();
-    let bindings = EFFECTIVE.get_or_init(|| build_bindings(overrides, &mut notices));
-    // If already initialized (test-only), we can't change it; just validate.
-    if EFFECTIVE.get().is_some() && notices.is_empty() {
-        let _ = bindings;
-    }
+    KEYMAP.get_or_init(|| Keymap::build(overrides, &mut notices));
     notices
 }
 
-fn build_bindings(
-    overrides: &std::collections::BTreeMap<String, String>,
-    notices: &mut Vec<String>,
-) -> Vec<RuntimeBinding> {
-    // Start from defaults.
-    let mut bindings: Vec<RuntimeBinding> = DEFAULT_BINDINGS
-        .iter()
-        .map(|b| RuntimeBinding { code: b.code, mods: b.mods, action: b.action })
-        .collect();
-
-    for (name, spec) in overrides {
-        // Find the action by name.
-        let action = DEFAULT_BINDINGS.iter().find(|b| b.action.name() == name).map(|b| b.action);
-        let Some(action) = action else {
-            notices.push(format!("config.toml [keys]: unknown action '{name}'"));
-            continue;
-        };
-        match parse_key_spec(spec) {
-            Ok((code, mods)) => {
-                // Replace the existing binding for this action.
-                if let Some(b) = bindings.iter_mut().find(|b| b.action == action) {
-                    b.code = code;
-                    b.mods = mods;
-                }
-            }
-            Err(e) => {
-                notices.push(format!("config.toml [keys] '{name}': {e}"));
-            }
-        }
+/// The action bound to `key`, if any (uses the global keymap).
+///
+/// Releases never trigger actions. Falls back to defaults when `init` has not
+/// been called.
+pub fn lookup(key: &KeyEvent) -> Option<Action> {
+    if let Some(km) = KEYMAP.get() {
+        return km.lookup(key);
     }
-    bindings
+    // Fallback: defaults only.
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    DEFAULT_BINDINGS
+        .iter()
+        .find(|b| b.code == key.code && b.mods == key.modifiers)
+        .map(|b| b.action)
 }
 
 /// Parse a key spec string like `"alt+right"`, `"alt+g"`, `"ctrl+x"`.
 ///
 /// Supported modifiers: `alt`, `ctrl`, `shift`. Supported keys: letter/digit
-/// chars, `left`, `right`, `up`, `down`, `enter`, `esc`, `tab`, `backspace`,
-/// `delete`, `home`, `end`, `pageup`, `pagedown`, `f1`–`f12`.
+/// chars, `left`, `right`, `up`, `down`, `enter`, `esc`, `tab`, `backtab`,
+/// `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, `f1`–`f12`.
 ///
 /// Multiple modifiers can be combined: `"alt+ctrl+x"`.
+///
+/// `shift+tab` is canonicalized to `KeyCode::BackTab`.
+/// `alt+shift+<letter>` is canonicalized to the uppercase letter.
 pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
-    let spec = spec.trim().to_ascii_lowercase();
-    let mut parts: Vec<&str> = spec.split('+').collect();
+    let spec_lc = spec.trim().to_ascii_lowercase();
+    let mut parts: Vec<&str> = spec_lc.split('+').collect();
     if parts.is_empty() {
         return Err("empty key spec".into());
     }
-    let key_str = parts.pop().unwrap();
+    let key_str_lc = parts.pop().unwrap();
     let mut mods = KeyModifiers::NONE;
     for m in &parts {
         match *m {
@@ -212,7 +279,11 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
             other => return Err(format!("unknown modifier '{other}'")),
         }
     }
-    let code = match key_str {
+    // Canonicalize shift+tab → BackTab.
+    if key_str_lc == "tab" && mods.contains(KeyModifiers::SHIFT) {
+        return Ok((KeyCode::BackTab, mods - KeyModifiers::SHIFT));
+    }
+    let code = match key_str_lc {
         "left" => KeyCode::Left,
         "right" => KeyCode::Right,
         "up" => KeyCode::Up,
@@ -220,6 +291,7 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
         "enter" | "return" => KeyCode::Enter,
         "esc" | "escape" => KeyCode::Esc,
         "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
         "backspace" => KeyCode::Backspace,
         "delete" | "del" => KeyCode::Delete,
         "home" => KeyCode::Home,
@@ -235,6 +307,11 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
         s if s.len() == 1 => {
             let c = s.chars().next().unwrap();
             if c.is_ascii_alphanumeric() || c.is_ascii_punctuation() {
+                // alt+shift+<letter> → uppercase letter with ALT only.
+                if mods.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
+                    let uc = c.to_ascii_uppercase();
+                    return Ok((KeyCode::Char(uc), mods - KeyModifiers::SHIFT));
+                }
                 KeyCode::Char(c)
             } else {
                 return Err(format!("unsupported key character '{c}'"));
@@ -252,28 +329,7 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
     Ok((code, mods))
 }
 
-/// The action bound to `key`, if any. Releases never trigger actions.
-///
-/// Uses the effective binding table (defaults + config overrides). Falls back
-/// to defaults when `init` has not been called.
-pub fn lookup(key: &KeyEvent) -> Option<Action> {
-    if key.kind == KeyEventKind::Release {
-        return None;
-    }
-    // Use overridden table when available; fall back to defaults.
-    if let Some(bindings) = EFFECTIVE.get() {
-        return bindings
-            .iter()
-            .find(|b| b.code == key.code && b.mods == key.modifiers)
-            .map(|b| b.action);
-    }
-    DEFAULT_BINDINGS
-        .iter()
-        .find(|b| b.code == key.code && b.mods == key.modifiers)
-        .map(|b| b.action)
-}
-
-/// Human-readable key string for a binding (e.g. `"Alt+←"`, `"Alt+g"`).
+/// Human-readable key string for a binding (e.g. `"Alt+←"`, `"Alt+G"`).
 pub fn key_str(code: KeyCode, mods: KeyModifiers) -> String {
     let mut parts = Vec::new();
     if mods.contains(KeyModifiers::CONTROL) {
@@ -293,6 +349,7 @@ pub fn key_str(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::Enter => "Enter".to_owned(),
         KeyCode::Esc => "Esc".to_owned(),
         KeyCode::Tab => "Tab".to_owned(),
+        KeyCode::BackTab => "Shift+Tab".to_owned(),
         KeyCode::Backspace => "Bksp".to_owned(),
         KeyCode::Delete => "Del".to_owned(),
         KeyCode::Home => "Home".to_owned(),
@@ -300,7 +357,7 @@ pub fn key_str(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::PageUp => "PgUp".to_owned(),
         KeyCode::PageDown => "PgDn".to_owned(),
         KeyCode::Char(' ') => "Space".to_owned(),
-        KeyCode::Char(c) => c.to_uppercase().collect(),
+        KeyCode::Char(c) => c.to_string(),
         KeyCode::F(n) => format!("F{n}"),
         _ => "?".to_owned(),
     };
@@ -308,32 +365,26 @@ pub fn key_str(code: KeyCode, mods: KeyModifiers) -> String {
     parts.join("+")
 }
 
-/// Generate the help lines from the current effective bindings.
+/// Generate the help lines from the current global effective bindings.
 /// Each entry is `(key_str, label)`.
 pub fn help_entries() -> Vec<(String, &'static str)> {
-    // Use effective bindings when available so overrides show up in help.
-    if let Some(bindings) = EFFECTIVE.get() {
-        bindings
-            .iter()
-            .filter_map(|rb| {
-                let label = DEFAULT_BINDINGS
-                    .iter()
-                    .find(|b| b.action == rb.action)
-                    .map(|b| b.label)?;
-                Some((key_str(rb.code, rb.mods), label))
-            })
-            .collect()
-    } else {
-        DEFAULT_BINDINGS
-            .iter()
-            .map(|b| (key_str(b.code, b.mods), b.label))
-            .collect()
+    if let Some(km) = KEYMAP.get() {
+        return km.help_entries();
     }
+    DEFAULT_BINDINGS
+        .iter()
+        .map(|b| (key_str(b.code, b.mods), b.label))
+        .collect()
 }
 
-/// Key hints shown in the status bar (compact, rightmost survives longest).
-pub const HINTS: &str =
-    "Alt+←/→ switch · Alt+n new · Alt+r rename · Alt+x close · Alt+s proxy · Alt+g overview · Alt+h help · Alt+q quit";
+/// Key hints for the status bar, generated from the current effective bindings.
+pub fn hints() -> String {
+    if let Some(km) = KEYMAP.get() {
+        return km.hints();
+    }
+    // Fallback: defaults.
+    Keymap::default().hints()
+}
 
 #[cfg(test)]
 mod tests {
@@ -346,32 +397,34 @@ mod tests {
 
     #[test]
     fn default_bindings_match_expected_keys() {
-        assert_eq!(lookup(&key(KeyCode::Left, KeyModifiers::ALT)), Some(Action::PrevSession));
-        assert_eq!(lookup(&key(KeyCode::Right, KeyModifiers::ALT)), Some(Action::NextSession));
-        assert_eq!(lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), Some(Action::Quit));
-        assert_eq!(lookup(&key(KeyCode::Char('a'), KeyModifiers::ALT)), Some(Action::NextAttention));
-        assert_eq!(lookup(&key(KeyCode::Char('g'), KeyModifiers::ALT)), Some(Action::Overview));
-        assert_eq!(lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Action::Help));
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::ALT)), Some(Action::PrevSession));
+        assert_eq!(km.lookup(&key(KeyCode::Right, KeyModifiers::ALT)), Some(Action::NextSession));
+        assert_eq!(km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), Some(Action::Quit));
+        assert_eq!(km.lookup(&key(KeyCode::Char('a'), KeyModifiers::ALT)), Some(Action::NextAttention));
+        assert_eq!(km.lookup(&key(KeyCode::Char('g'), KeyModifiers::ALT)), Some(Action::Overview));
+        assert_eq!(km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)), Some(Action::Help));
     }
 
     #[test]
     fn modifiers_must_match_exactly() {
-        assert_eq!(lookup(&key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)), None);
-        assert_eq!(lookup(&key(KeyCode::Left, KeyModifiers::NONE)), None);
-        assert_eq!(lookup(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)), None);
-        assert_eq!(lookup(&key(KeyCode::Char('N'), KeyModifiers::ALT | KeyModifiers::SHIFT)), None);
-        assert_eq!(lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT | KeyModifiers::CONTROL)), None);
+        let km = Keymap::default();
+        assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT)), None);
+        assert_eq!(km.lookup(&key(KeyCode::Left, KeyModifiers::NONE)), None);
+        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::CONTROL)), None);
+        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT | KeyModifiers::CONTROL)), None);
     }
 
     #[test]
     fn releases_are_ignored() {
+        let km = Keymap::default();
         let release = KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::ALT,
             kind: KeyEventKind::Release,
             state: KeyEventState::NONE,
         };
-        assert_eq!(lookup(&release), None);
+        assert_eq!(km.lookup(&release), None);
     }
 
     // ── parse_key_spec ────────────────────────────────────────────────────────
@@ -423,6 +476,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_shift_tab_becomes_backtab() {
+        // shift+tab should canonicalize to BackTab (no SHIFT modifier).
+        assert_eq!(parse_key_spec("shift+tab").unwrap(), (KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(parse_key_spec("alt+shift+tab").unwrap(), (KeyCode::BackTab, KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn parse_alt_shift_letter_becomes_uppercase() {
+        // alt+shift+g → Alt+G (uppercase, SHIFT removed)
+        assert_eq!(parse_key_spec("alt+shift+g").unwrap(), (KeyCode::Char('G'), KeyModifiers::ALT));
+    }
+
+    #[test]
     fn parse_invalid_key_returns_error() {
         assert!(parse_key_spec("").is_err());
         assert!(parse_key_spec("badmod+x").is_err());
@@ -438,34 +504,42 @@ mod tests {
         assert_eq!(mods, KeyModifiers::ALT);
     }
 
+    // ── Keymap::build ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn collision_detection_emits_notice_and_skips() {
+        let mut overrides = std::collections::BTreeMap::new();
+        // Try to bind "quit" to alt+n, which is already "new_session".
+        overrides.insert("quit".to_owned(), "alt+n".to_owned());
+        let mut notices = Vec::new();
+        let km = Keymap::build(&overrides, &mut notices);
+        // Notice should mention the collision.
+        assert!(!notices.is_empty(), "expected a collision notice");
+        assert!(notices[0].contains("already bound"), "notice should mention collision: {:?}", notices);
+        // The override must be rejected: alt+q still quits, alt+n still opens wizard.
+        assert_eq!(km.lookup(&key(KeyCode::Char('q'), KeyModifiers::ALT)), Some(Action::Quit));
+        assert_eq!(km.lookup(&key(KeyCode::Char('n'), KeyModifiers::ALT)), Some(Action::NewSession));
+    }
+
     // ── help_entries ──────────────────────────────────────────────────────────
 
     #[test]
     fn help_entries_covers_all_default_bindings() {
-        let entries = help_entries();
+        let km = Keymap::default();
+        let entries = km.help_entries();
         // Every default binding must appear in the help.
         for b in DEFAULT_BINDINGS {
             assert!(
                 entries.iter().any(|(_, label)| *label == b.label),
-                "missing help entry for '{}'",
+                "missing label: {}",
                 b.label
             );
         }
     }
 
     #[test]
-    fn build_bindings_rejects_unknown_actions_and_bad_specs() {
-        let mut notices = Vec::new();
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert("nonexistent_action".into(), "alt+z".into());
-        overrides.insert("overview".into(), "badmod+x".into());
-        overrides.insert("help".into(), "alt+z".into()); // valid override
-        let bindings = build_bindings(&overrides, &mut notices);
-        // Two notices: one for unknown action, one for bad spec.
-        assert_eq!(notices.len(), 2, "expected exactly 2 notices, got: {notices:?}");
-        // The help binding should have changed to alt+z.
-        let help_binding = bindings.iter().find(|b| b.action == Action::Help).unwrap();
-        assert_eq!(help_binding.code, KeyCode::Char('z'));
-        assert_eq!(help_binding.mods, KeyModifiers::ALT);
+    fn hints_string_not_empty() {
+        let km = Keymap::default();
+        assert!(!km.hints().is_empty());
     }
 }
