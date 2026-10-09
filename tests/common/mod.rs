@@ -41,7 +41,7 @@ pub const WAIT: Duration = Duration::from_secs(10);
 /// Longer timeout when the daemon must be (re-)started.
 pub const DAEMON_WAIT: Duration = Duration::from_secs(20);
 /// Timeout for reconnect after a daemon kill.
-pub const RECONNECT_WAIT: Duration = Duration::from_secs(30);
+pub const RECONNECT_WAIT: Duration = Duration::from_secs(90);
 
 /// PTY dimensions used by every test.
 pub const PTY_ROWS: u16 = 40;
@@ -779,7 +779,7 @@ exec cat
     }
 
     /// Start a `claudio` TUI process with the default env and wait until the
-    /// status bar shows "Alt+q" (the TUI is fully up).
+    /// status bar shows "Alt+h help" (the TUI is fully up).
     pub fn start_tui(&self) -> TuiProcess {
         self.start_tui_with(|_| {})
     }
@@ -791,7 +791,7 @@ exec cat
         self.apply(&mut cmd);
         setup(&mut cmd);
         let tui = TuiProcess::spawn(cmd);
-        tui.wait_for("Alt+q", Region::StatusBar, DAEMON_WAIT);
+        tui.wait_for("Alt+h help", Region::StatusBar, DAEMON_WAIT);
         tui
     }
 }

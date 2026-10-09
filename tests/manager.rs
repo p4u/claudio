@@ -428,7 +428,7 @@ fn test_daemon_stop_and_restart_cmd() {
 
 /// Gated by `CLAUDIO_SSH_TEST_HOST`. Drives the full wizard against a real SSH
 /// host, verifies the tab label contains @host, and verifies `hosts.json` lists
-/// the host first.  Kills the session before quitting so nothing persists on z6.
+/// the host first.  Kills the session before quitting so nothing persists on the remote host.
 ///
 /// The remote host must have `claude` installed and SSH key auth (BatchMode).
 #[test]
@@ -541,7 +541,7 @@ fn test_ssh_remote_session() {
     let mut tui = TuiProcess::spawn(cmd);
 
     // ── 1. Wait for TUI to start. ────────────────────────────────────────────
-    tui.wait_for("Alt+q", Region::StatusBar, Duration::from_secs(30));
+    tui.wait_for("Alt+h help", Region::StatusBar, Duration::from_secs(30));
 
     // ── 2. Host step: type the hostname and press Enter. ─────────────────────
     tui.send_keys(host.as_bytes());
@@ -684,7 +684,7 @@ fn test_proxy_env_injection() {
             proxy_bin.to_str().unwrap(),
             "./cmd/claude-proxy",
         ])
-        .current_dir("/volumes/repos/claude-proxy-claudio-api")
+        .current_dir("/home/user/src/claude-proxy-claudio-api")
         .output()
         .expect("go build (is go installed?)");
     assert!(
@@ -995,7 +995,7 @@ fn test_e2e_real_claude() {
     let mut tui = TuiProcess::spawn(cmd);
 
     // ── 1. Wait for TUI to start. ────────────────────────────────────────────
-    tui.wait_for("Alt+q", Region::StatusBar, Duration::from_secs(30));
+    tui.wait_for("Alt+h help", Region::StatusBar, Duration::from_secs(30));
 
     // ── 2. Wizard: local host, then session directory. ───────────────────────
     tui.send_keys(ENTER);
@@ -1104,7 +1104,7 @@ fn test_proxy_real_claude() {
 
     let mut tui = TuiProcess::spawn(cmd);
 
-    tui.wait_for("Alt+q", Region::StatusBar, Duration::from_secs(30));
+    tui.wait_for("Alt+h help", Region::StatusBar, Duration::from_secs(30));
 
     // Wizard: local host, then session directory.
     tui.send_keys(ENTER);
@@ -1199,6 +1199,34 @@ fn test_soak_connection_stays_alive() {
     tui.send_keys(ENTER);
     tui.wait_for(echo_phrase, Region::Pane, WAIT);
 
+    tui.quit(WAIT);
+}
+
+// ── Additional status bar and tab tests ──────────────────────────────────────
+
+/// Status bar shows cpu sparkline and mem usage for a running local session.
+#[test]
+fn test_status_bar_machine_stats() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    // Wait up to 6s for the cpu sparkline and mem to appear in the status bar.
+    tui.wait_for("cpu", Region::StatusBar, Duration::from_secs(6));
+    tui.wait_for("mem", Region::StatusBar, Duration::from_secs(6));
+    tui.quit(WAIT);
+}
+
+/// Tab label for a fake-claude session is the cwd basename, not "Claude Code".
+#[test]
+fn test_tab_label_is_basename() {
+    let harness = ManagerHarness::new();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let dir_name = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(dir_name, Region::TabBar, WAIT);
+    // Verify "Claude Code" does NOT appear in the tab bar.
+    let tab_text = tui.screen_text(Region::TabBar);
+    assert!(!tab_text.contains("Claude Code"), "tab should not say 'Claude Code', got: {tab_text:?}");
     tui.quit(WAIT);
 }
 

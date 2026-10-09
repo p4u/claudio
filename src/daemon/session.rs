@@ -628,16 +628,22 @@ impl Actor {
             }
             self.daemon.broadcast(self.id, ev);
         }
-        // Broadcast updated metadata (branch) after each hook.
+        // Broadcast updated metadata (branch + model/tokens) after each hook.
+        // The transcript read is blocking I/O, so we fire-and-forget a
+        // spawn_blocking task; on_hook is not async so we don't await it.
         let branch = read_git_branch(&self.cwd);
-        self.daemon.broadcast(
-            self.id,
-            SessionEvent::Meta {
-                branch,
-                model: None,
-                context_tokens: None,
-            },
-        );
+        let cwd = self.cwd.clone();
+        let session_id = self.tracker.claude_session_id.clone();
+        let daemon = Arc::clone(&self.daemon);
+        let id = self.id;
+        tokio::task::spawn_blocking(move || {
+            let (model, context_tokens) = session_id
+                .as_deref()
+                .and_then(|sid| crate::claude::projects::read_last_assistant_meta(&cwd, sid))
+                .map(|(m, t)| (Some(m), Some(t)))
+                .unwrap_or((None, None));
+            daemon.broadcast(id, SessionEvent::Meta { branch, model, context_tokens });
+        });
     }
 
     fn write(&mut self, bytes: Vec<u8>) {

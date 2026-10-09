@@ -147,7 +147,7 @@ fn parse_session(path: &Path, session_id: &str, expected_cwd: &str) -> Option<Cl
 /// multi-byte UTF-8 sequence, causing `read_to_string` to fail and the whole
 /// session to silently disappear. We instead read raw bytes and skip the first
 /// (potentially partial) line so every subsequent line is complete.
-fn read_file_tail(path: &Path) -> Option<String> {
+pub(crate) fn read_file_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
@@ -164,6 +164,71 @@ fn read_file_tail(path: &Path) -> Option<String> {
     } else {
         f.read_to_end(&mut buf).ok()?;
         String::from_utf8(buf).ok()
+    }
+}
+
+/// Read the model name and context token count from the last `type:"assistant"`
+/// record in the transcript for `(cwd, session_id)`.
+///
+/// Context tokens = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+/// from `message.usage`.
+///
+/// Returns `None` if the transcript is unreadable or has no assistant record.
+pub fn read_last_assistant_meta(cwd: &Path, session_id: &str) -> Option<(String, u64)> {
+    let path = transcript_path(cwd, session_id);
+    let content = read_file_tail(&path)?;
+    parse_last_assistant_meta(&content)
+}
+
+/// Parse model + context token count from the last `type:"assistant"` record in
+/// a JSONL string. Extracted for unit-testability without filesystem access.
+fn parse_last_assistant_meta(content: &str) -> Option<(String, u64)> {
+    let mut last_model: Option<String> = None;
+    let mut last_tokens: Option<u64> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Pre-filter: only bother parsing lines that look like assistant records.
+        if !line.contains("\"assistant\"") {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                continue;
+            }
+            let msg = match v.get("message") {
+                Some(m) => m,
+                None => continue,
+            };
+            let model = match msg.get("model").and_then(|m| m.as_str()) {
+                Some(m) => m.to_owned(),
+                None => continue,
+            };
+            let usage = match msg.get("usage") {
+                Some(u) => u,
+                None => continue,
+            };
+            let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cache_create = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let tokens = input + cache_create + cache_read;
+            last_model = Some(model);
+            last_tokens = Some(tokens);
+        }
+    }
+
+    match (last_model, last_tokens) {
+        (Some(m), Some(t)) => Some((m, t)),
+        _ => None,
     }
 }
 
@@ -440,24 +505,24 @@ mod tests {
     #[test]
     fn encode_cwd_replaces_non_alnum() {
         assert_eq!(
-            encode_cwd(Path::new("/volumes/repos/claudio")),
-            "-volumes-repos-claudio"
+            encode_cwd(Path::new("/home/user/src/claudio")),
+            "-home-user-src-claudio"
         );
-        assert_eq!(encode_cwd(Path::new("/home/p4u")), "-home-p4u");
+        assert_eq!(encode_cwd(Path::new("/home/user")), "-home-user");
         assert_eq!(encode_cwd(Path::new("/tmp")), "-tmp");
     }
 
     #[test]
     fn project_dir_uses_encoded_cwd() {
         let root = projects_root();
-        let p = project_dir(Path::new("/home/p4u"));
-        assert_eq!(p, root.join("-home-p4u"));
+        let p = project_dir(Path::new("/home/user"));
+        assert_eq!(p, root.join("-home-user"));
     }
 
     #[test]
     fn transcript_path_correct() {
-        let p = transcript_path(Path::new("/home/p4u"), "abc-123");
-        assert!(p.to_string_lossy().ends_with("/-home-p4u/abc-123.jsonl"));
+        let p = transcript_path(Path::new("/home/user"), "abc-123");
+        assert!(p.to_string_lossy().ends_with("/-home-user/abc-123.jsonl"));
     }
 
     // ── is_real_prompt ────────────────────────────────────────────────────────
@@ -599,6 +664,52 @@ mod tests {
         // call it and ensure no panic. The real env may or may not have data.
         let result = std::panic::catch_unwind(recent_project_dirs_no_panic_wrapper);
         assert!(result.is_ok());
+    }
+
+    // ── parse_last_assistant_meta (via read_last_assistant_meta) ─────────────
+
+    #[test]
+    fn read_last_assistant_meta_returns_model_and_tokens() {
+        let jsonl = r#"{"type":"assistant","message":{"model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}"#;
+        let result = parse_last_assistant_meta(jsonl);
+        assert!(result.is_some(), "should find assistant record");
+        let (model, tokens) = result.unwrap();
+        assert_eq!(model, "claude-3-5-sonnet-20241022");
+        assert_eq!(tokens, 1000);
+    }
+
+    #[test]
+    fn read_last_assistant_meta_no_assistant_returns_none() {
+        let jsonl = r#"{"type":"user","message":{"content":"hello"}}"#;
+        let result = parse_last_assistant_meta(jsonl);
+        assert!(result.is_none(), "no assistant record → should be None");
+    }
+
+    #[test]
+    fn read_last_assistant_meta_sums_all_usage_fields() {
+        // input=100, cache_creation=200, cache_read=300 → total 600
+        let jsonl = r#"{"type":"assistant","message":{"model":"claude-opus-4-5","usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":10}}}"#;
+        let result = parse_last_assistant_meta(jsonl);
+        assert!(result.is_some());
+        let (model, tokens) = result.unwrap();
+        assert_eq!(model, "claude-opus-4-5");
+        assert_eq!(tokens, 600);
+    }
+
+    #[test]
+    fn read_last_assistant_meta_uses_last_record() {
+        // Two assistant records — we should return the last one.
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-old","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-new","usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
+            "\n",
+        );
+        let result = parse_last_assistant_meta(jsonl);
+        assert!(result.is_some());
+        let (model, tokens) = result.unwrap();
+        assert_eq!(model, "claude-new");
+        assert_eq!(tokens, 500);
     }
 
     fn recent_project_dirs_no_panic_wrapper() {

@@ -224,6 +224,7 @@ impl Keymap {
     /// Generate the status-bar hints line from the current effective bindings.
     ///
     /// Reflects overrides so the hint is always accurate.
+    #[allow(dead_code)]
     pub fn hints(&self) -> String {
         let parts: Vec<String> = self
             .bindings
