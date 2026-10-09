@@ -83,8 +83,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # `ring` (TLS for the HTTPS client) compiles C code; the musl targets
+      # need a musl C compiler, which the runners don't ship.
+      - name: Install musl C toolchain (Linux only)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build binary
-        run: cargo build --release --locked --target "${{ matrix.target }}"
+        run: |
+          if [ "${{ matrix.os }}" = linux ]; then
+            # Target-specific, so host build scripts keep the system compiler.
+            export "CC_$(echo '${{ matrix.target }}' | tr - _)=musl-gcc"
+          fi
+          cargo build --release --locked --target "${{ matrix.target }}"
 
       - name: Verify statically linked (Linux only)
         if: matrix.os == 'linux'
