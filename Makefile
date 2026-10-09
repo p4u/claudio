@@ -35,9 +35,13 @@ build:
 
 ## Portable static binary via musl. rustup's bundled toolchain links musl
 ## self-contained (no musl-gcc needed). Output copied to dist/.
+## The musl std lives inside rustup's toolchain, which a distro cargo/rustc
+## earlier on PATH cannot see — so build with rustup's binaries explicitly.
+RUSTUP_CARGO := $(shell rustup which cargo 2>/dev/null)
+RUSTUP_RUSTC := $(shell rustup which rustc 2>/dev/null)
 static:
 	rustup target add $(MUSL_TARGET)
-	$(CARGO) build --release --locked --target $(MUSL_TARGET)
+	$(if $(RUSTUP_RUSTC),RUSTC=$(RUSTUP_RUSTC)) $(or $(RUSTUP_CARGO),$(CARGO)) build --release --locked --target $(MUSL_TARGET)
 	@mkdir -p $(DIST)
 	@cp target/$(MUSL_TARGET)/release/$(BIN) $(DIST)/$(BIN)
 	@echo "→ $(DIST)/$(BIN)"
