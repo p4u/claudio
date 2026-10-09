@@ -26,7 +26,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc};
 
 use super::session::{ClientId, Cmd};
-use super::{host, Config, Daemon};
+use super::{host, update, Config, Daemon};
 use crate::claude::projects;
 use crate::paths;
 use crate::proto::{self, Envelope, Frame, Msg, ProjectDir, SessionId, Welcome, MAX_FRAME, PROTO};
@@ -469,6 +469,17 @@ impl Client {
                     }
                 });
                 Msg::Ok
+            }
+            Msg::UpdateClaude { install } => {
+                // Minutes long: run beside the client loop and reply from
+                // the task, like `Attach`.
+                let daemon = Arc::clone(&self.daemon);
+                let queue = self.queue.clone();
+                tokio::spawn(async move {
+                    let msg = update::run(&daemon, install).await;
+                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                });
+                return;
             }
             other => Msg::Error {
                 message: format!("unsupported op: {}", op_name(&other)),

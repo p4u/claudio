@@ -66,6 +66,8 @@ const LIVENESS_DEADLINE: Duration = Duration::from_secs(45);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longer timeout for `Spawn` (the daemon may need to start a process).
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+/// `UpdateClaude` runs up to 300 s on the daemon, plus the re-probe.
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(330);
 
 /// Something the daemon sent without being asked.
 #[derive(Debug, PartialEq)]
@@ -360,12 +362,13 @@ impl Client {
     /// reach the daemon in call order even when the futures are awaited on
     /// different tasks. A daemon `Error` reply becomes an `Err`.
     ///
-    /// A 30-second deadline applies to all requests; `Spawn` gets 60 seconds.
+    /// A 30-second deadline applies to all requests; `Spawn` gets 60 seconds
+    /// and `UpdateClaude` 330.
     pub fn request(&self, msg: Msg) -> impl Future<Output = io::Result<Msg>> + Send + 'static {
-        let timeout = if matches!(msg, Msg::Spawn(_)) {
-            SPAWN_TIMEOUT
-        } else {
-            REQUEST_TIMEOUT
+        let timeout = match msg {
+            Msg::Spawn(_) => SPAWN_TIMEOUT,
+            Msg::UpdateClaude { .. } => UPDATE_TIMEOUT,
+            _ => REQUEST_TIMEOUT,
         };
         let queued = self.enqueue(msg);
         async move {

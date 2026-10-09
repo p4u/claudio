@@ -130,6 +130,19 @@ impl TestDaemon {
         Self::start_in(Self::new_dir()).await
     }
 
+    /// A daemon whose claude is `claude` instead of the shared fake.
+    async fn start_with_claude(dir: PathBuf, claude: PathBuf) -> TestDaemon {
+        let config = Config {
+            claude,
+            ..Self::config(&dir)
+        };
+        let listening = server::start(config.clone())
+            .unwrap()
+            .expect("lock is free");
+        tokio::spawn(listening.serve());
+        TestDaemon { dir, config }
+    }
+
     fn work(&self) -> PathBuf {
         self.dir.join("work")
     }
@@ -888,4 +901,110 @@ async fn kill_in_flight_session_succeeds() {
         }
     })
     .await;
+}
+
+/// A fake claude that reports the version in its `version` file and, on
+/// `update`, either bumps it to 2.0.0 or (with a `fail` file) exits 1.
+fn fake_claude_updatable(dir: &Path) -> PathBuf {
+    let bin = dir.join("claude");
+    std::fs::write(dir.join("version"), "1.0.0 (Claude Code)\n").unwrap();
+    let script = "#!/bin/sh\n\
+         D=$(dirname \"$0\")\n\
+         if [ \"$1\" = \"--version\" ]; then cat \"$D/version\"; exit 0; fi\n\
+         if [ \"$1\" = \"update\" ]; then\n\
+           echo \"Checking for updates\"\n\
+           echo \"permission note\" >&2\n\
+           if [ -e \"$D/fail\" ]; then exit 1; fi\n\
+           echo \"2.0.0 (Claude Code)\" > \"$D/version\"\n\
+           echo \"Updated to 2.0.0\"; exit 0\n\
+         fi\n\
+         exit 3\n";
+    std::fs::write(&bin, script).unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    bin
+}
+
+async fn welcome_claude_version(d: &TestDaemon) -> Option<String> {
+    let mut c = Client::raw(&d.config.socket).await;
+    match c.call(Msg::Hello(hello(PROTO))).await {
+        Msg::Welcome(w) => w.host.claude.map(|c| c.version),
+        other => panic!("expected welcome, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_claude_runs_claude_update_and_refreshes_the_host() {
+    let dir = TestDaemon::new_dir();
+    let claude = fake_claude_updatable(&dir);
+    let d = TestDaemon::start_with_claude(dir.clone(), claude).await;
+    assert_eq!(
+        welcome_claude_version(&d).await.as_deref(),
+        Some("1.0.0 (Claude Code)")
+    );
+
+    let mut c = d.client().await;
+    match c.call(Msg::UpdateClaude { install: false }).await {
+        Msg::ClaudeUpdated { version, ok, tail } => {
+            assert!(ok, "update failed: {tail}");
+            assert_eq!(version.as_deref(), Some("2.0.0 (Claude Code)"));
+            assert!(tail.contains("Checking for updates"), "stdout in tail: {tail:?}");
+            assert!(tail.contains("permission note"), "stderr in tail: {tail:?}");
+            assert!(tail.ends_with("Updated to 2.0.0"), "tail is trimmed: {tail:?}");
+        }
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
+    // The next Welcome reports the refreshed version, and the connection that
+    // asked kept working meanwhile.
+    assert_eq!(
+        welcome_claude_version(&d).await.as_deref(),
+        Some("2.0.0 (Claude Code)")
+    );
+    assert_eq!(c.call(Msg::Ping).await, Msg::Pong);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_update_reports_ok_false_beside_other_requests() {
+    let dir = TestDaemon::new_dir();
+    let claude = fake_claude_updatable(&dir);
+    std::fs::write(dir.join("fail"), "").unwrap();
+    let d = TestDaemon::start_with_claude(dir.clone(), claude).await;
+
+    let mut c = d.client().await;
+    // The reply comes from a task: a Ping sent right behind it is answered
+    // whichever finishes first, and both arrive.
+    let update = c.request(Msg::UpdateClaude { install: false }).await;
+    let ping = c.request(Msg::Ping).await;
+    let (mut updated, mut ponged) = (None, false);
+    c.until(|f| {
+        if let Frame::Control(env) = f {
+            if env.req == Some(update) {
+                updated = Some(env.msg.clone());
+            } else if env.req == Some(ping) {
+                ponged = env.msg == Msg::Pong;
+            }
+        }
+        (updated.is_some() && ponged).then_some(())
+    })
+    .await;
+    match updated.unwrap() {
+        Msg::ClaudeUpdated { version, ok, tail } => {
+            assert!(!ok);
+            assert_eq!(version.as_deref(), Some("1.0.0 (Claude Code)"));
+            assert!(tail.contains("permission note"));
+        }
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_with_a_missing_claude_reports_failure() {
+    let dir = TestDaemon::new_dir();
+    let d = TestDaemon::start_with_claude(dir.clone(), dir.join("nope/claude")).await;
+    let mut c = d.client().await;
+    match c.call(Msg::UpdateClaude { install: false }).await {
+        Msg::ClaudeUpdated { version, ok, tail } => {
+            assert!(!ok && version.is_none(), "{tail}");
+        }
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
 }

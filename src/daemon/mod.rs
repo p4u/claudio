@@ -8,6 +8,7 @@
 //! - [`session`] — one actor task per live session (PTY, screen, hooks).
 //! - [`journal`] — the durable session list (dormant sessions survive restarts).
 //! - [`host`] — host facts for `Welcome`, directory listing.
+//! - [`update`] — `claude update` (or the installer), on request.
 //!
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
@@ -18,6 +19,7 @@ mod journal;
 mod server;
 mod session;
 mod stats;
+mod update;
 #[cfg(test)]
 mod tests;
 
@@ -27,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use tokio::sync::{broadcast, OnceCell};
+use tokio::sync::broadcast;
 use tracing_subscriber::EnvFilter;
 
 use crate::paths;
@@ -75,6 +77,18 @@ impl Config {
             claude,
             claudio: std::env::current_exe()?,
         })
+    }
+}
+
+impl Config {
+    /// The claude binary to run now. A bare name is resolved again each time:
+    /// the installer may have created `~/.local/bin/claude` since startup.
+    pub fn claude_bin(&self) -> PathBuf {
+        if self.claude.components().count() > 1 {
+            self.claude.clone()
+        } else {
+            resolve_claude_path()
+        }
     }
 }
 
@@ -193,8 +207,11 @@ pub(crate) struct Daemon {
     journal_write: Mutex<()>,
     /// Frames for every connected client (session events).
     events: broadcast::Sender<Frame>,
-    /// Computed once, on first use (it runs `claude --version`).
-    host: OnceCell<HostInfo>,
+    /// Probed on first use (it runs `claude --version`), and again after a
+    /// claude update.
+    host: tokio::sync::Mutex<Option<HostInfo>>,
+    /// Held while `claude update` runs: one at a time.
+    updating: tokio::sync::Mutex<()>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
@@ -232,7 +249,8 @@ impl Daemon {
             }),
             journal_write: Mutex::new(()),
             events,
-            host: OnceCell::new(),
+            host: tokio::sync::Mutex::new(None),
+            updating: tokio::sync::Mutex::new(()),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
         }
@@ -247,15 +265,25 @@ impl Daemon {
 
     /// Host facts for `Welcome`, probed once.
     async fn host(&self) -> HostInfo {
-        self.host
-            .get_or_init(|| async {
-                let claude = self.config.claude.clone();
-                tokio::task::spawn_blocking(move || host::probe(&claude))
-                    .await
-                    .unwrap_or_else(|_| host::basic())
-            })
+        let mut slot = self.host.lock().await;
+        match &*slot {
+            Some(host) => host.clone(),
+            None => slot.insert(self.probe_host().await).clone(),
+        }
+    }
+
+    /// Probe the host again (claude just changed on disk) and remember it.
+    async fn refresh_host(&self) -> HostInfo {
+        let host = self.probe_host().await;
+        *self.host.lock().await = Some(host.clone());
+        host
+    }
+
+    async fn probe_host(&self) -> HostInfo {
+        let claude = self.config.claude_bin();
+        tokio::task::spawn_blocking(move || host::probe(&claude))
             .await
-            .clone()
+            .unwrap_or_else(|_| host::basic())
     }
 
     /// Send a session event to every connected client.

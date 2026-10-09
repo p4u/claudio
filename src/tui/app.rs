@@ -12,13 +12,14 @@
 //! - `notifications` – Notice, check_notifications
 //! - `interaction`   – Modal
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
 use crate::proxy::api::{ConfigResponse, PoolHealthResponse, StatsResponse};
 use crate::proxy::ProxyChoice;
 
+use super::confirm::ConfirmPrompt;
 use super::keymap::Keymap;
 use super::state::{ClientState, KillTombstone};
 
@@ -97,6 +98,8 @@ pub enum ReplyTo {
     /// Wizard recent projects for a remote host (host, wizard generation).
     /// Both must match the current wizard or the reply is discarded.
     RemoteProjects(String, u64),
+    /// `UpdateClaude` on this host; the outcome becomes a notice.
+    ClaudeUpdate(String),
 }
 
 /// The manager's state.
@@ -157,6 +160,16 @@ pub struct App {
     /// Ring buffer of host stats samples, keyed by host name.
     /// Capacity capped at 30 samples per host (~1 min at 2-s interval).
     pub host_stats: HashMap<String, std::collections::VecDeque<HostStatsSample>>,
+    /// `[claude]` from config.toml: the update policies.
+    pub claude_policy: crate::config::ClaudeSection,
+    /// This machine's `claude --version`; remote hosts are compared with it.
+    pub local_claude: Option<String>,
+    /// Per host, the claude version the user chose to skip (persisted).
+    pub claude_skipped: HashMap<String, String>,
+    /// Hosts whose claude was already checked in this run.
+    pub(super) claude_checked: HashSet<String>,
+    /// Prompts waiting for the open modal to close.
+    pub(super) confirms: VecDeque<ConfirmPrompt>,
 }
 
 impl App {
@@ -222,6 +235,11 @@ impl App {
             keymap,
             upgrade_notice: None,
             host_stats: HashMap::new(),
+            claude_policy: Default::default(),
+            local_claude: None,
+            claude_skipped: HashMap::new(),
+            claude_checked: HashSet::new(),
+            confirms: VecDeque::new(),
         }
     }
 
@@ -332,6 +350,7 @@ impl App {
             active: self.active_view().map(|v| v.id),
             recent_dirs: self.recent_dirs.clone(),
             killed: self.killed.clone(),
+            claude_skipped: self.claude_skipped.clone(),
         }
     }
 
@@ -377,6 +396,7 @@ impl App {
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         self.now = crate::paths::unix_now();
+        self.confirm_tick();
         if let Some(n) = &mut self.notice {
             n.ticks_left = n.ticks_left.saturating_sub(1);
             if n.ticks_left == 0 {

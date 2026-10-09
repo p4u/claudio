@@ -132,6 +132,16 @@ pub enum Msg {
     /// treats that as "unsupported" and hides the sparklines.
     SubscribeHostStats,
 
+    // ── claude maintenance (opt-in, additive) ────────────────────────────
+    /// Run `claude update` on the daemon's host, or the official installer
+    /// when `install` (claude is missing). Answered by `ClaudeUpdated` once it
+    /// finishes (minutes, at most); running sessions are left alone. An old
+    /// daemon answers `Error "unsupported op…"`.
+    UpdateClaude {
+        #[serde(default)]
+        install: bool,
+    },
+
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -161,6 +171,14 @@ pub enum Msg {
     },
     Projects {
         dirs: Vec<ProjectDir>,
+    },
+    /// The outcome of `UpdateClaude`. `version` is the host's re-probed
+    /// `claude --version` (`None` when claude is still missing); `tail` is the
+    /// last few KiB of the command's output.
+    ClaudeUpdated {
+        version: Option<String>,
+        ok: bool,
+        tail: String,
     },
     Ok,
     Error {
@@ -644,5 +662,23 @@ mod tests {
         let json = r#"{"kind":"future_event","data":42}"#;
         let event: SessionEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event, SessionEvent::Unknown);
+    }
+
+    #[test]
+    fn update_claude_wire_format() {
+        let req: Msg = serde_json::from_str(r#"{"op":"update_claude"}"#).unwrap();
+        assert_eq!(req, Msg::UpdateClaude { install: false });
+        let req = Msg::UpdateClaude { install: true };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"op":"update_claude","install":true}"#
+        );
+        let reply = Msg::ClaudeUpdated {
+            version: Some("2.1.296 (Claude Code)".into()),
+            ok: true,
+            tail: "done".into(),
+        };
+        let back: Msg = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+        assert_eq!(back, reply);
     }
 }

@@ -363,6 +363,7 @@ impl App {
             active: self.active_view().filter(|v| v.host == host).map(|v| v.id),
             recent_dirs: self.recent_dirs.clone(),
             killed: self.killed.clone(),
+            ..Default::default()
         };
         // Remove existing sessions for this host (they'll be re-added after merge).
         let active_id = self.active_view().map(|v| v.id);

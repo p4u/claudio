@@ -205,7 +205,7 @@ pub fn spawn(daemon: &Arc<Daemon>, spec: &SpawnSpec) -> io::Result<(Handle, ones
 /// session env applied.
 fn command(cfg: &super::Config, spec: &SpawnSpec, cwd: &Path, token: &str) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token);
-    let mut cmd = CommandBuilder::new(&cfg.claude);
+    let mut cmd = CommandBuilder::new(cfg.claude_bin());
     cmd.arg("--settings");
     cmd.arg(settings.to_string());
     for a in &spec.args {
