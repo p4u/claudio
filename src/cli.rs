@@ -340,7 +340,20 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_API_MAX_SESSIONS=<n>      Max conversation mappings kept (default: 32).\n\
 \x20  CLAUDIO_API_MAX_LIVE=<n>          Max live claude processes; idle ones are demoted (default: 6).\n\
 \x20  CLAUDIO_API_SESSION_TTL=<n>       Drop an idle conversation mapping after n seconds (default: 600).\n\
-\x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n";
+\x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n\
+\n\
+\x20Proxy commands (optional claude-proxy integration):\n\
+\x20  claudio proxy login [URL]         Add or update a proxy profile (prompts for token).\n\
+\x20  claudio proxy status              Show profiles, live stats and pool health.\n\
+\x20  claudio proxy logout [NAME]       Remove a proxy profile.\n\
+\x20  claudio proxy use NAME|none       Set (or clear) the default proxy profile.\n\
+\n\
+\x20Environment variables — proxy:\n\
+\x20  CLAUDIO_PROXY_URL=<token>@<host>  Ephemeral proxy profile for this run.\n\
+\x20                                    host may be: claude.example.net,\n\
+\x20                                    https://claude.example.net, or host:port.\n\
+\x20                                    http:// is only allowed for 127.0.0.1/localhost.\n\
+\x20                                    When set, overrides any saved default profile.\n";
 
 #[cfg(test)]
 mod tests {
