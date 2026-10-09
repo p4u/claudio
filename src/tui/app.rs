@@ -134,6 +134,10 @@ pub enum Modal {
     Wizard(Wizard),
     /// Proxy stats popup.
     ProxyStats { profile_name: String },
+    /// Overview / "mission control": all sessions at a glance.
+    Overview { selected: usize },
+    /// Help popup: all key bindings.
+    Help,
 }
 
 /// The manager's state.
@@ -168,6 +172,14 @@ pub struct App {
     pub proxy_profiles: Vec<String>,
     /// The default proxy profile from config.
     pub proxy_default: Option<String>,
+    /// Last state for which a desktop notification was sent per session.
+    /// Used to debounce: only one notification per session per state change.
+    pub notified: HashMap<SessionId, crate::proto::SessionState>,
+    /// Whether to emit desktop notifications (from config.toml [ui] notify).
+    pub notify_enabled: bool,
+    /// Sessions that need a notification emitted after the next draw.
+    /// Populated by `check_notifications`; drained by the event loop.
+    pub pending_notifs: Vec<String>,
 }
 
 /// Current Unix time in seconds.
@@ -178,7 +190,20 @@ pub fn unix_now() -> u64 {
 }
 
 impl App {
+    /// Create an App with default settings (notify enabled). Tests and the
+    /// daemon-status command use this.
+    #[allow(dead_code)]
     pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
+        App::new_with_config(width, height, home, recent_dirs, true)
+    }
+
+    pub fn new_with_config(
+        width: u16,
+        height: u16,
+        home: String,
+        recent_dirs: Vec<String>,
+        notify_enabled: bool,
+    ) -> App {
         // Load proxy profiles once at startup.
         let (proxy_profiles, proxy_default) = load_proxy_profiles();
         App {
@@ -201,6 +226,9 @@ impl App {
             proxy_status: HashMap::new(),
             proxy_profiles,
             proxy_default,
+            notified: HashMap::new(),
+            notify_enabled,
+            pending_notifs: Vec::new(),
         }
     }
 
@@ -677,9 +705,52 @@ impl App {
                 self.quit = true;
             }
             Action::ProxyStats => self.open_proxy_stats(),
+            Action::Overview => self.open_overview(),
+            Action::Help => self.open_help(),
             _ => {}
         }
         self.redraw = true;
+    }
+
+    /// Open the overview popup, selecting the active session.
+    fn open_overview(&mut self) {
+        let selected = self.active.unwrap_or(0);
+        self.modal = Some(Modal::Overview { selected });
+        self.redraw = true;
+    }
+
+    /// Open the help popup.
+    fn open_help(&mut self) {
+        self.modal = Some(Modal::Help);
+        self.redraw = true;
+    }
+
+    /// Check for background sessions that entered a notification-worthy state
+    /// since the last check, and populate `pending_notifs` with their labels.
+    ///
+    /// The caller (event loop) emits the OS notifications after each draw,
+    /// outside the ratatui buffer, to avoid corrupting the terminal state.
+    pub fn check_notifications(&mut self) {
+        if !self.notify_enabled {
+            return;
+        }
+        for (i, v) in self.sessions.iter().enumerate() {
+            if Some(i) == self.active {
+                // Never notify for the session the user is currently watching.
+                continue;
+            }
+            if !v.state.wants_attention() {
+                // Clear debounce state so a later attention state triggers again.
+                self.notified.remove(&v.id);
+                continue;
+            }
+            // Only notify once per (session, state) combination.
+            if self.notified.get(&v.id) == Some(&v.state) {
+                continue;
+            }
+            self.notified.insert(v.id, v.state);
+            self.pending_notifs.push(v.label());
+        }
     }
 
     fn modal_key(&mut self, key: KeyEvent) {
@@ -731,6 +802,26 @@ impl App {
                     self.modal = None;
                 }
             }
+            Modal::Overview { selected } => match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Up if *selected > 0 => *selected -= 1,
+                KeyCode::Down => {
+                    let max = self.sessions.len().saturating_sub(1);
+                    if *selected < max {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Modal::Overview { selected } = self.modal.take().unwrap() {
+                        self.activate(selected);
+                    }
+                }
+                _ => {}
+            },
+            Modal::Help => {
+                // Any key closes the help.
+                self.modal = None;
+            }
         }
     }
 
@@ -744,7 +835,10 @@ impl App {
                 input.push_str(text.lines().next().unwrap_or(""));
                 self.redraw = true;
             }
-            Some(Modal::Close { .. }) | Some(Modal::ProxyStats { .. }) => {}
+            Some(Modal::Close { .. })
+            | Some(Modal::ProxyStats { .. })
+            | Some(Modal::Overview { .. })
+            | Some(Modal::Help) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
@@ -760,7 +854,7 @@ impl App {
         }
         if m.row == 0 {
             if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                let titles = ui::tab_titles(&self.sessions, self.active, self.width);
+                let titles = ui::tab_titles(&self.sessions, self.active, self.width, self.now);
                 if let Some(i) = ui::tab_at(&titles, m.column) {
                     self.activate(i);
                 }
@@ -1163,5 +1257,93 @@ mod tests {
         app.on_incoming(Incoming::Event { id: other.id, event: SessionEvent::Removed });
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.active, Some(0));
+    }
+
+    // ── Overview ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn overview_opens_on_alt_g_and_closes_on_esc() {
+        let live = [info(Some(1), None), info(Some(2), None)];
+        let mut app = app_with(&live);
+        app.on_terminal(alt('g'));
+        assert!(matches!(app.modal, Some(Modal::Overview { .. })));
+        app.modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn overview_enter_activates_selected_session() {
+        let live = [info(Some(1), None), info(Some(2), None)];
+        let mut app = app_with(&live);
+        assert_eq!(app.active, Some(0));
+        app.on_terminal(alt('g'));
+        // Navigate down to index 1.
+        app.modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(app.modal, Some(Modal::Overview { selected: 1 })));
+        // Press Enter — should activate session 1.
+        app.modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+        assert_eq!(app.active, Some(1));
+    }
+
+    // ── Help ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn help_opens_on_alt_h_and_any_key_closes() {
+        let live = [info(Some(1), None)];
+        let mut app = app_with(&live);
+        app.on_terminal(alt('h'));
+        assert!(matches!(app.modal, Some(Modal::Help)));
+        // Any key closes help.
+        app.modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+    }
+
+    // ── Notifications ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn notification_emitted_once_per_state_change() {
+        let mut live = [info(Some(1), None), info(Some(2), None)];
+        live[1].state = SessionState::NeedsApproval;
+        let mut app = app_with(&live);
+        // Session 1 (index 1) wants attention; session 0 is active.
+        assert_eq!(app.active, Some(0));
+
+        // First check: should produce one notification.
+        app.check_notifications();
+        assert_eq!(app.pending_notifs.len(), 1);
+        let _ = app.pending_notifs.drain(..);
+
+        // Second check without state change: no new notification.
+        app.check_notifications();
+        assert!(app.pending_notifs.is_empty(), "debounced: no second notif");
+
+        // State change: new notification.
+        let ev = SessionEvent::State { state: SessionState::NeedsInput };
+        app.on_incoming(Incoming::Event { id: live[1].id, event: ev });
+        app.check_notifications();
+        assert_eq!(app.pending_notifs.len(), 1, "new state → new notification");
+    }
+
+    #[test]
+    fn active_session_never_notifies() {
+        let mut live = [info(Some(1), None)];
+        live[0].state = SessionState::NeedsApproval;
+        let mut app = app_with(&live);
+        // Session 0 is both active and wants attention.
+        assert_eq!(app.active, Some(0));
+        app.check_notifications();
+        assert!(app.pending_notifs.is_empty(), "active session must not notify");
+    }
+
+    #[test]
+    fn notifications_disabled_when_flag_is_off() {
+        let mut live = [info(Some(1), None), info(Some(2), None)];
+        live[1].state = SessionState::NeedsApproval;
+        let mut app = App::new_with_config(100, 30, "/home/u".into(), vec![], false);
+        app.recover(&ClientState::default(), &live);
+        app.take_effects();
+        app.check_notifications();
+        assert!(app.pending_notifs.is_empty(), "notifications disabled");
     }
 }

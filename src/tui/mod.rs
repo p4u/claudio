@@ -36,6 +36,15 @@ use crate::remote::bootstrap::ensure_remote;
 use app::{App, Effect, ReplyTo};
 use state::ClientState;
 
+/// Emit an OSC 9 desktop notification + BEL to the outer terminal for a
+/// session label. Written directly to stdout, between ratatui frames.
+fn emit_notification(label: &str) {
+    use std::io::Write;
+    let msg = format!("\x1b]9;claudio: {label} needs you\x07\x07");
+    let _ = std::io::stdout().write_all(msg.as_bytes());
+    let _ = std::io::stdout().flush();
+}
+
 /// Animation / clock tick.
 const TICK: Duration = Duration::from_millis(250);
 /// Minimum time between redraws (~60 fps), coalescing output bursts.
@@ -65,6 +74,10 @@ pub fn run() -> ExitCode {
 }
 
 async fn main() -> ExitCode {
+    // Load config and initialize the keymap (must happen before the TUI starts).
+    let cfg = crate::config::load();
+    let key_notices = keymap::init(&cfg.keys);
+
     let saved = ClientState::load(&paths::client_state());
     let (local_client, live) = match connect_local().await {
         Ok(conn) => conn,
@@ -81,7 +94,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = event_loop(&mut terminal, saved, local_client, live).await;
+    let result = event_loop(&mut terminal, saved, local_client, live, cfg.ui.notify, key_notices).await;
     restore_terminal();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -233,11 +246,18 @@ async fn event_loop(
     saved: ClientState,
     local_client: Client,
     live: Vec<SessionInfo>,
+    notify_enabled: bool,
+    key_notices: Vec<String>,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let local_home = local_client.welcome().host.home.clone();
-    let mut app = App::new(size.width, size.height, local_home, saved.recent_dirs.clone());
+    let mut app = App::new_with_config(size.width, size.height, local_home, saved.recent_dirs.clone(), notify_enabled);
     app.recover(&saved, &live);
+
+    // Show any config parse notices in the status bar at startup.
+    for notice in key_notices {
+        app.notify(notice);
+    }
 
     let mut conns = Connections::with_local(local_client.clone());
 
@@ -285,6 +305,12 @@ async fn event_loop(
             terminal.draw(|f| ui::draw(f, &app))?;
             app.redraw = false;
             last_draw = Instant::now();
+            // Check for and emit attention notifications after drawing so
+            // the OSC escape doesn't land inside a ratatui buffer update.
+            app.check_notifications();
+            for label in app.pending_notifs.drain(..) {
+                emit_notification(&label);
+            }
         }
 
         tokio::select! {

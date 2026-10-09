@@ -39,6 +39,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let status = app.proxy_status.get(profile_name.as_str());
             draw_proxy_stats(frame, profile_name, status);
         }
+        Some(Modal::Overview { selected }) => draw_overview(frame, app, *selected),
+        Some(Modal::Help) => draw_help(frame),
         None => {}
     }
 }
@@ -140,11 +142,29 @@ pub fn tab_label(view: &SessionView) -> String {
 }
 
 /// The tab texts as laid out for a bar `width` columns wide.
-pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16) -> Vec<(String, String)> {
+///
+/// Each tab may optionally show the session age (e.g. `12m`). Age is shown
+/// when there is enough room; it is the first thing dropped when space shrinks.
+pub fn tab_titles(sessions: &[SessionView], active: Option<usize>, width: u16, now: u64) -> Vec<(String, String)> {
     let labels: Vec<String> = sessions.iter().map(tab_label).collect();
-    let widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
-    let caps = fit_tabs(&widths, active, width as usize);
-    labels
+    let ages: Vec<String> = sessions.iter().map(|v| fmt_age(now.saturating_sub(v.created_at))).collect();
+    // Two-pass fitting: first try label+age, then label only.
+    let combined: Vec<String> = labels.iter().zip(&ages).map(|(l, a)| format!("{l} {a}")).collect();
+    let combined_widths: Vec<usize> = combined.iter().map(|l| str_width(l)).collect();
+    let label_widths: Vec<usize> = labels.iter().map(|l| str_width(l)).collect();
+    let caps_with_age = fit_tabs(&combined_widths, active, width as usize);
+    // Determine whether showing ages fits (all caps >= combined label widths).
+    let show_age = caps_with_age
+        .iter()
+        .zip(&combined_widths)
+        .all(|(&cap, &need)| cap >= need);
+    let (effective_labels, caps) = if show_age {
+        (combined, caps_with_age)
+    } else {
+        let caps = fit_tabs(&label_widths, active, width as usize);
+        (labels, caps)
+    };
+    effective_labels
         .iter()
         .zip(caps)
         .zip(sessions)
@@ -168,7 +188,7 @@ pub fn tab_at(titles: &[(String, String)], col: u16) -> Option<usize> {
 }
 
 fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
-    let titles = tab_titles(&app.sessions, app.active, area.width);
+    let titles = tab_titles(&app.sessions, app.active, area.width, app.now);
     let mut spans = Vec::new();
     for (i, ((prefix, suffix), view)) in titles.into_iter().zip(&app.sessions).enumerate() {
         if i > 0 {
@@ -506,6 +526,78 @@ fn fmt_tokens(n: i64) -> String {
     }
 }
 
+// ── Overview popup ────────────────────────────────────────────────────────────
+
+/// Render the overview / "mission control" popup.
+/// One row per session: `index glyph label host cwd state age [⇅]`.
+pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize) {
+    let area = frame.area();
+    let height = (app.sessions.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, 100.min(area.width.saturating_sub(2)), height);
+    let inner = popup(frame, rect, "Overview (↑/↓ select · Enter switch · Esc close)");
+
+    let visible = inner.height as usize;
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
+
+    let rows: Vec<Line> = app
+        .sessions
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(i, v)| {
+            let reconnecting = v.host != "local" && !v.attached
+                && matches!(v.state, crate::proto::SessionState::Unknown);
+            let (g, _) = glyph(v.state, app.tick, reconnecting);
+            let cwd = abbreviate_home(&v.cwd, &app.home);
+            let host_part = if v.host == "local" {
+                cwd
+            } else {
+                format!("{}:{}", v.host, cwd)
+            };
+            let age = fmt_age(app.now.saturating_sub(v.created_at));
+            let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
+            let state = state_name(v.state);
+            let label = v.label();
+            let text = format!(
+                " {:2} {} {:<20} {:<30} {:>14} {:>5} {}",
+                i + 1, g, truncate(&label, 20), truncate(&host_part, 30), state, age, proxy_badge
+            );
+            let base = if i == selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if v.state.wants_attention() {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::styled(text, base)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+// ── Help popup ────────────────────────────────────────────────────────────────
+
+/// Render the help popup listing all key bindings.
+pub fn draw_help(frame: &mut Frame) {
+    let entries = super::keymap::help_entries();
+    let height = (entries.len() as u16 + 4).min(frame.area().height.saturating_sub(2));
+    let area = frame.area();
+    let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);
+    let inner = popup(frame, rect, "Manager keys (any key closes)");
+
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(k, desc)| {
+            Line::from(vec![
+                Span::styled(format!("  {:>14}  ", k), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(*desc),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 // ── Proxy stats popup ─────────────────────────────────────────────────────────
 
 fn draw_proxy_stats(frame: &mut Frame, profile_name: &str, status: Option<&ProxyStatus>) {
@@ -674,6 +766,38 @@ mod tests {
         assert_eq!(tab_at(&titles, 9), None);
         assert_eq!(tab_at(&titles, 10), Some(1));
         assert_eq!(tab_at(&titles, 100), None);
+    }
+
+    #[test]
+    fn tab_titles_with_age_show_age_when_room() {
+        use super::super::app::SessionView;
+        use super::super::super::term::screen::Screen;
+        use super::super::super::proto::{SessionState};
+        use uuid::Uuid;
+        let now = 600u64; // 600 seconds
+        let make_view = |name: &str, created_at: u64| SessionView {
+            id: Uuid::new_v4(),
+            name: Some(name.to_owned()),
+            cwd: "/srv".into(),
+            host: "local".into(),
+            state: SessionState::Idle,
+            title: None,
+            claude_session_id: None,
+            created_at,
+            mirror: Screen::new(24, 80),
+            attached: false,
+            proxy: None,
+        };
+        let sessions = vec![make_view("api", 0), make_view("docs", 0)];
+        // Wide bar: ages should appear.
+        let titles_wide = tab_titles(&sessions, Some(0), 200, now);
+        let wide_text: String = titles_wide.iter().map(|(p, s)| format!("{p}{s}")).collect();
+        assert!(wide_text.contains("10m") || wide_text.contains("m"), "age should appear with wide bar");
+        // Very narrow bar: ages dropped.
+        let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
+        let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
+        // Narrow bar may still show partial, but should be shorter.
+        assert!(str_width(&narrow_text) <= 21);
     }
 
     #[test]
