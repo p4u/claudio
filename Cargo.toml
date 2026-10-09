@@ -8,6 +8,17 @@ description = "Drop-in `claude` wrapper emulating `-p`, with an optional OpenAI-
 name = "claudio"
 path = "src/main.rs"
 
+[[test]]
+name = "remote"
+path = "tests/remote.rs"
+required-features = ["diag"]
+
+[features]
+# Enables diagnostic / test-harness CLI subcommands (`__bootstrap`,
+# `__connect-check`, `__remote-session`, `__ssh-hosts`).  Not included in
+# production release builds.
+diag = []
+
 [dependencies]
 # Core -p (print-mode) emulation backend.
 portable-pty = "0.8"
