@@ -44,12 +44,14 @@ impl Probe {
     }
 
     /// `true` when the remote binary is identical to ours (same hash).
+    #[allow(dead_code)]
     pub fn is_up_to_date(&self, local: &Probe) -> bool {
         self.build == local.build
     }
 
     /// `true` when the remote binary can receive an upload from this machine
     /// (same os + arch).
+    #[allow(dead_code)]
     pub fn same_platform(&self, local: &Probe) -> bool {
         self.os == local.os && self.arch == local.arch
     }
