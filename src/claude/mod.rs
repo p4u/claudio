@@ -9,11 +9,6 @@
 //! - [`state`] — pure state machine that maps hook events onto
 //!   [`proto::SessionEvent`]s.
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod hooks;
-
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod projects;
-
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod state;

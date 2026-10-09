@@ -43,6 +43,7 @@ pub fn project_dir(cwd: &Path) -> PathBuf {
 }
 
 /// The absolute path of a transcript file for a given (cwd, claude_session_id).
+#[allow(dead_code)]
 pub fn transcript_path(cwd: &Path, claude_session_id: &str) -> PathBuf {
     project_dir(cwd).join(format!("{claude_session_id}.jsonl"))
 }
@@ -140,17 +141,30 @@ fn parse_session(path: &Path, session_id: &str, expected_cwd: &str) -> Option<Cl
     Some(ClaudeSession { id: session_id.to_owned(), title, last_prompt, modified, messages })
 }
 
-/// Read up to the last `TAIL_READ_BYTES` bytes of a file.
+/// Read up to the last `TAIL_READ_BYTES` bytes of a file as a UTF-8 string.
+///
+/// When seeking into the middle of a file, the seek position may fall inside a
+/// multi-byte UTF-8 sequence, causing `read_to_string` to fail and the whole
+/// session to silently disappear. We instead read raw bytes and skip the first
+/// (potentially partial) line so every subsequent line is complete.
 fn read_file_tail(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
+
+    let mut buf = Vec::new();
     if len > TAIL_READ_BYTES {
         f.seek(SeekFrom::End(-(TAIL_READ_BYTES as i64))).ok()?;
+        f.read_to_end(&mut buf).ok()?;
+        // Drop the first (possibly partial) line — it may start mid-character
+        // or mid-JSON-record due to the seek position.
+        let first_newline = buf.iter().position(|&b| b == b'\n')?;
+        let complete = &buf[first_newline + 1..];
+        String::from_utf8(complete.to_vec()).ok()
+    } else {
+        f.read_to_end(&mut buf).ok()?;
+        String::from_utf8(buf).ok()
     }
-    let mut buf = String::new();
-    f.read_to_string(&mut buf).ok()?;
-    Some(buf)
 }
 
 /// Check whether any line in `content` (tail bytes) has `"cwd": "<expected>"`.
@@ -190,9 +204,17 @@ fn verify_cwd_in_head(path: &Path, expected_cwd: &str) -> bool {
 
 /// Count the number of `type:"user"` records that look like real user prompts.
 ///
-/// A real prompt has `message.content` that is a non-empty string and does not
-/// start with `<` (which indicates a tool-result wrapper injected by Claude
-/// Code). The scan is capped at `MAX_USER_SCAN` records.
+/// A real prompt is discriminated by *record structure*, not by string content:
+/// - A `type:"user"` record whose `message.content` is a string → real prompt.
+/// - A `type:"user"` record whose `message.content` is an array containing
+///   `tool_result` blocks → tool-result wrapper injected by Claude Code, skip.
+/// - A `type:"user"` record whose `message.content` is an array of `text` blocks
+///   without any `tool_result` → real prompt.
+///
+/// This correctly handles prompts that start with `<` (e.g. `<task>…</task>`),
+/// which the previous `starts_with('<')` heuristic misclassified as tool output.
+///
+/// The scan is capped at `MAX_USER_SCAN` records.
 fn count_user_messages(path: &Path) -> u32 {
     use std::io::{BufRead, BufReader};
     let f = match std::fs::File::open(path) {
@@ -234,6 +256,14 @@ fn count_user_messages(path: &Path) -> u32 {
 
 /// Decide whether a `type:"user"` record carries a real human prompt (as
 /// opposed to a tool-result wrapper).
+///
+/// Discrimination is based on **record structure**, not string content:
+/// - String content → always a real prompt.
+/// - Array content with any `tool_result` block → tool-result wrapper, not a prompt.
+/// - Array content with `text` blocks and no `tool_result` → real prompt.
+///
+/// This correctly handles prompts that start with `<` (e.g. XML-tagged tasks)
+/// which were previously misclassified.
 fn is_real_prompt(record: &serde_json::Value) -> bool {
     let Some(msg) = record.get("message") else { return false };
     let content = match msg.get("content") {
@@ -242,21 +272,27 @@ fn is_real_prompt(record: &serde_json::Value) -> bool {
     };
     match content {
         serde_json::Value::String(s) => {
-            let s = s.trim();
-            !s.is_empty() && !s.starts_with('<')
+            // String content is always a real prompt (even if it starts with '<').
+            !s.trim().is_empty()
         }
         serde_json::Value::Array(items) => {
-            // Content blocks: look for at least one text block with non-empty
-            // text that doesn't look like a tool result.
+            // If any item is a tool_result block, this is a tool-result wrapper.
+            if items.iter().any(|item| {
+                item.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+            }) {
+                return false;
+            }
+            // Also check the toolUseResult field (alternative representation).
+            if msg.get("toolUseResult").is_some() {
+                return false;
+            }
+            // Real prompt: at least one non-empty text block.
             items.iter().any(|item| {
                 item.get("type").and_then(|t| t.as_str()) == Some("text")
                     && item
                         .get("text")
                         .and_then(|t| t.as_str())
-                        .map(|s| {
-                            let s = s.trim();
-                            !s.is_empty() && !s.starts_with('<')
-                        })
+                        .map(|s| !s.trim().is_empty())
                         .unwrap_or(false)
             })
         }
@@ -414,22 +450,41 @@ mod tests {
         assert!(p.to_string_lossy().ends_with("/-home-p4u/abc-123.jsonl"));
     }
 
+    // ── is_real_prompt ────────────────────────────────────────────────────────
+
     #[test]
     fn is_real_prompt_string_content() {
         // Plain text → real prompt
         let v = serde_json::json!({"type": "user", "message": {"content": "hello world"}});
         assert!(is_real_prompt(&v));
 
-        // Tool result (starts with <) → not a real prompt
-        let v = serde_json::json!({
-            "type": "user",
-            "message": {"content": "<local-command-stdout>ok</local-command-stdout>"}
-        });
-        assert!(!is_real_prompt(&v));
-
         // Empty → not a real prompt
         let v = serde_json::json!({"type": "user", "message": {"content": ""}});
         assert!(!is_real_prompt(&v));
+    }
+
+    /// Fable M12: prompts starting with `<` are real prompts, not tool output.
+    #[test]
+    fn is_real_prompt_xml_tagged_task_is_real() {
+        let v = serde_json::json!({
+            "type": "user",
+            "message": {"content": "<task>Do something important</task>"}
+        });
+        assert!(is_real_prompt(&v), "XML-tagged task prompt should be real");
+    }
+
+    /// Tool result (array with tool_result block) → not a real prompt.
+    #[test]
+    fn is_real_prompt_tool_result_array_is_not_real() {
+        let v = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "x", "content": "output"}
+                ]
+            }
+        });
+        assert!(!is_real_prompt(&v), "tool_result array should not be a real prompt");
     }
 
     #[test]
@@ -442,14 +497,60 @@ mod tests {
         });
         assert!(is_real_prompt(&v));
 
-        // Tool result text block
+        // Text block that starts with '<' but no tool_result → still real.
         let v = serde_json::json!({
             "type": "user",
             "message": {
-                "content": [{"type": "text", "text": "<tool_result>ok</tool_result>"}]
+                "content": [{"type": "text", "text": "<task>do stuff</task>"}]
             }
         });
-        assert!(!is_real_prompt(&v));
+        assert!(is_real_prompt(&v), "text block starting with < should be real");
+    }
+
+    /// Fable M12: toolUseResult field marks a tool-result record.
+    #[test]
+    fn is_real_prompt_tool_use_result_field() {
+        let v = serde_json::json!({
+            "type": "user",
+            "message": {
+                "toolUseResult": {"tool_use_id": "x"},
+                "content": [{"type": "text", "text": "some text"}]
+            }
+        });
+        assert!(!is_real_prompt(&v), "toolUseResult field should mark as tool result");
+    }
+
+    // ── read_file_tail ────────────────────────────────────────────────────────
+
+    /// Fable M12: tail read must not fail when the seek lands in a multi-byte
+    /// UTF-8 sequence.
+    #[test]
+    fn read_file_tail_multibyte_boundary() {
+        use std::io::Write;
+        let dir = std::env::temp_dir()
+            .join(format!("claudio-tail-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.jsonl");
+
+        // Write a file larger than TAIL_READ_BYTES so the seek happens.
+        // Fill with ASCII lines up to TAIL_READ_BYTES, then add a line with a
+        // multi-byte char (é = 2 bytes in UTF-8) right at the boundary.
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Write enough filler to push past TAIL_READ_BYTES.
+        let filler_line = b"{\"type\":\"summary\"}\n";
+        let filler_count = (TAIL_READ_BYTES as usize / filler_line.len()) + 2;
+        for _ in 0..filler_count {
+            f.write_all(filler_line).unwrap();
+        }
+        // Add a line with multi-byte characters near the end.
+        f.write_all("{\"type\":\"user\",\"message\":{\"content\":\"café\"}}\n".as_bytes()).unwrap();
+        drop(f);
+
+        // Must return Some (not fail on UTF-8 boundary).
+        let result = read_file_tail(&path);
+        assert!(result.is_some(), "read_file_tail should not fail at multibyte boundary");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
