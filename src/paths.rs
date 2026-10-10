@@ -105,6 +105,15 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A fresh, short scratch path for a test that binds Unix sockets: under
+/// `/tmp`, because macOS's long `$TMPDIR` pushes a socket path past the
+/// 104-byte `sun_path` limit.
+#[cfg(test)]
+pub fn socket_test_dir(tag: &str) -> PathBuf {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    PathBuf::from("/tmp").join(format!("{tag}-{}", &id[..12]))
+}
+
 /// Atomically replace `path` with `contents` (temp file + fsync + rename +
 /// parent-dir fsync, mode 0600), creating the parent directory.
 ///

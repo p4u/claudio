@@ -67,7 +67,7 @@ Tests `t1`, `t7`, `t8` are unit-style and always run. Tests `t2`–`t6` require
 
 - Run one unit test: `cargo test --bin claudio <name_substring>`.
 - Run one E2E test: `CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration <name> -- --test-threads=1 --nocapture`.
-- CI runs only the release build and unit tests, on Linux, macOS, and Windows. Keep code compiling on all three.
+- CI runs only the release build and unit tests, on Linux and macOS (claudio is Unix-only). Keep code compiling on both.
 
 ## Architecture
 

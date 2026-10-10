@@ -112,7 +112,7 @@ impl TestDaemon {
     }
 
     fn new_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("claudio-daemon-{}", Uuid::new_v4().simple()));
+        let dir = crate::paths::socket_test_dir("cl-d");
         std::fs::create_dir_all(dir.join("work")).unwrap();
         dir
     }

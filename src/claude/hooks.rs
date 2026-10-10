@@ -202,9 +202,8 @@ mod tests {
     #[test]
     fn relay_sends_hook_frame() {
         use std::os::unix::net::UnixListener;
-        use uuid::Uuid;
 
-        let dir = std::env::temp_dir().join(format!("claudio-relay-test-{}", Uuid::new_v4()));
+        let dir = crate::paths::socket_test_dir("cl-relay");
         std::fs::create_dir_all(&dir).unwrap();
         let sock_path = dir.join("relay.sock");
 
