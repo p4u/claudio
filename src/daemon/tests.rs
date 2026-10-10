@@ -1679,3 +1679,39 @@ async fn skip_permissions_support_is_rechecked_after_an_update() {
     d.daemon.refresh_host().await;
     assert!(check(&d.daemon).await.unwrap());
 }
+
+/// A session started in a repository announces its git status (branch,
+/// ahead/behind its upstream, dirty paths) in `Meta` without any hook: a
+/// terminal tab gets it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn meta_carries_the_git_status_of_the_session_directory() {
+    let d = TestDaemon::start().await;
+    let repo = super::git_status::tests::temp_repo();
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let spec = SpawnSpec {
+        cwd: repo.to_string_lossy().into_owned(),
+        ..d.spec(id)
+    };
+    c.spawn(spec).await;
+    let (branch, git) = c
+        .event(id, |e| match e {
+            SessionEvent::Meta {
+                branch,
+                git: Some(git),
+                ..
+            } => Some((branch.clone(), git.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(branch.as_deref(), Some("main"));
+    assert_eq!(git.branch(), Some("main"));
+    assert!(git.upstream);
+    assert_eq!((git.ahead, git.behind), (1, 1));
+    assert_eq!((git.staged, git.unstaged), (0, 1));
+    // The repo's own untracked file, plus the fake claude's `settings.json`
+    // when it has been written by the time git looked.
+    assert!((1..=2).contains(&git.untracked), "{}", git.untracked);
+    assert!(git.is_dirty());
+    let _ = std::fs::remove_dir_all(&repo);
+}

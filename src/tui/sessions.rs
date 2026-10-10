@@ -7,7 +7,8 @@
 use uuid::Uuid;
 
 use crate::proto::{
-    Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec, SpawnSpec,
+    GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
+    SpawnSpec,
 };
 use crate::term::screen::Screen;
 
@@ -55,6 +56,12 @@ pub struct SessionView {
     pub model: Option<String>,
     /// Total input+cache tokens of the last assistant turn.
     pub context_tokens: Option<u64>,
+    /// The working tree's state (ahead/behind, dirty counts), if known.
+    pub git: Option<GitStatus>,
+    /// Output tokens of the whole conversation so far.
+    pub output_tokens: Option<u64>,
+    /// Prompts sent in the conversation so far.
+    pub turns: Option<u32>,
     /// Claude, or a plain terminal tab.
     pub kind: SessionKind,
 }
@@ -88,6 +95,9 @@ impl SessionView {
             branch: None,
             model: None,
             context_tokens: None,
+            git: None,
+            output_tokens: None,
+            turns: None,
             kind,
         }
     }

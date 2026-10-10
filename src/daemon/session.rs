@@ -73,6 +73,13 @@ const KILL_GRACE: Duration = Duration::from_secs(3);
 /// Default size when a spec carries a zero dimension.
 const DEFAULT_SIZE: (u16, u16) = (24, 80);
 
+/// How often the metadata (git status, transcript totals) of a session with
+/// attached clients is refreshed without a hook asking for it.
+const META_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Hooks closer together than this (tool-use bursts) share one refresh.
+const META_HOOK_GAP: Duration = Duration::from_secs(2);
+
 /// Messages to a session actor.
 pub enum Cmd {
     /// Keyboard/mouse bytes for the PTY.
@@ -234,7 +241,7 @@ pub fn spawn(
         spawned_with_resume,
         spawn_time,
         kind,
-        cwd: cwd.clone(),
+        meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
     Ok((Handle { tx, token, pid }, committed_tx))
@@ -498,8 +505,110 @@ struct Actor {
     spawn_time: std::time::Instant,
     /// What the child is: claude, or a plain login shell.
     kind: SessionKind,
-    /// Working directory of this session (for git branch detection).
-    cwd: std::path::PathBuf,
+    /// Git status and transcript totals for the status bar (owns the cwd).
+    meta: MetaRefresher,
+}
+
+/// Produces [`SessionEvent::Meta`] for one session: the git status of its
+/// directory and, for claude, the transcript's model, context and totals.
+///
+/// One refresh runs at a time, off the actor task (git is a child process,
+/// the transcript read is blocking I/O), and the actor never waits for it.
+struct MetaRefresher {
+    id: SessionId,
+    daemon: Arc<Daemon>,
+    cwd: PathBuf,
+    kind: SessionKind,
+    /// The transcript cursor, held by the running refresh.
+    cursor: Arc<std::sync::Mutex<Option<crate::claude::projects::TranscriptCursor>>>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
+    started_at: Option<std::time::Instant>,
+}
+
+impl MetaRefresher {
+    fn new(id: SessionId, daemon: Arc<Daemon>, cwd: PathBuf, kind: SessionKind) -> Self {
+        Self {
+            id,
+            daemon,
+            cwd,
+            kind,
+            cursor: Arc::default(),
+            busy: Arc::default(),
+            started_at: None,
+        }
+    }
+
+    /// Start a refresh unless one is running or the last one started less
+    /// than `min_gap` ago. `session_id` is the current claude conversation.
+    fn refresh(&mut self, session_id: Option<&str>, min_gap: Duration) {
+        use std::sync::atomic::Ordering;
+        if self.started_at.is_some_and(|t| t.elapsed() < min_gap) {
+            return;
+        }
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.started_at = Some(std::time::Instant::now());
+        let (id, daemon, cwd, kind) = (self.id, Arc::clone(&self.daemon), self.cwd.clone(), self.kind);
+        let (cursor, busy) = (Arc::clone(&self.cursor), Arc::clone(&self.busy));
+        let session_id = session_id.map(str::to_owned);
+        tokio::spawn(async move {
+            let git = super::git_status::read(&cwd).await;
+            let transcript = match (kind, session_id) {
+                (SessionKind::Claude, Some(sid)) => {
+                    let cwd = cwd.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut slot = cursor.lock().unwrap_or_else(|e| e.into_inner());
+                        let cursor = slot
+                            .take()
+                            .filter(|c| c.session_id() == sid)
+                            .unwrap_or_else(|| {
+                                crate::claude::projects::TranscriptCursor::new(&cwd, &sid)
+                            });
+                        let cursor = slot.insert(cursor);
+                        cursor.advance();
+                        cursor.has_assistant().then(|| cursor.totals().clone())
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                }
+                _ => None,
+            };
+            daemon.broadcast(id, meta_event(&cwd, git, transcript));
+            busy.store(false, Ordering::Release);
+        });
+    }
+}
+
+/// The `Meta` event for a refresh's findings. The branch falls back to
+/// `.git/HEAD` when git itself could not answer.
+fn meta_event(
+    cwd: &Path,
+    git: Option<crate::proto::GitStatus>,
+    transcript: Option<crate::claude::projects::TranscriptTotals>,
+) -> SessionEvent {
+    let branch = match &git {
+        Some(status) => status.branch().map(str::to_owned),
+        None => read_git_branch(cwd),
+    };
+    let (model, context_tokens, output_tokens, turns) = match transcript {
+        Some(t) => (t.model, t.context_tokens, Some(t.output_tokens), Some(t.turns)),
+        None => (None, None, None, None),
+    };
+    SessionEvent::Meta {
+        branch,
+        model,
+        context_tokens,
+        git,
+        output_tokens,
+        turns,
+    }
+}
+
+/// The git part of `Meta` for `cwd`, for a session that has no actor yet.
+pub(super) async fn git_meta(cwd: &Path) -> SessionEvent {
+    meta_event(cwd, super::git_status::read(cwd).await, None)
 }
 
 impl Actor {
@@ -513,6 +622,8 @@ impl Actor {
         // Timer-based lag recovery: resync even when the child is silent.
         let mut lag_check = tokio::time::interval(LAG_CHECK_INTERVAL);
         lag_check.tick().await; // consume the immediate first tick
+        let mut meta_tick = tokio::time::interval(META_REFRESH_INTERVAL);
+        meta_tick.tick().await;
 
         // Wrap in Option so we can .take() it in the exit branch (once).
         let mut committed = Some(committed);
@@ -581,6 +692,10 @@ impl Actor {
                     return;
                 }
                 _ = lag_check.tick() => self.resync_lagging(),
+                // Only a watched session is worth a git run.
+                _ = meta_tick.tick(), if !self.subs.is_empty() => {
+                    self.meta.refresh(self.tracker.claude_session_id.as_deref(), Duration::ZERO);
+                }
             }
         }
     }
@@ -722,29 +837,14 @@ impl Actor {
             }
             self.daemon.broadcast(self.id, ev);
         }
-        // Broadcast updated metadata (branch + model/tokens) after each hook.
-        // The transcript read is blocking I/O, so we fire-and-forget a
-        // spawn_blocking task; on_hook is not async so we don't await it.
-        let branch = read_git_branch(&self.cwd);
-        let cwd = self.cwd.clone();
-        let session_id = self.tracker.claude_session_id.clone();
-        let daemon = Arc::clone(&self.daemon);
-        let id = self.id;
-        tokio::task::spawn_blocking(move || {
-            let (model, context_tokens) = session_id
-                .as_deref()
-                .and_then(|sid| crate::claude::projects::read_last_assistant_meta(&cwd, sid))
-                .map(|(m, t)| (Some(m), Some(t)))
-                .unwrap_or((None, None));
-            daemon.broadcast(
-                id,
-                SessionEvent::Meta {
-                    branch,
-                    model,
-                    context_tokens,
-                },
-            );
-        });
+        // Refresh the metadata (git status, model, tokens) after a hook. The
+        // turn boundaries always refresh; a burst of tool-use hooks shares one.
+        let min_gap = match event {
+            "SessionStart" | "Stop" | "StopFailure" | "UserPromptSubmit" => Duration::ZERO,
+            _ => META_HOOK_GAP,
+        };
+        self.meta
+            .refresh(self.tracker.claude_session_id.as_deref(), min_gap);
     }
 
     fn write(&mut self, bytes: Vec<u8>) {
@@ -825,9 +925,10 @@ impl Actor {
     }
 }
 
-/// Read the current git branch from `cwd/.git/HEAD`.
-/// Returns `None` when the directory is not a git repo or HEAD is detached.
-pub(super) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
+/// Read the current git branch from `cwd/.git/HEAD` (the fallback when git
+/// is not installed). `None` when the directory is not a git repo or HEAD is
+/// detached.
+fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
     let head_path = cwd.join(".git/HEAD");
     let content = std::fs::read_to_string(head_path).ok()?;
     let line = content.trim();

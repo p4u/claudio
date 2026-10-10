@@ -518,6 +518,10 @@ pub enum SessionEvent {
     /// Session metadata updated: git branch, active model, context token count.
     /// Broadcast on `SessionStart`, `Stop`, `UserPromptSubmit` hooks and when
     /// the claude session id changes. Old clients map this to `Unknown`.
+    ///
+    /// Every field is optional and `None` means "no news", never "cleared":
+    /// a client keeps what it had. `git`, `output_tokens` and `turns` came
+    /// later; an old daemon never sends them and an old client ignores them.
     Meta {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
@@ -525,11 +529,62 @@ pub enum SessionEvent {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_tokens: Option<u64>,
+        /// The working tree's state against its upstream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git: Option<GitStatus>,
+        /// Output tokens the whole conversation has produced so far.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        /// Prompts the user has sent in the conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turns: Option<u32>,
     },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
     Unknown,
+}
+
+/// A working tree's state, from `git status --porcelain=v2 --branch`.
+/// Counts are capped by the daemon; a zero everywhere is a clean tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatus {
+    /// The branch name, or the abbreviated commit id when `detached`.
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub detached: bool,
+    /// Whether the branch tracks an upstream (then `ahead`/`behind` mean
+    /// something; without one both are zero).
+    #[serde(default)]
+    pub upstream: bool,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    /// Paths with changes in the index.
+    #[serde(default)]
+    pub staged: u32,
+    /// Tracked paths with changes in the working tree.
+    #[serde(default)]
+    pub unstaged: u32,
+    #[serde(default)]
+    pub untracked: u32,
+    /// Unmerged paths.
+    #[serde(default)]
+    pub conflicts: u32,
+}
+
+impl GitStatus {
+    /// Whether anything is staged, modified, untracked or unmerged.
+    pub fn is_dirty(&self) -> bool {
+        self.staged + self.unstaged + self.untracked + self.conflicts > 0
+    }
+
+    /// The branch name when HEAD is on one.
+    pub fn branch(&self) -> Option<&str> {
+        (!self.detached && !self.head.is_empty()).then_some(self.head.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1030,6 +1085,62 @@ mod tests {
         assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SessionEvent::ClaudeSessionCleared);
+    }
+
+    #[test]
+    fn meta_git_and_conversation_fields_are_optional_both_ways() {
+        // An old daemon's Meta: only the three original fields.
+        let old = r#"{"kind":"meta","branch":"main","model":"m","context_tokens":5}"#;
+        let event: SessionEvent = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            event,
+            SessionEvent::Meta {
+                branch: Some("main".into()),
+                model: Some("m".into()),
+                context_tokens: Some(5),
+                git: None,
+                output_tokens: None,
+                turns: None,
+            }
+        );
+        // A new daemon's Meta read by an old client: unknown fields ignored.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Older {
+            Meta {
+                branch: Option<String>,
+            },
+            #[serde(other)]
+            Unknown,
+        }
+        let new = SessionEvent::Meta {
+            branch: Some("main".into()),
+            model: None,
+            context_tokens: None,
+            git: Some(GitStatus {
+                head: "main".into(),
+                upstream: true,
+                ahead: 2,
+                behind: 1,
+                unstaged: 3,
+                ..GitStatus::default()
+            }),
+            output_tokens: Some(48_000),
+            turns: Some(14),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(!json.contains("model"), "absent fields are not sent: {json}");
+        assert_eq!(
+            serde_json::from_str::<Older>(&json).unwrap(),
+            Older::Meta {
+                branch: Some("main".into())
+            }
+        );
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), new);
+        // A GitStatus from a future daemon with fields we lack still parses.
+        let git: GitStatus = serde_json::from_str(r#"{"head":"x","stashes":2}"#).unwrap();
+        assert_eq!(git.branch(), Some("x"));
+        assert!(!git.is_dirty());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::{ConfigResponse, SessionCredential};
+use crate::proxy::api::{ConfigResponse, ModelsResponse, SessionCredential};
 use crate::proxy::ProxyChoice;
 
 use super::confirm::ConfirmPrompt;
@@ -209,6 +209,10 @@ pub struct App {
     pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
     pub proxy_status: HashMap<String, ProxyStatus>,
+    /// Profiles whose model catalogue has been requested once for the status
+    /// bar's context window (a failed fetch is not retried; Alt+s fetches it
+    /// again anyway).
+    models_requested: HashSet<String>,
     /// The upstream credential each proxied session last used, as reported by
     /// the proxy. Only the active session is polled; the rest is a cache.
     pub session_creds: HashMap<SessionId, SessionCred>,
@@ -311,6 +315,7 @@ impl App {
             effects: Vec::new(),
             proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
+            models_requested: HashSet::new(),
             session_creds: HashMap::new(),
             proxy_profiles: cfg.proxy_profiles,
             proxy_default: cfg.proxy_default,
@@ -404,6 +409,7 @@ impl App {
         }
         let id = v.id;
         let now = self.now;
+        self.request_models_once(&profile);
         let fresh = self.session_creds.get(&id).is_some_and(|c| {
             c.claude_session_id == csid && now.saturating_sub(c.asked_at) < min_age
         });
@@ -449,6 +455,28 @@ impl App {
             entry.cred = cred;
             self.redraw = true;
         }
+    }
+
+    /// Fetch a profile's model catalogue (no stats windows) the first time a
+    /// session on it is looked at, so the context gauge knows the window.
+    fn request_models_once(&mut self, profile: &str) {
+        let cached = self
+            .proxy_status
+            .get(profile)
+            .is_some_and(|s| s.models.is_some());
+        if cached || !self.models_requested.insert(profile.to_owned()) {
+            return;
+        }
+        self.schedule_proxy_stats(profile, Vec::new());
+    }
+
+    /// The model catalogue of a session's proxy, once fetched (on the first
+    /// look at a session on it, or by the stats popup); the status bar reads
+    /// context windows from it.
+    pub fn session_models(&self, v: &SessionView) -> Option<&ModelsResponse> {
+        self.proxy_status
+            .get(v.proxy.as_deref()?)
+            .and_then(|s| s.models.as_ref())
     }
 
     /// The credential to show for a session: cached, and for its current
@@ -1763,6 +1791,43 @@ mod tests {
             cred_fetches(&app.take_effects()).is_empty(),
             "c2 was asked a moment ago"
         );
+    }
+
+    #[test]
+    fn a_proxied_session_fetches_the_model_catalogue_once() {
+        let (mut app, _) = proxied_app();
+        let models_fetches = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::FetchProxyStats {
+                            profile_name,
+                            windows,
+                            models: true
+                        } if profile_name == "p" && windows.is_empty()
+                    )
+                })
+                .count()
+        };
+        app.refresh_session_cred(0);
+        assert_eq!(models_fetches(&app.take_effects()), 1);
+        // Later lookups, on any session of the profile: not again.
+        app.refresh_session_cred(0);
+        app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(models_fetches(&app.take_effects()), 0);
+        // A profile whose catalogue is cached already is never asked.
+        let mut app = proxied_app().0;
+        app.proxy_status.insert(
+            "p".into(),
+            ProxyStatus {
+                models: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+        app.refresh_session_cred(0);
+        assert_eq!(models_fetches(&app.take_effects()), 0);
     }
 
     #[test]

@@ -160,6 +160,11 @@ impl SessionCredential {
         self.utilization.as_ref()?.five_hour_pct
     }
 
+    /// The 7-day window utilization in percent, if reported.
+    pub fn seven_day_pct(&self) -> Option<f64> {
+        self.utilization.as_ref()?.seven_day_pct
+    }
+
     /// Seconds since the proxy moved the conversation to this credential,
     /// while that is recent enough (see [`SWITCH_NOTICE_SECS`]) to mention.
     pub fn recent_switch_age(&self, now: u64) -> Option<u64> {

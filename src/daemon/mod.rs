@@ -16,6 +16,7 @@
 
 pub mod ctl;
 mod git;
+mod git_status;
 mod host;
 mod journal;
 mod server;
@@ -469,18 +470,11 @@ impl Daemon {
                 args = spec.args.len(), "session spawned"
             );
             self.broadcast(spec.id, SessionEvent::Created { info });
-            // Branch for the tab's status line, for terminals as well as claude
-            // (which only learns it on its first hook).
+            // Git status for the tab's status line, for terminals as well as
+            // claude (which only learns it on its first hook).
             let (daemon, id, cwd) = (Arc::clone(self), spec.id, host::expand_tilde(&spec.cwd));
-            tokio::task::spawn_blocking(move || {
-                if let Some(branch) = session::read_git_branch(&cwd) {
-                    let meta = SessionEvent::Meta {
-                        branch: Some(branch),
-                        model: None,
-                        context_tokens: None,
-                    };
-                    daemon.broadcast(id, meta);
-                }
+            tokio::spawn(async move {
+                daemon.broadcast(id, session::git_meta(&cwd).await);
             });
         }
 

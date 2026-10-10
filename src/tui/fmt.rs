@@ -98,14 +98,12 @@ pub fn fmt_count(n: i64) -> String {
     out
 }
 
-/// A session's context size: `ctx 143k`, `ctx 1.2M`, or `ctx 812`.
-pub fn fmt_context(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("ctx {:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1000 {
-        format!("ctx {}k", n / 1000)
+/// A context window: `1M`, `200k`, `32k`. Round figures stay round.
+pub fn fmt_window(n: u64) -> String {
+    if n >= 1_000_000 && n % 1_000_000 == 0 {
+        format!("{}M", n / 1_000_000)
     } else {
-        format!("ctx {n}")
+        fmt_tokens(n.min(i64::MAX as u64) as i64)
     }
 }
 
@@ -220,9 +218,10 @@ mod tests {
         assert_eq!(fmt_count(1234567), "1,234,567");
         assert_eq!(fmt_count(-1234), "-1,234");
 
-        assert_eq!(fmt_context(812), "ctx 812");
-        assert_eq!(fmt_context(143_600), "ctx 143k");
-        assert_eq!(fmt_context(1_240_000), "ctx 1.2M");
+        assert_eq!(fmt_window(1_000_000), "1M");
+        assert_eq!(fmt_window(200_000), "200k");
+        assert_eq!(fmt_window(1_500_000), "1.5M");
+        assert_eq!(fmt_window(812), "812");
 
         assert_eq!(fmt_pct(0.873), "87%");
         assert_eq!(fmt_pct(0.0021), "0.2%");
