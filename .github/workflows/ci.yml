@@ -23,5 +23,7 @@ jobs:
         run: cargo build --release --locked
       - name: Unit tests
         run: cargo test --locked --bin claudio
+        env:
+          RUST_BACKTRACE: 1
       # End-to-end tests require an authenticated `claude` and are gated behind
       # CLAUDIO_E2E; they do not run in CI.

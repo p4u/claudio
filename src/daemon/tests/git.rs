@@ -11,6 +11,11 @@ use std::process::Command;
 use super::*;
 use crate::proto::{GitCommitInfo, GitLogPage, GitPatch};
 
+/// Whether the filesystem stores file names that are not valid UTF-8. Linux
+/// takes any bytes; macOS (APFS, HFS+) rejects them with "Illegal byte
+/// sequence".
+const NON_UTF8_NAMES: bool = !cfg!(target_os = "macos");
+
 /// Run git in `dir` with a fixed identity; panics on failure.
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -62,8 +67,10 @@ impl Repo {
         git(&dir, &["mv", "a.txt", "b.txt"]);
         write("b.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\n");
         std::fs::write(dir.join("bin.dat"), [0u8, 1, 2, 0, 255]).unwrap();
-        let odd = OsString::from_vec(b"caf\xe9.txt".to_vec());
-        std::fs::write(dir.join(odd), "latin-1 name\n").unwrap();
+        if NON_UTF8_NAMES {
+            let odd = OsString::from_vec(b"caf\xe9.txt".to_vec());
+            std::fs::write(dir.join(odd), "latin-1 name\n").unwrap();
+        }
         let message = "evil \x1b[31msubject\n\nbody line one\nbody line two";
         let renamed = commit_all(&dir, message);
 
@@ -257,12 +264,13 @@ async fn commit_lists_renames_binaries_and_odd_names() {
     assert_eq!((renamed.added, renamed.removed), (Some(1), Some(0)));
     let binary = file("bin.dat");
     assert_eq!((binary.added, binary.removed), (None, None));
-    assert!(
+    assert_eq!(
         info.files.iter().any(|f| f.path.starts_with("caf")),
+        NON_UTF8_NAMES,
         "{:?}",
         info.files
     );
-    assert_eq!(info.files.len(), 3);
+    assert_eq!(info.files.len(), 2 + usize::from(NON_UTF8_NAMES));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -725,7 +733,11 @@ async fn files_are_selected_by_position_not_by_display_name() {
         (b"ctl\x01.txt", "CONTROL"),
         (b"ctl.txt", "PLAIN"),
     ];
-    for (name, content) in names {
+    let names: Vec<_> = names
+        .into_iter()
+        .filter(|(name, _)| NON_UTF8_NAMES || std::str::from_utf8(name).is_ok())
+        .collect();
+    for &(name, content) in &names {
         let name = OsString::from_vec(name.to_vec());
         std::fs::write(dir.join(name), format!("{content}\n")).unwrap();
     }
