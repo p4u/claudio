@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::{ConfigResponse, SessionCredential};
+use crate::proxy::api::{ConfigResponse, ModelsResponse, SessionCredential};
 use crate::proxy::ProxyChoice;
 
 use super::confirm::ConfirmPrompt;
@@ -449,6 +449,14 @@ impl App {
             entry.cred = cred;
             self.redraw = true;
         }
+    }
+
+    /// The model catalogue of a session's proxy, once the stats popup has
+    /// fetched it; the status bar reads context windows from it.
+    pub fn session_models(&self, v: &SessionView) -> Option<&ModelsResponse> {
+        self.proxy_status
+            .get(v.proxy.as_deref()?)
+            .and_then(|s| s.models.as_ref())
     }
 
     /// The credential to show for a session: cached, and for its current

@@ -143,7 +143,21 @@ Background sessions that need you are colored (never blinking) and send a deskto
 
 ### Status bar
 
-Line one describes the active session: host and directory, git branch, model, context size, state, uptime, and the proxy, including which upstream credential it is on (`⇄ proxy:work · work-max (max) · 5h 37%`, plus `⇆ switched 3m ago` after a switch). Line two shows CPU and memory sparklines for the session's host, turning yellow above 60% and red above 85%, and `Alt+h help`.
+Line one describes the active session: host and directory, model, state, uptime, and the proxy, including which upstream credential it is on (`⇄ proxy:work · work-max (max)`, plus `⇆ switched 3m ago` after a switch).
+
+Line two is the instrument panel, with `Alt+h help` (and the upgrade notice) flush right:
+
+```
+ cpu ▂▃▅▄▃▂▂▃▂▂ 23% │ mem ▄▄▄▄▄▄▄▄▄▄ 26.0/46G │ ctx ██████▎░░░ 62% 620k/1M │ ⎇ main ↑2 ↓1 ✚3 │ 5h █▉░░░ 37% │ 14 turns · 48k out │ 7d 12%
+```
+
+- `cpu`, `mem`: sparklines of the session's host, from the daemon's samples.
+- `ctx`: the last turn's context against the model's window (the proxy's model catalogue when it knows the model, else 1M for a `[1m]` model, else 200k).
+- `⎇`: the working tree, refreshed on claude's hooks and every 10 s while you watch: branch (or `@abc1234` when detached), `↑`/`↓` against the upstream, then `●` staged, `✚` modified, `…` untracked, `✖` unmerged paths; a clean tree in sync shows `✓`.
+- `5h`, `7d`: the credential's rate-limit windows, when the session runs through a proxy.
+- turns and output tokens of the whole conversation, read incrementally from the transcript.
+
+Gauges turn yellow above 60% and red above 85%. A narrow terminal drops whole segments, least important first (`7d`, the conversation, `5h`, `mem`, git), so what is left always reads whole. A terminal tab shows the host and the git segments only.
 
 ### Terminal tabs (`Alt+c`)
 

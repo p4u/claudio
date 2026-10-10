@@ -99,7 +99,14 @@ daemons coexist.
   immediately so recovery works even when no client is attached. A session
   is `SessionKind::Claude` or `Shell` (terminal tab: a login shell, no hooks).
   `command()` adds `--allow-dangerously-skip-permissions` when the config
-  allows it and this host's `claude --help` lists it.
+  allows it and this host's `claude --help` lists it. `MetaRefresher`
+  produces `SessionEvent::Meta` (git status, model, context, output tokens,
+  turns) off the actor task: on hooks (tool-use bursts share one refresh)
+  and every 10 s while a client is attached; one refresh runs at a time. The
+  transcript is read incrementally (`claude::projects::TranscriptCursor`).
+- `git_status.rs` — `git status --porcelain=v2 --branch` for the status
+  bar's `⎇` segment: 1 s deadline, capped output, same scrubbed env as
+  `git.rs`.
 - `journal.rs` — durable session list (`daemon-sessions-v1.json`): writes via
   temp + fsync + rename (`paths::write_atomic`). Never stores secrets or the
   daemon's `--settings` injection; ephemeral (`--plain`) sessions are not
@@ -151,7 +158,9 @@ is idle (checked every 2 min).
   the UI exits, and the UI exits with claude.
 - `connections.rs` — local + SSH connections, reconnect backoff.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
-  `status.rs` (two-line bottom bar), `stats.rs`, `git.rs`, `confirm.rs`.
+  `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
+  ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
+  `stats.rs`, `git.rs`, `confirm.rs`.
 - `fmt.rs` — shared text and number formatting.
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
