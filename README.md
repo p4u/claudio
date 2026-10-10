@@ -10,7 +10,7 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 
 ![Sessions view: active session, tab states, status bar](docs/screenshots/sessions.png)
 
-*The active session with Claude Code running. The tab bar shows every session with a state glyph; amber and red tabs need attention. The two-line status bar shows the session and its host's CPU and memory.*
+*The active session with Claude Code running. The tab bar shows every session with a state glyph; amber and red tabs need attention. The two-line status bar shows the session, then the host's CPU and memory, the context gauge, the git working tree, the credential's rate-limit windows and the conversation totals.*
 
 ![New-session wizard](docs/screenshots/wizard.png)
 
