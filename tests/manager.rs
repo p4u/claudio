@@ -1845,7 +1845,8 @@ fn test_plain_injects_proxy_env() {
     let tui = harness.start_plain_with(&["-c", "hello"], |cmd| {
         cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
     });
-    let screen = tui.screen_text(Region::Screen);
+    // The banner lists claude's argv, which wraps at the screen's edge.
+    let screen = tui.screen_text(Region::Screen).replace('\n', "");
     assert!(screen.contains("-c hello"), "{screen}");
     assert!(!screen.contains("sekret"), "the token must never reach argv:\n{screen}");
 
