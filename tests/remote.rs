@@ -11,9 +11,8 @@
 //! run.  Tests `t2`–`t6` require a real SSH host.
 //!
 //! **Note on `__` diag commands:** `t2`–`t4` use `claudio __bootstrap`,
-//! `__connect-check`, and `__remote-session`.  Per review finding S4, a future
-//! worker may gate these behind a non-default `diag` Cargo feature.  If that
-//! lands, add `required-features = ["diag"]` to the `[[test]]` entry for
+//! `__connect-check`, and `__remote-session`.  These may later be gated
+//! behind a non-default `diag` Cargo feature.  If that lands, add `required-features = ["diag"]` to the `[[test]]` entry for
 //! "remote" in Cargo.toml and replace the runtime guards below with the
 //! standard `#[cfg(feature = "diag")]` attribute.
 //!
@@ -254,8 +253,8 @@ fn t4_spawn_and_snapshot() {
 ///
 /// **Why not track a specific session PID?** `__remote-session` always kills
 /// the session on exit, so it cannot be used to keep a session alive across a
-/// connection drop.  Adding a `--no-kill` flag to `__remote-session` is tracked
-/// as a future improvement (see S4 in the architecture review); until then,
+/// connection drop.  Adding a `--no-kill` flag to `__remote-session` is a
+/// possible future improvement; until then,
 /// daemon-PID stability is the strongest guarantee available without modifying
 /// `src/`.
 #[test]

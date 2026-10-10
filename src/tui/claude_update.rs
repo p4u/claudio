@@ -97,10 +97,11 @@ impl App {
                 self.notify(format!("claude update failed on {host}: {line}"));
             }
             Ok(_) => {}
-            Err(e) => match App::older_daemon_notice(&host, &e) {
-                Some(notice) => self.notify(notice),
-                None => self.notify(format!("claude update failed on {host}: {e}")),
-            },
+            Err(e) => {
+                let notice = App::older_daemon_notice(host, &e)
+                    .unwrap_or_else(|| format!("claude update failed on {host}: {e}"));
+                self.notify(notice);
+            }
         }
     }
 }
@@ -154,21 +155,25 @@ fn claude_prompt(host: &str, have: Option<&str>, want: &str) -> ConfirmPrompt {
 mod tests {
     use super::*;
     use crate::tui::app::Effect;
+    use crate::tui::app::AppConfig;
     use crate::tui::interaction::Modal;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crate::tui::test_support;
+    use crossterm::event::KeyCode;
 
     const LOCAL: &str = "2.1.296 (Claude Code)";
 
     fn new_app(policy: UpdatePolicy) -> App {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.claude_policy.update_check = policy;
-        app.claude_policy.remote_check = policy;
-        app.set_local_claude(Some(LOCAL.into()));
-        app
+        let mut config = test_support::config();
+        config.claude.update_check = policy;
+        config.claude.remote_check = policy;
+        App::new(AppConfig {
+            local_claude: Some(LOCAL.into()),
+            ..config
+        })
     }
 
     fn press(app: &mut App, code: KeyCode) {
-        app.on_terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        app.on_terminal(test_support::press(code));
     }
 
     /// Let a freshly opened prompt start listening to the keyboard.

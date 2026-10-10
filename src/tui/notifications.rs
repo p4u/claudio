@@ -1,4 +1,4 @@
-//! Desktop notification debouncing (S1 split from app.rs).
+//! Status-bar notices and desktop notification debouncing.
 
 use std::collections::HashMap;
 

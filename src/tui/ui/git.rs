@@ -13,7 +13,7 @@ use ratatui::Frame;
 use crate::proto::{GitCommitInfo, GitFile, GitLogEntry};
 
 use super::super::git_view::{CommitPage, DiffPage, GitView, Load, Log, Patch, MESSAGE_ROWS_MAX};
-use super::{fmt_age, str_width, truncate};
+use super::super::fmt::{fmt_age, fmt_utc, spans_width, str_width, truncate};
 
 /// Columns of the author column in the log, when the pane is wide enough.
 const AUTHOR_COLS: usize = 14;
@@ -539,30 +539,6 @@ fn short(id: &str) -> &str {
     id.get(..SHORT_ID).unwrap_or(id)
 }
 
-/// `2025-01-31 14:22 UTC` for a Unix timestamp.
-fn fmt_utc(secs: i64) -> String {
-    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
-        rest / 3600,
-        rest % 3600 / 60
-    )
-}
-
-fn spans_width(spans: &[Span]) -> usize {
-    spans.iter().map(Span::width).sum()
-}
-
 /// `text` cut and space-padded to exactly `cols` columns.
 fn pad_to(text: &str, cols: usize) -> String {
     let text = truncate(text, cols);
@@ -641,14 +617,6 @@ mod tests {
         assert_eq!(find("origin/main").fg, Some(Color::Red));
         assert_eq!(find("tag: v1").fg, Some(Color::Yellow));
         assert!(ref_spans(&[]).is_empty());
-    }
-
-    #[test]
-    fn utc_dates_format() {
-        assert_eq!(fmt_utc(0), "1970-01-01 00:00 UTC");
-        assert_eq!(fmt_utc(1_700_000_000), "2023-11-14 22:13 UTC");
-        assert_eq!(fmt_utc(951_782_400), "2000-02-29 00:00 UTC", "leap day");
-        assert_eq!(fmt_utc(-86_400), "1969-12-31 00:00 UTC");
     }
 
     #[test]

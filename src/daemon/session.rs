@@ -978,6 +978,7 @@ mod tests {
             env: vec![],
             rows: 24,
             cols: 80,
+            ephemeral: false,
         };
         let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false);
         let argv = argv_of(&cmd);
@@ -1028,6 +1029,7 @@ mod tests {
                 env: vec![],
                 rows: 24,
                 cols: 80,
+                ephemeral: false,
             };
             let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true));
             assert_eq!(&argv[3..], [given]);

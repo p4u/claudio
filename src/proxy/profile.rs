@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(p("ab").masked_token(), "**");
     }
 
-    /// Fable: masked_token must not panic on Unicode tokens.
+    /// masked_token must not panic on Unicode tokens.
     #[test]
     fn masked_token_unicode_no_panic() {
         // Token with multi-byte characters (e.g. emoji = 4 bytes each).
@@ -392,7 +392,7 @@ mod tests {
 
     // ── TOML error sanitization ───────────────────────────────────────────────
 
-    /// Astra #8: a TOML parse error on a token line must NOT include the token
+    /// A TOML parse error on a token line must NOT include the token
     /// value in the error message.
     #[test]
     fn toml_error_does_not_leak_token() {

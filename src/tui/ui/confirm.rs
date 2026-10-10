@@ -5,7 +5,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{centered, popup, str_width};
+use super::{centered, popup};
+use crate::tui::fmt::str_width;
 use crate::tui::confirm::{Choice, ConfirmPrompt};
 
 /// Widest the popup gets, border included.

@@ -9,23 +9,21 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
-use crate::proxy::cmd::fmt_tokens;
 
 use super::super::app::{App, ProxyStatus, SessionView};
-use super::super::stats_view::{
-    bar, delta, family, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, short_model, Family, Page,
-    StatsView, Window,
+use super::super::fmt::{
+    fmt_age, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, fmt_tokens, short_model, str_width,
+    truncate,
 };
-use super::{centered, fmt_age, popup, state_name, str_width, truncate};
+use super::super::stats_view::{Page, StatsView, Window};
+use super::{centered, popup};
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;
-/// Header, rule and footer rows inside the popup border.
-const CHROME_ROWS: u16 = 3;
 const BAR_W: usize = 20;
 
 // ── Entry points ──────────────────────────────────────────────────────────────
@@ -54,22 +52,18 @@ pub(super) fn draw_proxy_stats(frame: &mut Frame, app: &App, view: &StatsView) {
         rule,
     );
     let lines = body_lines(app, view, inner.width as usize);
-    let max = max_scroll_for(lines.len(), body.height);
-    let scroll = view.scroll.min(max);
+    let max = lines
+        .len()
+        .saturating_sub(usize::from(body.height))
+        .min(usize::from(u16::MAX)) as u16;
+    // Only here is the page's length known: the view scrolls within it.
+    view.set_max_scroll(max);
+    let scroll = view.scroll();
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
     frame.render_widget(
         Paragraph::new(footer_line(app, view, inner.width as usize, scroll, max)),
         footer,
     );
-}
-
-/// The largest useful scroll offset of the view's current page, computed from
-/// the same lines the renderer draws. Used by the app to clamp scrolling.
-pub fn stats_max_scroll(app: &App, view: &StatsView) -> u16 {
-    let rect = popup_rect(Rect::new(0, 0, app.width, app.height));
-    let inner = Block::bordered().inner(rect);
-    let lines = body_lines(app, view, inner.width as usize);
-    max_scroll_for(lines.len(), inner.height.saturating_sub(CHROME_ROWS))
 }
 
 fn popup_rect(area: Rect) -> Rect {
@@ -78,12 +72,6 @@ fn popup_rect(area: Rect) -> Rect {
         POPUP_W.min(area.width.saturating_sub(2)),
         POPUP_H.min(area.height.saturating_sub(2)),
     )
-}
-
-fn max_scroll_for(lines: usize, body_height: u16) -> u16 {
-    lines
-        .saturating_sub(body_height as usize)
-        .min(u16::MAX as usize) as u16
 }
 
 // ── Chrome ────────────────────────────────────────────────────────────────────
@@ -416,7 +404,7 @@ fn session_summary(v: &SessionView, now: u64) -> Vec<Span<'static>> {
         spans.push(Span::styled(" · ctx ".to_owned(), dim()));
         spans.push(Span::raw(fmt_tokens(ctx as i64)));
     }
-    spans.push(Span::styled(format!(" · {}", state_name(v.state)), dim()));
+    spans.push(Span::styled(format!(" · {}", v.state.name()), dim()));
     if v.created_at > 0 && now >= v.created_at {
         spans.push(Span::styled(
             format!(" · up {}", fmt_age(now - v.created_at)),
@@ -830,7 +818,7 @@ fn sessions_lines(app: &App, profile: &str, lines: &mut Vec<Line<'static>>) {
                 fg(family_color(family(model))),
             ),
             Span::raw(format!("{ctx:>6}  ")),
-            Span::raw(format!("{:<10} ", state_name(v.state))),
+            Span::raw(format!("{:<10} ", v.state.name())),
             Span::styled(format!("{up:>4}"), dim()),
         ]));
     }
@@ -879,6 +867,31 @@ fn blocked_spans(until: Option<&str>) -> Vec<Span<'static>> {
     )]
 }
 
+/// A horizontal bar of `width` cells filled to `frac` (0..=1), using eighth
+/// blocks for the partial cell so small values are still visible.
+fn bar(frac: f64, width: usize) -> String {
+    const PARTIAL: [char; 8] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let frac = frac.clamp(0.0, 1.0);
+    let eighths = (frac * width as f64 * 8.0).round() as usize;
+    let full = eighths / 8;
+    let mut out = "█".repeat(full.min(width));
+    if full < width {
+        out.push(PARTIAL[eighths % 8]);
+        out.push_str(&"░".repeat(width - full - 1));
+    }
+    out
+}
+
+/// Relative change of `now` against `baseline`; `None` when there is no
+/// baseline to compare with.
+fn delta(now: f64, baseline: f64) -> Option<f64> {
+    if baseline <= 0.0 {
+        None
+    } else {
+        Some((now - baseline) / baseline)
+    }
+}
+
 /// Share of prompt tokens that were served from the cache.
 fn cache_hit(t: &StatsTotals) -> Option<f64> {
     let prompt = t.input_tokens + t.cache_read + t.cache_creation;
@@ -918,6 +931,31 @@ fn provider_color(status: &str) -> Color {
         "busy" => Color::Yellow,
         "saturated" | "unavailable" => Color::Red,
         _ => Color::DarkGray,
+    }
+}
+
+/// The model family, for colouring. Mirrors the proxy's `modelFamily`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Fable,
+    Opus,
+    Sonnet,
+    Haiku,
+    Other,
+}
+
+fn family(model: &str) -> Family {
+    let m = model.to_ascii_lowercase();
+    if m.contains("fable") || m.contains("mythos") {
+        Family::Fable
+    } else if m.contains("opus") {
+        Family::Opus
+    } else if m.contains("sonnet") {
+        Family::Sonnet
+    } else if m.contains("haiku") {
+        Family::Haiku
+    } else {
+        Family::Other
     }
 }
 
@@ -1073,28 +1111,30 @@ mod tests {
     }
 
     fn session(name: &str, proxy: Option<&str>, model: Option<&str>) -> SessionView {
+        let kind = crate::proto::SessionKind::Claude;
         SessionView {
-            id: Uuid::new_v4(),
             name: Some(name.into()),
-            cwd: "/home/u/proj".into(),
-            host: "local".into(),
             state: SessionState::Working,
-            title: None,
-            claude_session_id: None,
             created_at: 1,
-            mirror: crate::term::screen::Screen::new(28, 100),
             attached: true,
             proxy: proxy.map(str::to_owned),
-            branch: None,
             model: model.map(str::to_owned),
             context_tokens: Some(123_000),
-            kind: crate::proto::SessionKind::Claude,
+            ..SessionView::new(Uuid::new_v4(), "local", "/home/u/proj", kind, (28, 100))
         }
+    }
+
+    /// A manager on a 90×30 terminal.
+    fn stats_app() -> App {
+        App::new(crate::tui::app::AppConfig {
+            size: (90, 30),
+            ..crate::tui::test_support::config()
+        })
     }
 
     /// An app with three sessions (two on the proxy) and all stats loaded.
     fn app_with_stats() -> App {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
+        let mut app = stats_app();
         app.now = 7_201;
         app.proxy_profiles = vec!["myproxy".into()];
         app.proxy_default = Some("myproxy".into());
@@ -1113,6 +1153,23 @@ mod tests {
         app
     }
 
+    #[test]
+    fn bars_deltas_and_families() {
+        assert_eq!(bar(0.0, 4), "░░░░");
+        assert_eq!(bar(1.0, 4), "████");
+        assert_eq!(bar(0.5, 4), "██░░");
+        assert_eq!(bar(0.125, 2), "▎░");
+        assert_eq!(bar(2.0, 3), "███", "clamped");
+        assert_eq!(bar(0.3, 0), "");
+
+        assert_eq!(delta(126.0, 100.0), Some(0.26));
+        assert_eq!(delta(5.0, 0.0), None);
+
+        assert_eq!(family("claude-opus-5-5[1m]"), Family::Opus);
+        assert_eq!(family("claude-mythos-1"), Family::Fable);
+        assert_eq!(family("claude-glm-5"), Family::Other);
+    }
+
     fn render(app: &App) -> String {
         let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
         term.draw(|f| super::super::draw(f, app)).unwrap();
@@ -1128,18 +1185,14 @@ mod tests {
         out
     }
 
-    fn goto(app: &mut App, page: char) {
-        app.on_terminal(crossterm::event::Event::Key(
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(page),
-                crossterm::event::KeyModifiers::NONE,
-            ),
-        ));
+    /// Type `c` into the popup.
+    fn goto(app: &mut App, c: char) {
+        app.on_terminal(crate::tui::test_support::press(crossterm::event::KeyCode::Char(c)));
     }
 
     #[test]
     fn open_fetches_and_result_clears_loading() {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
+        let mut app = stats_app();
         app.sessions.push(session("s", Some("myproxy"), None));
         app.active = Some(0);
         app.open_proxy_stats();
@@ -1184,10 +1237,7 @@ mod tests {
 
     #[test]
     fn no_proxy_shows_login_hint() {
-        let mut app = App::new(90, 30, "/home/u".into(), vec![]);
-        // `App::new` loads the real config.toml; make sure no profile leaks in.
-        app.proxy_profiles.clear();
-        app.proxy_default = None;
+        let mut app = stats_app();
         app.sessions.push(session("s", None, None));
         app.active = Some(0);
         app.open_proxy_stats();
@@ -1220,25 +1270,27 @@ mod tests {
 
     #[test]
     fn scroll_is_clamped_to_page_content() {
+        let scroll = |app: &App| match &app.modal {
+            Some(Modal::ProxyStats(v)) => v.scroll(),
+            _ => panic!("popup not open"),
+        };
         let mut app = app_with_stats();
         goto(&mut app, '3'); // Trends: 5 metrics × 5 lines, taller than the body.
         app.take_effects();
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        let max = stats_max_scroll(&app, v);
-        assert!(max > 0);
+        render(&app);
         goto(&mut app, 'G');
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        assert_eq!(v.scroll, max);
+        let bottom = scroll(&app);
+        assert!(bottom > 0);
+        goto(&mut app, 'j');
+        assert_eq!(scroll(&app), bottom, "the end of the page");
+        assert!(render(&app).contains("↑ "), "the footer says there is more above");
+        goto(&mut app, 'k');
+        assert_eq!(scroll(&app), bottom - 1);
         goto(&mut app, '1'); // Overview fits: scroll resets.
-        let Some(Modal::ProxyStats(v)) = &app.modal else {
-            panic!()
-        };
-        assert_eq!(v.scroll, 0);
-        assert_eq!(stats_max_scroll(&app, v), 0);
+        render(&app);
+        assert_eq!(scroll(&app), 0);
+        goto(&mut app, 'G');
+        assert_eq!(scroll(&app), 0);
     }
 
     /// Renders every page; prints the snapshots with `--nocapture`.

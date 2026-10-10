@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(grid[0].0, 'X');
     }
 
-    /// **Fable M5 – SGR continuation state.** Feed `ESC[31mA` (red 'A') into
+    /// **SGR continuation state.** Feed `ESC[31mA` (red 'A') into
     /// screen A, take a snapshot, then feed 'B' into BOTH A and a fresh screen
     /// B that received the snapshot. The 'B' character must be red in both.
     #[test]
@@ -758,7 +758,7 @@ mod tests {
         );
     }
 
-    /// **Fable M5 – cursor position always emitted.** Even with a hidden
+    /// **The cursor position is always emitted.** Even with a hidden
     /// cursor, the snapshot must place it at the real position so that
     /// further bytes appended to the snapshot render at the right location.
     #[test]

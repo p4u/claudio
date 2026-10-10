@@ -6,12 +6,17 @@
 //! state.json) is queued as [`Effect`]s that the event loop in `mod.rs`
 //! drains with [`App::take_effects`].
 //!
-//! Sub-modules hold the individual types (S1 split):
-//! - `sessions`      – SessionView, sanitize_label
-//! - `proxy_state`   – ProxyStatus
-//! - `notifications` – Notice, check_notifications
-//! - `interaction`   – Modal
-//! - `git_app`       – the history viewer's glue to `App`
+//! Sibling modules extend `App` with one concern each:
+//! - `sessions`      – SessionView; spawning, activation and recovery
+//! - `interaction`   – Modal; terminal input, wizard routing, daemon events
+//!                     and request replies
+//! - `confirm`       – the generic multiple-choice prompt
+//! - `claude_update` – keeping claude up to date on every host
+//! - `stats_view`    – the proxy stats popup (Alt+s)
+//! - `git_app`       – the history viewer's glue (its state is `git_view`)
+//! - `plain`         – `claudio --plain`, one session full screen
+//! - `proxy_state`   – ProxyStatus and session credentials
+//! - `notifications` – Notice and attention notifications
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -95,6 +100,8 @@ pub enum Effect {
     Connect(String),
     /// Write state.json.
     Save,
+    /// Read the SSH host candidates again; they go to [`App::on_ssh_hosts`].
+    LoadSshHosts,
     /// Fetch proxy config (env) for a profile name. Result goes to
     /// [`App::on_proxy_config`].
     FetchProxyConfig { profile_name: String },
@@ -140,17 +147,14 @@ pub enum ReplyTo {
     Respawned(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
+    /// A directory listing for the wizard (which ignores one for a path it
+    /// no longer shows).
     DirEntries,
-    /// Wizard request tagged with the wizard's generation (S7).
-    ClaudeSessions(String, u64),
-    Projects,
-    /// Wizard directory listing for a remote host (host, path).
-    RemoteDirEntries,
-    /// Wizard claude sessions for a remote host (S7: generation-tagged).
-    RemoteClaudeSessions(String, u64),
-    /// Wizard recent projects for a remote host (host, wizard generation).
-    /// Both must match the current wizard or the reply is discarded.
-    RemoteProjects(String, u64),
+    /// The claude sessions in `cwd` on `host`, for the wizard of generation
+    /// `gen`; a reply for a cancelled or replaced wizard is dropped.
+    ClaudeSessions { host: String, cwd: String, gen: u64 },
+    /// The recent projects on `host`, for the wizard of generation `gen`.
+    Projects { host: String, gen: u64 },
     /// `UpdateClaude` on this host; the outcome becomes a notice.
     ClaudeUpdate(String),
     /// A request of the history viewer: the view's generation and the
@@ -195,9 +199,9 @@ pub struct App {
     pub quit: bool,
     /// Set when the screen needs repainting.
     pub redraw: bool,
-    /// Effect queue; drained by `take_effects`. `pub(super)` so sibling
-    /// modules (`sessions`, `interaction`) can push effects via `impl App`.
-    pub(super) effects: Vec<Effect>,
+    /// What the event loop is to do next: queued by [`App::emit`], drained
+    /// by [`App::take_effects`].
+    effects: Vec<Effect>,
     /// Cached proxy config (env vars) per profile name, with fetch time.
     pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
@@ -242,50 +246,55 @@ pub struct App {
     pub(super) claude_checked: HashSet<String>,
     /// Prompts waiting for the open modal to close.
     pub(super) confirms: VecDeque<ConfirmPrompt>,
+    /// The SSH hosts the wizard offers: recently used ones, then
+    /// `~/.ssh/config` aliases.
+    pub(super) ssh_hosts: Vec<String>,
+    /// The generation of the open wizard or history view, raised each time
+    /// one opens. Their requests carry it, so a reply meant for one that
+    /// was closed (or replaced) since is recognised and dropped.
+    pub(super) modal_gen: u64,
+}
+
+/// What the app starts from. The event loop gathers it (reading config.toml,
+/// state.json, the SSH host lists and the local daemon's welcome), so that
+/// `App` itself never touches the outside world.
+pub struct AppConfig {
+    pub mode: Mode,
+    /// Terminal size, `(width, height)`.
+    pub size: (u16, u16),
+    /// The local daemon host's home directory.
+    pub home: String,
+    pub keymap: Keymap,
+    /// Desktop notifications for background sessions (`[ui] notify`).
+    pub notify: bool,
+    /// The startup proxy choice (`--proxy` / `--no-proxy`).
+    pub proxy_override: ProxyChoice,
+    /// The configured proxy profile names, and the default one.
+    pub proxy_profiles: Vec<String>,
+    pub proxy_default: Option<String>,
+    /// `[claude]` from config.toml: the update policies.
+    pub claude: crate::config::ClaudeSection,
+    /// This machine's `claude --version`.
+    pub local_claude: Option<String>,
+    /// From state.json: recently used directories per host, and the claude
+    /// versions the user chose to skip.
+    pub recent_dirs: HashMap<String, Vec<String>>,
+    pub claude_skipped: HashMap<String, String>,
+    /// The SSH hosts the wizard offers (refreshed through
+    /// [`Effect::LoadSshHosts`]).
+    pub ssh_hosts: Vec<String>,
 }
 
 impl App {
-    /// Create an App with default settings (notify enabled, default keymap).
-    /// Used by unit tests; kept pub for future daemon-status command.
-    #[cfg(test)]
-    pub fn new(width: u16, height: u16, home: String, recent_dirs: Vec<String>) -> App {
-        use std::collections::HashMap;
-        let mut rd = HashMap::new();
-        if !recent_dirs.is_empty() {
-            rd.insert("local".to_owned(), recent_dirs);
-        }
-        App::new_with_config(width, height, home, rd, true, Keymap::default())
-    }
-
-    #[cfg(test)]
-    pub fn new_with_config(
-        width: u16,
-        height: u16,
-        home: String,
-        recent_dirs: HashMap<String, Vec<String>>,
-        notify_enabled: bool,
-        keymap: Keymap,
-    ) -> App {
-        App::new_with_proxy(width, height, home, recent_dirs, notify_enabled, keymap, ProxyChoice::Default)
-    }
-
-    pub fn new_with_proxy(
-        width: u16,
-        height: u16,
-        home: String,
-        recent_dirs: HashMap<String, Vec<String>>,
-        notify_enabled: bool,
-        keymap: Keymap,
-        proxy_override: ProxyChoice,
-    ) -> App {
-        let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
+    pub fn new(cfg: AppConfig) -> App {
+        let (width, height) = cfg.size;
         App {
-            mode: Mode::Manager,
+            mode: cfg.mode,
             exit: Default::default(),
             sessions: Vec::new(),
             active: None,
             modal: None,
-            recent_dirs,
+            recent_dirs: cfg.recent_dirs,
             projects: Vec::new(),
             width,
             height,
@@ -293,34 +302,67 @@ impl App {
             now: crate::paths::unix_now(),
             notice: None,
             connected: true,
-            home,
+            home: cfg.home,
             quit: false,
             redraw: true,
             effects: Vec::new(),
             proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
             session_creds: HashMap::new(),
-            proxy_profiles,
-            proxy_default,
-            proxy_override,
+            proxy_profiles: cfg.proxy_profiles,
+            proxy_default: cfg.proxy_default,
+            proxy_override: cfg.proxy_override,
             notified: HashMap::new(),
-            notify_enabled,
+            notify_enabled: cfg.notify,
             pending_notifs: Vec::new(),
             killed: Vec::new(),
-            keymap,
+            keymap: cfg.keymap,
             upgrade_notice: None,
             host_stats: HashMap::new(),
-            claude_policy: Default::default(),
-            local_claude: None,
-            claude_skipped: HashMap::new(),
+            claude_policy: cfg.claude,
+            local_claude: cfg.local_claude,
+            claude_skipped: cfg.claude_skipped,
             claude_checked: HashSet::new(),
             confirms: VecDeque::new(),
+            ssh_hosts: cfg.ssh_hosts,
+            modal_gen: 0,
         }
+    }
+
+    /// The SSH host candidates were (re)read: offer them from now on, and in
+    /// the wizard's first screen if it is open and untouched.
+    pub fn on_ssh_hosts(&mut self, hosts: Vec<String>) {
+        if let Some(w) = self.wizard_mut() {
+            w.set_ssh_hosts(&hosts);
+        }
+        self.ssh_hosts = hosts;
+        self.redraw = true;
     }
 
     /// Drain the queued effects, in order.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
+    }
+
+    /// Queue `effect` for the event loop.
+    pub(super) fn emit(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+
+    /// Send a request to `host`'s daemon.
+    pub(super) fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
+        self.emit(Effect::Request {
+            host: host.to_owned(),
+            msg,
+            to,
+        });
+    }
+
+    /// Queue a write of state.json; back-to-back saves are one write.
+    pub(super) fn save(&mut self) {
+        if self.mode.persists() && !matches!(self.effects.last(), Some(Effect::Save)) {
+            self.emit(Effect::Save);
+        }
     }
 
     // ── Proxy ─────────────────────────────────────────────────────────────────
@@ -476,8 +518,7 @@ impl App {
             .and_then(|p| self.proxy_status.get(p))
             .map(|s| s.cached_windows())
             .unwrap_or_default();
-        let max_scroll = super::ui::stats_max_scroll(self, &view);
-        let outcome = view.on_key(&key, &cached, max_scroll);
+        let outcome = view.on_key(&key, &cached);
         self.stats_outcome(view, outcome);
         self.redraw = true;
     }
@@ -497,9 +538,8 @@ impl App {
         self.modal = Some(Modal::ProxyStats(view));
     }
 
-    /// Build the `SpawnSpec.env` for a proxy profile name (M4 fix: fallible).
-    ///
-    /// Returns `Err(msg)` if a profile is selected but cannot be resolved.
+    /// Build the `SpawnSpec.env` for a proxy profile name. Fails when a
+    /// profile is selected but cannot be resolved.
     pub(super) fn proxy_env_for(
         &self,
         proxy_name: Option<&str>,
@@ -605,50 +645,13 @@ mod tests {
     use super::*;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
-    use crate::term::screen::Screen;
     use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
+    use crate::tui::test_support::{
+        self, alt, app_with, info, key, press, shell_info,
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
-
-    fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
-        SessionInfo {
-            id: Uuid::new_v4(),
-            cwd: "/srv/app".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: csid.map(Into::into),
-            title: None,
-            pid,
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        }
-    }
-
-    fn key(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
-    }
-
-    fn alt(c: char) -> Event {
-        key(KeyCode::Char(c), KeyModifiers::ALT)
-    }
-
-    fn plain(code: KeyCode) -> Event {
-        key(code, KeyModifiers::NONE)
-    }
-
-    fn app_with(live: &[SessionInfo]) -> App {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        // Isolate tests from any real proxy config on disk.
-        app.proxy_default = None;
-        app.proxy_profiles = Vec::new();
-        app.recover(&ClientState::default(), live);
-        app.take_effects();
-        app
-    }
 
     fn requests(effects: &[Effect]) -> Vec<&Msg> {
         effects
@@ -670,7 +673,7 @@ mod tests {
             active: Some(live[1].id),
             ..Default::default()
         };
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         let reqs = requests(&effects);
@@ -694,7 +697,7 @@ mod tests {
 
     #[test]
     fn no_sessions_opens_the_wizard() {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &[]);
         assert!(matches!(app.modal, Some(Modal::Wizard(_))));
         assert!(
@@ -702,6 +705,29 @@ mod tests {
                 limit: PROJECTS_LIMIT
             })
         );
+    }
+
+    #[test]
+    fn the_wizard_offers_the_ssh_hosts_and_asks_for_a_fresh_list() {
+        let mut app = App::new(AppConfig {
+            ssh_hosts: vec!["devbox".into()],
+            ..test_support::config()
+        });
+        app.recover(&ClientState::default(), &[]);
+        assert!(app.take_effects().iter().any(|e| matches!(e, Effect::LoadSshHosts)));
+        let hosts = |app: &App| match &app.modal {
+            Some(Modal::Wizard(w)) => w.host_step.as_ref().unwrap().items.clone(),
+            _ => panic!("expected the wizard"),
+        };
+        assert_eq!(hosts(&app), ["devbox"]);
+        // The fresh list replaces the untouched first screen...
+        app.on_ssh_hosts(vec!["devbox".into(), "nas".into()]);
+        assert_eq!(hosts(&app), ["devbox", "nas"]);
+        // ...but not one the user is typing in.
+        app.on_terminal(press(KeyCode::Char('n')));
+        app.on_ssh_hosts(vec!["other".into()]);
+        assert_eq!(hosts(&app), ["nas"]);
+        assert_eq!(app.ssh_hosts, ["other"], "the next wizard has it");
     }
 
     #[test]
@@ -748,12 +774,12 @@ mod tests {
     fn keys_go_to_the_active_session_unless_a_modal_is_open() {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
-        app.on_terminal(plain(KeyCode::Char('h')));
+        app.on_terminal(press(KeyCode::Char('h')));
         assert!(
             matches!(&app.take_effects()[..], [Effect::Input(id, b)] if *id == live[0].id && b == b"h")
         );
         app.on_terminal(alt('r'));
-        app.on_terminal(plain(KeyCode::Char('h')));
+        app.on_terminal(press(KeyCode::Char('h')));
         assert!(app.take_effects().is_empty());
         assert!(matches!(&app.modal, Some(Modal::Rename { input, .. }) if input == "apph"));
     }
@@ -764,7 +790,7 @@ mod tests {
         app.on_terminal(alt('r'));
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.on_terminal(Event::Paste("api".into()));
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         assert_eq!(app.sessions[0].name.as_deref(), Some("api"));
         // Rename sends the change to the daemon (durable journal) and saves state.
         let effects = app.take_effects();
@@ -778,7 +804,7 @@ mod tests {
         );
         app.on_terminal(alt('r'));
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         assert_eq!(app.sessions[0].name, None);
         assert_eq!(app.to_state().sessions[0].name, None);
     }
@@ -792,10 +818,10 @@ mod tests {
         ];
         let mut app = app_with(&live);
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_terminal(press(KeyCode::Char('n')));
         assert!(app.modal.is_none() && app.sessions.len() == 3, "n cancels");
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         let effects = app.take_effects();
         let save = effects
             .iter()
@@ -814,12 +840,40 @@ mod tests {
     }
 
     #[test]
+    fn the_kill_prompt_names_the_session_and_esc_cancels_it() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('x'));
+        match &app.modal {
+            Some(Modal::Confirm(p)) => assert_eq!(p.text, "Kill session app?"),
+            _ => panic!("expected the kill prompt"),
+        }
+        assert_eq!(hints(&app), ["[y] kill", "[n] cancel"]);
+        app.on_terminal(press(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.killed.is_empty());
+    }
+
+    #[test]
+    fn a_prompt_is_answered_by_plain_or_shifted_keys_only() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('x'));
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            app.on_terminal(key(KeyCode::Char('y'), mods));
+            app.on_terminal(key(KeyCode::Esc, mods));
+            assert!(matches!(app.modal, Some(Modal::Confirm(_))), "{mods:?}");
+        }
+        app.on_terminal(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.sessions.is_empty(), "Shift+Y kills");
+    }
+
+    #[test]
     fn tombstone_persisted_in_state_before_kill() {
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         // The tombstone must be in to_state() before Kill is sent.
         let effects = app.take_effects();
         let save_pos = effects
@@ -843,7 +897,7 @@ mod tests {
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         app.take_effects();
         assert!(!app.killed.is_empty());
         // Simulate a successful Kill reply.
@@ -860,7 +914,7 @@ mod tests {
         let mut app = app_with(&live);
         let id = live[0].id;
         app.on_terminal(alt('x'));
-        app.on_terminal(plain(KeyCode::Char('y')));
+        app.on_terminal(press(KeyCode::Char('y')));
         app.take_effects();
         // Simulate "no such session" error.
         app.on_reply(
@@ -887,19 +941,9 @@ mod tests {
         // The daemon still lists the session as live.
         let live = [SessionInfo {
             id,
-            cwd: "/w".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(42),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..info(Some(42), None)
         }];
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         // Kill must be re-sent.
@@ -922,41 +966,21 @@ mod tests {
 
         let local_live = vec![SessionInfo {
             id: local_id,
-            cwd: "/local".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(1),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..info(Some(1), None)
         }];
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &local_live);
         app.take_effects();
         assert_eq!(app.sessions.len(), 1);
 
         // Manually add a fake "remote" session (simulating a previous recover_host call).
-        app.sessions.push(SessionView {
-            id: remote_id,
-            name: None,
-            cwd: "/remote".into(),
-            host: "myserver".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: crate::term::screen::Screen::new(28, 100),
-            attached: false,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
+        app.sessions.push(SessionView::new(
+            remote_id,
+            "myserver",
+            "/remote",
+            SessionKind::Claude,
+            (28, 100),
+        ));
         assert_eq!(app.sessions.len(), 2);
 
         // Now simulate a second local reconnect: recover_host("local", ...) must
@@ -1058,7 +1082,7 @@ mod tests {
     fn wizard_spawns_into_the_chosen_dir_and_records_it() {
         let mut app = app_with(&[]);
         // Step 0: press Enter to select "local" host (empty host filter → picks local).
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         // The directory step opens in browse mode at `~/`: the home listing is requested.
         let effects = app.take_effects();
         assert!(requests(&effects)
@@ -1069,7 +1093,7 @@ mod tests {
         for c in "/w".chars() {
             app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        app.on_terminal(plain(KeyCode::Enter));
+        app.on_terminal(press(KeyCode::Enter));
         let effects = app.take_effects();
         assert!(requests(&effects)
             .iter()
@@ -1079,7 +1103,7 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
+        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
         let effects = app.take_effects();
         let reqs = requests(&effects);
         let Msg::Spawn(spec) = reqs[0] else {
@@ -1137,7 +1161,7 @@ mod tests {
             },
         );
         assert_eq!(app.sessions.len(), 2);
-        // M1 fix: new unknown session must get host "local" (from on_incoming_from).
+        // A session another client created gets the host it came from.
         assert_eq!(app.sessions[1].host, "local");
         app.on_incoming_from(
             "local",
@@ -1148,6 +1172,46 @@ mod tests {
         );
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.active, Some(0));
+    }
+
+    #[test]
+    fn plain_mode_sessions_never_become_tabs() {
+        let ephemeral = |info: SessionInfo| SessionInfo {
+            ephemeral: true,
+            ..info
+        };
+        let live = [
+            info(Some(1), None),
+            ephemeral(info(Some(2), None)),
+            // Dormant: it must not be resumed either.
+            ephemeral(info(None, Some("c3"))),
+        ];
+        let mut app = test_support::app();
+        app.recover(&ClientState::default(), &live);
+        assert_eq!(app.sessions.len(), 1);
+        let effects = app.take_effects();
+        assert!(!requests(&effects).iter().any(|m| matches!(m, Msg::Spawn(_))));
+
+        let other = ephemeral(info(Some(4), None));
+        let created = SessionEvent::Created {
+            info: other.clone(),
+        };
+        app.on_incoming_from("local", Incoming::Event { id: other.id, event: created });
+        assert_eq!(app.sessions.len(), 1);
+        app.recover_host("local", &[live[0].clone(), other]);
+        assert_eq!(app.sessions.len(), 1, "nor after a reconnect");
+    }
+
+    #[test]
+    fn a_manager_spawn_is_not_ephemeral() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.spawn("local".into(), "/w".into(), None, None);
+        let effects = app.take_effects();
+        let spawn = requests(&effects).into_iter().find_map(|m| match m {
+            Msg::Spawn(spec) => Some(spec.clone()),
+            _ => None,
+        });
+        assert!(!spawn.expect("a Spawn").ephemeral);
     }
 
     #[test]
@@ -1172,7 +1236,7 @@ mod tests {
 
     #[test]
     fn on_incoming_from_remote_tags_created_sessions_correctly() {
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
+        let mut app = test_support::app();
         app.recover(&ClientState::default(), &[]);
         // Close wizard.
         app.modal = None;
@@ -1198,41 +1262,13 @@ mod tests {
     fn local_disconnect_does_not_affect_remote_sessions() {
         let local_id = Uuid::new_v4();
         let remote_id = Uuid::new_v4();
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.sessions.push(SessionView {
-            id: local_id,
-            name: None,
-            cwd: "/l".into(),
-            host: "local".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: Screen::new(28, 100),
-            attached: true,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
-        app.sessions.push(SessionView {
-            id: remote_id,
-            name: None,
-            cwd: "/r".into(),
-            host: "myserver".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 1,
-            mirror: Screen::new(28, 100),
-            attached: true,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        });
+        let mut app = test_support::app();
+        for (id, host) in [(local_id, "local"), (remote_id, "myserver")] {
+            app.sessions.push(SessionView {
+                attached: true,
+                ..SessionView::new(id, host, "/w", SessionKind::Claude, (28, 100))
+            });
+        }
         app.on_incoming_from("local", Incoming::Disconnected);
         // Local session detached.
         assert!(
@@ -1344,8 +1380,10 @@ mod tests {
     fn notifications_disabled_when_flag_is_off() {
         let mut live = [info(Some(1), None), info(Some(2), None)];
         live[1].state = SessionState::NeedsApproval;
-        let mut app =
-            App::new_with_config(100, 30, "/home/u".into(), HashMap::new(), false, Keymap::default());
+        let mut app = App::new(AppConfig {
+            notify: false,
+            ..test_support::config()
+        });
         app.recover(&ClientState::default(), &live);
         app.take_effects();
         app.check_notifications();
@@ -1353,13 +1391,6 @@ mod tests {
     }
 
     // ── Terminal tabs ─────────────────────────────────────────────────────────
-
-    fn shell_info(pid: Option<u32>) -> SessionInfo {
-        SessionInfo {
-            kind: SessionKind::Shell,
-            ..info(pid, None)
-        }
-    }
 
     #[test]
     fn terminal_opens_right_after_the_active_tab_and_is_activated() {
@@ -1443,8 +1474,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut app = App::new(100, 30, "/home/u".into(), vec![]);
-        app.proxy_default = None;
+        let mut app = test_support::app();
         app.recover(&saved, &live);
         let effects = app.take_effects();
         assert!(
@@ -1523,7 +1553,7 @@ mod tests {
         assert!(respawn_of(&app.take_effects()).is_none(), "nothing before the answer");
 
         // `r` keeps the conversation, answered on the same tab.
-        app.on_terminal(plain(KeyCode::Char('r')));
+        app.on_terminal(press(KeyCode::Char('r')));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
         let (spec, to) = respawn_of(&effects).expect("a Respawn request");
@@ -1533,7 +1563,7 @@ mod tests {
 
         // `n` starts a new conversation.
         app.on_terminal(alt('e'));
-        app.on_terminal(plain(KeyCode::Char('N')));
+        app.on_terminal(press(KeyCode::Char('N')));
         let effects = app.take_effects();
         assert!(respawn_of(&effects).is_some_and(|(spec, _)| spec.fresh));
     }
@@ -1542,7 +1572,7 @@ mod tests {
     fn escape_cancels_a_reset() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
         app.on_terminal(alt('e'));
-        app.on_terminal(plain(KeyCode::Esc));
+        app.on_terminal(press(KeyCode::Esc));
         assert!(app.modal.is_none());
         assert!(respawn_of(&app.take_effects()).is_none());
     }
@@ -1552,9 +1582,9 @@ mod tests {
         let mut app = app_with(&[shell_info(Some(1))]);
         app.on_terminal(alt('e'));
         assert_eq!(hints(&app), ["[r] restart shell", "Esc cancel"]);
-        app.on_terminal(plain(KeyCode::Char('n')));
+        app.on_terminal(press(KeyCode::Char('n')));
         assert!(app.modal.is_some(), "there is no `n` here");
-        app.on_terminal(plain(KeyCode::Char('r')));
+        app.on_terminal(press(KeyCode::Char('r')));
         let effects = app.take_effects();
         assert!(respawn_of(&effects).is_some_and(|(spec, _)| !spec.fresh));
     }
@@ -1778,7 +1808,17 @@ mod tests {
         assert!(!app.session_creds.contains_key(&id));
     }
 
-    // ── Wizard generation / S7 ────────────────────────────────────────────────
+    // ── Wizard generation ─────────────────────────────────────────────────────
+
+    #[test]
+    fn each_wizard_gets_its_own_generation() {
+        let mut app = app_with(&[]);
+        let first = app.wizard_generation();
+        app.modal = None;
+        assert_eq!(app.wizard_generation(), 0, "no wizard");
+        app.on_terminal(alt('n'));
+        assert!(app.wizard_generation() > first);
+    }
 
     #[test]
     fn stale_wizard_reply_is_discarded() {
@@ -1791,8 +1831,32 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions("/w".into(), gen), Ok(reply));
+        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
         // No modal opened (wizard was closed).
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn only_local_projects_are_cached_for_the_next_wizard() {
+        let mut app = app_with(&[]);
+        let gen = app.wizard_generation();
+        app.modal = None;
+        let reply = |path: &str| {
+            Ok(Msg::Projects {
+                dirs: vec![crate::proto::ProjectDir {
+                    path: path.into(),
+                    modified: 1,
+                    git: None,
+                    symlink: false,
+                    hidden: false,
+                }],
+            })
+        };
+        let to = |host: &str| ReplyTo::Projects { host: host.into(), gen };
+        app.on_reply(to("devbox"), reply("/remote"));
+        assert!(app.projects.is_empty());
+        // Even for a closed wizard: the next one starts with them.
+        app.on_reply(to("local"), reply("/local"));
+        assert_eq!(app.projects, ["/local"]);
     }
 }

@@ -1,4 +1,4 @@
-//! Per-host connection state and reconnect backoff (M6 fix).
+//! Per-host connection state and reconnect backoff.
 //!
 //! Each host (including "local") has exactly one `HostConn` entry created
 //! before the first connection attempt. A generation counter tags readers and
@@ -113,7 +113,7 @@ impl Connections {
     }
 
     /// The current reconnect delay for `host`.
-    pub fn reconnect_delay(&self, host: &str) -> Duration {
+    fn reconnect_delay(&self, host: &str) -> Duration {
         self.map
             .get(host)
             .map(|c| c.reconnect_delay)
@@ -121,7 +121,7 @@ impl Connections {
     }
 
     /// Double the reconnect delay with ±20% jitter, capped at `RECONNECT_MAX`.
-    pub fn bump_delay(&mut self, host: &str) {
+    fn bump_delay(&mut self, host: &str) {
         if let Some(conn) = self.map.get_mut(host) {
             let base = (conn.reconnect_delay * 2).min(RECONNECT_MAX);
             // Jitter: use low bits of the current nanosecond timestamp.
@@ -131,6 +131,14 @@ impl Connections {
             let total_ms = (base_ms + jitter_ms).max(100) as u64;
             conn.reconnect_delay = Duration::from_millis(total_ms);
         }
+    }
+
+    /// Schedule the next attempt to reach `host`: the delay to wait first (the
+    /// backoff then grows), and the generation that attempt's events carry.
+    pub fn next_attempt(&mut self, host: &str) -> (Duration, u64) {
+        let delay = self.reconnect_delay(host);
+        self.bump_delay(host);
+        (delay, self.next_generation(host))
     }
 
     /// Reset the reconnect delay to the initial value on successful connect.

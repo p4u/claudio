@@ -167,9 +167,12 @@ pub struct Recovered {
 ///
 /// Used when reconciling a specific remote host's session list.
 pub fn merge_for_host(host: &str, saved: &ClientState, live: &[SessionInfo]) -> Vec<Recovered> {
-    // Skip tombstoned sessions.
-    let live_non_killed: Vec<&SessionInfo> =
-        live.iter().filter(|l| !saved.is_killed(l.id)).collect();
+    // Skip tombstoned sessions, and those that are not the manager's
+    // (`--plain`'s: never shown, never respawned).
+    let live_non_killed: Vec<&SessionInfo> = live
+        .iter()
+        .filter(|l| !l.ephemeral && !saved.is_killed(l.id))
+        .collect();
 
     let known = saved.sessions.iter().filter_map(|s| {
         // Skip tombstoned.
@@ -248,15 +251,9 @@ mod tests {
             id,
             cwd: "/srv".into(),
             name: Some("daemon-name".into()),
-            state: SessionState::Idle,
-            claude_session_id: csid.map(Into::into),
             title: Some("title".into()),
-            pid,
             created_at: 100,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..crate::tui::test_support::info(pid, csid)
         }
     }
 

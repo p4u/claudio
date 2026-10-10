@@ -1,4 +1,4 @@
-//! Proxy status cache (S1 split from app.rs). Profile loading and env
+//! Proxy status cache. Profile loading and env
 //! building live in [`crate::proxy::resolve`], shared with `--plain`.
 
 use std::collections::HashMap;

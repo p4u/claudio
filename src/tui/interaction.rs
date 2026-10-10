@@ -1,8 +1,8 @@
 //! Modal popup types and terminal input / wizard routing for [`App`].
 //!
 //! The `impl App` block here handles all keyboard, paste, mouse, focus and
-//! resize events, as well as wizard state transitions and host connection
-//! callbacks. It can access `App::effects` because that field is `pub(super)`.
+//! resize events, wizard state transitions and host connection callbacks,
+//! and the daemon's events and request replies.
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -15,12 +15,11 @@ use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::Screen;
 
-use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::sessions::SessionView;
-use super::state::KillTombstone;
 use super::stats_view::StatsView;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
@@ -33,11 +32,9 @@ pub enum Modal {
         id: SessionId,
         input: String,
     },
-    /// Confirm killing a session.
-    Close {
-        id: SessionId,
-    },
-    Wizard(Wizard),
+    /// The new-session wizard. Boxed like the history viewer: both are
+    /// several hundred bytes, the other modals a few dozen.
+    Wizard(Box<Wizard>),
     /// Proxy stats popup (see `stats_view.rs`).
     ProxyStats(StatsView),
     /// Overview / "mission control": all sessions at a glance.
@@ -48,7 +45,8 @@ pub enum Modal {
     },
     /// Help popup: all key bindings.
     Help,
-    /// A yes / no / skip question (see [`super::confirm`]).
+    /// A multiple-choice question: kill, reset, update claude (see
+    /// [`super::confirm`]).
     Confirm(ConfirmPrompt),
     /// The commit-history viewer (full pane).
     Git(Box<GitView>),
@@ -124,7 +122,7 @@ impl App {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             let bytes = encode_key(&key, &v.mirror.modes());
             if !bytes.is_empty() {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -171,11 +169,7 @@ impl App {
                     });
                 }
             }
-            Action::Close => {
-                if let Some(v) = self.active_view() {
-                    self.modal = Some(Modal::Close { id: v.id });
-                }
-            }
+            Action::Close => self.ask_kill(),
             Action::Quit => {
                 self.save();
                 self.quit = true;
@@ -241,29 +235,6 @@ impl App {
                 KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
                     input.push(c)
                 }
-                _ => {}
-            },
-            Modal::Close { id } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let id = *id;
-                    self.modal = None;
-                    if let Some(i) = self.index_of(id) {
-                        let host = self.sessions[i].host.clone();
-                        // M2: Add tombstone to killed list BEFORE sending Kill.
-                        self.killed.push(KillTombstone {
-                            host: host.clone(),
-                            id,
-                        });
-                        // Remove from session list (also queues Save via remove()).
-                        self.remove(i);
-                        // Save includes the tombstone since to_state() includes killed.
-                        self.save();
-                        // Kill is queued AFTER Save in the effects list, so the
-                        // tombstone is durably persisted before Kill reaches the daemon.
-                        self.request(&host, Msg::Kill { id }, ReplyTo::Kill(id));
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.modal = None,
                 _ => {}
             },
             Modal::ProxyStats(_) => self.stats_key(key),
@@ -353,15 +324,11 @@ impl App {
                 view.on_paste(text);
                 self.redraw = true;
             }
-            Some(Modal::Close { .. })
-            | Some(Modal::ProxyStats(_))
-            | Some(Modal::Overview { .. })
-            | Some(Modal::Help)
-            | Some(Modal::Confirm(_)) => {}
+            Some(Modal::ProxyStats(_) | Modal::Overview { .. } | Modal::Help | Modal::Confirm(_)) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
-                    self.effects.push(Effect::Input(v.id, bytes));
+                    self.emit(Effect::Input(v.id, bytes));
                 }
             }
         }
@@ -387,7 +354,7 @@ impl App {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             let origin = (0, self.mode.rows_above());
             if let Some(bytes) = encode_mouse(&m, origin, (cols, rows), &v.mirror.modes()) {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -395,7 +362,7 @@ impl App {
     fn on_focus(&mut self, gained: bool) {
         if let Some(v) = self.active_view().filter(|v| v.attached) {
             if let Some(bytes) = encode_focus(gained, &v.mirror.modes()) {
-                self.effects.push(Effect::Input(v.id, bytes));
+                self.emit(Effect::Input(v.id, bytes));
             }
         }
     }
@@ -426,85 +393,33 @@ impl App {
         match outcome {
             Outcome::None => {}
             Outcome::Cancel => self.modal = None,
-            Outcome::ConnectHost(host) => {
-                if host == "local" {
-                    // Compute seeds before mutably borrowing self.modal.
-                    let host_recent =
-                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
-                    let active_cwd_local: Option<String> = self.active_view().and_then(|v| {
-                        if v.host == "local" {
-                            Some(v.cwd.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    let new_seeds = super::wizard::assemble(
-                        active_cwd_local.as_deref(),
-                        &host_recent,
-                        &[],
-                    );
-                    let local_home = self.home.clone();
-                    let list_home = match &mut self.modal {
-                        Some(Modal::Wizard(w)) => {
-                            w.on_host_connected("local", &local_home, new_seeds);
-                            w.browse_home()
-                        }
-                        _ => Outcome::None,
-                    };
-                    self.wizard_outcome(list_home);
-                    self.request_local(
-                        Msg::RecentProjects {
-                            limit: PROJECTS_LIMIT,
-                        },
-                        ReplyTo::Projects,
-                    );
-                } else {
-                    self.effects.push(Effect::Connect(host));
-                }
+            // The local daemon is always connected.
+            Outcome::ConnectHost(host) if host == "local" => {
+                let home = self.home.clone();
+                self.on_host_connected("local", &home);
             }
+            Outcome::ConnectHost(host) => self.emit(Effect::Connect(host)),
             Outcome::ListDir(path) => {
-                let reply_to = if wizard_host == "local" {
-                    ReplyTo::DirEntries
-                } else {
-                    ReplyTo::RemoteDirEntries
-                };
-                self.request(&wizard_host, Msg::ListDir { path }, reply_to)
+                self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
             }
             Outcome::ChooseDir(cwd) => {
-                // If ChooseDir comes from the first screen's LOCAL section,
-                // the wizard is still in host_step. Transition to directory
-                // step (local host) before recording pending.
+                // A directory picked from the first screen's LOCAL section:
+                // move on to the local directory step, waiting for this one.
                 let in_host_step = matches!(&self.modal,
                     Some(Modal::Wizard(w)) if w.host_step.is_some());
                 if in_host_step {
-                    // Compute seeds before mutable borrow.
-                    let host_recent =
-                        super::state::recent_for_host(&self.recent_dirs, "local").to_vec();
-                    let active_cwd_local = self.active_view()
-                        .filter(|v| v.host == "local")
-                        .map(|v| v.cwd.clone());
-                    let seeds = super::wizard::assemble(
-                        active_cwd_local.as_deref(),
-                        &host_recent,
-                        &[],
-                    );
-                    let local_home = self.home.clone();
-                    let pending_dir = cwd.clone();
-                    if let Some(Modal::Wizard(w)) = &mut self.modal {
-                        w.on_host_connected("local", &local_home, seeds);
-                        w.pending = Some(pending_dir);
+                    let home = self.home.clone();
+                    if let Some(w) = self.wizard_enter_host("local", &home) {
+                        w.pending = Some(cwd.clone());
                     }
-                    self.request_local(
-                        Msg::RecentProjects { limit: PROJECTS_LIMIT },
-                        ReplyTo::Projects,
-                    );
+                    self.request_projects("local");
                 }
-                let reply_to = if wizard_host == "local" {
-                    ReplyTo::ClaudeSessions(cwd.clone(), wizard_gen)
-                } else {
-                    ReplyTo::RemoteClaudeSessions(cwd.clone(), wizard_gen)
+                let to = ReplyTo::ClaudeSessions {
+                    host: wizard_host.clone(),
+                    cwd: cwd.clone(),
+                    gen: wizard_gen,
                 };
-                self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, reply_to)
+                self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
             Outcome::Spawn { cwd, resume, proxy } => {
                 self.modal = None;
@@ -517,34 +432,35 @@ impl App {
         self.redraw = true;
     }
 
+    /// `host` (whose home is `home`) is connected: the wizard goes on to its
+    /// directory step, browsing the home directory.
     pub fn on_host_connected(&mut self, host: &str, home: &str) {
-        // Compute seeds before mutably borrowing self.modal.
-        let host_recent = super::state::recent_for_host(&self.recent_dirs, host).to_vec();
-        let active_cwd_for_host: Option<String> = self.active_view().and_then(|v| {
-            if v.host == host {
-                Some(v.cwd.clone())
-            } else {
-                None
-            }
-        });
-        let new_seeds =
-            super::wizard::assemble(active_cwd_for_host.as_deref(), &host_recent, &[]);
-
-        if let Some(Modal::Wizard(w)) = &mut self.modal {
-            w.on_host_connected(host, home, new_seeds);
+        if let Some(w) = self.wizard_enter_host(host, home) {
             let list_home = w.browse_home();
-            let gen = w.generation;
-            let h = host.to_owned();
-            self.effects.push(Effect::Request {
-                host: h,
-                msg: Msg::RecentProjects {
-                    limit: PROJECTS_LIMIT,
-                },
-                to: ReplyTo::RemoteProjects(host.to_owned(), gen),
-            });
+            self.request_projects(host);
             self.wizard_outcome(list_home);
         }
         self.redraw = true;
+    }
+
+    /// Move the open wizard on to `host`'s directory step, seeded for it.
+    fn wizard_enter_host(&mut self, host: &str, home: &str) -> Option<&mut Wizard> {
+        let seeds = self.wizard_seeds(host);
+        let w = self.wizard_mut()?;
+        w.on_host_connected(host, home, seeds);
+        Some(w)
+    }
+
+    /// The wizard's directory candidates on `host`: the active session's
+    /// directory when it runs there, then the host's recently used ones.
+    /// Recent claude projects follow when they arrive.
+    pub(super) fn wizard_seeds(&self, host: &str) -> Vec<String> {
+        let active_cwd = self
+            .active_view()
+            .filter(|v| v.host == host)
+            .map(|v| v.cwd.as_str());
+        let recent = super::state::recent_for_host(&self.recent_dirs, host);
+        super::wizard::assemble(active_cwd, recent, &[])
     }
 
     pub fn on_host_error(&mut self, host: &str, error: &str) {
@@ -558,7 +474,7 @@ impl App {
 
     pub(super) fn wizard_mut(&mut self) -> Option<&mut Wizard> {
         match &mut self.modal {
-            Some(Modal::Wizard(w)) => Some(w),
+            Some(Modal::Wizard(w)) => Some(w.as_mut()),
             _ => None,
         }
     }
@@ -603,28 +519,15 @@ impl App {
         if self.mode == Mode::Plain && self.plain_event(id, &event) {
             return;
         }
+        // Another client's new session becomes a tab, unless it is not one
+        // for the manager (`--plain`'s).
         if let SessionEvent::Created { info } = &event {
             if self.index_of(id).is_none() {
-                let (rows, cols) = self.pane_size();
-                self.sessions.push(SessionView {
-                    id,
-                    name: info.name.clone(),
-                    cwd: info.cwd.clone(),
-                    // M1 fix: use the originating host, not "local".
-                    host: host.to_owned(),
-                    state: info.state,
-                    title: info.title.clone(),
-                    claude_session_id: info.claude_session_id.clone(),
-                    created_at: info.created_at,
-                    mirror: Screen::new(rows, cols),
-                    attached: false,
-                    proxy: None,
-                    branch: info.branch.clone(),
-                    model: info.model.clone(),
-                    context_tokens: info.context_tokens,
-                    kind: info.kind,
-                });
-                self.save();
+                if !info.ephemeral {
+                    let view = SessionView::from_info(host, info, self.pane_size());
+                    self.sessions.push(view);
+                    self.save();
+                }
                 return;
             }
         }
@@ -690,32 +593,27 @@ impl App {
     pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
         self.redraw = true;
         match (to, reply) {
-            // M2: Kill acknowledged → clear tombstone.
-            (ReplyTo::Kill(id), Ok(Msg::Error { message }))
-                if message.contains("no such session") =>
-            {
-                self.killed.retain(|t| t.id != id);
-                self.save();
-            }
+            // Delivered (a session that is already gone answers "no such
+            // session"): the tombstone can go.
             (ReplyTo::Kill(id), Ok(_)) => {
                 self.killed.retain(|t| t.id != id);
                 self.save();
             }
-            (ReplyTo::Kill(id), Err(e)) => {
-                // Keep tombstone; will retry on next recovery.
-                self.notify(format!("kill failed (will retry): {e}"));
-                let _ = id; // tombstone stays
-            }
-            (ReplyTo::Projects, Ok(Msg::Projects { dirs })) => {
-                // Keep the full ProjectDir list for meta; extract paths for
-                // seed assembly and for App::projects cache.
-                let project_dirs = dirs;
-                self.projects = project_dirs.iter().map(|d| d.path.clone()).collect();
-                let projects = self.projects.clone();
+            // The tombstone stays, so the next recovery sends the Kill again.
+            (ReplyTo::Kill(_), Err(e)) => self.notify(format!("kill failed (will retry): {e}")),
+            (ReplyTo::Projects { host, gen }, Ok(Msg::Projects { dirs })) => {
+                let paths: Vec<String> = dirs.iter().map(|d| d.path.clone()).collect();
+                if host == "local" {
+                    // Seeds the next wizard at once.
+                    self.projects = paths.clone();
+                }
+                if gen != self.wizard_generation() {
+                    return;
+                }
                 if let Some(w) = self.wizard_mut() {
-                    // Local projects only apply when wizard is on "local".
-                    w.add_seeds_for_host("local", &projects);
-                    w.add_project_meta(&project_dirs);
+                    // Ignored unless the wizard is still on `host`.
+                    w.add_seeds_for_host(&host, &paths);
+                    w.add_project_meta(&dirs);
                 }
             }
             (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -723,11 +621,8 @@ impl App {
                     w.set_dir_entries(&path, &entries);
                 }
             }
-            // M12: ListClaudeSessions error must NOT be treated as "no sessions".
-            // Show the error and let the user retry.
-            (ReplyTo::ClaudeSessions(cwd, gen), reply) => {
+            (ReplyTo::ClaudeSessions { host, cwd, gen }, reply) => {
                 if gen != self.wizard_generation() {
-                    // S7: Stale reply from a cancelled wizard; discard.
                     return;
                 }
                 match reply {
@@ -738,8 +633,11 @@ impl App {
                         }
                     }
                     Ok(_) => {}
+                    // An error is not "no sessions": say so and let the user
+                    // retry.
                     Err(e) => {
-                        self.notify(format!("could not list claude sessions: {e}"));
+                        let place = if host == "local" { "" } else { "remote " };
+                        self.notify(format!("could not list {place}claude sessions: {e}"));
                         if let Some(w) = self.wizard_mut() {
                             w.set_claude_sessions_error(&cwd);
                         }
@@ -779,54 +677,13 @@ impl App {
                     }
                 }
             }
-            // Remote variants route to the same wizard handlers.
-            (ReplyTo::RemoteProjects(host, gen), Ok(Msg::Projects { dirs })) => {
-                if gen != self.wizard_generation() {
-                    // S7: stale reply from a cancelled or superseded wizard.
-                    return;
-                }
-                let project_dirs = dirs;
-                let project_paths: Vec<String> =
-                    project_dirs.iter().map(|d| d.path.clone()).collect();
-                if let Some(w) = self.wizard_mut() {
-                    // Only apply if the wizard is still on that host.
-                    w.add_seeds_for_host(&host, &project_paths);
-                    w.add_project_meta(&project_dirs);
-                }
-            }
-            (ReplyTo::RemoteDirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
-                if let Some(w) = self.wizard_mut() {
-                    w.set_dir_entries(&path, &entries);
-                }
-            }
-            (ReplyTo::RemoteClaudeSessions(cwd, gen), reply) => {
-                if gen != self.wizard_generation() {
-                    // S7: Stale reply from a cancelled wizard; discard.
-                    return;
-                }
-                match reply {
-                    Ok(Msg::ClaudeSessions { sessions, .. }) => {
-                        if let Some(w) = self.wizard_mut() {
-                            let outcome = w.set_claude_sessions(&cwd, sessions);
-                            self.wizard_outcome(outcome);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        self.notify(format!("could not list remote claude sessions: {e}"));
-                        if let Some(w) = self.wizard_mut() {
-                            w.set_claude_sessions_error(&cwd);
-                        }
-                    }
-                }
-            }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
             // Typing a path that doesn't exist (yet) is not an error.
-            (ReplyTo::DirEntries | ReplyTo::RemoteDirEntries, Err(_)) => {}
+            (ReplyTo::DirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {
                 let what = match to {
                     ReplyTo::Ack(what) => what,
-                    ReplyTo::Projects | ReplyTo::RemoteProjects(..) => "recent projects",
+                    ReplyTo::Projects { .. } => "recent projects",
                     _ => "request",
                 };
                 self.notify(format!("{what} failed: {e}"));
@@ -848,6 +705,6 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
     let label = v.label().to_lowercase();
     let cwd = v.cwd.to_lowercase();
     let host = v.host.to_lowercase();
-    let state = super::ui::state_name(v.state).to_lowercase();
+    let state = v.state.name();
     label.contains(&f) || cwd.contains(&f) || host.contains(&f) || state.contains(&f)
 }

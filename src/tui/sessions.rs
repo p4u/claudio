@@ -1,9 +1,8 @@
 //! Session view type, sanitization helpers, and session lifecycle methods.
 //!
-//! `SessionView` and `sanitize_label` are the shared types.
-//! The `impl App` block at the bottom adds session lifecycle methods to `App`;
-//! it lives here (a sibling of `app.rs`) to keep each file focused. It can
-//! access `App::effects` because that field is `pub(super)`.
+//! `SessionView` and `sanitize_label` are the shared types. The `impl App`
+//! block adds the session lifecycle to `App`: spawning, activation, reset,
+//! kill and recovery.
 
 use uuid::Uuid;
 
@@ -12,8 +11,11 @@ use crate::proto::{
 };
 use crate::term::screen::Screen;
 
+use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
-use super::state::{self, ClientState, SavedSession};
+use super::interaction::Modal;
+use super::state::{self, ClientState, KillTombstone, SavedSession};
+use super::wizard::{self, Wizard};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 
@@ -58,6 +60,64 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    /// A detached view of a session that nothing is known about yet but where
+    /// and what it runs. `size` is the pane's `(rows, cols)`.
+    pub fn new(
+        id: SessionId,
+        host: impl Into<String>,
+        cwd: impl Into<String>,
+        kind: SessionKind,
+        size: (u16, u16),
+    ) -> SessionView {
+        SessionView {
+            id,
+            name: None,
+            cwd: cwd.into(),
+            host: host.into(),
+            // A shell has no hooks to report its state: it is simply idle.
+            state: match kind {
+                SessionKind::Claude => SessionState::Starting,
+                SessionKind::Shell => SessionState::Idle,
+            },
+            title: None,
+            claude_session_id: None,
+            created_at: 0,
+            mirror: Screen::new(size.0, size.1),
+            attached: false,
+            proxy: None,
+            branch: None,
+            model: None,
+            context_tokens: None,
+            kind,
+        }
+    }
+
+    /// The view of a session `host`'s daemon reports.
+    pub fn from_info(host: &str, info: &SessionInfo, size: (u16, u16)) -> SessionView {
+        SessionView {
+            name: info.name.clone(),
+            state: info.state,
+            title: info.title.clone(),
+            claude_session_id: info.claude_session_id.clone(),
+            created_at: info.created_at,
+            branch: info.branch.clone(),
+            model: info.model.clone(),
+            context_tokens: info.context_tokens,
+            ..SessionView::new(info.id, host, info.cwd.clone(), info.kind, size)
+        }
+    }
+
+    /// The view of a session as state.json remembers it.
+    pub fn from_saved(saved: SavedSession, size: (u16, u16)) -> SessionView {
+        SessionView {
+            name: saved.name,
+            claude_session_id: saved.claude_session_id,
+            created_at: saved.created_at,
+            proxy: saved.proxy,
+            ..SessionView::new(saved.id, saved.host, saved.cwd, saved.kind, size)
+        }
+    }
+
     /// The tab label: the user's name, else a meaningful claude title (not
     /// "Claude Code"), else the cwd's basename. A terminal is its name, else
     /// `term`; its title is ignored so a shell prompt cannot rename the tab.
@@ -113,13 +173,6 @@ pub(super) struct SpawnRequest {
 }
 
 // ── Session lifecycle (impl App) ──────────────────────────────────────────────
-//
-// These methods are spread into sessions.rs to keep app.rs focused on the
-// App struct, constructors, and proxy/persistence logic.
-
-use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
-use super::interaction::Modal;
-use super::wizard::{self, Wizard};
 
 impl App {
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -143,38 +196,24 @@ impl App {
         }
     }
 
-    /// The current wizard's generation (0 if no wizard is open).
+    /// The open wizard's generation (0 if no wizard is open).
     pub(super) fn wizard_generation(&self) -> u64 {
         match &self.modal {
-            Some(Modal::Wizard(w)) => w.generation,
+            Some(Modal::Wizard(_)) => self.modal_gen,
             _ => 0,
         }
     }
 
-    // ── Effects helpers ───────────────────────────────────────────────────────
-
-    /// Enqueue a Save effect (deduped: only one at a time at the tail).
-    pub(super) fn save(&mut self) {
-        if !self.mode.persists() {
-            return;
-        }
-        if !matches!(self.effects.last(), Some(Effect::Save)) {
-            self.effects.push(Effect::Save);
-        }
-    }
-
-    /// Send a request to `host`'s daemon.
-    pub(super) fn request(&mut self, host: &str, msg: Msg, to: ReplyTo) {
-        self.effects.push(Effect::Request {
+    /// Ask `host` for its recent projects, to seed the open wizard.
+    pub(super) fn request_projects(&mut self, host: &str) {
+        let to = ReplyTo::Projects {
             host: host.to_owned(),
-            msg,
-            to,
-        });
-    }
-
-    /// Send a request to the local daemon.
-    pub(super) fn request_local(&mut self, msg: Msg, to: ReplyTo) {
-        self.request("local", msg, to);
+            gen: self.wizard_generation(),
+        };
+        let msg = Msg::RecentProjects {
+            limit: PROJECTS_LIMIT,
+        };
+        self.request(host, msg, to);
     }
 
     // ── Activate / remove ─────────────────────────────────────────────────────
@@ -290,30 +329,12 @@ impl App {
             args,
         };
         self.send_spawn(&host, req, proxy.as_deref())?;
-        let (rows, cols) = self.pane_size();
-        self.sessions.insert(
-            at,
-            SessionView {
-                id,
-                name: None,
-                cwd,
-                host,
-                state: match kind {
-                    SessionKind::Claude => SessionState::Starting,
-                    SessionKind::Shell => SessionState::Idle,
-                },
-                title: None,
-                claude_session_id: None,
-                created_at: self.now,
-                mirror: Screen::new(rows, cols),
-                attached: false,
-                proxy,
-                branch: None,
-                model: None,
-                context_tokens: None,
-                kind,
-            },
-        );
+        let view = SessionView {
+            created_at: self.now,
+            proxy,
+            ..SessionView::new(id, host, cwd, kind, self.pane_size())
+        };
+        self.sessions.insert(at, view);
         self.activate(at);
         Ok(())
     }
@@ -361,6 +382,8 @@ impl App {
             env: vec![], // filled by `send_with_proxy`
             rows,
             cols,
+            // `--plain`'s session is not one for a manager to show.
+            ephemeral: self.mode == Mode::Plain,
         };
         self.send_with_proxy(host, Msg::Spawn(spec), proxy, ReplyTo::Spawned(id))
     }
@@ -378,7 +401,7 @@ impl App {
     ) -> Result<(), String> {
         match proxy {
             Some(name) if self.proxy_config_cached(name).is_none() => {
-                self.effects.push(Effect::SpawnWithProxy {
+                self.emit(Effect::SpawnWithProxy {
                     host: host.to_owned(),
                     msg,
                     proxy_name: name.to_owned(),
@@ -391,6 +414,38 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    // ── Close (Alt+x) ─────────────────────────────────────────────────────────
+
+    /// Ask before killing the active session.
+    pub(super) fn ask_kill(&mut self) {
+        let Some(v) = self.active_view() else { return };
+        let prompt = ConfirmPrompt::new(
+            "Close session",
+            format!("Kill session {}?", v.label()),
+            vec![
+                Choice::new('y', "kill", Some(ConfirmAction::Kill(v.id))),
+                Choice::new('n', "cancel", None),
+            ],
+        );
+        self.queue_confirm(prompt.ready());
+    }
+
+    /// Kill session `id` and close its tab. The tombstone is saved before the
+    /// Kill is sent, so a Kill lost on the way is sent again on recovery
+    /// instead of the session coming back.
+    pub(super) fn kill_session(&mut self, id: SessionId) {
+        let Some(i) = self.index_of(id) else { return };
+        let host = self.sessions[i].host.clone();
+        self.killed.push(KillTombstone {
+            host: host.clone(),
+            id,
+        });
+        // Saves: state.json has the tombstone (`to_state` includes `killed`)
+        // and no longer the session.
+        self.remove(i);
+        self.request(&host, Msg::Kill { id }, ReplyTo::Kill(id));
     }
 
     // ── Reset (Alt+e) ─────────────────────────────────────────────────────────
@@ -466,45 +521,41 @@ impl App {
     }
 
     pub(super) fn open_wizard(&mut self) {
-        let active_cwd = self.active_view().map(|v| v.cwd.clone());
         let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
         let active_host = self.active_host();
-
-        // Seeds come from the active host's recent dirs. If the user later
-        // switches to a remote host, on_host_connected rebuilds the seeds.
-        let host_recent = state::recent_for_host(&self.recent_dirs, &active_host).to_vec();
-
-        // Only include the active session's cwd if it is on the active host.
-        let active_cwd_for_host = active_cwd.as_deref().filter(|_| {
-            self.active_view()
-                .map(|v| v.host == active_host)
-                .unwrap_or(false)
-        });
-        let seeds = wizard::assemble(active_cwd_for_host, &host_recent, &self.projects);
-        let host_candidates = crate::remote::hosts::candidates();
-        // Determine effective proxy default for the wizard:
+        // The wizard starts on the active host; picking another host seeds
+        // it again (see `on_host_connected`).
+        let seeds = wizard::assemble(None, &self.wizard_seeds(&active_host), &self.projects);
+        // Effective proxy default for the wizard:
         // active session's proxy > startup override > config default.
         let proxy_default = active_proxy
             .as_deref()
             .or_else(|| self.proxy_override.pick(self.proxy_default.as_deref()));
-        self.modal = Some(Modal::Wizard(Wizard::new(
+        self.modal_gen += 1;
+        let wizard = Wizard::new(
             seeds,
             self.home.clone(),
             &active_host,
-            &host_candidates,
-            &self.proxy_profiles.clone(),
+            &self.ssh_hosts,
+            &self.proxy_profiles,
             proxy_default,
-        )));
-        self.request_local(
-            Msg::RecentProjects {
-                limit: PROJECTS_LIMIT,
-            },
-            ReplyTo::Projects,
         );
+        self.modal = Some(Modal::Wizard(Box::new(wizard)));
+        // `~/.ssh/config` may have changed since the list was read.
+        self.emit(Effect::LoadSshHosts);
+        self.request_projects("local");
         self.redraw = true;
     }
 
     // ── Recovery ─────────────────────────────────────────────────────────────
+
+    /// Begin as the manager: recover the tabs, and subscribe to the local
+    /// host's CPU and memory samples for the status bar (an old daemon
+    /// refuses; the sparklines then stay empty).
+    pub fn start_manager(&mut self, saved: &ClientState, live: &[SessionInfo]) {
+        self.recover(saved, live);
+        self.request("local", Msg::SubscribeHostStats, ReplyTo::Ack("host_stats"));
+    }
 
     /// Full recovery: rebuild the entire session list from `saved` and the
     /// daemon's `live` sessions (initial local startup).
@@ -516,7 +567,7 @@ impl App {
         self.recover_host_inner("local", saved, live, true);
     }
 
-    /// Host-scoped recovery (M1 fix): reconcile only the given host's
+    /// Host-scoped recovery: reconcile only the given host's
     /// sessions against the current live list from that host's daemon.
     ///
     /// - Does NOT touch sessions belonging to other hosts.
@@ -556,7 +607,7 @@ impl App {
         live: &[SessionInfo],
         is_full: bool,
     ) {
-        let (rows, cols) = self.pane_size();
+        let size = self.pane_size();
         if is_full {
             self.connected = true;
             self.sessions.clear();
@@ -566,18 +617,9 @@ impl App {
         let merged = state::merge_for_host(host, saved, live);
 
         // Re-send Kill for tombstoned sessions that are still live.
-        for live_info in live {
-            if self
-                .killed
-                .iter()
-                .any(|t| t.id == live_info.id && t.host == host)
-            {
-                let id = live_info.id;
-                self.effects.push(Effect::Request {
-                    host: host.to_owned(),
-                    msg: Msg::Kill { id },
-                    to: ReplyTo::Kill(id),
-                });
+        for id in live.iter().map(|info| info.id) {
+            if self.killed.iter().any(|t| t.id == id && t.host == host) {
+                self.request(host, Msg::Kill { id }, ReplyTo::Kill(id));
             }
         }
 
@@ -595,21 +637,9 @@ impl App {
                 }
             }
             self.sessions.push(SessionView {
-                id: r.saved.id,
-                name: r.saved.name,
-                cwd: r.saved.cwd,
-                host: r.saved.host,
                 state: r.state,
                 title: r.title,
-                claude_session_id: r.saved.claude_session_id,
-                created_at: r.saved.created_at,
-                mirror: Screen::new(rows, cols),
-                attached: false,
-                proxy: r.saved.proxy,
-                branch: None,
-                model: None,
-                context_tokens: None,
-                kind: r.saved.kind,
+                ..SessionView::from_saved(r.saved, size)
             });
         }
 
@@ -643,7 +673,7 @@ impl App {
         self.recover_host("local", live);
     }
 
-    /// The local daemon connection dropped (M1 fix: only affects local sessions).
+    /// The local daemon connection dropped; only local sessions are affected.
     pub fn on_disconnected_local(&mut self) {
         self.connected = false;
         for v in &mut self.sessions {

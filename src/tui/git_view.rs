@@ -11,8 +11,6 @@
 //! abandoned (the page was popped) is recognized and dropped.
 //! `tui/ui/git.rs` renders the state; `tui/git_app.rs` connects it to `App`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use crate::proto::{GitCommitInfo, GitFile, GitLogEntry, Msg};
@@ -29,10 +27,6 @@ pub const CHROME: usize = 2;
 pub const MESSAGE_ROWS_MAX: usize = 8;
 /// Fixed rows of the commit page above the message: id, author, date, refs.
 const COMMIT_HEAD_ROWS: usize = 4;
-
-/// Gives each view a unique generation, so a late reply cannot reach a view
-/// that replaced the one it was asked by.
-static GIT_GEN: AtomicU64 = AtomicU64::new(1);
 
 /// What the caller must do after feeding the view an input.
 #[derive(Debug, PartialEq)]
@@ -55,7 +49,6 @@ pub enum Load<T> {
 }
 
 pub struct GitView {
-    pub gen: u64,
     pub host: String,
     cwd: String,
     /// Whether the log spans all branches (`a`).
@@ -346,7 +339,6 @@ impl GitView {
     /// A view of the history at `cwd` on `host`, and its first request.
     pub fn open(host: String, cwd: String) -> (GitView, GitOutcome) {
         let mut view = GitView {
-            gen: GIT_GEN.fetch_add(1, Ordering::Relaxed),
             host,
             cwd,
             all: false,
@@ -846,13 +838,6 @@ mod tests {
         );
         assert!(view.loading_log());
         assert_eq!(view.host, "devbox");
-    }
-
-    #[test]
-    fn each_view_gets_its_own_generation() {
-        let (a, _) = GitView::open("local".into(), "/r".into());
-        let (b, _) = GitView::open("local".into(), "/r".into());
-        assert_ne!(a.gen, b.gen);
     }
 
     #[test]

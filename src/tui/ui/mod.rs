@@ -16,14 +16,13 @@ mod git;
 mod stats;
 mod status;
 
-pub use stats::stats_max_scroll;
-pub use status::state_name;
 use confirm::draw_confirm;
 use git::draw_git;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
+use super::fmt::{abbreviate_home, fmt_age, str_width, tail, truncate};
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -83,11 +82,6 @@ fn draw_plain(frame: &mut Frame, app: &App) {
 fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
     match &app.modal {
         Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
-        Some(Modal::Close { id }) => {
-            if let Some(view) = app.sessions.iter().find(|v| v.id == *id) {
-                draw_close(frame, &view.label());
-            }
-        }
         Some(Modal::Wizard(w)) => {
             let toggle_key = app
                 .keymap
@@ -369,18 +363,6 @@ fn draw_rename(frame: &mut Frame, input: &str) {
     let rect = centered(area, 60.min(area.width.saturating_sub(4)), 3);
     let inner = popup(frame, rect, "Rename session (Enter save · Esc cancel)");
     draw_input(frame, inner, "", input);
-}
-
-fn draw_close(frame: &mut Frame, label: &str) {
-    let text = format!("Kill session {label}? [y] kill · [n]/Esc cancel");
-    let area = frame.area();
-    let rect = centered(
-        area,
-        (str_width(&text) as u16 + 4).min(area.width.saturating_sub(2)),
-        3,
-    );
-    let inner = popup(frame, rect, "Close session");
-    frame.render_widget(Paragraph::new(text), inner);
 }
 
 /// Render `rows` into `area`, highlighting `selected` and scrolling to keep
@@ -676,76 +658,6 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-// ── Text helpers ──────────────────────────────────────────────────────────────
-
-/// Display width of `s` in terminal columns.
-pub fn str_width(s: &str) -> usize {
-    Span::raw(s).width()
-}
-
-/// Cut `s` to at most `max` columns, ending in `…` when shortened.
-pub fn truncate(s: &str, max: usize) -> String {
-    if str_width(s) <= max {
-        return s.to_owned();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in s.chars() {
-        let w = char_width(c);
-        if used + w > max - 1 {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('…');
-    out
-}
-
-/// The last `max` columns of `s`.
-fn tail(s: &str, max: usize) -> String {
-    let mut used = 0;
-    let mut chars: Vec<char> = Vec::new();
-    for c in s.chars().rev() {
-        used += char_width(c);
-        if used > max {
-            break;
-        }
-        chars.push(c);
-    }
-    chars.into_iter().rev().collect()
-}
-
-fn char_width(c: char) -> usize {
-    let mut buf = [0u8; 4];
-    str_width(c.encode_utf8(&mut buf))
-}
-
-/// Replace a leading `home` with `~`.
-pub fn abbreviate_home(path: &str, home: &str) -> String {
-    if home.is_empty() || home == "/" {
-        return path.to_owned();
-    }
-    match path.strip_prefix(home) {
-        Some("") => "~".to_owned(),
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_owned(),
-    }
-}
-
-/// A compact duration: `42s`, `12m`, `3h`, `5d`.
-pub fn fmt_age(secs: u64) -> String {
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        3600..=86_399 => format!("{}h", secs / 3600),
-        _ => format!("{}d", secs / 86_400),
-    }
-}
-
 // ── Overview popup ────────────────────────────────────────────────────────────
 
 /// Render the overview / "mission control" popup.
@@ -792,7 +704,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
             let age = fmt_age(app.now.saturating_sub(v.created_at));
             let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
             let state = match v.kind {
-                SessionKind::Claude => state_name(v.state),
+                SessionKind::Claude => v.state.name(),
                 SessionKind::Shell => "terminal",
             };
             let label = v.label();
@@ -894,18 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_marks_cut_text() {
-        assert_eq!(truncate("claudio", 10), "claudio");
-        assert_eq!(truncate("claudio", 7), "claudio");
-        assert_eq!(truncate("claudio", 5), "clau…");
-        assert_eq!(truncate("claudio", 1), "…");
-        assert_eq!(truncate("claudio", 0), "");
-        // Wide characters count two columns.
-        assert_eq!(truncate("日本語です", 5), "日本…");
-        assert_eq!(str_width(&truncate("日本語です", 4)), 3);
-    }
-
-    #[test]
     fn tabs_fit_untouched_when_there_is_room() {
         assert_eq!(fit_tabs(&[5, 7, 3], Some(0), 200), vec![5, 7, 3]);
     }
@@ -956,27 +856,11 @@ mod tests {
 
     #[test]
     fn tab_titles_show_label_only() {
-        use super::super::super::proto::SessionState;
-        use super::super::super::term::screen::Screen;
-        use super::super::app::SessionView;
         use uuid::Uuid;
         let now = 600u64;
         let make_view = |name: &str| SessionView {
-            id: Uuid::new_v4(),
             name: Some(name.to_owned()),
-            cwd: "/srv".into(),
-            host: "local".into(),
-            state: SessionState::Idle,
-            title: None,
-            claude_session_id: None,
-            created_at: 0,
-            mirror: Screen::new(24, 80),
-            attached: false,
-            proxy: None,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..SessionView::new(Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (24, 80))
         };
         let sessions = vec![make_view("api"), make_view("docs")];
         // Wide bar: labels appear, no age.
@@ -988,20 +872,5 @@ mod tests {
         let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
         let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
         assert!(str_width(&narrow_text) <= 21);
-    }
-
-    #[test]
-    fn home_is_abbreviated_only_on_a_path_boundary() {
-        assert_eq!(abbreviate_home("/home/u/repos", "/home/u"), "~/repos");
-        assert_eq!(abbreviate_home("/home/u", "/home/u"), "~");
-        assert_eq!(abbreviate_home("/home/user2", "/home/u"), "/home/user2");
-    }
-
-    #[test]
-    fn ages_are_compact() {
-        assert_eq!(fmt_age(5), "5s");
-        assert_eq!(fmt_age(300), "5m");
-        assert_eq!(fmt_age(7200), "2h");
-        assert_eq!(fmt_age(3 * 86_400), "3d");
     }
 }

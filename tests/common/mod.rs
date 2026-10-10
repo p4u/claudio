@@ -970,6 +970,24 @@ pub fn current_nonce(tui: &TuiProcess) -> String {
 /// replace every non-alphanumeric character with `-`.
 ///
 /// Replicated here because integration tests cannot import the binary crate.
+/// Run git in `dir` with a fixed identity and no system config; panics on
+/// failure. (The daemon's unit tests have the same helper in-crate.)
+pub fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=Tess", "-c", "user.email=tess@example.org"])
+        .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Keep in sync with `src/claude/projects.rs::encode_cwd`.
 pub fn encode_cwd(path: &std::path::Path) -> String {
     path.to_string_lossy()

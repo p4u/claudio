@@ -16,7 +16,9 @@ use crate::proxy::api::SessionCredential;
 
 use super::super::app::App;
 use super::super::sessions::SessionView;
-use super::{abbreviate_home, fmt_age, str_width, truncate};
+use super::super::fmt::{
+    abbreviate_home, fmt_age, fmt_context, short_model, spans_width, str_width, truncate,
+};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -82,20 +84,6 @@ fn state_color(state: SessionState) -> Color {
 
 // ── Status bar ────────────────────────────────────────────────────────────────
 
-/// Human name of a session state.
-pub fn state_name(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Starting => "starting",
-        SessionState::Working => "working",
-        SessionState::NeedsApproval => "needs approval",
-        SessionState::NeedsInput => "needs input",
-        SessionState::Idle => "idle",
-        SessionState::Error => "error",
-        SessionState::Exited => "exited",
-        SessionState::Unknown => "unknown",
-    }
-}
-
 /// Line 1: session info — host:cwd, branch, model, context tokens, state, proxy.
 pub(super) fn draw_status_session(frame: &mut Frame, app: &App, area: Rect) {
     let spans = if !app.connected {
@@ -126,14 +114,12 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
         segments.push(vec![colored(format!("⎇ {branch}"), GREEN)]);
     }
     if let Some(model) = &v.model {
-        // Strip "claude-" prefix and truncate.
-        let short = model.strip_prefix("claude-").unwrap_or(model);
-        segments.push(vec![bold_colored(truncate(short, 14), BLUE)]);
+        segments.push(vec![bold_colored(truncate(short_model(model), 14), BLUE)]);
     }
     if let Some(ctx) = v.context_tokens {
-        segments.push(vec![colored(fmt_tokens_k(ctx), CYAN)]);
+        segments.push(vec![colored(fmt_context(ctx), CYAN)]);
     }
-    segments.push(vec![colored(state_name(v.state), state_color(v.state))]);
+    segments.push(vec![colored(v.state.name(), state_color(v.state))]);
     if v.created_at > 0 && app.now >= v.created_at {
         segments.push(vec![dim(fmt_age(app.now.saturating_sub(v.created_at)))]);
     }
@@ -294,10 +280,6 @@ fn draw_bar(frame: &mut Frame, spans: Vec<Span<'static>>, area: Rect) {
 
 // ── Span helpers ──────────────────────────────────────────────────────────────
 
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|s| str_width(&s.content)).sum()
-}
-
 /// Cut `spans` to at most `max` columns, keeping each span's style. The span
 /// that straddles the limit is shortened with `…`.
 fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
@@ -327,17 +309,6 @@ fn sparkline(vals: &[f32], max: f32) -> String {
             BARS[idx]
         })
         .collect()
-}
-
-/// Format context tokens: `143k`, `1.2M`, or raw for small values.
-fn fmt_tokens_k(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("ctx {:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1000 {
-        format!("ctx {}k", n / 1000)
-    } else {
-        format!("ctx {n}")
-    }
 }
 
 #[cfg(test)]
@@ -421,24 +392,15 @@ mod tests {
     #[test]
     fn status_line_appends_the_credential_after_the_proxy_badge() {
         use crate::proto::SessionKind;
-        let mut app = App::new(120, 30, "/home/u".into(), vec![]);
+        let mut app = App::new(crate::tui::app::AppConfig { size: (120, 30), ..crate::tui::test_support::config() });
         app.now = 1_000;
         app.sessions.push(SessionView {
-            id: uuid::Uuid::new_v4(),
             name: Some("s".into()),
-            cwd: "/srv".into(),
-            host: "local".into(),
             state: SessionState::Idle,
-            title: None,
             claude_session_id: Some("c1".into()),
-            created_at: 0,
-            mirror: crate::term::screen::Screen::new(10, 40),
             attached: true,
             proxy: Some("work".into()),
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
+            ..SessionView::new(uuid::Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (10, 40))
         });
         app.active = Some(0);
         let line = |app: &App| plain(&join_segments(session_segments(app, &app.sessions[0])));

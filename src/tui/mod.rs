@@ -8,6 +8,7 @@ pub mod app;
 mod claude_update;
 mod confirm;
 mod connections;
+mod fmt;
 mod git_app;
 mod git_view;
 mod interaction;
@@ -18,6 +19,8 @@ mod proxy_state;
 mod sessions;
 mod state;
 mod stats_view;
+#[cfg(test)]
+mod test_support;
 mod ui;
 mod wizard;
 
@@ -45,7 +48,7 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
 
-use app::{App, Effect, Mode, ReplyTo};
+use app::{App, AppConfig, Effect, Mode, ReplyTo};
 use connections::Connections;
 use plain::PlainStart;
 use state::ClientState;
@@ -63,10 +66,10 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// Emit an OSC 9 desktop notification + single BEL to the outer terminal for a
 /// session label. Written directly to stdout, between ratatui frames.
 ///
-/// M3 fix: label is sanitized before embedding; only one BEL.
+/// The label comes from claude (its title) and is sanitized first, so it
+/// cannot smuggle escape sequences into the outer terminal.
 fn emit_notification(label: &str) {
     use std::io::Write;
-    // sanitize_label strips C0/C1/DEL and caps at 200 chars.
     let safe = sessions::sanitize_label(label, 200);
     let msg = format!("\x1b]9;claudio: {safe} needs you\x07");
     let _ = std::io::stdout().write_all(msg.as_bytes());
@@ -82,6 +85,17 @@ enum Launch {
         proxy: crate::proxy::ProxyChoice,
         args: Vec<String>,
     },
+}
+
+/// What the app does first, once made.
+enum Start {
+    /// Recover the manager's tabs from state.json and the local daemon.
+    Manager {
+        saved: ClientState,
+        live: Vec<SessionInfo>,
+    },
+    /// Start the one `--plain` session.
+    Plain(PlainStart),
 }
 
 /// Run the manager until the user quits.
@@ -123,7 +137,7 @@ fn run_launch(launch: Launch) -> ExitCode {
 
 async fn main(launch: Launch) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
-    let cfg = crate::config::load();
+    let config = crate::config::load();
     let mut key_notices = Vec::new();
     let (proxy_override, plain) = match launch {
         Launch::Manager(proxy) => (proxy, None),
@@ -139,9 +153,9 @@ async fn main(launch: Launch) -> ExitCode {
             (proxy, Some(start))
         }
     };
-    let km = match plain {
-        Some(_) => keymap::Keymap::build_plain(&cfg.keys, &mut key_notices),
-        None => keymap::Keymap::build(&cfg.keys, &mut key_notices),
+    let keymap = match plain {
+        Some(_) => keymap::Keymap::build_plain(&config.keys, &mut key_notices),
+        None => keymap::Keymap::build(&config.keys, &mut key_notices),
     };
     let plain_id = plain.as_ref().map(|p| p.id);
 
@@ -157,7 +171,7 @@ async fn main(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut terminal = match enter_terminal() {
+    let (mut terminal, size) = match enter_terminal() {
         Ok(t) => t,
         Err(e) => {
             restore_terminal();
@@ -165,21 +179,40 @@ async fn main(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
+    let app = App::new(AppConfig {
+        mode: if plain.is_some() { Mode::Plain } else { Mode::Manager },
+        size,
+        home: local_client.welcome().host.home.clone(),
+        keymap,
+        notify: config.ui.notify && plain.is_none(),
+        proxy_override,
+        proxy_profiles,
+        proxy_default,
+        claude: config.claude,
+        local_claude: client_claude(&local_client),
+        recent_dirs: saved.recent_dirs.clone(),
+        claude_skipped: saved.claude_skipped.clone(),
+        // `--plain` has no wizard to offer them in.
+        ssh_hosts: match plain {
+            Some(_) => Vec::new(),
+            None => crate::remote::hosts::candidates(),
+        },
+    });
+    let start = match plain {
+        Some(start) => Start::Plain(start),
+        None => Start::Manager { saved, live },
+    };
     let mut conns = Connections::with_local(local_client.clone());
     // A panic must still reach the cleanup below, so catch it and re-raise.
     let result = std::panic::AssertUnwindSafe(event_loop(
         &mut terminal,
         &mut conns,
-        saved,
+        app,
+        start,
         local_client,
-        live,
-        cfg.ui.notify,
-        cfg.update.check,
-        cfg.claude,
-        km,
+        config.update.check,
         key_notices,
-        proxy_override,
-        plain,
     ))
     .catch_unwind()
     .await;
@@ -237,7 +270,8 @@ async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
 
 // ── Terminal setup ────────────────────────────────────────────────────────────
 
-fn enter_terminal() -> io::Result<Term> {
+/// Set the terminal up for the UI; returns it with its size `(width, height)`.
+fn enter_terminal() -> io::Result<(Term, (u16, u16))> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -259,7 +293,9 @@ fn enter_terminal() -> io::Result<Term> {
         )?;
         KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
     }
-    Terminal::new(CrosstermBackend::new(out))
+    let terminal = Terminal::new(CrosstermBackend::new(out))?;
+    let size = terminal.size()?;
+    Ok((terminal, (size.width, size.height)))
 }
 
 /// Undo everything `enter_terminal` did. Safe to call more than once and
@@ -356,59 +392,38 @@ async fn shutdown_signal() {
     std::future::pending::<()>().await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn event_loop(
     terminal: &mut Term,
     conns: &mut Connections,
-    saved: ClientState,
+    mut app: App,
+    start: Start,
     local_client: Client,
-    live: Vec<SessionInfo>,
-    notify_enabled: bool,
     update_check_enabled: bool,
-    claude_policy: crate::config::ClaudeSection,
-    km: keymap::Keymap,
     key_notices: Vec<String>,
-    proxy_override: crate::proxy::ProxyChoice,
-    plain: Option<PlainStart>,
 ) -> io::Result<plain::Exit> {
-    let size = terminal.size()?;
-    let local_home = local_client.welcome().host.home.clone();
-    let mut app = App::new_with_proxy(
-        size.width,
-        size.height,
-        local_home,
-        saved.recent_dirs.clone(),
-        notify_enabled && plain.is_none(),
-        km,
-        proxy_override,
-    );
-    match plain {
-        Some(start) => app.start_plain(start),
-        None => {
-            app.claude_skipped = saved.claude_skipped.clone();
-            app.set_local_claude(client_claude(&local_client));
-            app.recover(&saved, &live);
-
-            // Subscribe to host stats pushes (CPU/mem sparklines).
-            // Old daemons reply Error; we treat that as "unsupported" and the
-            // sparklines just stay empty.
-            app.effects.push(Effect::Request {
-                host: "local".to_owned(),
-                msg: Msg::SubscribeHostStats,
-                to: ReplyTo::Ack("host_stats"),
-            });
+    let remote_hosts = match start {
+        Start::Plain(start) => {
+            app.start_plain(start);
+            Vec::new()
         }
-    }
+        Start::Manager { saved, live } => {
+            app.start_manager(&saved, &live);
+            // Every remote host a saved tab lives on.
+            let hosts: std::collections::BTreeSet<String> = saved
+                .sessions
+                .into_iter()
+                .map(|s| s.host)
+                .filter(|h| h != "local")
+                .collect();
+            hosts.into_iter().collect()
+        }
+    };
     let manager = app.mode == Mode::Manager;
 
     // Show any config parse notices in the status bar at startup.
     for notice in key_notices {
         app.notify(notice);
     }
-
-    // M6: `conns` has local pre-created (see `main`). The local entry always
-    // exists before any connection attempt, so bump_delay/reconnect_delay work
-    // even for the very first failure.
 
     // Merge all incoming streams into one tagged channel.
     let (ev_tx, mut ev_rx) = mpsc::channel::<HostEvent>(1024);
@@ -419,22 +434,12 @@ async fn event_loop(
         spawn_reader("local".to_owned(), gen, rx, ev_tx.clone());
     }
 
-    // Start background connections to every remote host that appears in saved.
-    {
-        let remote_hosts: Vec<String> = saved
-            .sessions
-            .iter()
-            .filter(|s| s.host != "local")
-            .map(|s| s.host.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        for host in remote_hosts {
-            // M6: ensure the entry exists before the first attempt.
-            conns.ensure_host(&host);
-            let gen = conns.next_generation(&host);
-            spawn_connect(host, gen, ev_tx.clone(), false);
-        }
+    // Start background connections to the saved tabs' remote hosts.
+    for host in remote_hosts {
+        // The entry must exist before the first attempt to track backoff.
+        conns.ensure_host(&host);
+        let gen = conns.next_generation(&host);
+        spawn_connect(host, gen, ev_tx.clone(), false);
     }
 
     // Kick off a non-blocking upgrade check. The result arrives as
@@ -449,7 +454,7 @@ async fn event_loop(
 
     // And, at most once a day, compare the local claude with its release
     // channel. The result arrives as HostEvent::ClaudeLatest.
-    if manager && claude_policy.update_check != crate::config::UpdatePolicy::Off {
+    if manager && app.claude_policy.update_check != crate::config::UpdatePolicy::Off {
         let tx = ev_tx.clone();
         tokio::spawn(async move {
             if let Some(latest) = crate::claude::update::check_due().await {
@@ -457,7 +462,6 @@ async fn event_loop(
             }
         });
     }
-    app.claude_policy = claude_policy;
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(ReplyTo, io::Result<Msg>)>();
     let mut events = EventStream::new();
@@ -499,59 +503,30 @@ async fn event_loop(
             _ = &mut shutdown, if !manager => return Ok(Default::default()),
             ev = ev_rx.recv() => match ev {
                 Some(HostEvent::Incoming(host, gen, inc)) => {
-                    // M6: drop stale events from replaced connections.
+                    // Drop stale events from replaced connections.
                     if gen < conns.current_generation(&host) {
                         continue;
                     }
-                    if host == "local" {
-                        match inc {
-                            Incoming::Disconnected => {
-                                conns.disconnect("local");
-                                app.on_disconnected_local();
-                                let delay = conns.reconnect_delay("local");
-                                conns.bump_delay("local");
-                                // M6: get generation for this reconnect attempt.
-                                let new_gen = conns.next_generation("local");
-                                let tx = ev_tx.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(delay).await;
-                                    match connect_local().await {
-                                        Ok((client, sessions)) => {
-                                            let _ = tx.send(HostEvent::LocalReconnected { client, sessions, generation: new_gen }).await;
-                                        }
-                                        Err(_) => {
-                                            // M6: local failures retry (was silently dropped before).
-                                            let _ = tx.send(HostEvent::LocalReconnectFailed { generation: new_gen }).await;
-                                        }
-                                    }
-                                });
+                    match inc {
+                        // Reconnect with backoff.
+                        Incoming::Disconnected => {
+                            conns.disconnect(&host);
+                            app.on_incoming_from(&host, Incoming::Disconnected);
+                            let (delay, gen) = conns.next_attempt(&host);
+                            if host == "local" {
+                                spawn_reconnect_local(delay, gen, ev_tx.clone());
+                            } else {
+                                spawn_connect_after(host, gen, delay, ev_tx.clone(), true);
                             }
-                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
-                                app.on_host_stats("local".to_owned(), cpu_pct, mem_used, mem_total);
-                            }
-                            inc => app.on_incoming_from("local", inc),
                         }
-                    } else {
-                        match inc {
-                            Incoming::Disconnected => {
-                                conns.disconnect(&host);
-                                app.on_disconnected_remote(&host);
-                                // Reconnect with backoff.
-                                let delay = conns.reconnect_delay(&host);
-                                conns.bump_delay(&host);
-                                // M6: bump generation so stale LocalReconnected events are dropped.
-                                let new_gen = conns.next_generation(&host);
-                                spawn_connect_after(host, new_gen, delay, ev_tx.clone(), true);
-                            }
-                            Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
-                                app.on_host_stats(host, cpu_pct, mem_used, mem_total);
-                            }
-                            inc => app.on_incoming_from(&host, inc),
+                        Incoming::HostStats { cpu_pct, mem_used, mem_total, .. } => {
+                            app.on_host_stats(host, cpu_pct, mem_used, mem_total);
                         }
+                        inc => app.on_incoming_from(&host, inc),
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
-                    // M6: discard if a newer generation is already in flight.
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation(&host) {
                         continue;
                     }
@@ -566,29 +541,28 @@ async fn event_loop(
                     conns.connected(&host, client);
                     // Record this host in the MRU so it appears first next time.
                     crate::remote::hosts::touch(&host);
+                    app.on_ssh_hosts(crate::remote::hosts::candidates());
                     app.on_host_connected(&host, &home);
-                    // Recover remote sessions for this host only (M1 fix).
+                    // Recover this host's sessions only.
                     app.recover_host(&host, &sessions);
                     app.check_remote_claude(&host, remote_claude.as_deref());
                     app.redraw = true;
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
-                    // M6: discard if a newer generation is already in flight.
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation(&host) {
                         continue;
                     }
                     app.on_host_error(&host, &error);
                     conns.set_bootstrap_failed(&host, error.contains("bootstrap") || error.contains("install"));
-                    // Retry with backoff.
-                    let delay = conns.reconnect_delay(&host);
-                    conns.bump_delay(&host);
-                    let new_gen = conns.next_generation(&host);
-                    // On retry: skip bootstrap only if the last attempt did NOT fail in bootstrap.
+                    // Retry with backoff, bootstrapping again only if that
+                    // is what failed.
+                    let (delay, gen) = conns.next_attempt(&host);
                     let skip_bootstrap = !conns.bootstrap_failed(&host);
-                    spawn_connect_after(host, new_gen, delay, ev_tx.clone(), skip_bootstrap);
+                    spawn_connect_after(host, gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
-                    // M6: discard stale reconnections (a newer attempt already succeeded).
+                    // A newer attempt is already in flight.
                     if generation < conns.current_generation("local") {
                         continue;
                     }
@@ -603,25 +577,11 @@ async fn event_loop(
                     app.on_reconnected_local(&sessions, home);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
-                    // M6: local failure retries same as remote (was silently discarded before).
                     if generation < conns.current_generation("local") {
                         continue;
                     }
-                    let delay = conns.reconnect_delay("local");
-                    conns.bump_delay("local");
-                    let new_gen = conns.next_generation("local");
-                    let tx = ev_tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        match connect_local().await {
-                            Ok((client, sessions)) => {
-                                let _ = tx.send(HostEvent::LocalReconnected { client, sessions, generation: new_gen }).await;
-                            }
-                            Err(_) => {
-                                let _ = tx.send(HostEvent::LocalReconnectFailed { generation: new_gen }).await;
-                            }
-                        }
-                    });
+                    let (delay, gen) = conns.next_attempt("local");
+                    spawn_reconnect_local(delay, gen, ev_tx.clone());
                 }
                 Some(HostEvent::ProxyConfig { profile_name, config }) => {
                     if let Some(cfg) = config {
@@ -699,9 +659,9 @@ fn run_effect(
             }
         }
         Effect::Connect(host) => {
-            // M6: Wizard Connect on already-connected host reuses the connection.
+            // The wizard picked a host that is already connected: reuse the
+            // connection, and let the wizard advance as if it had just connected.
             if conns.is_connected(&host) {
-                // Deliver a synthetic Connected event so the wizard advances.
                 if let Some(client) = conns.client(&host) {
                     let home = client.welcome().host.home.clone();
                     app.on_host_connected(&host, &home);
@@ -709,11 +669,12 @@ fn run_effect(
                 }
                 return;
             }
-            // M6: ensure entry exists before first attempt.
+            // The entry must exist before the first attempt to track backoff.
             conns.ensure_host(&host);
             let gen = conns.next_generation(&host);
             spawn_connect(host, gen, ev_tx.clone(), false);
         }
+        Effect::LoadSshHosts => app.on_ssh_hosts(crate::remote::hosts::candidates()),
         Effect::Save => {
             if let Err(e) = app.to_state().save(&paths::client_state()) {
                 app.notify(format!("could not save state: {e}"));
@@ -907,6 +868,23 @@ fn spawn_reader(
                 break;
             }
         }
+    });
+}
+
+/// Spawn a task that reconnects to the local daemon (starting it if needed)
+/// after `delay`; the outcome comes back tagged with `generation`.
+fn spawn_reconnect_local(delay: Duration, generation: u64, tx: mpsc::Sender<HostEvent>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let event = match connect_local().await {
+            Ok((client, sessions)) => HostEvent::LocalReconnected {
+                client,
+                sessions,
+                generation,
+            },
+            Err(_) => HostEvent::LocalReconnectFailed { generation },
+        };
+        let _ = tx.send(event).await;
     });
 }
 

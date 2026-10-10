@@ -43,10 +43,11 @@ impl Exit {
 }
 
 impl App {
-    /// Become the plain UI and start its session on the local daemon, with
-    /// the proxy profile the startup choice picks (like the wizard's default).
+    /// Start the plain UI's session on the local daemon, with the proxy
+    /// profile the startup choice picks (like the wizard's default). The app
+    /// is one made in [`Mode::Plain`].
     pub fn start_plain(&mut self, start: PlainStart) {
-        self.mode = Mode::Plain;
+        debug_assert_eq!(self.mode, Mode::Plain);
         let proxy = self
             .proxy_override
             .pick(self.proxy_default.as_deref())
@@ -110,28 +111,24 @@ mod tests {
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
     use crate::proxy::ProxyChoice;
-    use crate::tui::app::{Effect, ReplyTo};
+    use crate::tui::app::{AppConfig, Effect, ReplyTo};
     use crate::tui::interaction::Modal;
     use crate::tui::keymap::Keymap;
+    use crate::tui::test_support::{self, alt};
     use crate::tui::ui;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn plain_app(args: &[&str]) -> (App, SessionId) {
         let mut notices = Vec::new();
-        let keymap = Keymap::build_plain(&Default::default(), &mut notices);
-        let mut app = App::new_with_proxy(
-            100,
-            30,
-            "/home/u".into(),
-            HashMap::new(),
-            false,
-            keymap,
-            ProxyChoice::Direct,
-        );
+        let mut app = App::new(AppConfig {
+            mode: Mode::Plain,
+            keymap: Keymap::build_plain(&Default::default(), &mut notices),
+            notify: false,
+            proxy_override: ProxyChoice::Direct,
+            ..test_support::config()
+        });
         let id = Uuid::new_v4();
         app.start_plain(PlainStart {
             id,
@@ -139,10 +136,6 @@ mod tests {
             cwd: "/work".into(),
         });
         (app, id)
-    }
-
-    fn alt(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
     }
 
     fn event(app: &mut App, id: SessionId, event: SessionEvent) {
@@ -181,6 +174,7 @@ mod tests {
         assert_eq!((spec.id, spec.cwd.as_str()), (id, "/work"));
         assert_eq!(spec.args, ["--resume", "abc"]);
         assert!(spec.env.is_empty(), "no proxy, no env");
+        assert!(spec.ephemeral, "not a session for a manager to show");
         // The pane is the whole screen.
         assert_eq!((spec.rows, spec.cols), (30, 100));
         assert_eq!(*to, ReplyTo::Spawned(id));
@@ -306,20 +300,7 @@ mod tests {
     fn foreign_sessions_never_appear() {
         let (mut app, _) = plain_app(&[]);
         app.take_effects();
-        let other = crate::proto::SessionInfo {
-            id: Uuid::new_v4(),
-            cwd: "/other".into(),
-            name: None,
-            state: SessionState::Idle,
-            claude_session_id: None,
-            title: None,
-            pid: Some(1),
-            created_at: 1,
-            branch: None,
-            model: None,
-            context_tokens: None,
-            kind: SessionKind::Claude,
-        };
+        let other = test_support::info(Some(1), None);
         event(&mut app, other.id, SessionEvent::Created { info: other.clone() });
         assert_eq!(app.sessions.len(), 1);
         // A reconnect re-attaches ours and leaves the others alone.

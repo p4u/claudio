@@ -48,6 +48,10 @@ pub struct Entry {
     pub claude_session_id: Option<String>,
     /// Unix seconds.
     pub created_at: u64,
+    /// Spawned with [`SpawnSpec::ephemeral`]: kept in memory (a reset needs
+    /// the entry) but never written, so a daemon restart forgets it.
+    #[serde(skip)]
+    pub ephemeral: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -120,9 +124,14 @@ impl Journal {
         &self.sessions
     }
 
-    /// Copy the current sessions list for an out-of-lock disk write.
+    /// Copy the entries to persist, for an out-of-lock disk write. Ephemeral
+    /// sessions are left out.
     pub fn snapshot(&self) -> Vec<Entry> {
-        self.sessions.clone()
+        self.sessions
+            .iter()
+            .filter(|e| !e.ephemeral)
+            .cloned()
+            .collect()
     }
 
     /// Persist a snapshot of sessions. Call this **outside** the registry lock.
@@ -135,9 +144,9 @@ impl Journal {
     }
 
     /// Update in-memory only (no disk write). A re-spawn of a known id keeps
-    /// its `created_at`, last claude session id and `kind` (`kind` only applies
-    /// to a new entry); cwd, name and args follow the new spec. Returns the
-    /// (possibly updated) entry.
+    /// its `created_at`, last claude session id, `kind` and `ephemeral` (those
+    /// only apply to a new entry); cwd, name and args follow the new spec.
+    /// Returns the (possibly updated) entry.
     pub fn upsert_entry(&mut self, spec: &SpawnSpec, kind: SessionKind) -> Entry {
         match self.sessions.iter_mut().find(|e| e.id == spec.id) {
             Some(e) => {
@@ -155,6 +164,7 @@ impl Journal {
                     kind,
                     claude_session_id: None,
                     created_at: crate::paths::unix_now(),
+                    ephemeral: spec.ephemeral,
                 };
                 self.sessions.push(e.clone());
                 e
@@ -247,7 +257,7 @@ impl Journal {
 
     /// Forget a session and persist. Returns the write result; callers that
     /// need durability (Kill) must propagate the error.
-    #[allow(dead_code)] // durable variant of remove_in_memory; kept for Kill-ack path (M2 design)
+    #[allow(dead_code)] // durable variant of remove_in_memory; kept for a Kill that must be durable
     pub fn remove(&mut self, id: SessionId) -> io::Result<bool> {
         if !self.remove_in_memory(id) {
             return Ok(false);
@@ -273,7 +283,29 @@ mod tests {
             env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "s3cret".into())],
             rows: 24,
             cols: 80,
+            ephemeral: false,
         }
+    }
+
+    #[test]
+    fn ephemeral_sessions_are_listed_but_never_written() {
+        let dir = std::env::temp_dir().join(format!("claudio-journal-{}", Uuid::new_v4()));
+        let path = dir.join("j.json");
+        let (kept, plain) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut j = Journal::load(&path);
+        j.record_spawn(&spec(kept), SessionKind::Claude).1.unwrap();
+        let ephemeral = SpawnSpec {
+            ephemeral: true,
+            ..spec(plain)
+        };
+        let (entry, res) = j.record_spawn(&ephemeral, SessionKind::Claude);
+        res.unwrap();
+        assert!(entry.ephemeral);
+        assert_eq!(j.entries().len(), 2, "known while the daemon runs");
+        let reloaded = Journal::load(&path);
+        let ids: Vec<_> = reloaded.entries().iter().map(|e| e.id).collect();
+        assert_eq!(ids, [kept], "a restarted daemon has only the durable one");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
