@@ -2048,7 +2048,10 @@ mod tests {
             notice_text(&app),
             "the proxy does not know this session yet — send a message first"
         );
-        app.on_switch_result(id, Err(SwitchError::NoAlternative));
+        app.on_switch_result(
+            id,
+            Err(SwitchError::NoAlternative("no other subscription available".into())),
+        );
         assert_eq!(notice_text(&app), "no other subscription available");
         app.on_switch_result(id, Err(SwitchError::TooOld));
         assert_eq!(notice_text(&app), "proxy too old for switching");

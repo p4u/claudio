@@ -445,10 +445,11 @@ pub enum SwitchError {
     /// 404: the proxy does not know the session (yet), or it is not yours.
     #[error("the proxy does not know this session yet — send a message first")]
     UnknownSession,
-    /// 409: no other subscription to move to.
-    #[error("no other subscription available")]
-    NoAlternative,
-    /// 405: a proxy without the switch route.
+    /// 409: no other subscription to move to; the proxy's reason.
+    #[error("{0}")]
+    NoAlternative(String),
+    /// A proxy without the switch route (it answers 404 or 405 and does not
+    /// list the `session_switch` capability).
     #[error("proxy too old for switching")]
     TooOld,
     #[error("{0}")]
@@ -471,11 +472,53 @@ pub async fn switch_session(
         .await
         .map_err(ApiError::from)?;
     match resp.status().as_u16() {
+        // An older proxy answers its unknown routes with 404 too.
+        404 if !has_capability(&client, base_url, token, "session_switch").await => {
+            Err(SwitchError::TooOld)
+        }
         404 => Err(SwitchError::UnknownSession),
-        409 => Err(SwitchError::NoAlternative),
+        409 => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let reason = body["error"]["message"]
+                .as_str()
+                .map(|m| m.trim_start_matches("claudio: ").to_owned())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "no other subscription available".to_owned());
+            Err(SwitchError::NoAlternative(reason))
+        }
         405 => Err(SwitchError::TooOld),
         _ if resp.status().is_success() => Ok(resp.json().await.map_err(ApiError::from)?),
         _ => Err(ApiError::Http(resp.status()).into()),
+    }
+}
+
+/// Whether the proxy's `/v1/claudio` discovery lists `capability`. Any
+/// failure counts as "no".
+async fn has_capability(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    capability: &str,
+) -> bool {
+    #[derive(Deserialize)]
+    struct Discovery {
+        #[serde(default)]
+        capabilities: Vec<String>,
+    }
+    let Ok(resp) = client
+        .get(format!("{base_url}/v1/claudio"))
+        .bearer_auth(token)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    match resp.error_for_status() {
+        Ok(resp) => resp
+            .json::<Discovery>()
+            .await
+            .is_ok_and(|d| d.capabilities.iter().any(|c| c == capability)),
+        Err(_) => false,
     }
 }
 
@@ -787,15 +830,25 @@ mod tests {
         assert!(o.to.is_none());
     }
 
+    /// `switch_router` plus the `/v1/claudio` discovery, listing `capabilities`.
+    fn switch_router_with(code: u16, body: serde_json::Value, capabilities: &[&str]) -> Router {
+        let discovery = serde_json::json!({"version": "1", "capabilities": capabilities});
+        switch_router(code, body).route("/v1/claudio", get(move || async move { Json(discovery) }))
+    }
+
     #[tokio::test]
     async fn switch_session_error_statuses() {
         let e = |code| async move {
-            let base =
-                serve(switch_router(code, serde_json::json!({"error": {"type": "x"}}))).await;
+            let base = serve(switch_router_with(
+                code,
+                serde_json::json!({"error": {"type": "x"}}),
+                &["session", "session_switch"],
+            ))
+            .await;
             switch_session(&base, "tok", "0a1b").await.unwrap_err()
         };
         assert!(matches!(e(404).await, SwitchError::UnknownSession));
-        assert!(matches!(e(409).await, SwitchError::NoAlternative));
+        assert!(matches!(e(409).await, SwitchError::NoAlternative(r) if r == "no other subscription available"));
         assert!(matches!(e(405).await, SwitchError::TooOld));
         for code in [400u16, 401, 429] {
             assert!(matches!(
@@ -803,6 +856,33 @@ mod tests {
                 SwitchError::Api(ApiError::Http(s)) if s.as_u16() == code
             ));
         }
+    }
+
+    /// A proxy without the route answers 404 like an unknown session; its
+    /// discovery (missing `session_switch`) tells them apart.
+    #[tokio::test]
+    async fn switch_session_404_from_an_older_proxy_is_too_old() {
+        let not_found = serde_json::json!({"error": {"type": "not_found"}});
+        let base = serve(switch_router_with(404, not_found.clone(), &["session"])).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert!(matches!(err, SwitchError::TooOld), "{err:?}");
+        // No discovery at all: also too old.
+        let base = serve(switch_router(404, not_found)).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert!(matches!(err, SwitchError::TooOld), "{err:?}");
+    }
+
+    /// The proxy's reason for a 409 is shown, without its `claudio: ` prefix.
+    #[tokio::test]
+    async fn switch_session_409_carries_the_reason() {
+        let body = serde_json::json!({"type": "error", "error": {"type": "no_alternative",
+            "message": "claudio: this session uses account-scoped resources and must keep its credential"}});
+        let base = serve(switch_router_with(409, body, &["session_switch"])).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "this session uses account-scoped resources and must keep its credential"
+        );
     }
 
     #[test]
