@@ -1834,6 +1834,31 @@ fn test_plain_exits_when_claude_ends_and_leaves_nothing() {
     manager.quit(WAIT);
 }
 
+/// A plain session is not the manager's: the daemon does not journal it, and
+/// a manager started next to it neither shows it nor resumes it.
+#[test]
+fn test_a_plain_session_is_not_a_manager_tab() {
+    let harness = ManagerHarness::new();
+    let mut plain = harness.start_plain_with(&["--no-proxy"], |_| {});
+    plain.wait_for("FAKE_CLAUDE_BANNER", Region::Screen, WAIT);
+    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+    assert!(harness.journal_sessions().is_empty(), "not journaled");
+
+    // With no session of its own, the manager opens its wizard.
+    let mut manager = harness.start_tui();
+    manager.wait_for("New session", Region::Screen, WAIT);
+    let tabs = manager.screen_text(Region::TabBar);
+    assert!(tabs.trim().is_empty(), "no tab for the plain session: {tabs:?}");
+    manager.send_keys(ESC);
+    manager.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
+    manager.quit(WAIT);
+
+    // The plain session ran on, untouched.
+    plain.send_keys(b"still-here\r");
+    plain.wait_for("still-here", Region::Screen, WAIT);
+    drop(plain);
+}
+
 /// Claude's non-zero status is the UI's, and the dormant session it leaves is
 /// killed rather than recovered later.
 #[test]
