@@ -1270,6 +1270,17 @@ fn is_dead(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) != 0 }
 }
 
+/// Wait for `pid` to be gone. A SIGKILLed child lingers as a zombie until
+/// its waiter thread reaps it, a moment after the daemon reports it stopped.
+async fn wait_dead(pid: u32) {
+    within(async {
+        while !is_dead(pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
 fn assert_restarted_in_place(seen: &[SessionEvent]) {
     assert!(
         seen.iter().any(|e| matches!(e, SessionEvent::Created { .. })),
@@ -1301,7 +1312,7 @@ async fn respawn_resumes_the_journaled_conversation() {
     let (pid, seen) = c.respawn(id, false).await;
     assert_restarted_in_place(&seen);
     assert_ne!(pid, Some(old_pid));
-    assert!(is_dead(old_pid), "the old process was stopped first");
+    wait_dead(old_pid).await;
 
     d.runs_reach(2).await;
     let runs = d.runs();
@@ -1398,7 +1409,7 @@ async fn respawn_restarts_a_shell() {
     let (pid, seen) = c.respawn(id, true).await;
     assert_restarted_in_place(&seen);
     assert_ne!(pid, Some(old_pid));
-    assert!(is_dead(old_pid));
+    wait_dead(old_pid).await;
 
     // A new login shell: the variable is gone, and it is still a terminal.
     c.attach(id, 24, 80).await;
@@ -1503,7 +1514,7 @@ async fn a_kill_during_a_respawn_is_not_undone() {
     assert!(matches!(reply, Msg::Error { .. }), "{reply:?}");
     assert!(b.sessions().await.is_empty(), "the killed session came back");
     assert!(d.journal()["sessions"].as_array().unwrap().is_empty());
-    assert!(is_dead(old_pid));
+    wait_dead(old_pid).await;
     assert!(d.daemon.registry().in_flight.is_empty());
 }
 
