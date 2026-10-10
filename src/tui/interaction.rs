@@ -613,6 +613,7 @@ impl App {
     pub fn on_reply(&mut self, to: ReplyTo, reply: io::Result<Msg>) {
         self.redraw = true;
         match (to, reply) {
+            (ReplyTo::HostStats, _) => {}
             // Delivered (a session that is already gone answers "no such
             // session"): the tombstone can go.
             (ReplyTo::Kill(id), Ok(_)) => {

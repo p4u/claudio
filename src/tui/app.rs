@@ -138,6 +138,9 @@ pub enum Effect {
 pub enum ReplyTo {
     /// Only errors matter; they are shown as a notice prefixed with this.
     Ack(&'static str),
+    /// `SubscribeHostStats`: nothing to do, even on error (an old daemon has
+    /// no stats; that host's sparklines stay empty).
+    HostStats,
     Spawned(SessionId),
     /// A spawn sent after an async proxy-config fetch: any `Attach` issued
     /// meanwhile reached the daemon first and failed, so attach on success.
@@ -1918,5 +1921,51 @@ mod tests {
         // Even for a closed wizard: the next one starts with them.
         app.on_reply(to("local"), reply("/local"));
         assert_eq!(app.projects, ["/local"]);
+    }
+
+    /// The hosts `effects` subscribe to host stats on.
+    fn subscriptions(effects: &[Effect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Request {
+                    host,
+                    msg: Msg::SubscribeHostStats,
+                    to: ReplyTo::HostStats,
+                } => Some(host.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_new_connection_subscribes_to_its_host_stats() {
+        let mut app = app_with(&[info(Some(7), None)]);
+        // A remote host, as the event loop handles its `Connected`.
+        app.recover_host("devbox", &[]);
+        app.subscribe_host_stats("devbox");
+        assert_eq!(subscriptions(&app.take_effects()), ["devbox"]);
+        // A new local daemon (e.g. one that replaced an outdated daemon).
+        app.on_reconnected_local(&[info(None, None)], "/home/u".into());
+        assert_eq!(subscriptions(&app.take_effects()), ["local"]);
+    }
+
+    #[test]
+    fn a_refused_host_stats_subscription_is_silent() {
+        let mut app = app_with(&[info(Some(7), None)]);
+        app.notice = None;
+        let refused = Err(std::io::Error::other("unsupported op"));
+        app.on_reply(ReplyTo::HostStats, refused);
+        assert!(app.notice.is_none());
+    }
+
+    #[test]
+    fn plain_mode_subscribes_to_no_host_stats() {
+        let mut app = App::new(AppConfig {
+            mode: Mode::Plain,
+            ..test_support::config()
+        });
+        app.subscribe_host_stats("local");
+        assert!(subscriptions(&app.take_effects()).is_empty());
     }
 }

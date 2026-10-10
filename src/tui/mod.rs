@@ -588,6 +588,7 @@ async fn event_loop(
                     app.on_host_connected(&host, &home);
                     // Recover this host's sessions only.
                     app.recover_host(&host, &sessions);
+                    app.subscribe_host_stats(&host);
                     app.check_remote_claude(&host, remote_claude.as_deref());
                     app.redraw = true;
                 }

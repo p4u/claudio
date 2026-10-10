@@ -555,7 +555,15 @@ impl App {
     /// refuses; the sparklines then stay empty).
     pub fn start_manager(&mut self, saved: &ClientState, live: &[SessionInfo]) {
         self.recover(saved, live);
-        self.request("local", Msg::SubscribeHostStats, ReplyTo::Ack("host_stats"));
+        self.subscribe_host_stats("local");
+    }
+
+    /// Subscribe to `host`'s CPU and memory samples, for the status bar.
+    /// Needed on every new connection: the subscription is per connection.
+    pub fn subscribe_host_stats(&mut self, host: &str) {
+        if self.mode == Mode::Manager {
+            self.request(host, Msg::SubscribeHostStats, ReplyTo::HostStats);
+        }
     }
 
     /// Full recovery: rebuild the entire session list from `saved` and the
@@ -672,6 +680,7 @@ impl App {
             return;
         }
         self.recover_host("local", live);
+        self.subscribe_host_stats("local");
     }
 
     /// The local daemon connection dropped; only local sessions are affected.
