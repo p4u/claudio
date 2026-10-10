@@ -530,14 +530,15 @@ impl App {
             .as_deref()
             .or_else(|| self.proxy_override.pick(self.proxy_default.as_deref()));
         self.modal_gen += 1;
-        self.modal = Some(Modal::Wizard(Wizard::new(
+        let wizard = Wizard::new(
             seeds,
             self.home.clone(),
             &active_host,
             &self.ssh_hosts,
             &self.proxy_profiles,
             proxy_default,
-        )));
+        );
+        self.modal = Some(Modal::Wizard(Box::new(wizard)));
         // `~/.ssh/config` may have changed since the list was read.
         self.emit(Effect::LoadSshHosts);
         self.request_projects("local");

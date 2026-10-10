@@ -97,10 +97,11 @@ impl App {
                 self.notify(format!("claude update failed on {host}: {line}"));
             }
             Ok(_) => {}
-            Err(e) => match App::older_daemon_notice(&host, &e) {
-                Some(notice) => self.notify(notice),
-                None => self.notify(format!("claude update failed on {host}: {e}")),
-            },
+            Err(e) => {
+                let notice = App::older_daemon_notice(host, &e)
+                    .unwrap_or_else(|| format!("claude update failed on {host}: {e}"));
+                self.notify(notice);
+            }
         }
     }
 }

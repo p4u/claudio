@@ -32,7 +32,9 @@ pub enum Modal {
         id: SessionId,
         input: String,
     },
-    Wizard(Wizard),
+    /// The new-session wizard. Boxed like the history viewer: both are
+    /// several hundred bytes, the other modals a few dozen.
+    Wizard(Box<Wizard>),
     /// Proxy stats popup (see `stats_view.rs`).
     ProxyStats(StatsView),
     /// Overview / "mission control": all sessions at a glance.
@@ -472,7 +474,7 @@ impl App {
 
     pub(super) fn wizard_mut(&mut self) -> Option<&mut Wizard> {
         match &mut self.modal {
-            Some(Modal::Wizard(w)) => Some(w),
+            Some(Modal::Wizard(w)) => Some(w.as_mut()),
             _ => None,
         }
     }
