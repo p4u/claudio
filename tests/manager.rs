@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness, Region,
-    TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT,
-    ALT_SHIFT_1, ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC,
-    LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
+    current_nonce, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness,
+    Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R,
+    ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER,
+    ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -1912,4 +1912,62 @@ fn test_plain_rejects_print_mode() {
     let stderr = String::from_utf8_lossy(&res.stderr);
     assert!(stderr.contains("-p is not supported with --plain"), "{stderr}");
     assert!(!marker.exists(), "claude must not run");
+}
+
+// ── Resume ───────────────────────────────────────────────────────────────────
+
+/// Write one claude transcript for `dir` in `home`, filed the way claude
+/// files it (under the resolved path).
+fn write_transcript(home: &std::path::Path, dir: &std::path::Path) {
+    let real = fs::canonicalize(dir).unwrap();
+    let encoded: String = real
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let pdir = home.join(".claude/projects").join(encoded);
+    fs::create_dir_all(&pdir).unwrap();
+    let rec = serde_json::json!({
+        "type": "user", "cwd": real.to_string_lossy(),
+        "message": {"role": "user", "content": "PROBE-PROMPT hello"},
+    });
+    fs::write(pdir.join("11111111-2222-3333-4444-555555555555.jsonl"), format!("{rec}\n")).unwrap();
+}
+
+/// A directory with an earlier claude conversation offers to resume it
+/// (picked with the browser's "start here").
+#[test]
+fn test_wizard_start_here_offers_resume() {
+    let h = ManagerHarness::new();
+    write_transcript(&h.home, &h.dirs[0]);
+    let mut tui = h.start_tui();
+    tui.wait_for("Explore local dirs", Region::Screen, WAIT);
+    tui.send_keys(ENTER); // Explore → browser at ~/
+    tui.wait_for("start here", Region::Screen, WAIT);
+    tui.send_keys(CTRL_U);
+    thread::sleep(Duration::from_millis(100));
+    tui.send_paste(&format!("{}/", h.dirs[0].display()));
+    thread::sleep(Duration::from_millis(500));
+    tui.send_keys(ENTER);
+    thread::sleep(Duration::from_millis(1500));
+    tui.wait_for("resume?", Region::Screen, WAIT);
+}
+
+/// The same when the directory is picked from the first screen's recent list.
+#[test]
+fn test_wizard_recent_dir_offers_resume() {
+    let h = ManagerHarness::new();
+    write_transcript(&h.home, &h.dirs[0]);
+    let state = h.config_home.join("claudio/state.json");
+    fs::create_dir_all(state.parent().unwrap()).unwrap();
+    let dir = h.dirs[0].to_string_lossy().into_owned();
+    fs::write(&state, serde_json::json!({"recent_dirs": {"local": [dir]}}).to_string()).unwrap();
+    let mut tui = h.start_tui();
+    tui.wait_for("Explore local dirs", Region::Screen, WAIT);
+    thread::sleep(Duration::from_millis(500));
+    tui.send_keys(DOWN_ARROW);
+    thread::sleep(Duration::from_millis(200));
+    tui.send_keys(ENTER);
+    thread::sleep(Duration::from_millis(1500));
+    tui.wait_for("resume?", Region::Screen, WAIT);
 }
