@@ -244,13 +244,31 @@ impl Client {
         within(proto::read_frame(&mut self.stream)).await.unwrap()
     }
 
-    /// Read until `pick` accepts a frame.
+    /// Read until `pick` accepts a frame. On a timeout, the panic lists the
+    /// last frames that did arrive, so a failure says what was seen instead.
     async fn until<T>(&mut self, mut pick: impl FnMut(&Frame) -> Option<T>) -> T {
-        loop {
-            let frame = self.recv().await.expect("daemon closed the connection");
-            if let Some(v) = pick(&frame) {
-                return v;
+        let mut seen: std::collections::VecDeque<String> = Default::default();
+        let wait = async {
+            loop {
+                let frame = proto::read_frame(&mut self.stream)
+                    .await
+                    .unwrap()
+                    .expect("daemon closed the connection");
+                if let Some(v) = pick(&frame) {
+                    return v;
+                }
+                if seen.len() == 12 {
+                    seen.pop_front();
+                }
+                seen.push_back(match &frame {
+                    Frame::Control(env) => format!("{:?}", env.msg).chars().take(160).collect(),
+                    Frame::Data { bytes, .. } => format!("{} data bytes", bytes.len()),
+                });
             }
+        };
+        match tokio::time::timeout(READ_TIMEOUT, wait).await {
+            Ok(v) => v,
+            Err(_) => panic!("timed out; last frames seen:\n{}", Vec::from(seen).join("\n")),
         }
     }
 
