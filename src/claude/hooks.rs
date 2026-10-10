@@ -102,17 +102,24 @@ fn relay_from(input: impl Read, event: &str, socket: &Path, token: &str) {
     let _ = send_hook_frame(event, socket, token, payload);
 }
 
-/// Connect to the Unix socket and write the Hook frame.
+/// Connect to the Unix socket, write the Hook frame, and stay connected until
+/// the daemon has taken it and hung up. The daemon checks the peer's uid
+/// first, and macOS can no longer tell it once the peer is gone: a relay that
+/// wrote and left at once would lose hooks there.
 fn send_hook_frame(event: &str, socket: &Path, token: &str, payload: Value) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    stream.set_read_timeout(Some(WRITE_TIMEOUT))?;
 
     let frame = Frame::Control(Envelope::event(Msg::Hook {
         token: token.to_owned(),
         event: event.to_owned(),
         payload,
     }));
-    stream.write_all(&frame.encode())
+    stream.write_all(&frame.encode())?;
+    // The daemon replies nothing: this returns at its hang-up (or the timeout).
+    let _ = stream.read(&mut [0u8; 1]);
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

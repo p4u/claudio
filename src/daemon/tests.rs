@@ -171,22 +171,30 @@ impl TestDaemon {
 
     /// The hook token the fake claude was started with.
     async fn token(&self) -> String {
+        self.token_other_than("").await
+    }
+
+    /// The hook token of a process started after the one with `previous`:
+    /// after a respawn, `settings.json` holds the old token until the new
+    /// process rewrites it.
+    async fn token_other_than(&self, previous: &str) -> String {
         let path = self.work().join("settings.json");
-        let settings: serde_json::Value = within(async {
+        within(async {
             loop {
-                if let Ok(raw) = std::fs::read(&path) {
-                    if let Ok(v) = serde_json::from_slice(&raw) {
-                        return v;
-                    }
+                let token = std::fs::read(&path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                    .and_then(|settings| {
+                        let cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str()?;
+                        Some(cmd.rsplit(' ').next()?.to_owned())
+                    });
+                match token {
+                    Some(token) if token != previous => return token,
+                    _ => tokio::time::sleep(Duration::from_millis(20)).await,
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
-        .await;
-        let cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
-        cmd.rsplit(' ').next().unwrap().to_owned()
+        .await
     }
 
     fn journal(&self) -> serde_json::Value {
@@ -368,6 +376,8 @@ async fn send_hook(socket: &Path, token: &str, event: &str, payload: serde_json:
         payload,
     };
     c.send(Frame::Control(Envelope::event(hook))).await;
+    // Stay connected until the daemon hangs up, as the real relay does.
+    let _ = tokio::time::timeout(READ_TIMEOUT, proto::read_frame(&mut c.stream)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1366,6 +1376,7 @@ async fn fresh_respawn_starts_a_new_conversation() {
     spec.args = vec!["--model".into(), "m".into()];
     c.spawn(spec).await;
     c.attach_until(id, BANNER).await;
+    let first = d.token().await;
 
     // No conversation recorded yet (no SessionStart): nothing to resume.
     let (_, seen) = c.respawn(id, false).await;
@@ -1373,7 +1384,8 @@ async fn fresh_respawn_starts_a_new_conversation() {
     c.attach_until(id, BANNER).await;
 
     let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
-    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
+    let token = d.token_other_than(&first).await;
+    send_hook(&d.config.socket, &token, "SessionStart", payload).await;
     c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
         .await;
 
@@ -1480,15 +1492,16 @@ fn respawn_spec(id: SessionId, fresh: bool) -> proto::RespawnSpec {
 }
 
 impl Client {
-    /// Wait until `id` is listed without a process: a respawn has taken it
-    /// over and is stopping the old one.
-    async fn until_stopping(&mut self, id: SessionId) {
+    /// Wait until `id` no longer runs `old_pid`: a respawn has taken it over
+    /// and is stopping the old process (or, where it died at once, already
+    /// started the new one).
+    async fn until_stopping(&mut self, id: SessionId, old_pid: u32) {
         within(async {
             while self
                 .sessions()
                 .await
                 .iter()
-                .any(|s| s.id == id && s.pid.is_some())
+                .any(|s| s.id == id && s.pid == Some(old_pid))
             {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -1523,7 +1536,7 @@ async fn a_kill_during_a_respawn_is_not_undone() {
     a.attach_until(id, BANNER).await;
 
     let respawn = a.request(Msg::Respawn(respawn_spec(id, false))).await;
-    b.until_stopping(id).await;
+    b.until_stopping(id, old_pid).await;
 
     let second = b.call(Msg::Respawn(respawn_spec(id, true))).await;
     assert!(
@@ -1552,10 +1565,10 @@ async fn a_late_clean_exit_close_spares_the_respawned_session() {
     let mut a = d.client().await;
     let mut b = d.client().await;
     let id = Uuid::new_v4();
-    a.spawn(d.spec(id)).await;
+    let old_pid = a.spawn(d.spec(id)).await.unwrap();
 
     let respawn = a.request(Msg::Respawn(respawn_spec(id, false))).await;
-    b.until_stopping(id).await;
+    b.until_stopping(id, old_pid).await;
     // What the old actor does after a clean exit, at the worst moment.
     d.daemon.close_exited(id);
     let pid = match a.reply(respawn).await {

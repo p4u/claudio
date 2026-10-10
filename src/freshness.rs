@@ -359,6 +359,12 @@ mod tests {
         assert!(!wait_for_lock(&socket, &lock, Duration::from_millis(200)));
         assert!(started.elapsed() >= Duration::from_millis(200));
         drop(held);
+        // A process another test forks meanwhile holds a copy of the lock's
+        // descriptor until it execs: the lock frees a moment later.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !lock_free(&lock) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(lock_free(&lock));
         assert!(!wait_for_lock(&socket, &lock, Duration::from_secs(5)));
         std::fs::remove_dir_all(&dir).unwrap();
