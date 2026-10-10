@@ -357,7 +357,9 @@ fn os_string(bytes: Vec<u8>) -> OsString {
     }
 }
 
-fn command(cwd: &Path) -> Command {
+/// A `git` process in `cwd` with the scrubbed environment and base flags;
+/// shared with [`super::git_status`].
+pub(super) fn command(cwd: &Path) -> Command {
     let mut cmd = Command::new("git");
     for var in SCRUBBED_ENV {
         cmd.env_remove(var);

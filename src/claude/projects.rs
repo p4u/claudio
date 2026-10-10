@@ -41,7 +41,6 @@ pub fn project_dir(cwd: &Path) -> PathBuf {
 }
 
 /// The absolute path of a transcript file for a given (cwd, claude_session_id).
-#[allow(dead_code)] // used in tests; kept pub for potential future scripting CLI
 pub fn transcript_path(cwd: &Path, claude_session_id: &str) -> PathBuf {
     project_dir(cwd).join(format!("{claude_session_id}.jsonl"))
 }
@@ -181,68 +180,157 @@ pub(crate) fn read_file_tail(path: &Path) -> Option<String> {
     }
 }
 
-/// Read the model name and context token count from the last `type:"assistant"`
-/// record in the transcript for `(cwd, session_id)`.
-///
-/// Context tokens = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
-/// from `message.usage`.
-///
-/// Returns `None` if the transcript is unreadable or has no assistant record.
-pub fn read_last_assistant_meta(cwd: &Path, session_id: &str) -> Option<(String, u64)> {
-    let path = transcript_path(cwd, session_id);
-    let content = read_file_tail(&path)?;
-    parse_last_assistant_meta(&content)
+// ── Transcript cursor ─────────────────────────────────────────────────────────
+
+/// Most bytes one [`TranscriptCursor::advance`] reads. A long transcript
+/// opened for the first time (a resume) is caught up over several refreshes
+/// instead of one long read.
+const CURSOR_READ_CAP: u64 = 8 * 1024 * 1024;
+
+/// What a transcript says about its conversation so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptTotals {
+    /// The model of the last assistant record.
+    pub model: Option<String>,
+    /// Context of the last assistant turn: `input_tokens +
+    /// cache_creation_input_tokens + cache_read_input_tokens`.
+    pub context_tokens: Option<u64>,
+    /// Sum of every assistant record's `output_tokens`.
+    pub output_tokens: u64,
+    /// User prompts (tool results excluded).
+    pub turns: u32,
 }
 
-/// Parse model + context token count from the last `type:"assistant"` record in
-/// a JSONL string. Extracted for unit-testability without filesystem access.
-fn parse_last_assistant_meta(content: &str) -> Option<(String, u64)> {
-    let mut last_model: Option<String> = None;
-    let mut last_tokens: Option<u64> = None;
+/// Incremental reader of one session's transcript: each [`advance`] parses
+/// only what was appended since the last one, so the totals cover the whole
+/// conversation at the cost of the new records.
+///
+/// [`advance`]: TranscriptCursor::advance
+#[derive(Debug)]
+pub struct TranscriptCursor {
+    session_id: String,
+    path: PathBuf,
+    /// Bytes consumed so far.
+    offset: u64,
+    /// The unterminated last line of the previous read.
+    partial: Vec<u8>,
+    /// `message.id` of the last assistant record: one API response is written
+    /// as one record per content block, all with the same usage, which must
+    /// be counted once.
+    last_message_id: Option<String>,
+    totals: TranscriptTotals,
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Pre-filter: only bother parsing lines that look like assistant records.
-        if !line.contains("\"assistant\"") {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-                continue;
-            }
-            let msg = match v.get("message") {
-                Some(m) => m,
-                None => continue,
-            };
-            let model = match msg.get("model").and_then(|m| m.as_str()) {
-                Some(m) => m.to_owned(),
-                None => continue,
-            };
-            let usage = match msg.get("usage") {
-                Some(u) => u,
-                None => continue,
-            };
-            let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_create = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let tokens = input + cache_create + cache_read;
-            last_model = Some(model);
-            last_tokens = Some(tokens);
+impl TranscriptCursor {
+    /// A cursor at the start of the transcript of `(cwd, session_id)`.
+    pub fn new(cwd: &Path, session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            path: transcript_path(cwd, session_id),
+            offset: 0,
+            partial: Vec::new(),
+            last_message_id: None,
+            totals: TranscriptTotals::default(),
         }
     }
 
-    match (last_model, last_tokens) {
-        (Some(m), Some(t)) => Some((m, t)),
-        _ => None,
+    /// The claude session id this cursor follows.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn totals(&self) -> &TranscriptTotals {
+        &self.totals
+    }
+
+    /// Whether the cursor has seen an assistant record.
+    pub fn has_assistant(&self) -> bool {
+        self.totals.model.is_some()
+    }
+
+    /// Read what the transcript gained since the last call (at most
+    /// [`CURSOR_READ_CAP`] bytes). A file that shrank (rewritten) is read
+    /// again from the start. Returns whether the totals changed.
+    pub fn advance(&mut self) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < self.offset {
+            self.offset = 0;
+            self.partial.clear();
+            self.last_message_id = None;
+            self.totals = TranscriptTotals::default();
+        }
+        if len == self.offset {
+            return false;
+        }
+        if f.seek(SeekFrom::Start(self.offset)).is_err() {
+            return false;
+        }
+        let want = (len - self.offset).min(CURSOR_READ_CAP);
+        let mut buf = Vec::with_capacity(want as usize);
+        if f.take(want).read_to_end(&mut buf).is_err() {
+            return false;
+        }
+        self.offset += buf.len() as u64;
+        let before = self.totals.clone();
+        self.feed(&buf);
+        before != self.totals
+    }
+
+    /// Consume appended bytes, parsing every complete line.
+    fn feed(&mut self, bytes: &[u8]) {
+        let mut data = std::mem::take(&mut self.partial);
+        data.extend_from_slice(bytes);
+        let mut start = 0;
+        while let Some(nl) = data[start..].iter().position(|&b| b == b'\n') {
+            self.apply_record(&data[start..start + nl]);
+            start += nl + 1;
+        }
+        self.partial = data.split_off(start);
+    }
+
+    /// Fold one transcript record into the totals.
+    fn apply_record(&mut self, line: &[u8]) {
+        // Cheap pre-filter: the records of interest name their type.
+        let looks_relevant = line.windows(11).any(|w| w == b"\"assistant\"")
+            || line.windows(6).any(|w| w == b"\"user\"");
+        if !looks_relevant {
+            return;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            return;
+        };
+        let totals = &mut self.totals;
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => {
+                let Some(msg) = v.get("message") else { return };
+                let Some(usage) = msg.get("usage") else { return };
+                let count = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
+                    totals.model = Some(model.to_owned());
+                    totals.context_tokens = Some(
+                        count("input_tokens")
+                            + count("cache_creation_input_tokens")
+                            + count("cache_read_input_tokens"),
+                    );
+                }
+                let message_id = msg.get("id").and_then(|i| i.as_str()).map(str::to_owned);
+                if message_id.is_none() || message_id != self.last_message_id {
+                    totals.output_tokens =
+                        totals.output_tokens.saturating_add(count("output_tokens"));
+                }
+                self.last_message_id = message_id;
+            }
+            Some("user") => {
+                if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true) && is_real_prompt(&v) {
+                    totals.turns = totals.turns.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -707,50 +795,95 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── parse_last_assistant_meta (via read_last_assistant_meta) ─────────────
+    // ── TranscriptCursor ─────────────────────────────────────────────────────
 
-    #[test]
-    fn read_last_assistant_meta_returns_model_and_tokens() {
-        let jsonl = r#"{"type":"assistant","message":{"model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}"#;
-        let result = parse_last_assistant_meta(jsonl);
-        assert!(result.is_some(), "should find assistant record");
-        let (model, tokens) = result.unwrap();
-        assert_eq!(model, "claude-3-5-sonnet-20241022");
-        assert_eq!(tokens, 1000);
+    fn cursor() -> TranscriptCursor {
+        TranscriptCursor::new(Path::new("/nonexistent"), "sid")
+    }
+
+    fn assistant(id: &str, model: &str, input: u64, cache_create: u64, cache_read: u64, out: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"cache_creation_input_tokens":{cache_create},"cache_read_input_tokens":{cache_read},"output_tokens":{out}}}}}}}"#
+        ) + "\n"
     }
 
     #[test]
-    fn read_last_assistant_meta_no_assistant_returns_none() {
-        let jsonl = r#"{"type":"user","message":{"content":"hello"}}"#;
-        let result = parse_last_assistant_meta(jsonl);
-        assert!(result.is_none(), "no assistant record → should be None");
+    fn cursor_takes_model_and_context_from_the_last_assistant_record() {
+        let mut c = cursor();
+        assert!(!c.has_assistant());
+        c.feed(assistant("m1", "claude-old", 100, 0, 0, 5).as_bytes());
+        // Context sums input and both cache figures.
+        c.feed(assistant("m2", "claude-opus-4-5", 100, 200, 300, 10).as_bytes());
+        assert!(c.has_assistant());
+        assert_eq!(c.totals().model.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(c.totals().context_tokens, Some(600));
+        assert_eq!(c.totals().output_tokens, 15);
     }
 
     #[test]
-    fn read_last_assistant_meta_sums_all_usage_fields() {
-        // input=100, cache_creation=200, cache_read=300 → total 600
-        let jsonl = r#"{"type":"assistant","message":{"model":"claude-opus-4-5","usage":{"input_tokens":100,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":10}}}"#;
-        let result = parse_last_assistant_meta(jsonl);
-        assert!(result.is_some());
-        let (model, tokens) = result.unwrap();
-        assert_eq!(model, "claude-opus-4-5");
-        assert_eq!(tokens, 600);
+    fn cursor_counts_output_once_per_api_response_and_prompts_without_tool_results() {
+        let mut c = cursor();
+        let mut jsonl = String::new();
+        jsonl += r#"{"type":"user","message":{"content":"hello"}}"#;
+        jsonl += "\n";
+        // One response, two content blocks: same message id and usage.
+        jsonl += &assistant("m1", "claude-x", 10, 0, 0, 40);
+        jsonl += &assistant("m1", "claude-x", 10, 0, 0, 40);
+        jsonl += r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t"}]}}"#;
+        jsonl += "\n";
+        jsonl += &assistant("m2", "claude-x", 20, 0, 0, 8);
+        jsonl += r#"{"type":"user","isMeta":true,"message":{"content":"<system-reminder>x</system-reminder>"}}"#;
+        jsonl += "\n";
+        jsonl += r#"{"type":"user","message":{"content":[{"type":"text","text":"again"}]}}"#;
+        jsonl += "\n";
+        jsonl += r#"{"type":"summary","summary":"not a turn"}"#;
+        jsonl += "\n";
+        c.feed(jsonl.as_bytes());
+        assert_eq!(c.totals().output_tokens, 48);
+        assert_eq!(c.totals().turns, 2);
+        assert_eq!(c.totals().context_tokens, Some(20));
     }
 
     #[test]
-    fn read_last_assistant_meta_uses_last_record() {
-        // Two assistant records — we should return the last one.
-        let jsonl = concat!(
-            r#"{"type":"assistant","message":{"model":"claude-old","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
-            "\n",
-            r#"{"type":"assistant","message":{"model":"claude-new","usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#,
-            "\n",
-        );
-        let result = parse_last_assistant_meta(jsonl);
-        assert!(result.is_some());
-        let (model, tokens) = result.unwrap();
-        assert_eq!(model, "claude-new");
-        assert_eq!(tokens, 500);
+    fn cursor_reassembles_lines_split_across_reads() {
+        let mut c = cursor();
+        let line = assistant("m1", "claude-x", 1, 0, 0, 7);
+        let (a, b) = line.as_bytes().split_at(30);
+        c.feed(a);
+        assert!(!c.has_assistant(), "an unterminated line is not a record yet");
+        c.feed(b);
+        assert_eq!(c.totals().output_tokens, 7);
+        // Garbage lines are skipped, not fatal.
+        c.feed(b"not json \"assistant\"\n{\"type\":\"assistant\"}\n");
+        assert_eq!(c.totals().output_tokens, 7);
+    }
+
+    #[test]
+    fn cursor_reads_appended_bytes_and_restarts_on_a_rewritten_file() {
+        let dir = std::env::temp_dir().join(format!("claudio-cursor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let mut c = TranscriptCursor::new(Path::new("/x"), "sid");
+        c.path = path.clone();
+        assert!(!c.advance(), "missing file");
+        std::fs::write(&path, assistant("m1", "claude-x", 5, 0, 0, 3)).unwrap();
+        assert!(c.advance());
+        assert!(!c.advance(), "nothing new");
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(assistant("m2", "claude-x", 9, 0, 0, 4).as_bytes()).unwrap();
+        }
+        assert!(c.advance());
+        assert_eq!(c.totals().output_tokens, 7);
+        assert_eq!(c.totals().context_tokens, Some(9));
+        // A shorter file is a new one.
+        std::fs::write(&path, assistant("m9", "claude-y", 1, 0, 0, 1)).unwrap();
+        assert!(c.advance());
+        assert_eq!(c.totals().output_tokens, 1);
+        assert_eq!(c.totals().model.as_deref(), Some("claude-y"));
+        assert_eq!(c.session_id(), "sid");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn recent_project_dirs_no_panic_wrapper() {

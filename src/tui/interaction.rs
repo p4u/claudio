@@ -590,10 +590,14 @@ impl App {
                 v.name = name;
                 self.save();
             }
+            // `None` is "no news", never "cleared".
             SessionEvent::Meta {
                 branch,
                 model,
                 context_tokens,
+                git,
+                output_tokens,
+                turns,
             } => {
                 if branch.is_some() {
                     v.branch = branch;
@@ -603,6 +607,15 @@ impl App {
                 }
                 if context_tokens.is_some() {
                     v.context_tokens = context_tokens;
+                }
+                if git.is_some() {
+                    v.git = git;
+                }
+                if output_tokens.is_some() {
+                    v.output_tokens = output_tokens;
+                }
+                if turns.is_some() {
+                    v.turns = turns;
                 }
             }
             SessionEvent::Unknown => {}
