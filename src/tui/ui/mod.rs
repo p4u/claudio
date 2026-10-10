@@ -367,12 +367,14 @@ fn draw_rename(frame: &mut Frame, input: &str) {
 
 /// Render `rows` into `area`, highlighting `selected` and scrolling to keep
 /// it visible.
-fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
+/// `rows` with `selected` highlighted and scrolled into view; `None` for a
+/// list without a selection (an unfocused section).
+fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: Option<usize>) {
     let visible = area.height as usize;
     if visible == 0 {
         return;
     }
-    let offset = selected.saturating_sub(visible - 1);
+    let offset = selected.map_or(0, |i| i.saturating_sub(visible - 1));
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -380,7 +382,7 @@ fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: usize) {
         .take(visible)
         .map(|(i, row)| {
             let text = truncate(row, area.width as usize);
-            if i == selected {
+            if Some(i) == selected {
                 Line::styled(text, Style::default().add_modifier(Modifier::REVERSED))
             } else {
                 Line::raw(text)
@@ -446,16 +448,29 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
                 .style(local_hdr_style),
             sections[0],
         );
-        // LOCAL items: "Explore local dirs…" + recent dirs.
-        let local_rows: Vec<String> = std::iter::once("  Explore local dirs…".to_owned())
-            .chain(hs.local_items.iter().map(|d| format!("  {d}")))
+        // LOCAL items: "Explore local dirs…" + recent dirs, badged like the
+        // directory list.
+        let local_area = sections[1];
+        let visible = local_area.height as usize;
+        let selected = local_focused.then_some(hs.local_selected);
+        let width = local_area.width as usize;
+        let explore = truncate("  Explore local dirs…", width);
+        let explore = if selected == Some(0) {
+            Line::styled(explore, Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            Line::raw(explore)
+        };
+        let offset = selected.map_or(0, |i| i.saturating_sub(visible.saturating_sub(1)));
+        let lines: Vec<Line> = std::iter::once(explore)
+            .chain(hs.local_items.iter().enumerate().map(|(i, dir)| {
+                let mut row = dir_row(w, dir, selected == Some(i + 1), width.saturating_sub(2), now);
+                row.spans.insert(0, Span::raw("  "));
+                row
+            }))
+            .skip(offset)
+            .take(visible)
             .collect();
-        draw_list(
-            frame,
-            sections[1],
-            &local_rows,
-            if local_focused { hs.local_selected } else { usize::MAX },
-        );
+        frame.render_widget(Paragraph::new(lines), local_area);
         frame.render_widget(
             Paragraph::new("── REMOTE ─────────────────────────────────────────────────")
                 .style(remote_hdr_style),
@@ -470,7 +485,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
             frame,
             sections[3],
             &remote_rows,
-            if remote_focused { hs.selected } else { usize::MAX },
+            remote_focused.then_some(hs.selected),
         );
         return;
     }
@@ -517,7 +532,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         let rows: Vec<String> = std::iter::once("+ New session".to_owned())
             .chain(filtered.iter().map(|s| resume_label(s, now)))
             .collect();
-        draw_list(frame, areas[list_idx], &rows, step.selected);
+        draw_list(frame, areas[list_idx], &rows, Some(step.selected));
         return;
     }
 
@@ -592,70 +607,74 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
     let lines: Vec<Line> = here
         .into_iter()
         .chain(w.items.iter().enumerate().map(|(i, path)| {
-            let i = i + first_item_row;
-            let meta = w.meta.get(path.as_str());
-            let display = w.display(path);
-            let is_hidden = meta.map_or(false, |m| m.hidden);
-            let is_selected = i == selected;
-
-            // Build badge text pieces (right-aligned).
-            let mut badges: Vec<(String, Style)> = Vec::new();
-            if let Some(m) = meta {
-                if m.symlink {
-                    badges.push((" ↪".to_owned(), Style::default().add_modifier(Modifier::DIM)));
-                }
-                if m.recently_used {
-                    badges.push((" ↻".to_owned(), Style::default().fg(Color::Cyan)));
-                }
-                if let Some(at) = m.claude_at {
-                    let age = fmt_age(now.saturating_sub(at));
-                    badges.push((
-                        format!(" ✻ {age}"),
-                        Style::default().fg(Color::Magenta),
-                    ));
-                }
-                if let Some(branch) = &m.git {
-                    badges.push((
-                        format!(" ⎇ {branch}"),
-                        Style::default().fg(Color::Green),
-                    ));
-                }
-            }
-
-            let badge_width: usize = badges.iter().map(|(s, _)| str_width(s)).sum();
-            let label_max = width.saturating_sub(badge_width);
-            let label = truncate(&display, label_max);
-            let label_w = str_width(&label);
-
-            let base_style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else if is_hidden {
-                Style::default().add_modifier(Modifier::DIM)
-            } else {
-                Style::default()
-            };
-
-            let mut spans = vec![Span::styled(label, base_style)];
-            // Padding between label and badges.
-            let pad = width.saturating_sub(label_w + badge_width);
-            if pad > 0 {
-                spans.push(Span::styled(" ".repeat(pad), base_style));
-            }
-            for (text, badge_style) in badges {
-                let style = if is_selected {
-                    // Merge reversed background onto badge colour.
-                    badge_style.patch(Style::default().add_modifier(Modifier::REVERSED))
-                } else {
-                    badge_style
-                };
-                spans.push(Span::styled(text, style));
-            }
-            Line::from(spans)
+            dir_row(w, path, i + first_item_row == selected, width, now)
         }))
         .skip(offset)
         .take(visible)
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One directory row: the `~`-abbreviated path, then right-aligned badges
+/// (symlink ↪, recently used ↻, claude activity ✻, git branch ⎇).
+fn dir_row(w: &Wizard, path: &str, is_selected: bool, width: usize, now: u64) -> Line<'static> {
+    let meta = w.meta.get(path);
+    let display = w.display(path);
+    let is_hidden = meta.map_or(false, |m| m.hidden);
+
+    // Build badge text pieces (right-aligned).
+    let mut badges: Vec<(String, Style)> = Vec::new();
+    if let Some(m) = meta {
+        if m.symlink {
+            badges.push((" ↪".to_owned(), Style::default().add_modifier(Modifier::DIM)));
+        }
+        if m.recently_used {
+            badges.push((" ↻".to_owned(), Style::default().fg(Color::Cyan)));
+        }
+        if let Some(at) = m.claude_at {
+            let age = fmt_age(now.saturating_sub(at));
+            badges.push((
+                format!(" ✻ {age}"),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        if let Some(branch) = &m.git {
+            badges.push((
+                format!(" ⎇ {branch}"),
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+
+    let badge_width: usize = badges.iter().map(|(s, _)| str_width(s)).sum();
+    let label_max = width.saturating_sub(badge_width);
+    let label = truncate(&display, label_max);
+    let label_w = str_width(&label);
+
+    let base_style = if is_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else if is_hidden {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default()
+    };
+
+    let mut spans = vec![Span::styled(label, base_style)];
+    // Padding between label and badges.
+    let pad = width.saturating_sub(label_w + badge_width);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), base_style));
+    }
+    for (text, badge_style) in badges {
+        let style = if is_selected {
+            // Merge reversed background onto badge colour.
+            badge_style.patch(Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            badge_style
+        };
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
 }
 
 // ── Overview popup ────────────────────────────────────────────────────────────
@@ -796,6 +815,33 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wizard's first screen, as drawn: LOCAL has the focus, and the
+    /// unfocused REMOTE section must still list its hosts.
+    #[test]
+    fn wizard_first_screen_draws_both_sections() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut cfg = crate::tui::test_support::config();
+        cfg.ssh_hosts = vec!["prod-db".into(), "build-01".into()];
+        cfg.recent_dirs.insert("local".into(), vec!["/home/u/web".into()]);
+        let mut app = App::new(cfg);
+        app.recover(&Default::default(), &[]);
+
+        let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        for expected in ["Explore local dirs", "~/web", "prod-db", "build-01"] {
+            assert!(screen.contains(expected), "{expected} missing:\n{screen}");
+        }
+    }
 
     fn total_width(titles: &[(String, String)]) -> usize {
         titles

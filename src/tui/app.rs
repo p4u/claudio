@@ -675,6 +675,26 @@ mod tests {
     }
 
     #[test]
+    fn wizard_lists_ssh_hosts_before_and_after_late_replies() {
+        let mut cfg = test_support::config();
+        cfg.ssh_hosts = vec!["prod-db".into(), "build-01".into()];
+        let mut app = App::new(cfg);
+        app.recover(&ClientState::default(), &[]);
+        app.take_effects();
+        let remote = |app: &App| match &app.modal {
+            Some(Modal::Wizard(w)) => w.host_step.as_ref().unwrap().items.clone(),
+            _ => panic!("wizard not open"),
+        };
+        assert_eq!(remote(&app), ["prod-db", "build-01"]);
+        let gen = app.wizard_generation();
+        app.on_reply(
+            ReplyTo::Projects { host: "local".into(), gen },
+            Ok(Msg::Projects { dirs: vec![] }),
+        );
+        assert_eq!(remote(&app), ["prod-db", "build-01"]);
+    }
+
+    #[test]
     fn wizard_offers_recent_local_dirs_that_are_not_open() {
         let mut cfg = test_support::config();
         cfg.recent_dirs
