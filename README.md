@@ -14,7 +14,7 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 
 ![New-session wizard](docs/screenshots/wizard.png)
 
-*The new-session wizard. LOCAL lists recent directories with git branch (⎇) and claude-activity (✻) badges; REMOTE lists SSH hosts from `~/.ssh/config`.*
+*The new-session wizard. LOCAL starts with your recent directories; REMOTE lists SSH hosts from `~/.ssh/config`.*
 
 ![Directory browser](docs/screenshots/directories.png)
 
@@ -23,6 +23,22 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 ![Overview popup](docs/screenshots/overview.png)
 
 *Alt+g: all sessions at a glance.*
+
+![Git viewer: commit log](docs/screenshots/git.png)
+
+*Alt+l: the git viewer lists the session directory's commits, with branches, tags and merges.*
+
+![Git viewer: a commit's patch](docs/screenshots/git-diff.png)
+
+*Enter on a commit and then on a file shows its colored patch; Esc steps back one page at a time.*
+
+![Proxy stats popup](docs/screenshots/stats.png)
+
+*Alt+s: the proxy stats popup, here on its Overview page (account, pool health, usage, top models, this session's credential).*
+
+![Terminal tab](docs/screenshots/terminal.png)
+
+*Alt+c opens a `$ term@local` terminal tab right next to the active session, in the same directory.*
 
 ---
 

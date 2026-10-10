@@ -9,11 +9,11 @@
 //!   cargo test --test screenshots -- --nocapture
 //! ```
 //!
-//! Reads the proxy URL (format `<token>@<host>`) from `/tmp/claudio-demo-proxy-url`
-//! at runtime.  The token and host are **never** printed, logged, or committed.
+//! Reads the proxy URL (format `<token>@<host>`) from `CLAUDIO_PROXY_URL`.
+//! The token and host are **never** printed, logged, or committed.
 //!
 //! # Requirements
-//! - `/tmp/claudio-demo-proxy-url` must exist.
+//! - `CLAUDIO_PROXY_URL` must be set.
 //! - `inkscape` or `magick` (ImageMagick) must be in `$PATH`.
 //! - The `claude` binary must be in `$PATH`.
 
@@ -29,9 +29,12 @@ use portable_pty::CommandBuilder;
 const SS_ROWS: u16 = 40;
 const SS_COLS: u16 = 140;
 
+/// Alt+s: the proxy stats popup.
+const ALT_S: &[u8] = b"\x1bs";
+
 // ── Test entry point ──────────────────────────────────────────────────────────
 
-/// Capture 4 real screenshots from the running claudio TUI.
+/// Capture the real screenshots from the running claudio TUI.
 ///
 /// Gated by `CLAUDIO_SCREENSHOTS=<output-dir>`.  Skips silently when the env
 /// var is absent so `cargo test` in CI doesn't require a live proxy.
@@ -47,11 +50,13 @@ fn capture_screenshots() {
     let out_dir = PathBuf::from(&out_dir_str);
     fs::create_dir_all(&out_dir).expect("create output dir");
 
-    // Read the proxy URL.  Never print or log its contents.
-    let proxy_url = fs::read_to_string("/tmp/claudio-demo-proxy-url")
-        .expect("missing /tmp/claudio-demo-proxy-url — create it as `token@host`")
-        .trim()
-        .to_owned();
+    // Read the proxy URL (`token@host`) from the environment.  Never print or
+    // log its contents.
+    let proxy_url = std::env::var("CLAUDIO_PROXY_URL")
+        .map(|v| v.trim().to_owned())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .expect("set CLAUDIO_PROXY_URL=<token>@<host> to capture the screenshots");
 
     eprintln!("[screenshots] setting up demo environment...");
     let demo = DemoEnv::setup(&proxy_url);
@@ -67,9 +72,6 @@ fn capture_screenshots() {
         // Give rendering a single tick to settle.
         thread::sleep(Duration::from_millis(300));
 
-        // ── wizard.png ────────────────────────────────────────────────────────
-        save_shot(&tui, &demo, &out_dir.join("wizard.png"), "wizard");
-
         // Navigate to the directory picker: Enter on "Explore local dirs…".
         tui.send_keys(ENTER);
         // Wait for the dir picker, which opens browsing HOME (`~/`).
@@ -81,6 +83,10 @@ fn capture_screenshots() {
         tui.send_keys(b"pro");
         // Wait for the typed text to appear in the filter field.
         tui.wait_for("~/pro", Region::Screen, Duration::from_secs(5));
+        // Tab opens the highlighted `~/projects`: its subdirectories are listed.
+        tui.wait_for("~/projects", Region::Screen, Duration::from_secs(10));
+        tui.send_keys(b"\t");
+        tui.wait_for("webapp", Region::Screen, Duration::from_secs(10));
 
         // Wait for the async ListDir response to arrive and populate the list.
         // We expect "projects" (or a sub-path) to appear as a completion entry.
@@ -133,6 +139,7 @@ fn capture_screenshots() {
         // Send a short prompt for session 1 while sessions 2 and 3 are created.
         tui.send_paste("Summarize what this project does in one sentence.");
         tui.send_keys(ENTER);
+        thread::sleep(Duration::from_secs(4));
 
         // Session 2: api-gateway — leave idle.
         eprintln!("[screenshots] creating session 2 (api-gateway)...");
@@ -215,7 +222,83 @@ fn capture_screenshots() {
         // ── overview.png ──────────────────────────────────────────────────────
         save_shot(&tui, &demo, &out_dir.join("overview.png"), "overview");
 
-        // Dismiss popup and quit.
+        // Dismiss the popup; session 1 (webapp, the demo repo) is still active.
+        tui.send_keys(common::ESC);
+        thread::sleep(Duration::from_millis(300));
+
+        // ── git.png / git-diff.png: the git viewer (Alt+l) ───────────────────
+        eprintln!("[screenshots] phase 2: git viewer");
+        tui.send_keys(common::ALT_L);
+        tui.wait_for("chore(release)", Region::Pane, WAIT);
+        tui.wait_for("feat(auth)", Region::Pane, WAIT);
+        thread::sleep(Duration::from_millis(500));
+        save_shot(&tui, &demo, &out_dir.join("git.png"), "git");
+
+        // Open a commit with a real patch: filter the log for it, open it,
+        // then open its first file's diff.
+        tui.send_keys(b"/");
+        thread::sleep(Duration::from_millis(150));
+        tui.send_paste("resolve paths");
+        thread::sleep(Duration::from_millis(300));
+        tui.send_keys(ENTER);
+        thread::sleep(Duration::from_millis(300));
+        tui.send_keys(ENTER);
+        tui.wait_for("Author:", Region::Pane, WAIT);
+        tui.send_keys(ENTER);
+        tui.wait_for("diff --git", Region::Pane, WAIT);
+        thread::sleep(Duration::from_millis(500));
+        save_shot(&tui, &demo, &out_dir.join("git-diff.png"), "git-diff");
+        // Esc: diff → commit → log → (filter cleared) → closed.
+        for _ in 0..4 {
+            tui.send_keys(common::ESC);
+            thread::sleep(Duration::from_millis(300));
+        }
+
+        // ── stats.png: the proxy stats popup (Alt+s), Overview page ──────────
+        eprintln!("[screenshots] phase 2: proxy stats");
+        tui.send_keys(ALT_S);
+        tui.wait_for("Overview", Region::Screen, WAIT);
+        // The pages load from the proxy; give the requests time to land.
+        thread::sleep(Duration::from_secs(4));
+        save_shot(&tui, &demo, &out_dir.join("stats.png"), "stats");
+        tui.send_keys(common::ESC);
+        thread::sleep(Duration::from_millis(300));
+
+        // ── terminal.png: a terminal tab (Alt+c) next to the claude tab ──────
+        eprintln!("[screenshots] phase 2: terminal tab");
+        tui.send_keys(common::ALT_C);
+        tui.wait_for("$ term@local", Region::TabBar, WAIT);
+        tui.wait_for("$", Region::Pane, WAIT);
+        thread::sleep(Duration::from_millis(500));
+        tui.send_keys(b"git log --oneline --graph --decorate -n 14\r");
+        tui.wait_for("chore(release)", Region::Pane, WAIT);
+        thread::sleep(Duration::from_millis(300));
+        tui.send_keys(b"ls\r");
+        thread::sleep(Duration::from_millis(300));
+        tui.send_keys(b"git status -sb\r");
+        thread::sleep(Duration::from_millis(600));
+        save_shot(&tui, &demo, &out_dir.join("terminal.png"), "terminal");
+
+        tui.send_keys(common::ALT_Q);
+        tui.wait_exit(WAIT);
+    }
+
+    // ── Phase 3: wizard.png ───────────────────────────────────────────────────
+    // The sessions above were recorded as recent directories. Restart with no
+    // sessions so the wizard opens on its first screen over an empty pane.
+
+    eprintln!("[screenshots] phase 3: wizard with recent directories");
+    demo.kill_daemon();
+    demo.forget_sessions();
+    thread::sleep(Duration::from_millis(500));
+    {
+        let mut tui = demo.start_tui();
+        tui.wait_for("LOCAL", Region::Screen, DAEMON_WAIT);
+        tui.wait_for("api-gateway", Region::Screen, WAIT);
+        // The git-branch and claude-activity badges arrive asynchronously.
+        thread::sleep(Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(500));
+        save_shot(&tui, &demo, &out_dir.join("wizard.png"), "wizard");
         tui.send_keys(common::ESC);
         thread::sleep(Duration::from_millis(150));
         tui.send_keys(common::ALT_Q);
@@ -287,6 +370,22 @@ Host build-01\n  HostName build-01.example.com\n  User ci\n\n\
 Host staging\n  HostName staging.example.com\n  User ubuntu\n";
         fs::write(home.join(".ssh/config"), ssh_cfg).expect("write ssh config");
 
+        // The terminal tab runs a login bash: a short, colored prompt and `ls`
+        // colors, so the shot shows neither the host's shell setup nor its paths.
+        fs::write(
+            home.join(".bash_profile"),
+            "[ -f ~/.bashrc ] && . ~/.bashrc\n",
+        )
+        .expect("write .bash_profile");
+        fs::write(
+            home.join(".bashrc"),
+            "PS1='\\[\\e[1;34m\\]\\w\\[\\e[0m\\] \\[\\e[1;32m\\]$\\[\\e[0m\\] '\n\
+             alias ls='ls --color=auto'\n\
+             alias grep='grep --color=auto'\n\
+             export GIT_PAGER=cat\n\n",
+        )
+        .expect("write .bashrc");
+
         DemoEnv {
             home,
             runtime,
@@ -315,6 +414,7 @@ Host staging\n  HostName staging.example.com\n  User ubuntu\n";
         cmd.env("CLAUDE_CONFIG_DIR", self.home.join(".claude"));
         cmd.env("CLAUDIO_PROXY_URL", &self.proxy_url);
         cmd.env("CLAUDIO_NO_UPDATE_CHECK", "1");
+        cmd.env("SHELL", "/bin/bash");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd
@@ -335,16 +435,43 @@ Host staging\n  HostName staging.example.com\n  User ubuntu\n";
         }
     }
 
+    /// Drop the daemon's journaled sessions, so a new daemon starts empty.
+    /// (`state.json`, which holds the recent directories, is kept.)
+    fn forget_sessions(&self) {
+        for root in [&self.runtime, &self.home] {
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                let Ok(rd) = fs::read_dir(&dir) else { continue };
+                for entry in rd.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("daemon-sessions"))
+                    {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
     /// Verify the SVG source text contains no personal or sensitive strings.
     ///
     /// Panics on any violation so the test never silently writes leaky PNGs.
     fn privacy_check(&self, text: &str, label: &str) {
-        let forbidden = ["/volumes", "p4u"];
+        let forbidden = ["/volumes", "p4u", "vocdoni", "z6"];
         for pat in &forbidden {
-            if text.contains(pat) {
+            if let Some(at) = text.find(pat) {
+                let from = text[..at].char_indices().rev().nth(30).map_or(0, |(i, _)| i);
+                let to = (at + pat.len() + 30).min(text.len());
+                let to = (to..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
                 panic!(
-                    "[screenshots] PRIVACY VIOLATION in {label}: pattern {:?} appeared in SVG/screen text",
-                    pat
+                    "[screenshots] PRIVACY VIOLATION in {label}: pattern {:?} appeared in SVG/screen text: …{}…",
+                    pat,
+                    &text[from..to]
                 );
             }
         }
@@ -361,27 +488,15 @@ impl Drop for DemoEnv {
     fn drop(&mut self) {
         self.kill_daemon();
         let _ = fs::remove_dir_all(self.runtime.parent().unwrap_or(&self.runtime));
-        // Do NOT remove /tmp/claudio-demo-proxy-url.
     }
 }
 
 // ── Demo project setup ────────────────────────────────────────────────────────
 
 fn setup_demo_projects(home: &PathBuf) {
-    // webapp — a small git repo on main, one commit.
+    // webapp — a small React app with a believable history (see below).
     let webapp = home.join("projects/webapp");
-    git_init(&webapp, "main");
-    fs::write(webapp.join("package.json"), r#"{
-  "name": "webapp",
-  "version": "0.1.0",
-  "description": "Demo React application",
-  "scripts": { "start": "react-scripts start", "build": "react-scripts build" }
-}
-"#).ok();
-    fs::write(webapp.join("README.md"), "# webapp\nA demo React web application.\n").ok();
-    fs::create_dir_all(webapp.join("src")).ok();
-    fs::write(webapp.join("src/App.jsx"), "export default function App() { return <h1>Demo</h1>; }\n").ok();
-    git_commit(&webapp, "Initial commit");
+    setup_webapp_history(&webapp);
 
     // api-gateway — a git repo with a feature branch.
     let api_gw = home.join("projects/api-gateway");
@@ -418,6 +533,141 @@ fn setup_demo_projects(home: &PathBuf) {
     // notes — plain directory (not a git repo).
     let notes = home.join("notes");
     fs::write(notes.join("ideas.md"), "# Ideas\n- improve API\n- refactor auth\n").ok();
+}
+
+/// Give `webapp` 12 conventional commits from three authors, two tags, a
+/// merged feature branch and one unmerged branch, spread over a few weeks.
+fn setup_webapp_history(dir: &PathBuf) {
+    git_init(dir, "main");
+    let ana = ("Ana Ruiz", "ana@example.com");
+    let sam = ("Sam Okafor", "sam@example.com");
+    let lee = ("Lee Chen", "lee@example.com");
+
+    let commit = |files: &[(&str, &str)], msg: &str, who: (&str, &str), days: u64| {
+        for (path, body) in files {
+            let full = dir.join(path);
+            fs::create_dir_all(full.parent().unwrap()).ok();
+            fs::write(full, body).expect("write demo file");
+        }
+        git_run(dir, &["add", "-A"], who, days);
+        git_run(dir, &["commit", "-q", "-m", msg], who, days);
+    };
+
+    let package = |version: &str| {
+        format!(
+            "{{\n  \"name\": \"webapp\",\n  \"version\": \"{version}\",\n  \"description\": \"Demo React application\",\n  \"scripts\": {{ \"start\": \"vite\", \"build\": \"vite build\" }}\n}}\n"
+        )
+    };
+    let session = |extra: &str| {
+        format!(
+            "const KEY = \"webapp.token\";\n\nexport const saveToken = (t) => localStorage.setItem(KEY, t);\nexport const loadToken = () => localStorage.getItem(KEY);\n{extra}"
+        )
+    };
+    let api = |base: bool| {
+        let (decl, sig, url, msg) = if base {
+            ("const BASE = \"/api\";\n\n", "path", "BASE + path", "path")
+        } else {
+            ("", "url", "url", "url")
+        };
+        format!(
+            "{decl}export async function request({sig}, opts = {{}}, retries = 3) {{\n  for (let attempt = 0; ; attempt++) {{\n    try {{\n      const res = await fetch({url}, opts);\n      if (res.status < 500) return res;\n    }} catch (err) {{\n      if (attempt >= retries) throw err;\n    }}\n    if (attempt >= retries) throw new Error(`request failed: ${{{msg}}}`);\n    await new Promise((r) => setTimeout(r, 2 ** attempt * 100));\n  }}\n}}\n"
+        )
+    };
+
+    commit(
+        &[
+            ("package.json", &package("0.1.0")),
+            ("README.md", "# webapp\nA demo React web application.\n"),
+            ("src/App.jsx", "export default function App() {\n  return <h1>Demo</h1>;\n}\n"),
+        ],
+        "chore: scaffold the app with Vite",
+        ana,
+        34,
+    );
+    commit(
+        &[("src/Login.jsx", "export function Login({ onSubmit }) {\n  return (\n    <form onSubmit={onSubmit}>\n      <input name=\"email\" />\n      <input name=\"password\" type=\"password\" />\n      <button>Sign in</button>\n    </form>\n  );\n}\n")],
+        "feat(auth): add the login form",
+        ana,
+        31,
+    );
+    commit(&[("src/session.js", &session(""))], "feat(auth): persist the session token", sam, 27);
+    commit(
+        &[
+            ("src/session.js", &session("export const clearToken = () => localStorage.removeItem(KEY);\n")),
+            ("src/App.jsx", "import { loadToken } from \"./session\";\nimport { Login } from \"./Login\";\n\nexport default function App() {\n  if (!loadToken()) return <Login />;\n  return <h1>Demo</h1>;\n}\n"),
+        ],
+        "fix(auth): show the login form when the token is missing",
+        sam,
+        24,
+    );
+    commit(
+        &[("README.md", "# webapp\nA demo React web application.\n\n## Setup\n\n    npm install\n    npm start\n")],
+        "docs: add setup instructions to the README",
+        lee,
+        21,
+    );
+    git_run(dir, &["tag", "-a", "v0.1.0", "-m", "v0.1.0"], ana, 21);
+
+    // A feature branch, merged later with a merge commit.
+    git_run(dir, &["checkout", "-q", "-b", "feat/dark-mode"], ana, 18);
+    commit(
+        &[("src/theme.js", "import { createContext, useContext } from \"react\";\n\nexport const ThemeContext = createContext(\"light\");\nexport const useTheme = () => useContext(ThemeContext);\n")],
+        "feat(ui): add a theme context",
+        lee,
+        18,
+    );
+    commit(
+        &[("src/Navbar.jsx", "import { useTheme } from \"./theme\";\n\nexport function Navbar({ onToggle }) {\n  const theme = useTheme();\n  return <nav className={theme}><button onClick={onToggle}>Dark mode</button></nav>;\n}\n")],
+        "feat(ui): add a dark mode toggle to the navbar",
+        lee,
+        15,
+    );
+    // An unmerged branch, off the dark-mode work.
+    git_run(dir, &["branch", "fix/nav-overflow"], lee, 15);
+
+    git_run(dir, &["checkout", "-q", "main"], sam, 14);
+    commit(&[("src/api.js", &api(false))], "fix(api): retry failed requests with backoff", sam, 14);
+    commit(&[("src/api.js", &api(true))], "refactor(api): resolve paths against a base URL", sam, 11);
+    git_run(
+        dir,
+        &["merge", "--no-ff", "-q", "feat/dark-mode", "-m", "Merge branch 'feat/dark-mode'"],
+        ana,
+        9,
+    );
+    commit(
+        &[("src/App.test.jsx", "import { render } from \"@testing-library/react\";\nimport App from \"./App\";\n\ntest(\"renders without crashing\", () => {\n  render(<App />);\n});\n")],
+        "test: add an App smoke test",
+        lee,
+        5,
+    );
+    commit(&[("package.json", &package("0.2.0"))], "chore(release): 0.2.0", ana, 2);
+    git_run(dir, &["tag", "-a", "v0.2.0", "-m", "v0.2.0"], ana, 2);
+}
+
+/// Run git in `dir` as `who`, `days` days ago, so the log has believable dates.
+fn git_run(dir: &PathBuf, args: &[&str], who: (&str, &str), days: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let when = format!("{} +0000", now.saturating_sub(days * 86_400 + 3_600 * (days % 7 + 1)));
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", who.0)
+        .env("GIT_AUTHOR_EMAIL", who.1)
+        .env("GIT_COMMITTER_NAME", who.0)
+        .env("GIT_COMMITTER_EMAIL", who.1)
+        .env("GIT_AUTHOR_DATE", &when)
+        .env("GIT_COMMITTER_DATE", &when)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn git_init(dir: &PathBuf, branch: &str) {
@@ -659,6 +909,30 @@ fn dismiss_security_notes(tui: &mut TuiProcess) {
             continue;
         }
 
+        // Bypass-permissions warning (claudio launches claude with
+        // `--allow-dangerously-skip-permissions`). The cursor starts on
+        // "No, exit"; move to "Yes, I accept" and confirm.
+        if pane.contains("Bypass Permissions mode") && pane.contains("Yes, I accept") {
+            eprintln!("[screenshots] accepting the bypass-permissions warning");
+            thread::sleep(Duration::from_millis(500));
+            tui.send_keys(common::DOWN_ARROW);
+            thread::sleep(Duration::from_millis(300));
+            tui.send_keys(ENTER);
+            let gone = Instant::now() + Duration::from_secs(15);
+            loop {
+                thread::sleep(Duration::from_millis(200));
+                if !tui.screen_text(Region::Pane).contains("Yes, I accept") {
+                    thread::sleep(Duration::from_millis(300));
+                    break;
+                }
+                if Instant::now() > gone {
+                    eprintln!("[screenshots] bypass warning didn't clear — continuing");
+                    break;
+                }
+            }
+            continue;
+        }
+
         // Security notes / gateway onboarding ("Press Enter to continue…").
         if pane.contains("Press Enter") || pane.contains("to continue") {
             eprintln!("[screenshots] dismissing security notes (Enter)");
@@ -696,17 +970,66 @@ fn dismiss_security_notes(tui: &mut TuiProcess) {
 
 // ── Screenshot save helper ────────────────────────────────────────────────────
 
+/// Hide what identifies the real proxy account: e-mail addresses become
+/// `demo@example.com` and the account name's "p4u" becomes "dmo". Both keep
+/// the text's width so the render's layout does not move.
+fn redact(text: &str) -> String {
+    redact_emails(text).replace("p4u", "dmo")
+}
+
+/// Replace every e-mail address in `text` with `demo@example.com`, padded or
+/// truncated to the same width.
+fn redact_emails(text: &str) -> String {
+    const DEMO: &str = "demo@example.com";
+    let is_mail = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-');
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '@' {
+            // Local part already copied to `out`: peel it back off.
+            let mut start = out.len();
+            for (idx, c) in out.char_indices().rev() {
+                if is_mail(c) { start = idx } else { break }
+            }
+            let local = out.len() - start;
+            let mut end = i + 1;
+            while end < chars.len() && (is_mail(chars[end])) {
+                end += 1;
+            }
+            let domain = end - (i + 1);
+            if local > 0 && domain > 2 && chars[i + 1..end].contains(&'.') {
+                out.truncate(start);
+                let width = local + 1 + domain;
+                let mut repl: String = DEMO.chars().take(width).collect();
+                while repl.chars().count() < width {
+                    repl.push(' ');
+                }
+                out.push_str(&repl);
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Export the current screen as SVG, run a privacy check, convert to PNG.
 fn save_shot(tui: &TuiProcess, demo: &DemoEnv, png_path: &PathBuf, name: &str) {
     eprintln!("[screenshots] capturing {name}...");
 
-    let svg = tui.screen_svg();
+    let screen = redact(&tui.screen_text(Region::Screen));
+    // The status bar shows the proxy account's real e-mail address; swap it for
+    // a same-width placeholder (everything else is the real render).
+    let svg = redact(&tui.screen_svg());
 
     // Privacy check on the SVG source.
     demo.privacy_check(&svg, name);
 
     // Also check the plain screen text.
-    demo.privacy_check(&tui.screen_text(Region::Screen), name);
+    demo.privacy_check(&screen, name);
 
     // Write SVG to a temp file alongside the PNG.
     let svg_path = png_path.with_extension("svg");
