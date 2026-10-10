@@ -174,6 +174,7 @@ mod tests {
         assert_eq!((spec.id, spec.cwd.as_str()), (id, "/work"));
         assert_eq!(spec.args, ["--resume", "abc"]);
         assert!(spec.env.is_empty(), "no proxy, no env");
+        assert!(spec.ephemeral, "not a session for a manager to show");
         // The pane is the whole screen.
         assert_eq!((spec.rows, spec.cols), (30, 100));
         assert_eq!(*to, ReplyTo::Spawned(id));

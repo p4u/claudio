@@ -427,6 +427,7 @@ impl Client {
                     env: Vec::new(),
                     rows: shell.rows,
                     cols: shell.cols,
+                    ephemeral: false,
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }

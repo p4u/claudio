@@ -308,6 +308,12 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     pub rows: u16,
     pub cols: u16,
+    /// Not the manager's: the session lives only as long as the client that
+    /// started it (`claudio --plain`). The daemon does not journal it, and
+    /// reports it with [`SessionInfo::ephemeral`] so a manager leaves it out.
+    /// An old daemon ignores the field and treats it as any other session.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// How to restart a session. Everything else (cwd, name, claude arguments,
@@ -383,6 +389,7 @@ impl std::fmt::Debug for SpawnSpec {
             .field("env", &env_keys)
             .field("rows", &self.rows)
             .field("cols", &self.cols)
+            .field("ephemeral", &self.ephemeral)
             .finish()
     }
 }
@@ -418,6 +425,9 @@ pub struct SessionInfo {
     /// Absent from old daemons, which only run claude.
     #[serde(default)]
     pub kind: SessionKind,
+    /// Started with [`SpawnSpec::ephemeral`]: not a tab for the manager.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// What a session is doing, derived from Claude Code hooks.
@@ -866,6 +876,15 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_is_absent_from_older_peers() {
+        let id = "00000000-0000-0000-0000-000000000000";
+        let spec = format!(r#"{{"id":"{id}","cwd":"/w","rows":24,"cols":80}}"#);
+        assert!(!serde_json::from_str::<SpawnSpec>(&spec).unwrap().ephemeral);
+        let info = format!(r#"{{"id":"{id}","cwd":"/w","state":"idle","created_at":1}}"#);
+        assert!(!serde_json::from_str::<SessionInfo>(&info).unwrap().ephemeral);
+    }
+
+    #[test]
     fn spawn_debug_redacts_env_values() {
         let spec = SpawnSpec {
             id: Uuid::nil(),
@@ -875,6 +894,7 @@ mod tests {
             env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "s3cret".into())],
             rows: 24,
             cols: 80,
+            ephemeral: false,
         };
         let dbg = format!("{spec:?}");
         assert!(dbg.contains("ANTHROPIC_AUTH_TOKEN"));

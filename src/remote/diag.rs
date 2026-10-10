@@ -125,6 +125,7 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
             env: vec![],
             rows: 24,
             cols: 80,
+            ephemeral: false,
         };
 
         // Spawn the session.

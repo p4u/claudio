@@ -672,6 +672,7 @@ impl Daemon {
                     env: vec![], // env is not stored in journal (by design)
                     rows: 24,
                     cols: 80,
+                    ephemeral: e.ephemeral,
                 };
                 (spec, e.kind)
             })
@@ -763,6 +764,7 @@ impl Daemon {
             env: req.env,
             rows: req.rows,
             cols: req.cols,
+            ephemeral: entry.ephemeral,
         };
         let spawned = self.spawn_reserved(spec, entry.kind).await;
         match (&spawned, self.session(id)) {
@@ -895,5 +897,6 @@ fn dormant_info(entry: &Entry) -> SessionInfo {
         model: None,
         context_tokens: None,
         kind: entry.kind,
+        ephemeral: entry.ephemeral,
     }
 }

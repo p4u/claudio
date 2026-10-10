@@ -519,11 +519,15 @@ impl App {
         if self.mode == Mode::Plain && self.plain_event(id, &event) {
             return;
         }
+        // Another client's new session becomes a tab, unless it is not one
+        // for the manager (`--plain`'s).
         if let SessionEvent::Created { info } = &event {
             if self.index_of(id).is_none() {
-                let view = SessionView::from_info(host, info, self.pane_size());
-                self.sessions.push(view);
-                self.save();
+                if !info.ephemeral {
+                    let view = SessionView::from_info(host, info, self.pane_size());
+                    self.sessions.push(view);
+                    self.save();
+                }
                 return;
             }
         }

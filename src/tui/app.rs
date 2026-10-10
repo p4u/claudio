@@ -1175,6 +1175,46 @@ mod tests {
     }
 
     #[test]
+    fn plain_mode_sessions_never_become_tabs() {
+        let ephemeral = |info: SessionInfo| SessionInfo {
+            ephemeral: true,
+            ..info
+        };
+        let live = [
+            info(Some(1), None),
+            ephemeral(info(Some(2), None)),
+            // Dormant: it must not be resumed either.
+            ephemeral(info(None, Some("c3"))),
+        ];
+        let mut app = test_support::app();
+        app.recover(&ClientState::default(), &live);
+        assert_eq!(app.sessions.len(), 1);
+        let effects = app.take_effects();
+        assert!(!requests(&effects).iter().any(|m| matches!(m, Msg::Spawn(_))));
+
+        let other = ephemeral(info(Some(4), None));
+        let created = SessionEvent::Created {
+            info: other.clone(),
+        };
+        app.on_incoming_from("local", Incoming::Event { id: other.id, event: created });
+        assert_eq!(app.sessions.len(), 1);
+        app.recover_host("local", &[live[0].clone(), other]);
+        assert_eq!(app.sessions.len(), 1, "nor after a reconnect");
+    }
+
+    #[test]
+    fn a_manager_spawn_is_not_ephemeral() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.spawn("local".into(), "/w".into(), None, None);
+        let effects = app.take_effects();
+        let spawn = requests(&effects).into_iter().find_map(|m| match m {
+            Msg::Spawn(spec) => Some(spec.clone()),
+            _ => None,
+        });
+        assert!(!spawn.expect("a Spawn").ephemeral);
+    }
+
+    #[test]
     fn a_fresh_reset_drops_the_saved_conversation() {
         let live = [info(Some(1), Some("c1"))];
         let mut app = app_with(&live);

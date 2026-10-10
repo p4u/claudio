@@ -382,6 +382,8 @@ impl App {
             env: vec![], // filled by `send_with_proxy`
             rows,
             cols,
+            // `--plain`'s session is not one for a manager to show.
+            ephemeral: self.mode == Mode::Plain,
         };
         self.send_with_proxy(host, Msg::Spawn(spec), proxy, ReplyTo::Spawned(id))
     }

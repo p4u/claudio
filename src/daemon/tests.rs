@@ -164,6 +164,7 @@ impl TestDaemon {
             env: vec![("SECRET_ENV".into(), "hunter2".into())],
             rows: 24,
             cols: 80,
+            ephemeral: false,
         }
     }
 
@@ -450,6 +451,30 @@ async fn spawn_attach_echo_and_list() {
     // The journal never holds the env.
     let raw = std::fs::read_to_string(&d.config.journal).unwrap();
     assert!(!raw.contains("hunter2") && !raw.contains("SECRET_ENV") && !raw.contains("--settings"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ephemeral_session_is_listed_as_such_and_never_journaled() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let (kept, plain) = (Uuid::new_v4(), Uuid::new_v4());
+    c.spawn(d.spec(kept)).await;
+    let ephemeral = SpawnSpec {
+        ephemeral: true,
+        ..d.spec(plain)
+    };
+    assert!(c.spawn(ephemeral).await.is_some());
+
+    let sessions = c.sessions().await;
+    let flag = |id| sessions.iter().find(|s| s.id == id).map(|s| s.ephemeral);
+    assert_eq!((flag(kept), flag(plain)), (Some(false), Some(true)));
+    let journaled: Vec<_> = d.journal()["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(journaled, [kept.to_string()]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -757,6 +782,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         env: vec![],
         rows: 24,
         cols: 80,
+        ephemeral: false,
     };
 
     // spawner handles the Spawn/Spawned handshake; observer watches events.
@@ -844,6 +870,7 @@ async fn immediate_exit_leaves_session_dormant() {
         env: vec![],
         rows: 24,
         cols: 80,
+        ephemeral: false,
     };
     c.spawn(spec).await;
 
