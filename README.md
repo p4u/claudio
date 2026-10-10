@@ -187,7 +187,7 @@ A multi-page popup for the session's claude-proxy profile:
 - **Pool & limits:** provider health, your limit, and the model catalogue.
 - **Sessions:** your sessions on this profile.
 
-`←`/`→` or `1`–`5` switch pages, `w` changes the time window, and `r` refreshes.
+`←`/`→` or `1`–`5` switch pages, `w` changes the time window, and `r` refreshes. `n` asks the proxy to move the session to its next subscription (after a confirmation); the switch takes effect on the next message and rebuilds the prompt cache.
 
 ### Keeping claude up to date
 

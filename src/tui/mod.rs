@@ -399,6 +399,11 @@ enum HostEvent {
         claude_session_id: String,
         result: Result<Option<crate::proxy::api::SessionCredential>, String>,
     },
+    /// The proxy answered a subscription switch request.
+    SubscriptionSwitch {
+        session: crate::proto::SessionId,
+        result: Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError>,
+    },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
@@ -653,6 +658,9 @@ async fn event_loop(
                 Some(HostEvent::SessionCredential { session, claude_session_id, result }) => {
                     app.on_session_credential(session, &claude_session_id, result);
                 }
+                Some(HostEvent::SubscriptionSwitch { session, result }) => {
+                    app.on_switch_result(session, result);
+                }
                 Some(HostEvent::UpgradeAvailable(tag)) => {
                     if let Some(t) = tag {
                         app.upgrade_notice = Some(t);
@@ -798,6 +806,22 @@ fn run_effect(
                     .await;
             });
         }
+        Effect::SwitchSubscription {
+            profile_name,
+            session,
+            claude_session_id,
+        } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = switch_subscription(&profile_name, &claude_session_id).await;
+                let _ = tx
+                    .send(HostEvent::SubscriptionSwitch {
+                        session,
+                        result,
+                    })
+                    .await;
+            });
+        }
         Effect::SpawnWithProxy {
             host,
             msg,
@@ -903,6 +927,20 @@ async fn fetch_session_credential(
     crate::proxy::api::fetch_session(&url, &token, claude_session_id)
         .await
         .map_err(describe_api_error)
+}
+
+/// Ask the proxy to move a conversation to its next subscription.
+async fn switch_subscription(
+    profile_name: &str,
+    claude_session_id: &str,
+) -> Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError> {
+    use crate::proxy::api::{ApiError, SwitchError};
+    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
+        return Err(SwitchError::Api(ApiError::Http(
+            reqwest::StatusCode::UNAUTHORIZED,
+        )));
+    };
+    crate::proxy::api::switch_session(&url, &token, claude_session_id).await
 }
 
 /// A one-line, user-facing description of a proxy API error.

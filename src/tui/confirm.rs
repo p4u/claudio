@@ -27,6 +27,13 @@ pub enum ConfirmAction {
     Reset { id: SessionId, fresh: bool },
     /// Kill session `id` and close its tab.
     Kill(SessionId),
+    /// Ask the proxy `profile` to move conversation `claude_session_id` of
+    /// session `session` to another subscription.
+    SwitchSubscription {
+        session: SessionId,
+        profile: String,
+        claude_session_id: String,
+    },
 }
 
 /// A host and the version the user may choose to skip for it.
@@ -158,6 +165,11 @@ impl App {
             }
             Some(ConfirmAction::Reset { id, fresh }) => self.reset_session(id, fresh),
             Some(ConfirmAction::Kill(id)) => self.kill_session(id),
+            Some(ConfirmAction::SwitchSubscription {
+                session,
+                profile,
+                claude_session_id,
+            }) => self.start_switch(profile, session, claude_session_id),
             None => {}
         }
         self.show_next_confirm();

@@ -409,6 +409,76 @@ pub async fn fetch_session(
     Ok(Some(resp.json().await?))
 }
 
+/// One side of a switch: the credential a session leaves or moves to.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SwitchCredential {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub plan: String,
+}
+
+impl SwitchCredential {
+    /// The label for display, else the id; `None` when neither was sent.
+    pub fn name(&self) -> Option<&str> {
+        [self.label.as_str(), self.id.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+    }
+}
+
+/// `202` body of `POST /v1/claudio/session/switch`.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SwitchOutcome {
+    pub session_id: String,
+    pub from: SwitchCredential,
+    /// `None` when the proxy has not chosen the target yet.
+    pub to: Option<SwitchCredential>,
+    pub state: String,
+}
+
+/// Why a switch was not scheduled.
+#[derive(Debug, Error)]
+pub enum SwitchError {
+    /// 404: the proxy does not know the session (yet), or it is not yours.
+    #[error("the proxy does not know this session yet — send a message first")]
+    UnknownSession,
+    /// 409: no other subscription to move to.
+    #[error("no other subscription available")]
+    NoAlternative,
+    /// 405: a proxy without the switch route.
+    #[error("proxy too old for switching")]
+    TooOld,
+    #[error("{0}")]
+    Api(#[from] ApiError),
+}
+
+/// `POST /v1/claudio/session/switch` — ask the proxy to move a conversation
+/// to its next subscription. It takes effect on the session's next request.
+pub async fn switch_session(
+    base_url: &str,
+    token: &str,
+    claude_session_id: &str,
+) -> Result<SwitchOutcome, SwitchError> {
+    let client = build_client()?;
+    let resp = client
+        .post(format!("{base_url}/v1/claudio/session/switch"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "id": claude_session_id }))
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    match resp.status().as_u16() {
+        404 => Err(SwitchError::UnknownSession),
+        409 => Err(SwitchError::NoAlternative),
+        405 => Err(SwitchError::TooOld),
+        _ if resp.status().is_success() => Ok(resp.json().await.map_err(ApiError::from)?),
+        _ => Err(ApiError::Http(resp.status()).into()),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -668,6 +738,69 @@ mod tests {
             assert!(matches!(
                 fetch_session(&base, "tok", "x").await,
                 Err(ApiError::Http(s)) if s.as_u16() == code
+            ));
+        }
+    }
+
+    fn switch_router(code: u16, body: serde_json::Value) -> Router {
+        use axum::routing::post;
+        Router::new().route(
+            "/v1/claudio/session/switch",
+            post(
+                move |h: axum::http::HeaderMap, Json(req): Json<serde_json::Value>| async move {
+                    assert_eq!(h["authorization"], "Bearer tok");
+                    assert_eq!(req, serde_json::json!({"id": "0a1b"}));
+                    (axum::http::StatusCode::from_u16(code).unwrap(), Json(body))
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn switch_session_202_full() {
+        let base = serve(switch_router(
+            202,
+            serde_json::json!({
+                "session_id": "0a1b",
+                "from": {"id": "c1", "label": "work-max", "provider": "anthropic", "plan": "max"},
+                "to": {"id": "c2", "label": "personal", "provider": "anthropic", "plan": "pro"},
+                "state": "pending"
+            }),
+        ))
+        .await;
+        let o = switch_session(&base, "tok", "0a1b").await.unwrap();
+        assert_eq!(o.from.name(), Some("work-max"));
+        assert_eq!(o.to.unwrap().name(), Some("personal"));
+        assert_eq!(o.state, "pending");
+    }
+
+    #[tokio::test]
+    async fn switch_session_202_to_null() {
+        let base = serve(switch_router(
+            202,
+            serde_json::json!({"session_id": "0a1b", "from": {"id": "c1"},
+                               "to": null, "state": "pending"}),
+        ))
+        .await;
+        let o = switch_session(&base, "tok", "0a1b").await.unwrap();
+        assert_eq!(o.from.name(), Some("c1"));
+        assert!(o.to.is_none());
+    }
+
+    #[tokio::test]
+    async fn switch_session_error_statuses() {
+        let e = |code| async move {
+            let base =
+                serve(switch_router(code, serde_json::json!({"error": {"type": "x"}}))).await;
+            switch_session(&base, "tok", "0a1b").await.unwrap_err()
+        };
+        assert!(matches!(e(404).await, SwitchError::UnknownSession));
+        assert!(matches!(e(409).await, SwitchError::NoAlternative));
+        assert!(matches!(e(405).await, SwitchError::TooOld));
+        for code in [400u16, 401, 429] {
+            assert!(matches!(
+                e(code).await,
+                SwitchError::Api(ApiError::Http(s)) if s.as_u16() == code
             ));
         }
     }

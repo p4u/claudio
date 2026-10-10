@@ -117,7 +117,11 @@ fn header_line(view: &StatsView, width: usize) -> Line<'static> {
 }
 
 fn footer_line(app: &App, view: &StatsView, width: usize, scroll: u16, max: u16) -> Line<'static> {
-    let keys = " ←→ page · 1-5 jump · w window · ↑↓ scroll · r refresh · q close";
+    let keys = if view.can_switch {
+        " ←→ page · 1-5 jump · w window · ↑↓ scroll · r refresh · n next sub · q close"
+    } else {
+        " ←→ page · 1-5 jump · w window · ↑↓ scroll · r refresh · q close"
+    };
     let status = view
         .profile
         .as_deref()
@@ -361,6 +365,15 @@ fn overview_lines(
         lines.push(kv("This session", session_summary(v, app.now)));
         if let Some(cred) = app.session_credential(v) {
             lines.push(kv("Credential", credential_spans(cred, app.now)));
+        }
+        if view.can_switch {
+            lines.push(kv(
+                "",
+                vec![Span::styled(
+                    "press n to move this session to another subscription".to_owned(),
+                    dim(),
+                )],
+            ));
         }
     }
 }

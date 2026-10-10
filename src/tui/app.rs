@@ -22,10 +22,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::{ConfigResponse, ModelsResponse, SessionCredential};
+use crate::proxy::api::{
+    ConfigResponse, ModelsResponse, SessionCredential, SwitchError, SwitchOutcome,
+};
 use crate::proxy::ProxyChoice;
 
-use super::confirm::ConfirmPrompt;
+use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::keymap::Keymap;
 use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
@@ -116,6 +118,13 @@ pub enum Effect {
     /// Ask the proxy which upstream credential a conversation uses. The
     /// result goes to [`App::on_session_credential`].
     FetchSessionCredential {
+        profile_name: String,
+        session: SessionId,
+        claude_session_id: String,
+    },
+    /// Ask the proxy to move a conversation to another subscription. The
+    /// result goes to [`App::on_switch_result`].
+    SwitchSubscription {
         profile_name: String,
         session: SessionId,
         claude_session_id: String,
@@ -532,7 +541,11 @@ impl App {
         let profile = session_profile
             .or_else(|| self.proxy_default.clone())
             .or_else(|| self.proxy_profiles.first().cloned());
-        let (view, outcome) = StatsView::open(profile, borrowed);
+        let (mut view, outcome) = StatsView::open(profile, borrowed);
+        view.can_switch = !borrowed
+            && self
+                .switchable_session()
+                .is_some_and(|(_, p, _)| Some(&p) == view.profile.as_ref());
         self.stats_outcome(view, outcome);
         self.refresh_session_cred(SESSION_CRED_MIN_GAP_SECS);
         self.redraw = true;
@@ -564,9 +577,86 @@ impl App {
                     self.schedule_proxy_stats(&name, windows);
                 }
             }
+            StatsOutcome::Switch => {
+                // The popup gives way to the prompt; Alt+s opens it again.
+                self.ask_switch_subscription();
+                return;
+            }
             StatsOutcome::Nothing => {}
         }
         self.modal = Some(Modal::ProxyStats(view));
+    }
+
+    /// The active session's proxy profile and conversation id, when it can be
+    /// moved to another subscription.
+    fn switchable_session(&self) -> Option<(SessionId, String, String)> {
+        let v = self.active_view()?;
+        let csid = v.claude_session_id.clone().filter(|c| !c.is_empty())?;
+        if v.kind != crate::proto::SessionKind::Claude {
+            return None;
+        }
+        Some((v.id, v.proxy.clone()?, csid))
+    }
+
+    /// Ask before moving the active session to another subscription.
+    fn ask_switch_subscription(&mut self) {
+        let Some((session, profile, claude_session_id)) = self.switchable_session() else {
+            return;
+        };
+        let prompt = ConfirmPrompt::new(
+            "Next subscription",
+            "Move this session to another subscription?\nThe prompt cache will rebuild.",
+            vec![
+                Choice::new(
+                    'y',
+                    "switch",
+                    Some(ConfirmAction::SwitchSubscription {
+                        session,
+                        profile,
+                        claude_session_id,
+                    }),
+                ),
+                Choice::new('n', "cancel", None),
+            ],
+        );
+        self.queue_confirm(prompt.ready());
+    }
+
+    /// The prompt was answered `y`: send the request.
+    pub(super) fn start_switch(
+        &mut self,
+        profile: String,
+        session: SessionId,
+        claude_session_id: String,
+    ) {
+        self.effects.push(Effect::SwitchSubscription {
+            profile_name: profile,
+            session,
+            claude_session_id,
+        });
+    }
+
+    /// Called when a `SwitchSubscription` effect completes: say what the
+    /// proxy answered, and look the credential up again so the status bar
+    /// follows once the switch happens.
+    pub fn on_switch_result(
+        &mut self,
+        session: SessionId,
+        result: Result<SwitchOutcome, SwitchError>,
+    ) {
+        match result {
+            Ok(o) => {
+                let from = o.from.name().unwrap_or("current subscription");
+                let to = o.to.as_ref().and_then(|t| t.name()).unwrap_or("next available");
+                self.notify(format!("switch scheduled: {from} → {to} (on the next message)"));
+                let active = self.active_view().map(|v| v.id) == Some(session);
+                if active {
+                    self.refresh_session_cred(0);
+                }
+            }
+            Err(SwitchError::Api(e)) => self.notify(format!("switch failed: {e}")),
+            Err(e) => self.notify(e.to_string()),
+        }
     }
 
     /// Build the `SpawnSpec.env` for a proxy profile name. Fails when a
@@ -1856,6 +1946,119 @@ mod tests {
         app.open_proxy_stats();
         let effects = app.take_effects();
         assert_eq!(cred_fetches(&effects), vec![("p", live[0].id, "c1")]);
+    }
+
+    fn press_char(app: &mut App, c: char) {
+        app.on_terminal(key(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    fn notice_text(app: &App) -> String {
+        app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn n_in_the_stats_popup_is_offered_only_to_proxied_sessions_with_an_id() {
+        let (mut app, _) = proxied_app();
+        app.open_proxy_stats();
+        assert!(matches!(&app.modal, Some(Modal::ProxyStats(v)) if v.can_switch));
+        press_char(&mut app, 'n');
+        match &app.modal {
+            Some(Modal::Confirm(p)) => {
+                assert!(p.text.starts_with("Move this session to another subscription?"));
+                let hints: Vec<_> = p.choices.iter().map(Choice::hint).collect();
+                assert_eq!(hints, ["[y] switch", "[n] cancel"]);
+            }
+            _ => panic!("expected the confirm prompt"),
+        }
+
+        // No conversation id yet: the key does nothing.
+        let (mut app, _) = proxied_app();
+        app.sessions[0].claude_session_id = None;
+        app.open_proxy_stats();
+        assert!(matches!(&app.modal, Some(Modal::ProxyStats(v)) if !v.can_switch));
+        press_char(&mut app, 'n');
+        assert!(matches!(app.modal, Some(Modal::ProxyStats(_))));
+
+        // A direct session, looking at the default profile's stats.
+        let (mut app, _) = proxied_app();
+        app.sessions[0].proxy = None;
+        app.proxy_default = Some("p".into());
+        app.open_proxy_stats();
+        assert!(matches!(&app.modal, Some(Modal::ProxyStats(v)) if !v.can_switch));
+    }
+
+    #[test]
+    fn confirming_the_switch_emits_the_effect_and_cancel_does_not() {
+        let (mut app, live) = proxied_app();
+        app.open_proxy_stats();
+        press_char(&mut app, 'n');
+        app.take_effects();
+        press_char(&mut app, 'n');
+        assert!(app.modal.is_none());
+        assert!(!app
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::SwitchSubscription { .. })));
+
+        app.open_proxy_stats();
+        press_char(&mut app, 'n');
+        press_char(&mut app, 'y');
+        let effects = app.take_effects();
+        assert!(effects.iter().any(|e| matches!(e,
+            Effect::SwitchSubscription { profile_name, session, claude_session_id }
+                if profile_name == "p" && *session == live[0].id && claude_session_id == "c1")));
+    }
+
+    #[test]
+    fn switch_outcomes_become_notices() {
+        use crate::proxy::api::{ApiError, SwitchCredential};
+        let cred = |l: &str| SwitchCredential {
+            label: l.into(),
+            ..Default::default()
+        };
+        let (mut app, live) = proxied_app();
+        let id = live[0].id;
+        app.on_switch_result(
+            id,
+            Ok(SwitchOutcome {
+                from: cred("work-max"),
+                to: Some(cred("personal")),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            notice_text(&app),
+            "switch scheduled: work-max → personal (on the next message)"
+        );
+        // The credential is looked up again.
+        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", id, "c1")]);
+        app.on_switch_result(
+            id,
+            Ok(SwitchOutcome {
+                from: cred("work-max"),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            notice_text(&app),
+            "switch scheduled: work-max → next available (on the next message)"
+        );
+        app.on_switch_result(id, Err(SwitchError::UnknownSession));
+        assert_eq!(
+            notice_text(&app),
+            "the proxy does not know this session yet — send a message first"
+        );
+        app.on_switch_result(id, Err(SwitchError::NoAlternative));
+        assert_eq!(notice_text(&app), "no other subscription available");
+        app.on_switch_result(id, Err(SwitchError::TooOld));
+        assert_eq!(notice_text(&app), "proxy too old for switching");
+        app.on_switch_result(
+            id,
+            Err(SwitchError::Api(ApiError::Http(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ))),
+        );
+        assert!(notice_text(&app).starts_with("switch failed: "));
     }
 
     #[test]

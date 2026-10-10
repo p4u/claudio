@@ -123,6 +123,9 @@ pub struct StatsView {
     max_scroll: Cell<u16>,
     /// A fetch is in flight for this profile.
     pub loading: bool,
+    /// The active session is on this proxy and has a conversation id, so
+    /// `n` (move it to another subscription) is offered. Set by the app.
+    pub can_switch: bool,
 }
 
 /// What the app should do after a key press.
@@ -133,6 +136,8 @@ pub enum StatsOutcome {
     /// Fetch stats for these windows (the app adds pool health, and the model
     /// catalogue when it is not cached yet).
     Fetch(Vec<Window>),
+    /// `n`: ask to move the active session to another subscription.
+    Switch,
 }
 
 impl StatsView {
@@ -147,6 +152,7 @@ impl StatsView {
             // Not drawn yet: nothing to limit scrolling to.
             max_scroll: Cell::new(u16::MAX),
             loading: false,
+            can_switch: false,
         };
         let outcome = view.fetch_missing(&[]);
         (view, outcome)
@@ -188,6 +194,7 @@ impl StatsView {
                 self.fetch_missing(cached)
             }
             KeyCode::Char('r') => self.fetch(self.page.windows(self.window)),
+            KeyCode::Char('n') if self.can_switch => StatsOutcome::Switch,
             KeyCode::Down | KeyCode::Char('j') => self.scroll_to(self.scroll().saturating_add(1)),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_to(self.scroll().saturating_sub(1)),
             KeyCode::PageDown | KeyCode::Char(' ') => {
@@ -313,6 +320,20 @@ mod tests {
         assert_eq!(out, StatsOutcome::Nothing);
         v.on_key(&press(KeyCode::Char('w')), &Window::ALL);
         assert_eq!(v.window, Window::H24, "cycles back");
+    }
+
+    #[test]
+    fn n_switches_only_when_offered() {
+        let mut v = view();
+        assert_eq!(
+            v.on_key(&press(KeyCode::Char('n')), &Window::ALL),
+            StatsOutcome::Nothing
+        );
+        v.can_switch = true;
+        assert_eq!(
+            v.on_key(&press(KeyCode::Char('n')), &Window::ALL),
+            StatsOutcome::Switch
+        );
     }
 
     #[test]
