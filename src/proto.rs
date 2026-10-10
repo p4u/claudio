@@ -268,6 +268,15 @@ pub struct Welcome {
     pub claudio_version: String,
     pub proto: u32,
     pub host: HostInfo,
+    /// SHA-256 of the binary the daemon was started from (what `__probe`
+    /// reports as `build`). Old daemons omit it: they predate the freshness
+    /// check, so they are outdated by definition ([`crate::freshness`]).
+    #[serde(default)]
+    pub build: Option<String>,
+    /// That binary's modification time (Unix seconds), which orders two
+    /// builds of one version.
+    #[serde(default)]
+    pub build_time: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -752,6 +761,29 @@ mod tests {
         let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         assert_eq!(len, bytes.len() - 4);
         Frame::decode(&bytes[4..]).unwrap()
+    }
+
+    #[test]
+    fn welcome_from_an_old_daemon_has_no_build() {
+        let old = r#"{"claudio_version":"0.2.0","proto":1,
+            "host":{"hostname":"h","os":"linux","arch":"x86_64","home":"/h"}}"#;
+        let w: Welcome = serde_json::from_str(old).unwrap();
+        assert_eq!((w.build, w.build_time), (None, None));
+        // And an old client still reads a new Welcome (unknown fields ignored).
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldWelcome {
+            claudio_version: String,
+            proto: u32,
+        }
+        let new = Welcome {
+            build: Some("ab".into()),
+            build_time: Some(7),
+            ..serde_json::from_str(old).unwrap()
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(serde_json::from_str::<OldWelcome>(&json).is_ok());
+        assert_eq!(serde_json::from_str::<Welcome>(&json).unwrap(), new);
     }
 
     #[test]

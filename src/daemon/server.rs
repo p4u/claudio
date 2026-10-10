@@ -59,7 +59,7 @@ pub struct Listening {
     daemon: Arc<Daemon>,
     listener: UnixListener,
     /// Held (locked) for the daemon's lifetime.
-    _lock: File,
+    lock: File,
 }
 
 /// Take the startup lock, bind the socket (mode 0600) and load the journal.
@@ -105,7 +105,7 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     Ok(Some(Listening {
         daemon,
         listener,
-        _lock: lock,
+        lock,
     }))
 }
 
@@ -130,8 +130,9 @@ impl Listening {
     }
 
     /// Accept connections forever, re-binding the socket if it disappears.
-    /// Exits when the daemon's shutdown notification fires.
-    pub async fn serve(mut self) {
+    /// Exits when the daemon's shutdown notification fires, handing back the
+    /// startup lock: the caller releases it once it has stopped.
+    pub async fn serve(mut self) -> File {
         let mut next: ClientId = 0;
         let socket_path = self.daemon.config.socket.clone();
         let mut health_tick = tokio::time::interval(SOCKET_HEALTH_INTERVAL);
@@ -162,6 +163,9 @@ impl Listening {
                 },
             }
         }
+        // Stop listening now; the lock stays held until the caller is done.
+        drop(self.listener);
+        self.lock
     }
 
     /// Check whether the socket path still exists and re-bind if it has been
@@ -268,10 +272,13 @@ async fn client_loop(
         git_slots: Arc::new(Semaphore::new(GIT_CONCURRENCY)),
         git_pending: Arc::new(Semaphore::new(GIT_PENDING)),
     };
+    let build = client.daemon.config.build.as_ref();
     let welcome = Welcome {
         claudio_version: env!("CARGO_PKG_VERSION").to_owned(),
         proto: PROTO,
         host: client.daemon.host().await,
+        build: build.map(|b| b.build.clone()),
+        build_time: build.and_then(|b| b.mtime),
     };
     // Queued directly (no event flush): Welcome is always the first frame.
     let welcome = Envelope {

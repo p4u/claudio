@@ -57,6 +57,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::client::{self, Client, Incoming};
+use crate::freshness::{self, DaemonCheck};
 use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
@@ -70,6 +71,8 @@ use state::ClientState;
 const TICK: Duration = Duration::from_millis(250);
 /// Minimum time between redraws (~60 fps), coalescing output bursts.
 const FRAME: Duration = Duration::from_millis(16);
+/// How often a daemon left outdated (its sessions were busy) is retried.
+const OUTDATED_RETRY: Duration = Duration::from_secs(120);
 
 /// Whether keyboard enhancement flags were pushed (and must be popped).
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
@@ -258,13 +261,32 @@ async fn main(launch: Launch) -> ExitCode {
     }
 }
 
-/// Start the local daemon if needed, connect and list its sessions.
+/// Start the local daemon if needed (replacing an outdated one), connect and
+/// list its sessions.
 async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
-    tokio::task::spawn_blocking(client::ensure_daemon)
-        .await
-        .map_err(io::Error::other)??;
+    let check = client::ensure_local_daemon().await?;
     let client = client::connect(&paths::daemon_socket()).await?;
+    if check == DaemonCheck::Deferred {
+        client.mark_daemon_outdated();
+    }
     list_sessions(&client).await.map(|s| (client, s))
+}
+
+/// Once the outdated daemon behind `client` is idle, ask for a reconnect:
+/// connecting runs the freshness check again (`connect_local`'s, or the
+/// remote bridge's), which replaces it now. A busy one waits for next time.
+async fn retry_outdated(
+    host: String,
+    generation: u64,
+    client: Client,
+    tx: mpsc::Sender<HostEvent>,
+) {
+    let Ok(Msg::Sessions { sessions }) = client.request(Msg::ListSessions).await else {
+        return;
+    };
+    if !freshness::busy(&sessions) {
+        let _ = tx.send(HostEvent::Reconnect { host, generation }).await;
+    }
 }
 
 /// The `claude --version` its daemon reported at connect, if claude is there.
@@ -358,6 +380,9 @@ enum HostEvent {
     },
     /// A local reconnect failed; retry after delay.
     LocalReconnectFailed { generation: u64 },
+    /// Drop `host`'s connection and connect again: its outdated daemon has
+    /// become idle (see [`retry_outdated`]).
+    Reconnect { host: String, generation: u64 },
     /// Proxy config fetched (or failed).
     ProxyConfig {
         profile_name: String,
@@ -446,6 +471,8 @@ async fn event_loop(
         let gen = conns.current_generation("local");
         spawn_reader("local".to_owned(), gen, rx, ev_tx.clone());
     }
+    // `conns` owns the connection from here: dropping it there closes it.
+    drop(local_client);
 
     // Start background connections to the saved tabs' remote hosts.
     for host in remote_hosts {
@@ -483,6 +510,9 @@ async fn event_loop(
     // 60-second proxy stats refresh.
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
     proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut outdated_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + OUTDATED_RETRY, OUTDATED_RETRY);
+    outdated_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_draw = Instant::now() - FRAME;
     // A plain session must not outlive its terminal.
     let mut shutdown = Box::pin(shutdown_signal());
@@ -596,6 +626,21 @@ async fn event_loop(
                     let (delay, gen) = conns.next_attempt("local");
                     spawn_reconnect_local(delay, gen, ev_tx.clone());
                 }
+                Some(HostEvent::Reconnect { host, generation }) => {
+                    if generation < conns.current_generation(&host) || !conns.is_connected(&host) {
+                        continue;
+                    }
+                    // Dropping the client closes the connection; the newer
+                    // generation silences its reader.
+                    conns.disconnect(&host);
+                    app.on_incoming_from(&host, Incoming::Disconnected);
+                    let gen = conns.next_generation(&host);
+                    if host == "local" {
+                        spawn_reconnect_local(Duration::ZERO, gen, ev_tx.clone());
+                    } else {
+                        spawn_connect(host, gen, ev_tx.clone(), true);
+                    }
+                }
                 Some(HostEvent::ProxyConfig { profile_name, config }) => {
                     if let Some(cfg) = config {
                         app.on_proxy_config(profile_name, cfg);
@@ -624,6 +669,19 @@ async fn event_loop(
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
                 if let Some(name) = proxy_name.filter(|_| manager) {
                     app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
+                }
+            }
+            _ = outdated_tick.tick() => {
+                for (host, conn) in &conns.map {
+                    if let Some(client) = conn.client.as_ref().filter(|c| c.daemon_outdated()) {
+                        let retry = retry_outdated(
+                            host.clone(),
+                            conn.generation,
+                            client.clone(),
+                            ev_tx.clone(),
+                        );
+                        tokio::spawn(retry);
+                    }
                 }
             }
             _ = tokio::time::sleep(wait), if app.redraw => {}

@@ -4,10 +4,12 @@
 //! ```text
 //! ssh HOST '$HOME/.local/bin/claudio --slave'
 //! ```
-//! It ensures the remote daemon is running, then bridges the ssh connection's
-//! stdio ↔ the daemon's Unix socket. **stdout must stay clean** — it is the
-//! binary protocol channel — so all logging goes to stderr (and optionally to
-//! a log file).
+//! It ensures the remote daemon is running, and replaces it if it is older
+//! than this binary and idle ([`crate::freshness`]: an upgrade uploads a new
+//! binary, but the daemon keeps running the old one). It then bridges the
+//! ssh connection's stdio ↔ the daemon's Unix socket. **stdout must stay
+//! clean** — it is the binary protocol channel — so all logging goes to
+//! stderr (and optionally to a log file).
 //!
 //! The bridge exits when **either** direction closes, not both.  This means
 //! that when the local client closes its ssh connection (or the daemon socket
@@ -22,14 +24,16 @@
 
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
 
+use crate::freshness::{self, DaemonCheck};
 use crate::paths;
 use crate::proto::PROTO;
+use crate::remote::probe::Probe;
 
 /// How long we wait for the daemon socket to appear after launch.
 const DAEMON_WAIT: Duration = Duration::from_secs(10);
@@ -62,9 +66,11 @@ async fn async_run() -> io::Result<()> {
     let dir = paths::runtime_dir();
     paths::ensure_private_dir(&dir)?;
 
-    // Ensure the remote daemon is running.
+    // Ensure the remote daemon is running, and runs this binary (the one the
+    // bootstrap installed) or a newer one.
     let socket = paths::daemon_socket();
     ensure_daemon_detached(&socket).await?;
+    ensure_current(&socket).await;
 
     // Connect to the daemon socket.
     let daemon = UnixStream::connect(&socket).await.map_err(|e| {
@@ -105,11 +111,41 @@ async fn async_run() -> io::Result<()> {
     }
 }
 
+/// Replace an outdated daemon unless it is busy (see [`crate::freshness`]).
+/// Silent on stdout; the outcome goes to stderr, where the local client
+/// looks for [`freshness::DEFERRED`] to try again later. A failed check
+/// leaves the daemon as it is.
+async fn ensure_current(socket: &Path) {
+    let own = match Probe::current() {
+        Ok(own) => own,
+        Err(e) => {
+            eprintln!("claudio --slave: cannot identify this binary: {e}");
+            return;
+        }
+    };
+    let start = || ensure_daemon_detached(socket);
+    match freshness::ensure_current(socket, &paths::daemon_lock(), &own, start).await {
+        Ok(DaemonCheck::UpToDate) => {}
+        Ok(DaemonCheck::Restarted) => eprintln!("claudio --slave: restarted the outdated daemon"),
+        Ok(DaemonCheck::Deferred) => eprintln!(
+            "claudio --slave: {}: the daemon is outdated but busy",
+            freshness::DEFERRED
+        ),
+        Err(e) => eprintln!("claudio --slave: daemon version check failed: {e}"),
+    }
+}
+
 /// Start the daemon if not already running, using the most persistent method
 /// available.
-async fn ensure_daemon_detached(socket: &std::path::Path) -> io::Result<()> {
-    // Already running?
-    if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+async fn ensure_daemon_detached(socket: &Path) -> io::Result<()> {
+    // Already running? Or on its way out (or in), holding the lock: a new
+    // one would find it taken and quit.
+    let (sock, lock) = (socket.to_owned(), paths::daemon_lock());
+    let wait = move || freshness::wait_for_lock(&sock, &lock, Duration::from_secs(5));
+    if tokio::task::spawn_blocking(wait)
+        .await
+        .map_err(io::Error::other)?
+    {
         return Ok(());
     }
 
@@ -122,8 +158,18 @@ async fn ensure_daemon_detached(socket: &std::path::Path) -> io::Result<()> {
         .append(true)
         .open(&log_path)?;
 
-    // Try systemd-run; fall back to setsid on failure.
-    if try_systemd_run(&exe, log.try_clone()?).is_err() {
+    // Try systemd-run; fall back to setsid on failure. A daemon that just
+    // exited may leave its unit behind for a moment (stopping the rest of
+    // its cgroup), so a failed launch gets a second try first.
+    let mut launched = try_systemd_run(&exe, log.try_clone()?);
+    if launched
+        .as_ref()
+        .is_err_and(|e| e.kind() != io::ErrorKind::NotFound)
+    {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        launched = try_systemd_run(&exe, log.try_clone()?);
+    }
+    if launched.is_err() {
         spawn_setsid(&exe, log)?;
     }
 

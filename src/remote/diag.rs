@@ -73,6 +73,10 @@ pub fn connect_check_cmd(host: &str) -> ExitCode {
             }
         };
 
+        // Send a Ping-style request to cleanly exercise the channel (and give
+        // the bridge's stderr, which may report a deferred update, time to
+        // arrive).
+        let _ = client.request(crate::proto::Msg::Ping).await;
         // The handshake already consumed the Welcome message.
         let w = client.welcome();
         let output = serde_json::json!({
@@ -83,10 +87,10 @@ pub fn connect_check_cmd(host: &str) -> ExitCode {
             "claude_ok": w.host.claude.is_some(),
             "claudio_version": w.claudio_version,
             "proto": w.proto,
+            "build": w.build,
+            "daemon_outdated": client.daemon_outdated(),
         });
         println!("{}", serde_json::to_string(&output).unwrap_or_default());
-        // Send a Ping-style request to cleanly exercise the channel.
-        let _ = client.request(crate::proto::Msg::Ping).await;
         ExitCode::SUCCESS
     })
 }

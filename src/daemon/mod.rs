@@ -39,6 +39,7 @@ use crate::proto::{
     Envelope, Frame, HostInfo, Msg, RespawnSpec, SessionEvent, SessionId, SessionInfo,
     SessionKind, SessionState, SpawnSpec,
 };
+use crate::remote::probe::Probe;
 use journal::{Entry, Journal};
 use session::{Cmd, Handle};
 
@@ -67,6 +68,10 @@ pub struct Config {
     /// `[claude] allow_skip_permissions` from this host's `config.toml`:
     /// launch claude with `--allow-dangerously-skip-permissions`.
     pub skip_permissions: bool,
+    /// The binary this daemon runs, as of its start (reported in `Welcome`
+    /// so clients can tell an outdated daemon; see [`crate::freshness`]).
+    /// `None` when it could not be read.
+    pub build: Option<Probe>,
 }
 
 impl Config {
@@ -83,6 +88,10 @@ impl Config {
             claude,
             claudio: std::env::current_exe()?,
             skip_permissions: crate::config::load().claude.allow_skip_permissions,
+            // Hashed now: an upgrade may replace the file while we run.
+            build: Probe::current()
+                .inspect_err(|e| tracing::warn!(error = %e, "cannot identify this binary"))
+                .ok(),
         })
     }
 }
@@ -188,23 +197,30 @@ pub fn run() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    runtime.block_on(async move {
+    let (code, lock) = runtime.block_on(async move {
         match server::start(config) {
-            Ok(Some(listening)) => {
-                listening.serve().await;
-                std::process::ExitCode::SUCCESS
-            }
+            Ok(Some(listening)) => (std::process::ExitCode::SUCCESS, Some(listening.serve().await)),
             Ok(None) => {
                 tracing::info!("another daemon is already running");
-                std::process::ExitCode::SUCCESS
+                (std::process::ExitCode::SUCCESS, None)
             }
             Err(e) => {
                 tracing::error!(error = %e, "daemon failed to start");
-                std::process::ExitCode::FAILURE
+                (std::process::ExitCode::FAILURE, None)
             }
         }
-    })
+    });
+    // Asked to shut down: stop every task, then exit, which closes the
+    // sessions' terminals. The lock goes last, as a successor waits for it
+    // and must not run beside us. Bounded: a stuck blocking task (a slow
+    // `claude --version`) must not hold a restart up.
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+    drop(lock);
+    code
 }
+
+/// How long a shutting-down daemon waits for its blocking tasks.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// State shared by every connection and session actor.
 pub(crate) struct Daemon {

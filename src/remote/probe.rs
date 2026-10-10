@@ -3,8 +3,14 @@
 //! The bootstrapper runs this on the remote host to decide whether an upload
 //! is needed. The `build` hash uses SHA-256 of the running binary so that dev
 //! builds with the same version string are still distinguished.
+//!
+//! The same facts identify the binary a daemon runs (its `Welcome`), so a
+//! client can tell an outdated daemon from a current one ([`crate::freshness`]).
 
 use std::io;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,22 +26,46 @@ pub struct Probe {
     pub arch: String,
     /// SHA-256 of the running binary, lower-case hex.
     pub build: String,
+    /// The binary's modification time (Unix seconds): orders two builds of
+    /// one version. Absent from older binaries.
+    #[serde(default)]
+    pub mtime: Option<u64>,
 }
 
 impl Probe {
     /// Build a [`Probe`] describing this running binary.
+    ///
+    /// On Linux this reads `/proc/self/exe`: the running code, even once the
+    /// file on disk has been replaced (an upgrade, a bootstrap upload).
     pub fn current() -> io::Result<Probe> {
-        let exe = std::env::current_exe()?;
+        let exe = if cfg!(target_os = "linux") {
+            PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe()?
+        };
         let bytes = std::fs::read(&exe)?;
         let hash = Sha256::digest(&bytes);
         let build: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let mtime = std::fs::metadata(&exe)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
         Ok(Probe {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             proto: PROTO,
             os: os_name(),
             arch: arch_name(),
             build,
+            mtime,
         })
+    }
+
+    /// This process's probe, computed once (the first call reads and hashes
+    /// the binary). `None` when the binary cannot be read.
+    pub fn own() -> Option<&'static Probe> {
+        static OWN: OnceLock<Option<Probe>> = OnceLock::new();
+        OWN.get_or_init(|| Probe::current().ok()).as_ref()
     }
 
     /// Parse a probe JSON line from the remote binary's stdout.
@@ -116,9 +146,25 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "deadbeef".repeat(8),
+            mtime: Some(1_700_000_000),
         };
         let json = serde_json::to_string(&probe).unwrap();
         assert_eq!(Probe::parse(&json), Some(probe));
+    }
+
+    #[test]
+    fn parse_accepts_a_probe_without_mtime() {
+        // What a binary from before `mtime` prints.
+        let line = r#"{"version":"0.2.0","proto":1,"os":"linux","arch":"x86_64","build":"ab"}"#;
+        assert_eq!(Probe::parse(line).unwrap().mtime, None);
+    }
+
+    #[test]
+    fn own_describes_this_binary() {
+        let own = Probe::own().expect("the test binary is readable");
+        assert_eq!(own.build.len(), 64);
+        assert!(own.mtime.is_some());
+        assert_eq!(own, &Probe::current().unwrap());
     }
 
     #[test]
@@ -135,6 +181,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "aabb".into(),
+            mtime: None,
         };
         let b = Probe {
             build: "ccdd".into(),
@@ -156,6 +203,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "x".into(),
+            mtime: None,
         };
         let mac = Probe {
             os: "macos".into(),

@@ -16,6 +16,7 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod freshness;
 mod msglog;
 mod paths;
 mod plain;

@@ -543,6 +543,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "aabbcc".into(),
+            mtime: None,
         };
         let remote_old = Probe {
             version: "0.9.0".into(),
@@ -559,6 +560,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "aabbcc".into(),
+            mtime: None,
         };
         let remote = local.clone();
         assert!(is_up_to_date(&remote, &local, "linux", "x86_64").await);
@@ -572,6 +574,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             build: "locallinuxhash".into(),
+            mtime: None,
         };
         let remote = Probe {
             os: "macos".into(),

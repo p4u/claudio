@@ -116,6 +116,16 @@ daemons coexist.
 Connects to the socket; if unavailable, starts the daemon (double-fork +
 `setsid`, or `systemd-run --user` on systemd hosts) and retries.
 
+**`freshness.rs`** — keeps each host's daemon at least as new as the claudio
+binary on it. `Welcome.build`/`build_time` identify the daemon's binary;
+`ensure_current` runs before the local TUI connects and in the remote bridge
+before it relays. An older daemon is shut down (SIGTERM by the lock's PID if
+it predates `Shutdown`) and restarted from the current binary, unless
+`busy` (a claude turn or permission prompt, or a `--plain` session): then it
+is left running, the client is flagged `daemon_outdated` (over SSH the
+bridge prints `DEFERRED` on stderr), and the TUI reconnects that host once it
+is idle (checked every 2 min).
+
 **`tui/`** — the manager UI, driven by tokio + ratatui:
 - `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
   `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
@@ -159,11 +169,12 @@ Connects to the socket; if unavailable, starts the daemon (double-fork +
   `~/.cache/claudio/<version>/` and uploads that.
 - `bridge.rs` — `--slave` mode: the stdio↔socket bridge the local client runs
   on the remote as `ssh HOST ~/.local/bin/claudio --slave`. Starts the remote
-  daemon if not running (`systemd-run --user` preferred, `setsid` fallback).
+  daemon if not running (`systemd-run --user` preferred, `setsid` fallback),
+  and replaces an outdated one (`freshness.rs`).
 - `hosts.rs` — SSH host candidates: MRU list (`hosts.json`) + `~/.ssh/config`
   aliases.
 - `probe.rs` — `__probe` subcommand: prints `{version, proto, os, arch,
-  build}` as JSON.
+  build, mtime}` as JSON (`Probe::own()`: this binary, hashed once).
 
 **`proxy/`** — claude-proxy HTTP client and profile management:
 - `profile.rs` — load/save profiles from `config.toml` (`[proxy]` section,
@@ -219,6 +230,11 @@ Connects to the socket; if unavailable, starts the daemon (double-fork +
   that into "run `claudio daemon restart`". Never add a field to an existing
   op that an old daemon would silently ignore into wrong behaviour (that is
   why terminals are `SpawnShell`, not `Spawn{kind}`).
+- **A daemon is replaced only by a newer build.** `freshness::compare` orders
+  builds by version, then binary mtime; "different" is not enough, or two
+  binaries (a release and a dev build) would replace each other's daemon
+  forever. A daemon keeps its startup lock until it has fully stopped, so
+  its successor never runs beside it.
 - **Test fakes and the test config.** The daemon runs `claude --help` once to
   probe for flags, so fake claudes must ignore `--help` (and `--version`)
   without side effects. Every test claudio starts with `[claude]

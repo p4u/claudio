@@ -222,6 +222,64 @@ fn test_5_daemon_restart() {
     tui.quit(WAIT);
 }
 
+/// 5b. A daemon left running by an older claudio is replaced, silently, when
+///     a newer one starts and the sessions are idle: the session comes back
+///     (a new process, reattached) and the host's CPU/memory chart shows.
+///     The "older claudio" is a copy of this binary with a changed hash and
+///     an older file time.
+#[test]
+fn test_5b_outdated_daemon_is_replaced() {
+    let harness = ManagerHarness::new();
+    let old_bin = harness.root.join("claudio-old");
+    let mut bytes = fs::read(BINARY).unwrap();
+    bytes.extend_from_slice(b"\0an older build");
+    fs::write(&old_bin, bytes).unwrap();
+    let old_file = fs::File::options().write(true).open(&old_bin).unwrap();
+    let day_ago = std::time::SystemTime::now() - Duration::from_secs(86_400);
+    old_file.set_modified(day_ago).unwrap();
+    drop(old_file);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // The older claudio starts its daemon, with one session, and quits.
+    let mut cmd = CommandBuilder::new(&old_bin);
+    harness.apply(&mut cmd);
+    let mut old_tui = TuiProcess::spawn(cmd);
+    old_tui.wait_for("Alt+h help", Region::StatusBar, DAEMON_WAIT);
+    wizard_pick_dir(&mut old_tui, &harness.dirs[0]);
+    let old_nonce = current_nonce(&old_tui);
+    old_tui.send_keys(ALT_Q);
+    old_tui.wait_exit(WAIT);
+    let old_pid = harness.daemon_pid().expect("the old daemon runs");
+    #[cfg(target_os = "linux")]
+    assert_eq!(fs::read_link(format!("/proc/{old_pid}/exe")).unwrap(), old_bin);
+
+    // This claudio replaces it, and the session is back.
+    let tui = harness.start_tui();
+    tui.wait_until(
+        |screen| {
+            let text = screen.region_text(Region::Pane);
+            extract_nonce(&text).map_or(false, |n| n != old_nonce)
+        },
+        DAEMON_WAIT,
+    );
+    let dir_name = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(dir_name, Region::TabBar, WAIT);
+    let new_pid = harness.daemon_pid().unwrap();
+    assert_ne!(new_pid, old_pid);
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        fs::read_link(format!("/proc/{new_pid}/exe")).unwrap(),
+        fs::canonicalize(BINARY).unwrap()
+    );
+    tui.wait_for("cpu", Region::StatusBar, DAEMON_WAIT);
+    // No prompt, no notice about it.
+    let screen = tui.screen_text(Region::StatusBar);
+    assert!(!screen.contains("daemon"), "{screen}");
+}
+
 // ── Test 6: Close session ─────────────────────────────────────────────────────
 
 /// 6. Alt+x + y removes the session from the tab bar and state.json.

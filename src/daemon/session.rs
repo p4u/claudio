@@ -969,6 +969,7 @@ mod tests {
             claude: "/bin/claude".into(),
             claudio: "/bin/claudio".into(),
             skip_permissions: true,
+            build: None,
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -1019,6 +1020,7 @@ mod tests {
             claude: "/bin/claude".into(),
             claudio: "/bin/claudio".into(),
             skip_permissions: true,
+            build: None,
         };
         for given in [ALLOW, "--dangerously-skip-permissions"] {
             let spec = SpawnSpec {

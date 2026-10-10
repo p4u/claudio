@@ -59,3 +59,8 @@ tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 strip = true
+
+# Every daemon start and connect hashes the claudio binary (the freshness
+# check); unoptimized, that takes seconds on a debug build.
+[profile.dev.package.sha2]
+opt-level = 3

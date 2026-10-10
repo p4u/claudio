@@ -216,6 +216,21 @@ fn t3_connect_ssh_welcome() {
         "[t3] welcome: host={} claude_ok={} ✓",
         v["host"], v["claude_ok"]
     );
+
+    // The bridge replaced any older daemon (unless sessions were busy): the
+    // daemon runs the binary the bootstrap installed.
+    let (remote_probe, _) = ssh_run(&host, "$HOME/.local/bin/claudio __probe 2>/dev/null");
+    let remote: serde_json::Value =
+        serde_json::from_str(remote_probe.lines().next().unwrap_or("{}")).unwrap_or_default();
+    if v["daemon_outdated"].as_bool() == Some(true) {
+        println!("[t3] the daemon is outdated but busy: its restart was deferred");
+    } else {
+        assert_eq!(
+            v["build"], remote["build"],
+            "the remote daemon should run the installed binary"
+        );
+        println!("[t3] the daemon runs the installed build ✓");
+    }
 }
 
 // ── t4: spawn, attach, snapshot ──────────────────────────────────────────────

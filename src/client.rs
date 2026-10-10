@@ -29,8 +29,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -38,10 +38,12 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::Instant as TokioInstant;
 
+use crate::freshness::DaemonCheck;
 use crate::paths;
 use crate::proto::{
     read_frame, write_frame, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, Welcome, PROTO,
 };
+use crate::remote::probe::Probe;
 
 /// How long the handshake may take before the daemon is considered wedged.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -125,6 +127,9 @@ struct Shared {
     last_frame: Arc<Mutex<TokioInstant>>,
     /// Signals the reader loop to exit when the writer exits abnormally.
     write_died: Arc<Notify>,
+    /// The daemon is outdated and was left running because it was busy
+    /// (see [`crate::freshness`]).
+    daemon_outdated: Arc<AtomicBool>,
 }
 
 /// A connection to a daemon. Cheap to clone; all clones share it.
@@ -135,11 +140,12 @@ pub struct Client {
 
 /// Connect to the local daemon at `socket` and perform the handshake.
 ///
-/// Validates the runtime directory and verifies the peer UID before use.
+/// Validates the socket's directory (the runtime directory) and verifies the
+/// peer UID before use.
 pub async fn connect(socket: &Path) -> io::Result<Client> {
-    // Validate the runtime directory before connecting.
-    let dir = paths::runtime_dir();
-    paths::ensure_private_dir(&dir)?;
+    if let Some(dir) = socket.parent() {
+        paths::ensure_private_dir(dir)?;
+    }
 
     let stream = UnixStream::connect(socket).await?;
 
@@ -180,12 +186,18 @@ pub async fn connect_ssh(host: &str) -> io::Result<Client> {
         .take()
         .ok_or_else(|| io::Error::other("no ssh stderr"))?;
 
-    // Supervisor: owns the child, logs stderr, and reaps on exit.
+    // Supervisor: owns the child, logs stderr, and reaps on exit. The bridge
+    // says on stderr when it left an outdated daemon running.
     let host_owned = host.to_owned();
+    let outdated = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&outdated);
     tokio::spawn(async move {
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if line.contains(crate::freshness::DEFERRED) {
+                flag.store(true, Ordering::Relaxed);
+            }
             tracing::debug!(host = %host_owned, "ssh stderr: {line}");
         }
         let _ = child.wait().await;
@@ -195,7 +207,7 @@ pub async fn connect_ssh(host: &str) -> io::Result<Client> {
         rd: stdout,
         wr: stdin,
     };
-    Client::handshake(pair).await
+    Client::handshake_flagged(pair, outdated).await
 }
 
 /// An `AsyncRead + AsyncWrite` pair over an ssh process's stdout/stdin.
@@ -250,6 +262,14 @@ impl Client {
     /// Send `Hello` over `stream`, expect a compatible `Welcome`, then start
     /// the reader, writer and heartbeat tasks.
     pub async fn handshake<S>(stream: S) -> io::Result<Client>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        Self::handshake_flagged(stream, Arc::default()).await
+    }
+
+    /// [`Client::handshake`], with the flag behind [`Client::daemon_outdated`].
+    async fn handshake_flagged<S>(stream: S, daemon_outdated: Arc<AtomicBool>) -> io::Result<Client>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
@@ -319,6 +339,7 @@ impl Client {
             incoming: Mutex::new(Some(in_rx)),
             last_frame: Arc::clone(&last_frame),
             write_died: Arc::clone(&write_died),
+            daemon_outdated,
         });
 
         tokio::spawn(write_loop(wr, out_rx, Arc::clone(&write_died)));
@@ -333,11 +354,9 @@ impl Client {
         // are never silently dropped when the outgoing channel is momentarily busy.
         tokio::spawn(input_forwarder(input_fwd_rx, out_tx));
 
-        // Heartbeat task.
-        let hb_shared = Arc::clone(&shared);
-        tokio::spawn(async move {
-            heartbeat_loop(hb_shared).await;
-        });
+        // Heartbeat task. It holds the connection only weakly, so dropping
+        // the last `Client` closes it.
+        tokio::spawn(heartbeat_loop(Arc::downgrade(&shared)));
 
         Ok(Client { shared })
     }
@@ -345,6 +364,18 @@ impl Client {
     /// The daemon's handshake reply.
     pub fn welcome(&self) -> &Welcome {
         &self.shared.welcome
+    }
+
+    /// Whether this daemon runs an older claudio than its host's binary and
+    /// was left running because sessions were busy: a restart is due once
+    /// they are idle (see [`crate::freshness`]).
+    pub fn daemon_outdated(&self) -> bool {
+        self.shared.daemon_outdated.load(Ordering::Relaxed)
+    }
+
+    /// Record that the daemon's restart was deferred.
+    pub fn mark_daemon_outdated(&self) {
+        self.shared.daemon_outdated.store(true, Ordering::Relaxed);
     }
 
     /// The channel of unsolicited messages. It can be taken only once.
@@ -515,10 +546,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
 /// arrives within `LIVENESS_DEADLINE`.
 ///
 /// Uses `tokio::time::Instant` so tests can drive time with
-/// `tokio::time::pause()` / `tokio::time::advance()`.
-async fn heartbeat_loop(shared: Arc<Shared>) {
+/// `tokio::time::pause()` / `tokio::time::advance()`. Ends with the last
+/// `Client`.
+async fn heartbeat_loop(shared: Weak<Shared>) {
     loop {
         tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
 
         // Check liveness using tokio time so tests can control it.
         let elapsed = {
@@ -607,7 +642,7 @@ pub fn ensure_daemon() -> io::Result<()> {
     // Validate the runtime directory first.
     paths::ensure_private_dir(&dir)?;
 
-    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+    if crate::freshness::wait_for_lock(&socket, &paths::daemon_lock(), Duration::from_secs(5)) {
         return Ok(());
     }
     let log_path = dir.join("daemon.log");
@@ -660,6 +695,29 @@ pub fn ensure_daemon() -> io::Result<()> {
     // Reap the daemon if it ever exits while we are still running.
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// Start the local daemon if needed, and replace it if it runs an older
+/// claudio than this binary and is not busy (see [`crate::freshness`]). A
+/// failed check is logged and leaves the daemon as it is.
+pub async fn ensure_local_daemon() -> io::Result<DaemonCheck> {
+    let start = || async {
+        tokio::task::spawn_blocking(ensure_daemon)
+            .await
+            .map_err(io::Error::other)?
+    };
+    start().await?;
+    let Some(own) = Probe::own() else {
+        return Ok(DaemonCheck::UpToDate);
+    };
+    let (socket, lock) = (paths::daemon_socket(), paths::daemon_lock());
+    match crate::freshness::ensure_current(&socket, &lock, own, start).await {
+        Ok(check) => Ok(check),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not check the daemon's version");
+            Ok(DaemonCheck::UpToDate)
+        }
+    }
 }
 
 /// Verify that the peer on `stream` has the same effective UID as us.
@@ -737,6 +795,8 @@ mod tests {
                 home: "/home/u".into(),
                 claude: None,
             },
+            build: None,
+            build_time: None,
         })
     }
 
@@ -969,6 +1029,24 @@ mod tests {
         let client = Client::handshake(ours).await.unwrap();
         assert_eq!(client.request(Msg::Ping).await.unwrap(), Msg::Pong);
         drop(fake.await.unwrap());
+    }
+
+    /// The heartbeat task does not keep a connection alive: dropping the last
+    /// `Client` closes it (the ensure-current check relies on this).
+    #[tokio::test]
+    async fn dropping_the_last_client_closes_the_connection() {
+        let (ours, mut daemon) = UnixStream::pair().unwrap();
+        let fake = tokio::spawn(async move {
+            accept(&mut daemon, welcome(PROTO)).await;
+            read_frame(&mut daemon).await.unwrap()
+        });
+        let client = Client::handshake(ours).await.unwrap();
+        assert!(!client.daemon_outdated());
+        client.clone().mark_daemon_outdated();
+        assert!(client.daemon_outdated());
+        drop(client);
+        let eof = tokio::time::timeout(Duration::from_secs(5), fake).await;
+        assert_eq!(eof.expect("connection closed").unwrap(), None);
     }
 
     /// Peer UID mismatch is detected on a real Unix socket pair.
