@@ -64,7 +64,17 @@ fn encode_cwd(path: &Path) -> String {
 /// given path are included. Files with no user message are skipped. Unreadable
 /// files and missing directories yield empty results, never panics.
 pub fn list_sessions(cwd: &Path) -> Vec<ClaudeSession> {
-    let dir = project_dir(cwd);
+    list_sessions_in(&projects_root(), cwd)
+}
+
+/// [`list_sessions`] under an explicit projects root.
+///
+/// claude files a transcript under its resolved working directory: a session
+/// started in a symlinked path (`~/repos/x` → `/volumes/repos/x`) records and
+/// is filed under the target. So `cwd` is resolved the same way first.
+fn list_sessions_in(root: &Path, cwd: &Path) -> Vec<ClaudeSession> {
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let dir = root.join(encode_cwd(&cwd));
     let cwd_str = cwd.to_string_lossy();
 
     let entries = match std::fs::read_dir(&dir) {
@@ -642,6 +652,33 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A directory opened through a symlink finds the sessions claude filed
+    /// under the symlink's target.
+    #[cfg(unix)]
+    #[test]
+    fn list_sessions_follows_symlinks_like_claude() {
+        let base = std::env::temp_dir().join(format!("claudio-proj-{}", uuid::Uuid::new_v4()));
+        let real = base.join("volumes/repo");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(base.join("volumes"), base.join("home")).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+
+        let root = base.join("projects");
+        let dir = root.join(encode_cwd(&real));
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = serde_json::json!({
+            "type": "user",
+            "cwd": real.to_string_lossy(),
+            "message": {"role": "user", "content": "hello"},
+        });
+        std::fs::write(dir.join("conv-1.jsonl"), format!("{record}\n")).unwrap();
+
+        let via_link = list_sessions_in(&root, &base.join("home/repo"));
+        assert_eq!(via_link.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["conv-1"]);
+        assert_eq!(list_sessions_in(&root, &real).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
