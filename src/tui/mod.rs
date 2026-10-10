@@ -19,6 +19,19 @@ mod proxy_state;
 mod sessions;
 mod state;
 mod stats_view;
+
+/// `recent` without the local directories that no longer exist, so the
+/// wizard never offers a deleted directory (the check is I/O, so it happens
+/// here rather than in the pure wizard).
+fn existing_local_dirs(
+    mut recent: std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    if let Some(dirs) = recent.get_mut("local") {
+        dirs.retain(|d| std::path::Path::new(d).is_dir());
+    }
+    recent
+}
+
 #[cfg(test)]
 mod test_support;
 mod ui;
@@ -191,7 +204,7 @@ async fn main(launch: Launch) -> ExitCode {
         proxy_default,
         claude: config.claude,
         local_claude: client_claude(&local_client),
-        recent_dirs: saved.recent_dirs.clone(),
+        recent_dirs: existing_local_dirs(saved.recent_dirs.clone()),
         claude_skipped: saved.claude_skipped.clone(),
         // `--plain` has no wizard to offer them in.
         ssh_hosts: match plain {

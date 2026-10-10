@@ -107,9 +107,6 @@ impl HostStep {
     }
 
     /// Like `new` but also populates the LOCAL section with recent dirs.
-    ///
-    /// Non-existing local dirs are silently dropped so stale test artifacts
-    /// don't pollute the list (see `claude::projects::recent_project_dirs`).
     pub fn with_local_dirs(
         active_host: &str,
         extra: &[String],
@@ -134,20 +131,12 @@ impl HostStep {
             HostSection::Local
         };
         let items = candidates.clone();
-        // Drop local dirs that no longer exist on the filesystem so stale
-        // test temp dirs (e.g. /tmp/cl-e2e-*) don't appear in the list.
-        let local_dirs_existing: Vec<String> = local_dirs
-            .iter()
-            .filter(|d| std::path::Path::new(d.as_str()).exists())
-            .cloned()
-            .collect();
-        let local_items = local_dirs_existing.clone();
         HostStep {
             input: String::new(),
             focus,
             local_selected: 0,
-            local_items,
-            local_dirs: local_dirs_existing,
+            local_items: local_dirs.to_vec(),
+            local_dirs: local_dirs.to_vec(),
             selected: remote_selected,
             items,
             connecting: None,
@@ -527,28 +516,10 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
 }
 
 impl Wizard {
-    /// A wizard over `seeds` (see [`assemble`]) with a host-selection step.
-    ///
-    /// - `active_host` pre-selects the active session's host in step 0.
-    /// - `host_candidates` is `hosts::candidates()` (MRU + ssh config).
-    /// - `home` expands `~` on the chosen host.
-    /// - `proxy_profiles` is the list of saved proxy profile names; pass `&[]`
-    ///   when none are configured (the proxy toggle is hidden).
-    /// - `proxy_default` is the name of the profile that should be pre-selected.
-    pub fn new(
-        seeds: Vec<String>,
-        home: String,
-        active_host: &str,
-        host_candidates: &[String],
-        proxy_profiles: &[String],
-        proxy_default: Option<&str>,
-    ) -> Wizard {
-        Self::new_with_recent(seeds, &[], home, active_host, host_candidates, proxy_profiles, proxy_default)
-    }
 
-    /// Like [`Wizard::new`] but also accepts the `recent` slice so seeds that
-    /// came from `recent_dirs` are marked `recently_used` in `meta`.
-    pub fn new_with_recent(
+    /// A wizard on `active_host`. `recent` fills the first screen's LOCAL
+    /// section and marks those seeds `recently_used` in `meta`.
+    pub fn new(
         seeds: Vec<String>,
         recent: &[String],
         home: String,
@@ -605,6 +576,19 @@ impl Wizard {
         if step.input.is_empty() && step.connecting.is_none() {
             let local_dirs = std::mem::take(&mut step.local_dirs);
             *step = HostStep::with_local_dirs(&self.host, hosts, &local_dirs);
+        }
+    }
+
+    /// A fresher LOCAL list for the first screen (recent claude projects
+    /// arrive after the wizard opens). Like [`Wizard::set_ssh_hosts`], it
+    /// only replaces the list while nothing was typed there.
+    pub fn set_local_dirs(&mut self, dirs: &[String]) {
+        let Some(step) = self.host_step.as_mut() else {
+            return;
+        };
+        if step.input.is_empty() && step.connecting.is_none() {
+            let hosts = std::mem::take(&mut step.candidates);
+            *step = HostStep::with_local_dirs(&self.host, &hosts, dirs);
         }
     }
 
@@ -1211,7 +1195,7 @@ mod tests {
     /// about the host step.
     fn wizard_local(seeds: Vec<String>, home: &str) -> Wizard {
         let seeds_clone = seeds.clone();
-        let mut w = Wizard::new(seeds, home.into(), "local", &[], &[], None);
+        let mut w = Wizard::new(seeds, &[], home.into(), "local", &[], &[], None);
         // Advance past the host step by picking "local".
         w.on_host_connected("local", home, seeds_clone);
         w
@@ -1415,7 +1399,7 @@ mod tests {
     #[test]
     fn proxy_toggle_available_in_directory_step() {
         let mut w = Wizard::new(
-            strings(&["/w"]),
+            strings(&["/w"]), &[],
             "/h".into(),
             "local",
             &[],
@@ -1435,7 +1419,7 @@ mod tests {
     #[test]
     fn host_paste_sets_host_input() {
         let mut w = Wizard::new(
-            vec![],
+            vec![], &[],
             "/h".into(),
             "local",
             &["server.example.com".to_owned()],
@@ -1453,7 +1437,7 @@ mod tests {
     fn host_filtering_uses_fuzzy_scorer() {
         // Fuzzy: "srv" matches "my-server" (subsequence).
         let mut w = Wizard::new(
-            vec![],
+            vec![], &[],
             "/h".into(),
             "local",
             &["my-server".to_owned(), "production".to_owned()],
@@ -1519,10 +1503,10 @@ mod tests {
     }
 
     #[test]
-    fn recently_used_badge_set_from_new_with_recent() {
+    fn recently_used_badge_set_from_recent_dirs() {
         let seeds = strings(&["/a", "/b", "/c"]);
         let recent = strings(&["/b"]);
-        let w = Wizard::new_with_recent(
+        let w = Wizard::new(
             seeds, &recent, "/h".into(), "local", &[], &[], None,
         );
         assert!(
@@ -1641,24 +1625,17 @@ mod tests {
         assert!(!super::looks_like_host(""), "empty is not a host");
     }
 
-    /// HostStep::with_local_dirs silently drops non-existing paths.
     #[test]
-    fn host_step_drops_nonexistent_local_dirs() {
-        // /tmp always exists; /nonexistent_claudio_test_dir should not.
-        let hs = make_host_step(
-            &[],
-            &["/tmp", "/nonexistent_claudio_test_dir_xyzzy"],
-        );
-        assert!(
-            hs.local_items.iter().any(|d| d == "/tmp"),
-            "/tmp should be kept"
-        );
-        assert!(
-            !hs.local_items
-                .iter()
-                .any(|d| d == "/nonexistent_claudio_test_dir_xyzzy"),
-            "non-existing dir should be dropped"
-        );
+    fn late_local_dirs_fill_the_first_screen_until_the_user_types() {
+        let mut w = Wizard::new(vec![], &[], "/h".into(), "local", &["box".into()], &[], None);
+        w.set_local_dirs(&strings(&["/h/a", "/h/b"]));
+        let step = w.host_step.as_ref().unwrap();
+        assert_eq!(step.local_items, strings(&["/h/a", "/h/b"]));
+        assert_eq!(step.items, strings(&["box"]), "hosts are kept");
+
+        w.on_key(&press(KeyCode::Char('a')));
+        w.set_local_dirs(&strings(&["/h/c"]));
+        assert!(!w.host_step.as_ref().unwrap().local_dirs.contains(&"/h/c".to_owned()));
     }
 
     // ── Hidden directories ────────────────────────────────────────────────────
@@ -1742,7 +1719,7 @@ mod tests {
 
     #[test]
     fn toggle_is_a_noop_outside_the_directory_step() {
-        let mut w = Wizard::new(strings(&["/w"]), "/h".into(), "local", &[], &[], None);
+        let mut w = Wizard::new(strings(&["/w"]), &[], "/h".into(), "local", &[], &[], None);
         assert!(w.host_step.is_some());
         w.toggle_hidden();
         assert!(!w.show_hidden, "host step ignores the toggle");
@@ -1753,7 +1730,7 @@ mod tests {
     /// A wizard past the host step, browsing `/home/u` (`~/`) with `entries`
     /// listed. Returns the `ListDir` outcome that opening the browser produced.
     fn browser(entries: &[&str]) -> (Wizard, Outcome) {
-        let mut w = Wizard::new(strings(&["/srv/app"]), "/home/u".into(), "local", &[], &[], None);
+        let mut w = Wizard::new(strings(&["/srv/app"]), &[], "/home/u".into(), "local", &[], &[], None);
         w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
         let opened = w.browse_home();
         let entries: Vec<DirEntry> = entries.iter().map(|n| DirEntry::simple(*n, true)).collect();
@@ -1775,7 +1752,7 @@ mod tests {
 
     #[test]
     fn browser_uses_the_remote_hosts_home() {
-        let mut w = Wizard::new(vec![], "/home/u".into(), "local", &["box".into()], &[], None);
+        let mut w = Wizard::new(vec![], &[], "/home/u".into(), "local", &["box".into()], &[], None);
         w.on_host_connected("box", "/home/remote", vec![]);
         assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
         w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)]);
@@ -1913,7 +1890,7 @@ mod tests {
 
     #[test]
     fn arrows_cycle_the_proxy_only_without_input() {
-        let mut w = Wizard::new(vec![], "/h".into(), "local", &[], &["p".to_owned()], None);
+        let mut w = Wizard::new(vec![], &[], "/h".into(), "local", &[], &["p".to_owned()], None);
         w.on_host_connected("local", "/h", vec![]);
         // Empty input: proxy cycling.
         w.on_key(&press(KeyCode::Right));

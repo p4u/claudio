@@ -534,6 +534,7 @@ impl App {
         self.modal_gen += 1;
         let wizard = Wizard::new(
             seeds,
+            &self.local_recent(),
             self.home.clone(),
             &active_host,
             &self.ssh_hosts,

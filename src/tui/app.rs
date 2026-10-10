@@ -666,6 +666,46 @@ mod tests {
             .collect()
     }
 
+    /// The LOCAL rows on the wizard's first screen.
+    fn local_rows(app: &App) -> Vec<String> {
+        match &app.modal {
+            Some(Modal::Wizard(w)) => w.host_step.as_ref().unwrap().local_items.clone(),
+            _ => panic!("wizard not open"),
+        }
+    }
+
+    #[test]
+    fn wizard_offers_recent_local_dirs_that_are_not_open() {
+        let mut cfg = test_support::config();
+        cfg.recent_dirs
+            .insert("local".into(), vec!["/srv/app".into(), "/srv/web".into()]);
+        let mut app = App::new(cfg);
+        // `/srv/app` is already open in a tab.
+        app.recover(&ClientState::default(), &[info(Some(1), None)]);
+        app.take_effects();
+
+        app.open_wizard();
+        assert_eq!(local_rows(&app), ["/srv/web"]);
+
+        // Directories with recent claude activity follow once the daemon
+        // answers, without repeating the open or already listed ones.
+        let gen = app.wizard_generation();
+        let dir = |path: &str| crate::proto::ProjectDir {
+            path: path.into(),
+            modified: 1,
+            git: None,
+            symlink: false,
+            hidden: false,
+        };
+        app.on_reply(
+            ReplyTo::Projects { host: "local".into(), gen },
+            Ok(Msg::Projects {
+                dirs: vec![dir("/srv/app"), dir("/srv/web"), dir("/srv/api")],
+            }),
+        );
+        assert_eq!(local_rows(&app), ["/srv/web", "/srv/api"]);
+    }
+
     #[test]
     fn recovery_respawns_dormant_sessions_and_attaches_the_saved_active() {
         let live = [info(Some(1), None), info(None, Some("c2"))];

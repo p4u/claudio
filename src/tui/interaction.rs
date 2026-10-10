@@ -8,6 +8,7 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
+use std::collections::HashSet;
 use std::io;
 
 use crate::client::Incoming;
@@ -463,6 +464,25 @@ impl App {
         super::wizard::assemble(active_cwd, recent, &[])
     }
 
+    /// The first screen's LOCAL list: recently used local directories, then
+    /// those with recent claude activity, minus any already open in a tab.
+    pub(super) fn local_recent(&self) -> Vec<String> {
+        let open: HashSet<&str> = self
+            .sessions
+            .iter()
+            .filter(|v| v.host == "local")
+            .map(|v| v.cwd.as_str())
+            .collect();
+        let mut seen = HashSet::new();
+        super::state::recent_for_host(&self.recent_dirs, "local")
+            .iter()
+            .chain(&self.projects)
+            .filter(|d| !open.contains(d.as_str()) && seen.insert(d.as_str()))
+            .take(LOCAL_RECENT_LIMIT)
+            .cloned()
+            .collect()
+    }
+
     pub fn on_host_error(&mut self, host: &str, error: &str) {
         if let Some(Modal::Wizard(w)) = &mut self.modal {
             if let Some(hs) = &mut w.host_step {
@@ -610,10 +630,14 @@ impl App {
                 if gen != self.wizard_generation() {
                     return;
                 }
+                let local_recent = (host == "local").then(|| self.local_recent());
                 if let Some(w) = self.wizard_mut() {
                     // Ignored unless the wizard is still on `host`.
                     w.add_seeds_for_host(&host, &paths);
                     w.add_project_meta(&dirs);
+                    if let Some(dirs) = &local_recent {
+                        w.set_local_dirs(dirs);
+                    }
                 }
             }
             (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
@@ -692,6 +716,9 @@ impl App {
         }
     }
 }
+
+/// How many recent directories the wizard's first screen offers.
+const LOCAL_RECENT_LIMIT: usize = 8;
 
 // ── Overview filter helper ─────────────────────────────────────────────────────
 
