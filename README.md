@@ -212,6 +212,7 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+a` | Next session that needs attention |
 | `Alt+g` | Overview of all sessions |
 | `Alt+s` | Proxy stats |
+| `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
 | `Alt+h` | Help |
 | `Alt+.` | In the wizard: show or hide dot-directories |
 | `Alt+q` | Quit the UI (sessions keep running) |

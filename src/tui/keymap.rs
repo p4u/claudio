@@ -209,6 +209,9 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
 /// [`goto_session`]); these are not in [`DEFAULT_BINDINGS`].
 const GOTO_SESSION_HELP: (&str, &str) = ("Alt+Shift+1…9,0", "go to session 1…10");
 
+/// Help-popup label for `n` inside the proxy stats popup.
+const SWITCH_SUBSCRIPTION_HELP: &str = "move the session to the next proxy subscription";
+
 /// `Alt+Shift+<digit>` → [`Action::GotoSession`].
 ///
 /// With the kitty keyboard protocol (enabled in `tui/mod.rs`), terminals send
@@ -384,6 +387,14 @@ impl Keymap {
                 .position(|b| b.action == Action::NextSession)
                 .map_or(entries.len(), |i| i + 1);
             entries.insert(at, (GOTO_SESSION_HELP.0.to_owned(), GOTO_SESSION_HELP.1));
+        }
+        // The stats popup's `n` (`stats_view.rs`) sits right after its key.
+        if let Some(key) = self.key_for(Action::ProxyStats) {
+            let at = entries
+                .iter()
+                .position(|(k, _)| *k == key)
+                .map_or(entries.len(), |i| i + 1);
+            entries.insert(at, (format!("{key} → n"), SWITCH_SUBSCRIPTION_HELP));
         }
         entries
     }
@@ -882,7 +893,18 @@ mod tests {
     fn plain_help_lists_exactly_the_plain_keys_in_order() {
         let (km, _) = plain_keymap(&[]);
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+l", "Alt+e"]);
+        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e"]);
+    }
+
+    #[test]
+    fn help_lists_the_subscription_switch_after_the_stats_key() {
+        let entries = Keymap::default().help_entries();
+        let at = entries.iter().position(|(k, _)| k == "Alt+s").unwrap();
+        assert_eq!(entries[at + 1], ("Alt+s → n".to_owned(), SWITCH_SUBSCRIPTION_HELP));
+        // A remapped stats key moves the row along with it.
+        let overrides = [("proxy_stats".to_owned(), "alt+p".to_owned())].into();
+        let km = Keymap::build(&overrides, &mut Vec::new());
+        assert!(km.help_entries().iter().any(|(k, _)| k == "Alt+p → n"));
     }
 
     #[test]
