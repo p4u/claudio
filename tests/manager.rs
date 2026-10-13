@@ -1800,7 +1800,8 @@ fn test_plain_is_the_bare_session_full_screen() {
     drop(tui);
 }
 
-/// Alt+h lists exactly the four plain keys; any key closes it.
+/// Alt+h lists exactly the four plain keys (and the stats popup's `n`); any
+/// key closes it.
 #[test]
 fn test_plain_help_lists_only_the_plain_keys() {
     let harness = ManagerHarness::new();
@@ -1809,10 +1810,10 @@ fn test_plain_help_lists_only_the_plain_keys() {
     tui.send_keys(ALT_H);
     tui.wait_for("claudio keys", Region::Screen, WAIT);
     let screen = tui.screen_text(Region::Screen);
-    for key in ["Alt+h", "Alt+s", "Alt+l", "Alt+e"] {
+    for key in ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e"] {
         assert!(screen.contains(key), "{key} missing:\n{screen}");
     }
-    assert_eq!(screen.matches("Alt+").count(), 4, "exactly the plain keys:\n{screen}");
+    assert_eq!(screen.matches("Alt+").count(), 5, "exactly the plain keys:\n{screen}");
 
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("claudio keys", Region::Screen), WAIT);
