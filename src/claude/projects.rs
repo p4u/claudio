@@ -310,7 +310,10 @@ impl TranscriptCursor {
                 let Some(usage) = msg.get("usage") else { return };
                 let count = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                 if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
-                    totals.model = Some(model.to_owned());
+                    // What claude asked for keeps the `[1m]` the context
+                    // window depends on; the API's name drops it.
+                    let requested = v.get("requestedModel").and_then(|m| m.as_str());
+                    totals.model = Some(requested.unwrap_or(model).to_owned());
                     totals.context_tokens = Some(
                         count("input_tokens")
                             + count("cache_creation_input_tokens")
@@ -818,6 +821,17 @@ mod tests {
         assert_eq!(c.totals().model.as_deref(), Some("claude-opus-4-5"));
         assert_eq!(c.totals().context_tokens, Some(600));
         assert_eq!(c.totals().output_tokens, 15);
+    }
+
+    /// The API names the model without the `[1m]` claude asked for (and
+    /// recorded as `requestedModel`); the context window needs it.
+    #[test]
+    fn cursor_prefers_the_requested_model() {
+        let mut c = cursor();
+        let record = assistant("m1", "claude-opus-5-5", 1, 0, 0, 1)
+            .replacen('{', r#"{"requestedModel":"claude-opus-5-5[1m]","#, 1);
+        c.feed(record.as_bytes());
+        assert_eq!(c.totals().model.as_deref(), Some("claude-opus-5-5[1m]"));
     }
 
     #[test]

@@ -415,10 +415,12 @@ impl App {
                 view.on_fetched();
             }
         }
-        self.proxy_status
-            .entry(profile_name)
-            .or_default()
-            .apply(fetch);
+        let status = self.proxy_status.entry(profile_name.clone()).or_default();
+        status.apply(fetch);
+        // A failed catalogue fetch is asked again on the next look.
+        if status.models.is_none() {
+            self.models_requested.remove(&profile_name);
+        }
         self.redraw = true;
     }
 
@@ -1987,6 +1989,10 @@ mod tests {
         app.refresh_session_cred(0);
         app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
         assert_eq!(models_fetches(&app.take_effects()), 0);
+        // A fetch that failed (no catalogue) is asked again on the next look.
+        app.on_proxy_stats("p".into(), ProxyFetch::default());
+        app.refresh_session_cred(0);
+        assert_eq!(models_fetches(&app.take_effects()), 1);
         // A profile whose catalogue is cached already is never asked.
         let mut app = proxied_app().0;
         app.proxy_status.insert(

@@ -332,26 +332,28 @@ fn context_segment(
     })
 }
 
-/// A model's context window: the proxy's catalogue when it knows the model,
-/// else 1M for a `[1m]`/`1m` model id, else [`DEFAULT_CONTEXT_WINDOW`].
+/// A model's context window: the proxy's catalogue entry for exactly this
+/// model, else 1M for a `[1m]`/`1m` model id, else the longest catalogue id
+/// it starts with (a dated id), else [`DEFAULT_CONTEXT_WINDOW`].
 pub fn context_window(model: &str, models: Option<&ModelsResponse>) -> u64 {
-    let known = models.and_then(|m| {
-        m.data
-            .iter()
-            .filter(|e| e.max_input_tokens > 0 && !e.id.is_empty())
-            .find(|e| e.id == model || model.starts_with(&e.id))
-    });
-    if let Some(entry) = known {
+    let entries = models
+        .map(|m| m.data.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e.max_input_tokens > 0 && !e.id.is_empty());
+    if let Some(entry) = entries.clone().find(|e| e.id == model) {
         return entry.max_input_tokens as u64;
     }
     let one_million = model
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("1m"));
     if one_million {
-        1_000_000
-    } else {
-        DEFAULT_CONTEXT_WINDOW
+        return 1_000_000;
     }
+    entries
+        .filter(|e| model.starts_with(&e.id))
+        .max_by_key(|e| e.id.len())
+        .map_or(DEFAULT_CONTEXT_WINDOW, |e| e.max_input_tokens as u64)
 }
 
 /// `⎇ main ↑2 ↓1 ●1 ✚3 …2`: the branch, how it stands against its upstream,
@@ -821,16 +823,19 @@ mod tests {
     #[test]
     fn context_window_prefers_the_catalogue_then_the_model_id_then_200k() {
         let models = catalogue(&[
+            ("claude-opus-5", 300_000),
             ("claude-opus-5-5", 500_000),
             ("claude-sonnet-4-5", 0),
             ("", 7),
         ]);
         assert_eq!(context_window("claude-opus-5-5", Some(&models)), 500_000);
-        // A dated id matches its catalogue family.
+        // A dated id matches its catalogue family, the longest one.
         assert_eq!(
             context_window("claude-opus-5-5-20260101", Some(&models)),
             500_000
         );
+        // `[1m]` beats the base model's entry it starts with.
+        assert_eq!(context_window("claude-opus-5-5[1m]", Some(&models)), 1_000_000);
         // Unknown size in the catalogue: fall through to the id.
         assert_eq!(context_window("claude-sonnet-4-5", Some(&models)), 200_000);
         assert_eq!(context_window("claude-sonnet-4-5[1m]", Some(&models)), 1_000_000);
@@ -1007,12 +1012,12 @@ mod tests {
             "{line:?}"
         );
         assert!(line.ends_with("Alt+h help "), "{line:?}");
-        // The catalogue's window wins over the model id.
+        // The catalogue's window for this very model wins over the model id.
         let mut app = app;
         app.proxy_status.insert(
             "work".into(),
             ProxyStatus {
-                models: Some(catalogue(&[("claude-opus-5-5", 800_000)])),
+                models: Some(catalogue(&[("claude-opus-5-5[1m]", 800_000)])),
                 ..Default::default()
             },
         );
