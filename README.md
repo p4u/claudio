@@ -159,7 +159,7 @@ Line two is the instrument panel, with `Alt+h help` (and the upgrade notice) flu
 ```
 
 - `cpu`, `mem`: sparklines of the session's host, from the daemon's samples.
-- `ctx`: the last turn's context against the model's window (the proxy's model catalogue when it knows the model, else 1M for a `[1m]` model, else 200k).
+- `ctx`: the last turn's context against the window claude compacts at: 1M for a `[1m]` model, else 200k.
 - `⎇`: the working tree, refreshed on claude's hooks and every 10 s while you watch: branch (or `@abc1234` when detached), `↑`/`↓` against the upstream, then `●` staged, `✚` modified, `…` untracked, `✖` unmerged paths; a clean tree in sync shows `✓`.
 - `5h`, `7d`: the credential's rate-limit windows, when the session runs through a proxy.
 - turns and output tokens of the whole conversation, read incrementally from the transcript.

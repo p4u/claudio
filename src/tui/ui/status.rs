@@ -19,7 +19,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::proto::{GitStatus, SessionKind, SessionState};
-use crate::proxy::api::{ModelsResponse, SessionCredential};
+use crate::proxy::api::SessionCredential;
 
 use super::super::app::{App, HostStatsSample};
 use super::super::fmt::{
@@ -45,8 +45,8 @@ const SEPARATOR: &str = " · ";
 /// Separator between the segments of line 2.
 const BAR_SEPARATOR: &str = " │ ";
 
-/// The context window assumed when neither the proxy's catalogue nor the
-/// model id says otherwise.
+/// The context window claude assumes for a model it does not know, and so
+/// the gauge's window for any model id without a `1m` token.
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 /// Cells of the context gauge.
 const CONTEXT_GAUGE: usize = 10;
@@ -245,11 +245,7 @@ fn machine_segments(app: &App) -> Vec<Segment> {
     };
     let claude = v.kind == SessionKind::Claude;
     if claude {
-        segments.extend(context_segment(
-            v.context_tokens,
-            v.model.as_deref(),
-            app.session_models(v),
-        ));
+        segments.extend(context_segment(v.context_tokens, v.model.as_deref()));
     }
     segments.extend(git_segment(v.git.as_ref(), v.branch.as_deref()));
     if claude {
@@ -308,13 +304,9 @@ fn metric_spans(name: &str, history: &[f32], value: String) -> Vec<Span<'static>
 
 /// `ctx ██████▎░░░ 62% 620k/1M`: the last turn's context against the model's
 /// window, colored by how full it is. Nothing until a turn has happened.
-fn context_segment(
-    used: Option<u64>,
-    model: Option<&str>,
-    models: Option<&ModelsResponse>,
-) -> Option<Segment> {
+fn context_segment(used: Option<u64>, model: Option<&str>) -> Option<Segment> {
     let used = used?;
-    let window = context_window(model.unwrap_or_default(), models);
+    let window = context_window(model.unwrap_or_default());
     let pct = used as f32 / window.max(1) as f32 * 100.0;
     let color = level_color(pct);
     let mut spans = vec![label("ctx"), text(" ")];
@@ -332,28 +324,19 @@ fn context_segment(
     })
 }
 
-/// A model's context window: the proxy's catalogue entry for exactly this
-/// model, else 1M for a `[1m]`/`1m` model id, else the longest catalogue id
-/// it starts with (a dated id), else [`DEFAULT_CONTEXT_WINDOW`].
-pub fn context_window(model: &str, models: Option<&ModelsResponse>) -> u64 {
-    let entries = models
-        .map(|m| m.data.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter(|e| e.max_input_tokens > 0 && !e.id.is_empty());
-    if let Some(entry) = entries.clone().find(|e| e.id == model) {
-        return entry.max_input_tokens as u64;
-    }
+/// The window claude compacts against: 1M for a model id with a `1m` token
+/// (`claude-opus-5-5[1m]`), else [`DEFAULT_CONTEXT_WINDOW`]. The proxy's
+/// catalogue is not consulted: claude ignores the context sizes in
+/// `/v1/models`, so a larger catalogue window is one it never fills.
+pub fn context_window(model: &str) -> u64 {
     let one_million = model
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("1m"));
     if one_million {
-        return 1_000_000;
+        1_000_000
+    } else {
+        DEFAULT_CONTEXT_WINDOW
     }
-    entries
-        .filter(|e| model.starts_with(&e.id))
-        .max_by_key(|e| e.id.len())
-        .map_or(DEFAULT_CONTEXT_WINDOW, |e| e.max_input_tokens as u64)
 }
 
 /// `⎇ main ↑2 ↓1 ●1 ✚3 …2`: the branch, how it stands against its upstream,
@@ -577,7 +560,7 @@ fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::api::{CredentialInfo, CredentialUtilization, ModelEntry};
+    use crate::proxy::api::{CredentialInfo, CredentialUtilization, ModelEntry, ModelsResponse};
     use crate::tui::proxy_state::{ProxyStatus, SessionCred};
 
     fn plain(spans: &[Span<'_>]) -> String {
@@ -806,51 +789,23 @@ mod tests {
 
     // ── context ──────────────────────────────────────────────────────────────
 
-    fn catalogue(entries: &[(&str, i64)]) -> ModelsResponse {
-        ModelsResponse {
-            data: entries
-                .iter()
-                .map(|(id, max)| ModelEntry {
-                    id: (*id).to_owned(),
-                    max_input_tokens: *max,
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn context_window_prefers_the_catalogue_then_the_model_id_then_200k() {
-        let models = catalogue(&[
-            ("claude-opus-5", 300_000),
-            ("claude-opus-5-5", 500_000),
-            ("claude-sonnet-4-5", 0),
-            ("", 7),
-        ]);
-        assert_eq!(context_window("claude-opus-5-5", Some(&models)), 500_000);
-        // A dated id matches its catalogue family, the longest one.
-        assert_eq!(
-            context_window("claude-opus-5-5-20260101", Some(&models)),
-            500_000
-        );
-        // `[1m]` beats the base model's entry it starts with.
-        assert_eq!(context_window("claude-opus-5-5[1m]", Some(&models)), 1_000_000);
-        // Unknown size in the catalogue: fall through to the id.
-        assert_eq!(context_window("claude-sonnet-4-5", Some(&models)), 200_000);
-        assert_eq!(context_window("claude-sonnet-4-5[1m]", Some(&models)), 1_000_000);
-        assert_eq!(context_window("claude-opus-5-5[1m]", None), 1_000_000);
-        assert_eq!(context_window("claude-sonnet-4-5-1m", None), 1_000_000);
-        assert_eq!(context_window("CLAUDE-X-1M", None), 1_000_000);
+    fn context_window_is_1m_for_a_1m_token_else_200k() {
+        assert_eq!(context_window("claude-opus-5-5[1m]"), 1_000_000);
+        assert_eq!(context_window("claude-sonnet-4-5-1m"), 1_000_000);
+        assert_eq!(context_window("CLAUDE-X-1M"), 1_000_000);
+        // Without the suffix claude assumes 200k, whatever the upstream allows.
+        assert_eq!(context_window("claude-opus-5-5"), 200_000);
+        assert_eq!(context_window("claude-openai-qwen38-27b"), 200_000);
         // `1m` has to be a whole token: a date is not a window.
-        assert_eq!(context_window("claude-opus-4-1-20250805", None), 200_000);
-        assert_eq!(context_window("claude-haiku-4-5", None), 200_000);
-        assert_eq!(context_window("", None), 200_000);
+        assert_eq!(context_window("claude-opus-4-1-20250805"), 200_000);
+        assert_eq!(context_window("claude-haiku-4-5"), 200_000);
+        assert_eq!(context_window(""), 200_000);
     }
 
     #[test]
     fn context_segment_is_a_colored_gauge_with_bold_percent() {
-        let seg = context_segment(Some(620_000), Some("claude-opus-5-5[1m]"), None).unwrap();
+        let seg = context_segment(Some(620_000), Some("claude-opus-5-5[1m]")).unwrap();
         assert_eq!(segment_text(&seg), "ctx ██████▎░░░ 62% 620k/1M");
         assert_eq!(seg.priority, PRIO_CONTEXT);
         let pct = find(&seg.spans, "62%");
@@ -859,18 +814,18 @@ mod tests {
         assert_eq!(seg.spans[2].style.fg, Some(YELLOW), "gauge shares the color");
         assert_eq!(find(&seg.spans, " 620k/1M").style.fg, Some(DIM));
 
-        let seg = context_segment(Some(40_000), Some("claude-haiku-4-5"), None).unwrap();
+        let seg = context_segment(Some(40_000), Some("claude-haiku-4-5")).unwrap();
         assert_eq!(segment_text(&seg), "ctx ██░░░░░░░░ 20% 40k/200k");
         assert_eq!(find(&seg.spans, "20%").style.fg, Some(GREEN));
 
-        let seg = context_segment(Some(190_000), None, None).unwrap();
+        let seg = context_segment(Some(190_000), None).unwrap();
         assert_eq!(segment_text(&seg), "ctx █████████▌ 95% 190k/200k");
         assert_eq!(find(&seg.spans, "95%").style.fg, Some(RED));
 
-        // Over the window (a different model than the catalogue thinks): capped.
-        let seg = context_segment(Some(300_000), Some("x"), None).unwrap();
+        // Over the window: the gauge is capped, the percentage is not.
+        let seg = context_segment(Some(300_000), Some("x")).unwrap();
         assert_eq!(segment_text(&seg), "ctx ██████████ 150% 300k/200k");
-        assert!(context_segment(None, Some("x"), None).is_none());
+        assert!(context_segment(None, Some("x")).is_none());
     }
 
     // ── git ──────────────────────────────────────────────────────────────────
@@ -1012,16 +967,24 @@ mod tests {
             "{line:?}"
         );
         assert!(line.ends_with("Alt+h help "), "{line:?}");
-        // The catalogue's window for this very model wins over the model id.
+        // The proxy's catalogue does not move the gauge: claude compacts
+        // against the window it believes the model has, not the catalogue's.
         let mut app = app;
         app.proxy_status.insert(
             "work".into(),
             ProxyStatus {
-                models: Some(catalogue(&[("claude-opus-5-5[1m]", 800_000)])),
+                models: Some(ModelsResponse {
+                    data: vec![ModelEntry {
+                        id: "claude-opus-5-5[1m]".into(),
+                        max_input_tokens: 800_000,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         );
-        assert!(render(&app, 200).contains("77% 620k/800k"), "{}", render(&app, 200));
+        assert!(render(&app, 200).contains("62% 620k/1M"), "{}", render(&app, 200));
     }
 
     #[test]
