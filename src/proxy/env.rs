@@ -45,6 +45,11 @@ pub const DEFAULT_HAIKU: &str = "claude-haiku-5-5[1m]";
 ///   non-Anthropic base URL, in case the proxy drops `tool_reference` blocks.
 ///   claude-proxy passes them through, so it stays on and every request
 ///   carries only the tools it needs.
+///
+/// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is not set in either mode. claude clamps
+/// it to the window it believes the model has, so it can only lower that
+/// window, and it hides claude's notice that an unrecognized model is assumed
+/// to have 200k. A model id with the `[1m]` suffix is what gives a session 1M.
 pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
@@ -60,7 +65,6 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".into(),
         "1".into(),
     ));
-    env.push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1000000".into()));
     env.push(("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()));
     if !profile.first_party {
         env.push((
@@ -126,7 +130,8 @@ pub struct EnvDiff<'a> {
 /// would turn the feature flags off again. An inherited
 /// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept, since it may be set on
 /// purpose; it turns the feature flags off too, so it has to be unset by hand
-/// for first-party sessions.
+/// for first-party sessions. An inherited `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+/// is kept as well: claude clamps it to the model's window anyway.
 pub fn env_diff(env: &[(String, String)]) -> EnvDiff<'_> {
     let mut remove = crate::claude::SESSION_MARKERS.to_vec();
     if env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
@@ -264,8 +269,8 @@ mod tests {
     }
 
     #[test]
-    fn gateway_output_is_unchanged() {
-        // Must match what origin/main produces, pair for pair and in order.
+    fn gateway_env_is_exactly_these_pairs_in_order() {
+        // The whole gateway env, pair for pair and in order.
         let env = session_env(&profile("https://x.net", "tok"), None);
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
         assert_eq!(
@@ -275,7 +280,6 @@ mod tests {
                 pair("ANTHROPIC_AUTH_TOKEN", "tok"),
                 pair("CLAUDE_CODE_USE_GATEWAY", "1"),
                 pair("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1"),
-                pair("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),
                 pair("CLAUDE_CODE_GATEWAY_HINT_HEADERS", "1"),
                 pair("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
                 pair("API_TIMEOUT_MS", "30000"),
@@ -297,7 +301,6 @@ mod tests {
                 "ANTHROPIC_BASE_URL",
                 "ANTHROPIC_AUTH_TOKEN",
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
                 "CLAUDE_CODE_GATEWAY_HINT_HEADERS",
                 "API_TIMEOUT_MS",
                 "DISABLE_AUTOUPDATER",
@@ -352,5 +355,29 @@ mod tests {
         assert!(!diff
             .remove
             .contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
+    }
+
+    #[test]
+    fn neither_mode_sets_the_auto_compact_window() {
+        // claude clamps it to the window it believes the model has, so it
+        // can only shrink that window, and it hides claude's "model not
+        // recognized" notice.
+        for p in [
+            profile("https://x.net", "tok"),
+            first_party_profile("https://x.net", "tok"),
+        ] {
+            let env = session_env(&p, None);
+            assert!(env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
+        }
+        // An older proxy that still advertises it is not followed either.
+        let mut cfg = ConfigResponse::default();
+        cfg.env
+            .insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1000000".into());
+        let env = session_env(&profile("https://x.net", "tok"), Some(&cfg));
+        assert!(env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
+        // A user's own setting is inherited untouched (claude clamps it too).
+        assert!(!env_diff(&env)
+            .remove
+            .contains(&"CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
     }
 }

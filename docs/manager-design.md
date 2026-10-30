@@ -299,7 +299,6 @@ The env goes through `Spawn.env` and is redacted from all daemon logs:
 - `ANTHROPIC_AUTH_TOKEN`
 - `CLAUDE_CODE_USE_GATEWAY=1`
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`
-- `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
 - `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
 - `API_TIMEOUT_MS`
@@ -313,6 +312,13 @@ off. A first-party session (`first_party = true` on the profile, or
 non-Anthropic base URL otherwise). `env_diff` drops an inherited
 `CLAUDE_CODE_USE_GATEWAY` from a first-party env; an inherited
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept.
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is not set. claude clamps it to the window
+it believes the model has (its own model table, or 1M for a `[1m]` id), so it
+can never raise that window. All it does is hide claude's notice that an
+unrecognized model is assumed to have 200k, and lock `/autocompact`. A 1M
+session comes from a `[1m]` model id, which the proxy's model aliasing maps to
+the upstream model.
 
 `ANTHROPIC_API_KEY` is unset. Note that `/proc/<pid>/environ` is readable by
 the same uid and root.
