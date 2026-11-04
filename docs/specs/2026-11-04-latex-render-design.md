@@ -162,8 +162,10 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
   client replaces its copy). `MetaRefresher` holds the last sent state in
   `Arc<Mutex<Option<(u64, Vec<String>)>>>`. After each refresh, if the cursor's list differs
   from the stored one, it increments `seq` (starting at 1) and stores the new list under the
-  lock, then broadcasts it. An empty list is sent when a non-empty one is cleared. A new claude
-  session id (new cursor) restarts `seq` at 1 with an empty list.
+  lock, then broadcasts it. An empty list is sent when a non-empty one is cleared. `seq` keeps
+  growing for the actor's whole life: a new claude session id (new cursor) starts an empty list
+  with the next `seq`, so a new conversation's lists always outrank anything sent before (a
+  replay racing a `/clear` can't pin a stale list).
 - Replay on attach: `Actor::attach` reads the slot and, if set, queues `(seq, list)` as a
   `Msg::Event` control frame right after `Subscriber::sync`. Ordering against a concurrent
   broadcast does not matter because of `seq` (below). Residual: a `Lagged` drop of a broadcast
@@ -210,12 +212,15 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
   → `None`).
 - `inline`: if the 2D rendering is exactly one row, that row; otherwise a one-line rendering of
   the `rust-latex-parser` AST (our own walker, modelled on term-maths' `MathRenderer`):
-  `\frac{a}{b}` → `a/b`, with parentheses around a numerator or denominator that is not a single
-  atom (`n(n+1)/2`; `(−b ± √(b²−4ac))/(2a)`); `\sqrt{x}` → `√x` for an atom, else `√(…)`;
-  `\sqrt[n]{x}` → `ⁿ√…` when `n` has a superscript form; sub/superscripts → Unicode
+  `\frac{a}{b}` → `a/b`; a numerator is bracketed only when it has a top-level space or `/`, a
+  denominator unless it is a number, one symbol (with scripts or a `√`) or already bracketed
+  (`n(n + 1)/2`; `(-b ± √(b² - 4ac))/(2a)`; the parser keeps ASCII `-` and spaced operators);
+  `\sqrt{x}` → `√x` for an atom, else `√(…)` (`\sqrt[n]{…}` has no root index in this parser and
+  renders as it parses); sub/superscripts → Unicode
   sub/superscript characters when every character has one, else `_(…)` / `^(…)`; large operators
   with limits → operator + scripts (`∑ᵢ₌₁ⁿ`, else `∑_(i=1)^(n)`); `\left`/`\right` delimiters →
-  the plain delimiter; matrices → `[a b; c d]`; `cases` → `{ 1 if x > 0; 0 otherwise }`;
+  the plain delimiter; matrices → `[a b; c d]`, except `vmatrix` → `|a b; c d|` and `Vmatrix` →
+  `‖…‖`; `cases` → `{ 1 if x > 0; 0 otherwise }`;
   symbols, Greek, `\mathbb` etc. as term-maths maps them. Output is one line, sanitized, at most
   512 columns (longer → `None`).
 
@@ -247,11 +252,12 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
   fits; the later rows of the span become blank, except that a suffix which did not fit stays on
   the last row after its indentation. If a rebuilt row would be wider than the pane, or the
   inline text alone does not fit after the prefix, the whole row (or span) is left raw — no
-  partial replacement.
+  partial replacement. A tag that continues onto rows containing another `<latex>` stays raw
+  (those rows are processed on their own).
 - Cells are written as grapheme clusters (`unicode-segmentation`): one cluster per cell, width
   from `unicode-width` of the cluster; a width-2 cluster takes its cell plus a spacer (ratatui
-  `Buffer::set_string` semantics); a width-0 cluster is dropped; a cluster that would straddle
-  the right edge makes the row stay raw. Copied cells keep their own styles; the inline text gets
+  `Buffer::set_string` semantics); a width-0 cluster is dropped; a cluster wider than two
+  columns, or one that would straddle the right edge, makes the row stay raw. Copied cells keep their own styles; the inline text gets
   the accent foreground (one constant) on the span's original background.
 - Selection, copy and the cursor still use the mirror's cells (unchanged).
 
@@ -336,9 +342,11 @@ threads and frame sizes stay bounded.
   override and a zero-width space are removed), the 2048-byte and 64-formula limits;
   `TranscriptCursor` exposes the list and resets it on a rewrite (unit tests in projects.rs).
 - [ ] AC4: the daemon broadcasts `SessionEvent::Latex` only when the list changes, with `seq`
-  increasing; a client attaching later receives the latest `(seq, list)` right after `Attached`
-  and the snapshot (daemon tests); `App::on_event` given seq 2 then seq 1 keeps seq 2's list, and
-  a `ClaudeSession` event resets it (app test).
+  increasing across conversations (pure `latex_event` test); a client attaching later receives
+  the latest `(seq, list)` right after `Attached` and the snapshot (unit test through
+  `Subscriber::attach`, plus AC10's manager test, whose second client can only get the formula
+  through the replay); `App::on_event` given seq 2 then seq 1 keeps seq 2's list, and a
+  `ClaudeSession` event resets it (app test).
 - [ ] AC5: proto: `Latex` round-trips; an old client decodes it as `Unknown` (test in proto.rs,
   `Older`-enum pattern).
 - [ ] AC6: `latex.rs` renders a table of formulas to the expected one-line strings (at least:
