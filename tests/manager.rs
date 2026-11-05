@@ -2118,10 +2118,10 @@ fn test_wizard_recent_dir_offers_resume() {
 
 // ── LaTeX formulas ────────────────────────────────────────────────────────────
 
-/// A fake claude that answers with a formula, as real claude would with
-/// `[claude] latex = true`: it saves its `--settings`, writes the assistant
-/// record to its transcript (under the test's `$HOME`), prints the answer
-/// with the tag, then runs its own SessionStart hook so the daemon reads it.
+/// A fake claude that answers with a formula, as real claude does by
+/// default: it saves its `--settings`, writes the assistant record to its
+/// transcript (under the test's `$HOME`), prints the answer with the tag,
+/// then runs its own SessionStart hook so the daemon reads it.
 fn write_latex_fake_claude(h: &ManagerHarness, settings: &std::path::Path) {
     let sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     let project = h.home.join(".claude/projects").join(encode_cwd(&h.dirs[0]));
@@ -2157,16 +2157,12 @@ exec cat
 
 /// A formula in claude's answer is rendered in place of its `<latex>` tag
 /// and listed by Alt+u; a TUI started later gets it from the daemon's
-/// replay on attach. `[claude] latex = true` gives the session the
+/// replay on attach. The default config gives the session the
 /// `__context latex` SessionStart hook.
 #[test]
 fn test_latex_formula_is_rendered_in_the_pane_and_the_popup() {
     let h = ManagerHarness::new();
-    fs::write(
-        h.config_home.join("claudio/config.toml"),
-        "[claude]\nupdate_check = \"off\"\nremote_check = \"off\"\nlatex = true\n",
-    )
-    .unwrap();
+    // The default test config has no `latex` key: the hook is on by default.
     let settings = h.root.join("settings.json");
     write_latex_fake_claude(&h, &settings);
 

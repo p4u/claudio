@@ -18,8 +18,8 @@ const PAGE: u16 = 10;
 pub const EMPTY: [&str; 4] = [
     "No formulas yet.",
     "",
-    "claude writes them in <latex> tags with `latex = true` under [claude]",
-    "in config.toml on the session's host, then `claudio daemon restart` there.",
+    "claude writes them in <latex> tags when asked for math (on by default;",
+    "`latex = false` under [claude] on the session's host, then `claudio daemon restart`).",
 ];
 
 /// The popup's state: whose formulas, and how far down.

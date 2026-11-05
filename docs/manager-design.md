@@ -372,12 +372,13 @@ the proxy directly. Quota signals come from `/me/stats` (`blocked_until`).
 
 Spec: `docs/specs/2026-11-04-latex-render-design.md`.
 
-- **Instruction.** With `[claude] latex = true` (read at daemon start, per
-  host), `hooks::settings` gives `SessionStart` a second command,
-  `<claudio> __context latex`. It prints one `hookSpecificOutput` line whose
-  `additionalContext` asks claude to wrap math in `<latex>…</latex>`. This is
-  context, not the system prompt, so the session stays a plain interactive
-  one. The matcher `*` re-injects it after `/clear`, a resume and a compact.
+- **Instruction.** Unless `[claude] latex = false` (on by default; read at
+  daemon start, per host), `hooks::settings` gives `SessionStart` a second
+  command, `<claudio> __context latex`. It prints one `hookSpecificOutput`
+  line whose `additionalContext` asks claude to wrap math in
+  `<latex>…</latex>`. This is context, not the system prompt, so the session
+  stays a plain interactive one. The matcher `*` re-injects it after
+  `/clear`, a resume and a compact.
 - **Extraction.** `TranscriptCursor` keeps the conversation's last 64
   formulas. They come from the `text` blocks (or string `content`) of
   non-sidechain assistant records, outside code fences and inline code. Each

@@ -122,7 +122,7 @@ daemons coexist.
   `SessionEvent::Latex { seq, formulas }`: the whole list, only when it
   changed (`seq` + 1, for the session's whole life; a new conversation sends an empty list under the next `seq`). The last list is
   replayed to a client right after its `Attached` + snapshot. `command()`
-  adds the `__context latex` SessionStart hook with `[claude] latex`.
+  adds the `__context latex` SessionStart hook unless `[claude] latex = false`.
 - `git_status.rs` — `git status --porcelain=v2 --branch` for the status
   bar's `⎇` segment: 1 s deadline, capped output, same scrubbed env as
   `git.rs`.
@@ -249,7 +249,7 @@ is idle (checked every 2 min).
   wizard's resume list).
 - `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
   to the daemon socket. Also `__context latex`, the SessionStart hook that asks
-  claude to wrap math in `<latex>` tags (`[claude] latex`); it prints one
+  claude to wrap math in `<latex>` tags (`[claude] latex`, on by default); it prints one
   constant JSON line and never touches the socket.
 - `latex.rs` — `extract_latex` (the formulas of an assistant text, code
   excluded) and `sanitize`, the character filter every formula goes through

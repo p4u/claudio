@@ -4,8 +4,9 @@ Status: audited (rev 2, spec audit folded in)   Class: architectural
 Owner decisions so far (2026-11-04):
 - Scope: steps 1–3 only (instruction injection, inline one-line rendering, formulas popup).
   Pixel rendering (sixel/kitty) is out of scope.
-- The instruction is **opt-in**: `[claude] latex = true` in `config.toml`, read by each host's
-  daemon from its own config (the `allow_skip_permissions` pattern).
+- The instruction is **on by default** (opt out with `[claude] latex = false` in `config.toml`),
+  read by each host's daemon from its own config (the `allow_skip_permissions` pattern).
+- 2026-11-05: default changed from opt-in to on (gate audit F1).
 - The formulas popup is on **Alt+u** (free in both claude and claudio; rebindable via `[keys]`).
 - Formulas whose 2D rendering needs several rows are shown inline as **one-line math**
   (`x = (−b ± √(b²−4ac))/(2a)`); the popup shows the 2D form.
@@ -44,7 +45,7 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
 
 ## Goals
 
-1. With `[claude] latex = true`, every claude session the daemon starts is told, through a
+1. Unless `[claude] latex = false`, every claude session the daemon starts is told, through a
    SessionStart hook, to wrap math in `<latex>…</latex>`.
 2. The daemon extracts the exact LaTeX of every `<latex>` tag in the session's assistant text
    from the transcript and keeps the client's list of recent formulas current, including for a
@@ -114,7 +115,7 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
 
 ### 1. Instruction injection (daemon host)
 
-- `ClaudeSection` gains `latex: bool`, `#[serde(default)]` (false), documented in the config
+- `ClaudeSection` gains `latex: bool`, `#[serde(default = "default_true")]` (true), documented in the config
   header comment and README.
 - `daemon::Config` gains `latex: bool`, read from `crate::config::load().claude.latex` at start
   like `skip_permissions`. The value is read at daemon start: after editing `config.toml`, run
@@ -275,7 +276,7 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
   cluster-based cell writing as §4.
 - Keys: Down/j, Up/k, PageDown/Space, PageUp, Home/g, End/G scroll; Esc/q close; Ctrl/Alt chords
   are ignored (the `StatsView` pattern). An empty list shows "No formulas yet" plus the hint
-  from §1 (`[claude] latex = true` in config.toml on the session's host, then `claudio daemon
+  from §1 (on by default; `[claude] latex = false` on the session's host turns it off, then `claudio daemon
   restart`).
 - The help popup lists the binding automatically (`help_entries`).
 
@@ -298,7 +299,7 @@ Verified facts (2026-11-04, claude 2.1.312) that shape the design:
 
 | Writer → reader | Behaviour |
 |---|---|
-| New daemon → old client | `SessionEvent::Latex` decodes as `Unknown` and is ignored; tags show raw (only if `[claude] latex` is on). Supported. |
+| New daemon → old client | `SessionEvent::Latex` decodes as `Unknown` and is ignored; tags show raw (always, now that the instruction is on by default). Supported. |
 | Old daemon → new client | No `Latex` events: no inline rendering, popup says "No formulas yet". Old daemons never inject the instruction either. Freshness replaces an idle older daemon anyway. Supported. |
 | New config → old binary | `[claude] latex` is an unknown key; the old binary ignores it (no `deny_unknown_fields`). Supported. |
 | Hook command → binary | `__context` is run from the daemon's own binary path. A binary downgraded under a live session would lack `__context`; the hook's 5 s timeout bounds it, and claude ignores a failing SessionStart hook. Accepted residual. |
@@ -331,7 +332,7 @@ threads and frame sizes stay bounded.
 
 ## Acceptance criteria
 
-- [ ] AC1: `[claude] latex` parses (default false); `hooks::settings(…, latex)` adds exactly one
+- [ ] AC1: `[claude] latex` parses (default true); `hooks::settings(…, latex)` adds exactly one
   `__context latex` command to `SessionStart` iff `latex` is true, and nothing else changes
   (unit tests in config.rs and hooks.rs).
 - [ ] AC2: `claudio __context latex` prints one valid JSON line with
@@ -370,7 +371,7 @@ threads and frame sizes stay bounded.
   writes the matching assistant record to its transcript; the pane shows the rendered form and
   Alt+u shows the formula (tests/manager.rs, single-threaded).
 - [ ] AC11: manual check by the controller with real claude through claudio on a local session
-  and an SSH session (`z6`): with `[claude] latex = true`, a math question renders inline and in
+  and an SSH session (`z6`): by default, a math question renders inline and in
   the popup; with it off, no instruction is injected.
 - [ ] AC12: docs: README (config key and restart note, Alt+u and the readline note, what is
   rendered), docs/manager-design.md (hook, event with `seq`, extraction, render worker),

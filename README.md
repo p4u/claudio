@@ -198,7 +198,7 @@ A multi-page popup for the session's claude-proxy profile:
 
 ### Formulas (`Alt+u`)
 
-With `latex = true` under `[claude]` in `config.toml`, each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
+Each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. This is on by default; `latex = false` under `[claude]` in `config.toml` turns it off. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
 
 In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such as `E = mc²` or `x = (-b ± √(b² - 4ac))/(2a)`. Nothing else on the screen moves, and selecting still copies the original text. A formula claudio cannot render, or does not recognise on screen, stays as written. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
 
@@ -276,7 +276,7 @@ check = true                    # check for new claudio releases
 allow_skip_permissions = true   # start claude with --allow-dangerously-skip-permissions
 update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
 remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
-latex = false                   # ask claude to write math in <latex> tags, rendered in the pane
+latex = true                    # ask claude to write math in <latex> tags, rendered in the pane
                                 # (this host's sessions; `claudio daemon restart` after a change)
 
 [keys]                          # rebind any manager key
