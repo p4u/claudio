@@ -547,6 +547,38 @@ async fn hooks_update_state_and_journal() {
     assert_eq!(c.sessions().await[0].state, SessionState::NeedsInput);
 }
 
+/// `Answers` is served off the client loop: no conversation yet (or no
+/// transcript) is an empty list, an unknown session an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn answers_are_empty_without_a_transcript_and_refused_for_unknown_sessions() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    c.spawn(d.spec(id)).await;
+    let empty = Msg::AnswersReply {
+        id,
+        answers: Vec::new(),
+    };
+    assert_eq!(c.call(Msg::Answers { id }).await, empty);
+    // A conversation whose transcript does not exist (the test's work dir
+    // has none) has no answers either.
+    let payload = serde_json::json!({
+        "session_id": "0a1b2c3d-0000-4000-8000-000000000000",
+        "source": "startup",
+    });
+    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::ClaudeSession { .. }).then_some(())
+    })
+    .await;
+    assert_eq!(c.call(Msg::Answers { id }).await, empty);
+    let unknown = Uuid::new_v4();
+    match c.call(Msg::Answers { id: unknown }).await {
+        Msg::Error { message } => assert!(message.contains("no such session"), "{message}"),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_removes_session_everywhere() {
     let d = TestDaemon::start().await;

@@ -117,6 +117,12 @@ pub enum Msg {
     ListClaudeSessions {
         cwd: String,
     },
+    /// The session's most recent answers, for the reader view. Answered by
+    /// `AnswersReply` (empty when the session has no conversation yet). An
+    /// older daemon answers `Error "unsupported op…"`.
+    Answers {
+        id: SessionId,
+    },
     /// Directories with claude history on this host, newest first (seeds the
     /// new-session directory picker).
     RecentProjects {
@@ -211,6 +217,11 @@ pub enum Msg {
     ClaudeSessions {
         cwd: String,
         sessions: Vec<ClaudeSession>,
+    },
+    /// Reply to `Answers`: oldest first, built by [`answers_reply`].
+    AnswersReply {
+        id: SessionId,
+        answers: Vec<Answer>,
     },
     Projects {
         dirs: Vec<ProjectDir>,
@@ -664,6 +675,36 @@ pub struct ClaudeSession {
     pub messages: u32,
 }
 
+/// The largest encoded `AnswersReply` the daemon sends: half of
+/// [`MAX_FRAME`], so the reply and its envelope always fit a frame.
+pub const ANSWERS_REPLY_MAX: usize = 512 * 1024;
+
+/// One of claude's answers, for the reader view: the user's prompt and the
+/// text claude answered it with (markdown, `<latex>` tags included). Both
+/// are capped and sanitized by the daemon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Answer {
+    pub prompt: String,
+    pub text: String,
+}
+
+/// The `AnswersReply` for session `id`: `answers` (oldest first) without as
+/// many of the oldest as it takes for its JSON to fit
+/// [`ANSWERS_REPLY_MAX`]. JSON escapes every `\` and `"` of a formula, so
+/// the cap is on the encoded size, not on the text's.
+pub fn answers_reply(id: SessionId, answers: Vec<Answer>) -> Msg {
+    let mut msg = Msg::AnswersReply { id, answers };
+    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > ANSWERS_REPLY_MAX) {
+        match &mut msg {
+            Msg::AnswersReply { answers, .. } if !answers.is_empty() => {
+                answers.remove(0);
+            }
+            _ => break,
+        }
+    }
+    msg
+}
+
 /// The most commits one `GitLog` request may ask for.
 pub const GIT_LOG_MAX: u32 = 500;
 
@@ -1095,6 +1136,66 @@ mod tests {
         assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SessionEvent::ClaudeSessionCleared);
+    }
+
+    #[test]
+    fn answers_round_trip_and_are_unknown_to_older_daemons() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum V04 {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let ask = Msg::Answers { id: Uuid::nil() };
+        let json = serde_json::to_string(&Envelope::request(5, ask.clone())).unwrap();
+        assert!(json.contains(r#""op":"answers""#), "{json}");
+        assert_eq!(serde_json::from_str::<V04>(&json).unwrap(), V04::Unknown);
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, ask);
+        let reply = Msg::AnswersReply {
+            id: Uuid::nil(),
+            answers: vec![Answer {
+                prompt: "why?".into(),
+                text: "Because <latex>x^2</latex>.".into(),
+            }],
+        };
+        let frame = Frame::Control(Envelope::request(5, reply.clone()));
+        assert_eq!(roundtrip(frame.clone()), frame);
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains(r#""op":"answers_reply""#), "{json}");
+        assert_eq!(serde_json::from_str::<V04>(&json).unwrap(), V04::Unknown);
+    }
+
+    #[test]
+    fn an_answers_reply_always_fits_a_frame() {
+        // Ten answers of 64 KiB made only of backslashes: twice that once
+        // encoded, 1.25 MiB in all.
+        let answers: Vec<Answer> = (0..10)
+            .map(|i| Answer {
+                prompt: format!("p{i}"),
+                text: "\\\\".repeat(32 * 1024),
+            })
+            .collect();
+        let msg = answers_reply(Uuid::nil(), answers.clone());
+        let json = serde_json::to_vec(&msg).unwrap();
+        assert!(json.len() <= ANSWERS_REPLY_MAX, "{}", json.len());
+        let frame = Frame::Control(Envelope::request(u64::MAX, msg.clone())).encode();
+        assert!(frame.len() - 4 <= MAX_FRAME);
+        let Msg::AnswersReply { answers: kept, .. } = msg else {
+            panic!("{msg:?}")
+        };
+        // The oldest went; the newest stay, in order.
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[..], answers[7..]);
+        // A reply that fits is left alone.
+        let small = answers_reply(Uuid::nil(), answers[..2].to_vec());
+        assert_eq!(
+            small,
+            Msg::AnswersReply {
+                id: Uuid::nil(),
+                answers: answers[..2].to_vec(),
+            }
+        );
     }
 
     #[test]

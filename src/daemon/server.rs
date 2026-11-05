@@ -490,6 +490,17 @@ impl Client {
             }
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
+            Msg::Answers { id } => {
+                // A transcript read: run beside the client loop and reply
+                // from the task, like `UpdateClaude`.
+                let conversation = self.daemon.conversation(id);
+                let queue = self.queue.clone();
+                tokio::spawn(async move {
+                    let msg = answers(id, conversation).await;
+                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                });
+                return;
+            }
             Msg::RecentProjects { limit } => recent_projects(limit).await,
             Msg::SubscribeHostStats => {
                 // Spawn a task that watches the stats channel and pushes
@@ -683,6 +694,35 @@ async fn list_claude_sessions(cwd: String) -> Msg {
             message: format!("list_claude_sessions failed: {e}"),
         },
     }
+}
+
+/// The `AnswersReply` for session `id`, whose `conversation` is
+/// [`Daemon::conversation`]'s: the recent answers of its transcript, read
+/// and capped on a blocking thread. No conversation yet, no answers.
+async fn answers(id: SessionId, conversation: Option<(String, Option<String>)>) -> Msg {
+    let Some((cwd, sid)) = conversation else {
+        return Msg::Error {
+            message: format!("no such session: {id}"),
+        };
+    };
+    // A claude session id is a UUID; anything else must not become a path.
+    let sid = sid.filter(|sid| {
+        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        !sid.is_empty() && sid.chars().all(safe)
+    });
+    let read = tokio::task::spawn_blocking(move || {
+        let answers = match sid {
+            Some(sid) => {
+                let path = projects::transcript_path(&host::expand_tilde(&cwd), &sid);
+                projects::read_answers(&path)
+            }
+            None => Vec::new(),
+        };
+        proto::answers_reply(id, answers)
+    });
+    read.await.unwrap_or_else(|e| Msg::Error {
+        message: format!("answers failed: {e}"),
+    })
 }
 
 async fn recent_projects(limit: u32) -> Msg {

@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::claude::latex::{extract_latex, MAX_FORMULAS};
-use crate::proto::ClaudeSession;
+use crate::claude::latex::{extract_latex, sanitize, MAX_FORMULAS};
+use crate::proto::{Answer, ClaudeSession};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -480,7 +480,7 @@ fn count_user_messages(path: &Path) -> u32 {
 ///
 /// This correctly handles prompts that start with `<` (e.g. XML-tagged tasks)
 /// which were previously misclassified.
-fn is_real_prompt(record: &serde_json::Value) -> bool {
+pub(crate) fn is_real_prompt(record: &serde_json::Value) -> bool {
     let Some(msg) = record.get("message") else {
         return false;
     };
@@ -517,6 +517,181 @@ fn is_real_prompt(record: &serde_json::Value) -> bool {
         }
         _ => false,
     }
+}
+
+// ── Recent answers ────────────────────────────────────────────────────────────
+
+/// How many of a conversation's answers the reader view gets.
+pub const MAX_ANSWERS: usize = 10;
+/// How much of a transcript's end [`read_answers`] reads.
+const ANSWERS_TAIL: u64 = 4 * 1024 * 1024;
+/// The longest prompt and answer text sent; longer ones are cut.
+const MAX_PROMPT_BYTES: usize = 2 * 1024;
+const MAX_ANSWER_BYTES: usize = 64 * 1024;
+/// What is appended to a prompt or answer that was cut.
+const CUT_MARK: &str = " …";
+/// How Claude Code's own `type:"user"` records start: slash commands, their
+/// output and caveats, and reminders. None of them is a prompt.
+const NOT_PROMPTS: [&str; 5] = [
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<system-reminder>",
+];
+
+/// The [`recent_answers`] of the transcript at `path`, from its last
+/// [`ANSWERS_TAIL`] bytes; a tail's first (partial) line is skipped. A
+/// missing or unreadable transcript has none. Blocking I/O.
+pub fn read_answers(path: &Path) -> Vec<Answer> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(ANSWERS_TAIL);
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_err()
+        || f.take(ANSWERS_TAIL).read_to_end(&mut buf).is_err()
+    {
+        return Vec::new();
+    }
+    let lines = match buf.iter().position(|&b| b == b'\n') {
+        Some(nl) if start > 0 => &buf[nl + 1..],
+        None if start > 0 => &[],
+        _ => &buf[..],
+    };
+    recent_answers(lines)
+}
+
+/// The answers of a transcript's lines, oldest first: the last
+/// [`MAX_ANSWERS`], each a prompt and the text claude answered it with.
+///
+/// An answer starts at a real prompt: a `type:"user"` record that
+/// [`is_real_prompt`] accepts, without `isMeta`, `isCompactSummary` or
+/// `isVisibleInTranscriptOnly`, and not one of Claude Code's own records
+/// ([`NOT_PROMPTS`]). Its text is the `text` blocks (or string content) of
+/// the `type:"assistant"` records that follow, joined by blank lines;
+/// records with `isApiErrorMessage` are not claude's answer, and tool
+/// results in between do not end it. A compaction boundary ends it. Sidechain
+/// records (subagents) are skipped, and so is an answer with no text.
+///
+/// `bytes` may start or end mid-line (a tail read): a line that is not a
+/// JSON record is skipped. Prompt and text are [`sanitize`]d and cut to
+/// [`MAX_PROMPT_BYTES`] and [`MAX_ANSWER_BYTES`].
+pub fn recent_answers(bytes: &[u8]) -> Vec<Answer> {
+    let mut answers = VecDeque::with_capacity(MAX_ANSWERS + 1);
+    // The answer being read: its prompt and its text blocks so far.
+    let mut current: Option<(String, Vec<String>)> = None;
+    for line in bytes.split(|&b| b == b'\n') {
+        // Cheap pre-filter: the records of interest name their type.
+        let looks_relevant = line.windows(11).any(|w| w == b"\"assistant\"")
+            || line.windows(6).any(|w| w == b"\"user\"")
+            || line.windows(16).any(|w| w == b"compact_boundary");
+        if !looks_relevant {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if flag(&v, "isSidechain") {
+            continue;
+        }
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                if let Some(prompt) = answer_prompt(&v) {
+                    finish(&mut answers, current.replace((prompt, Vec::new())));
+                }
+            }
+            Some("assistant") if !flag(&v, "isApiErrorMessage") => {
+                if let Some((_, texts)) = current.as_mut() {
+                    let content = v.get("message").and_then(|m| m.get("content"));
+                    push_texts(texts, content);
+                }
+            }
+            Some("system") => {
+                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") {
+                    finish(&mut answers, current.take());
+                }
+            }
+            _ => {}
+        }
+    }
+    finish(&mut answers, current);
+    answers.into()
+}
+
+/// Whether `record` has `key: true`.
+fn flag(record: &serde_json::Value, key: &str) -> bool {
+    record.get(key).and_then(|f| f.as_bool()) == Some(true)
+}
+
+/// The prompt of a `type:"user"` record that starts an answer (see
+/// [`recent_answers`]): its string content, or its text blocks joined by
+/// newlines.
+fn answer_prompt(record: &serde_json::Value) -> Option<String> {
+    let own = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
+    if own.iter().any(|key| flag(record, key)) || !is_real_prompt(record) {
+        return None;
+    }
+    let content = record.get("message")?.get("content")?;
+    let mut texts = Vec::new();
+    push_texts(&mut texts, Some(content));
+    let prompt = texts.join("\n");
+    let start = prompt.trim_start();
+    (!NOT_PROMPTS.iter().any(|tag| start.starts_with(tag))).then_some(prompt)
+}
+
+/// Append the text of a message's `content` to `texts`: the string itself,
+/// or its `text` blocks (not `thinking`, `tool_use` or `tool_result`).
+fn push_texts(texts: &mut Vec<String>, content: Option<&serde_json::Value>) {
+    match content {
+        Some(serde_json::Value::String(text)) => texts.push(text.clone()),
+        Some(serde_json::Value::Array(blocks)) => {
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        texts.push(text.to_owned());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Add the answer `done` (if any, and if it has text) to `answers`, keeping
+/// the last [`MAX_ANSWERS`].
+fn finish(answers: &mut VecDeque<Answer>, done: Option<(String, Vec<String>)>) {
+    let Some((prompt, texts)) = done else { return };
+    let texts: Vec<&str> = texts
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if texts.is_empty() {
+        return;
+    }
+    if answers.len() == MAX_ANSWERS {
+        answers.pop_front();
+    }
+    answers.push_back(Answer {
+        prompt: cut(&sanitize(prompt.trim()), MAX_PROMPT_BYTES),
+        text: cut(&sanitize(&texts.join("\n\n")), MAX_ANSWER_BYTES),
+    });
+}
+
+/// `s` cut to at most `max` bytes on a char boundary, with [`CUT_MARK`]
+/// appended when it was cut.
+fn cut(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{CUT_MARK}", &s[..end])
 }
 
 /// Extract `ai-title` (last occurrence) and `last-prompt` from the tail bytes.
@@ -1108,5 +1283,199 @@ mod tests {
             paths.iter().any(|p| p == &live_cwd.to_string_lossy().to_string()),
             "live cwd must appear in results; got: {paths:?}"
         );
+    }
+
+    // ── recent_answers ────────────────────────────────────────────────────────
+
+    /// A transcript of `records`, one JSON line each.
+    fn jsonl(records: &[serde_json::Value]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for record in records {
+            out.extend_from_slice(record.to_string().as_bytes());
+            out.push(b'\n');
+        }
+        out
+    }
+
+    fn prompt_record(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": content}})
+    }
+
+    fn answer_record(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": content}})
+    }
+
+    fn answer(prompt: &str, text: &str) -> Answer {
+        Answer {
+            prompt: prompt.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn answers_are_a_prompt_and_the_text_blocks_after_it() {
+        use serde_json::json;
+        let transcript = jsonl(&[
+            prompt_record(json!("first question")),
+            answer_record(json!([
+                {"type": "thinking", "thinking": "hmm"},
+                {"type": "text", "text": "Part one."},
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+            ])),
+            // A tool result does not end the answer.
+            prompt_record(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "file"}])),
+            answer_record(json!([{"type": "text", "text": "Part two: <latex>x^2</latex>"}])),
+            prompt_record(
+                json!([{"type": "text", "text": "second"}, {"type": "text", "text": "question"}]),
+            ),
+            answer_record(json!("A string answer.")),
+        ]);
+        assert_eq!(
+            recent_answers(&transcript),
+            [
+                answer(
+                    "first question",
+                    "Part one.\n\nPart two: <latex>x^2</latex>"
+                ),
+                answer("second\nquestion", "A string answer."),
+            ]
+        );
+    }
+
+    #[test]
+    fn answers_skip_claude_codes_own_records() {
+        use serde_json::json;
+        let mut meta = prompt_record(json!("caveat text"));
+        meta["isMeta"] = json!(true);
+        let mut summary = prompt_record(json!(
+            "This session is being continued from a previous conversation"
+        ));
+        summary["isCompactSummary"] = json!(true);
+        let mut visible = prompt_record(json!("only in the transcript"));
+        visible["isVisibleInTranscriptOnly"] = json!(true);
+        let mut api_error =
+            answer_record(json!([{"type": "text", "text": "API Error: stream error"}]));
+        api_error["isApiErrorMessage"] = json!(true);
+        let mut side_prompt = prompt_record(json!("a subagent's task"));
+        side_prompt["isSidechain"] = json!(true);
+        let mut side_text = answer_record(json!("a subagent's answer"));
+        side_text["isSidechain"] = json!(true);
+        let transcript = jsonl(&[
+            prompt_record(json!("the question")),
+            meta,
+            prompt_record(json!(
+                "<command-name>/model</command-name>\n<command-args></command-args>"
+            )),
+            prompt_record(json!("<command-message>model</command-message>")),
+            prompt_record(json!(
+                "<local-command-stdout>Set model</local-command-stdout>"
+            )),
+            prompt_record(json!("<local-command-caveat>Caveat</local-command-caveat>")),
+            prompt_record(json!("  <system-reminder>remember</system-reminder>")),
+            visible,
+            side_prompt,
+            side_text,
+            api_error,
+            answer_record(json!([{"type": "text", "text": "The answer."}])),
+            // A compaction ends the answer; what follows has no prompt.
+            json!({"type": "system", "subtype": "compact_boundary"}),
+            summary,
+            answer_record(json!("after the summary")),
+            // A prompt that got no text is no answer.
+            prompt_record(json!("unanswered")),
+            answer_record(json!([{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}])),
+        ]);
+        assert_eq!(
+            recent_answers(&transcript),
+            [answer("the question", "The answer.")]
+        );
+    }
+
+    #[test]
+    fn answers_are_the_last_ten_capped_and_sanitized() {
+        use serde_json::json;
+        let mut records = Vec::new();
+        for i in 0..12 {
+            records.push(prompt_record(json!(format!("q{i}"))));
+            records.push(answer_record(json!(format!("a{i}"))));
+        }
+        let answers = recent_answers(&jsonl(&records));
+        assert_eq!(answers.len(), MAX_ANSWERS);
+        assert_eq!(answers[0], answer("q2", "a2"));
+        assert_eq!(answers[9], answer("q11", "a11"));
+
+        // A long prompt and a long text are cut on a char boundary.
+        let prompt = "p".repeat(MAX_PROMPT_BYTES + 100);
+        let text = format!("{}é{}", "t".repeat(MAX_ANSWER_BYTES - 1), "t".repeat(10));
+        let answers = recent_answers(&jsonl(&[
+            prompt_record(json!(prompt)),
+            answer_record(json!(text)),
+        ]));
+        assert_eq!(
+            answers[0].prompt,
+            format!("{} …", "p".repeat(MAX_PROMPT_BYTES))
+        );
+        assert_eq!(
+            answers[0].text,
+            format!("{} …", "t".repeat(MAX_ANSWER_BYTES - 1))
+        );
+
+        // Escapes, bidi controls and private-use characters never leave.
+        let dirty = jsonl(&[
+            prompt_record(json!("why\u{1b}[2J\u{202e}?")),
+            answer_record(json!("because\u{e000}\u{9b}31m\u{200b}.")),
+        ]);
+        assert_eq!(recent_answers(&dirty), [answer("why[2J?", "because31m.")]);
+    }
+
+    #[test]
+    fn answers_skip_lines_cut_by_a_tail_read() {
+        use serde_json::json;
+        let transcript = jsonl(&[
+            prompt_record(json!("old question")),
+            answer_record(json!("old answer")),
+            prompt_record(json!("new question")),
+            answer_record(json!("new answer")),
+        ]);
+        // Cut inside the first line, and inside a multi-byte character of
+        // the last one.
+        let last = answer_record(json!("cut ééé")).to_string();
+        let mut bytes = transcript[10..].to_vec();
+        bytes.extend_from_slice(&last.as_bytes()[..last.find('é').unwrap() + 1]);
+        assert_eq!(
+            recent_answers(&bytes),
+            [answer("new question", "new answer")]
+        );
+        assert!(recent_answers(b"").is_empty());
+        assert!(recent_answers(b"not json\n{\"type\":\"user\"").is_empty());
+    }
+
+    #[test]
+    fn answers_are_read_from_the_tail_of_a_long_transcript() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("claudio-answers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        // An old answer whose text alone is longer than the tail read: its
+        // prompt is not read, and the rest of its line is skipped.
+        let mut transcript = jsonl(&[
+            prompt_record(json!("old")),
+            answer_record(json!("x".repeat(ANSWERS_TAIL as usize))),
+        ]);
+        transcript.extend(jsonl(&[
+            prompt_record(json!("new")),
+            answer_record(json!("fresh")),
+        ]));
+        std::fs::write(&path, &transcript).unwrap();
+        assert_eq!(read_answers(&path), [answer("new", "fresh")]);
+        // A short transcript is read whole.
+        std::fs::write(
+            &path,
+            jsonl(&[prompt_record(json!("q")), answer_record(json!("a"))]),
+        )
+        .unwrap();
+        assert_eq!(read_answers(&path), [answer("q", "a")]);
+        assert!(read_answers(&dir.join("missing.jsonl")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

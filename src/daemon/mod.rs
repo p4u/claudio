@@ -461,6 +461,17 @@ impl Daemon {
             .send(Frame::Control(Envelope::event(Msg::Event { id, event })));
     }
 
+    /// Where session `id`'s conversation is: its directory, and its claude
+    /// session id (`None` until claude reports one, and for a terminal).
+    /// `None` for a session the daemon does not know.
+    pub(crate) fn conversation(&self, id: SessionId) -> Option<(String, Option<String>)> {
+        let reg = self.registry();
+        let entry = reg.journal.entries().iter().find(|e| e.id == id)?;
+        let claude = entry.kind == SessionKind::Claude;
+        let sid = entry.claude_session_id.clone().filter(|_| claude);
+        Some((entry.cwd.clone(), sid))
+    }
+
     /// The command channel of a live session.
     fn session(&self, id: SessionId) -> Option<tokio::sync::mpsc::Sender<Cmd>> {
         self.registry().live.get(&id).map(|h| h.tx.clone())
