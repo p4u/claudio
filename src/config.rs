@@ -234,8 +234,11 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
 /// Why [`save_extension`] wrote nothing.
 #[derive(Debug)]
 pub enum SaveError {
-    /// The file does not parse as TOML, before or after the edit.
+    /// The file does not parse as TOML.
     InvalidToml,
+    /// The file is valid TOML but laid out so the line edit cannot set the
+    /// key (a dotted `extensions.x`, an inline table, `[[extensions]]`…).
+    Unsupported(String),
     /// The name is not an extension's (`^[a-z][a-z0-9-]{0,31}$`).
     BadName,
     Io(io::Error),
@@ -245,6 +248,10 @@ impl std::fmt::Display for SaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SaveError::InvalidToml => write!(f, "config.toml is not valid TOML"),
+            SaveError::Unsupported(name) => write!(
+                f,
+                "config.toml layout not understood; set [extensions] {name} = … by hand"
+            ),
             SaveError::BadName => write!(f, "not an extension name"),
             SaveError::Io(e) => write!(f, "{e}"),
         }
@@ -330,8 +337,15 @@ fn track_multiline(content: &str, open: &mut Option<&'static str>) {
             }
         }
         None => {
+            // Only a value can open a multi-line string; a comment or a
+            // key never does.
+            if content.trim_start().starts_with('#') {
+                return;
+            }
+            let Some(eq) = content.find('=') else { return };
+            let value = content[eq + 1..].trim_start();
             for delim in ["\"\"\"", "'''"] {
-                if content.matches(delim).count() % 2 == 1 {
+                if value.starts_with(delim) && value.matches(delim).count() % 2 == 1 {
                     *open = Some(delim);
                     break;
                 }
@@ -427,17 +441,28 @@ pub fn save_extension(path: &Path, name: &str, on: bool) -> Result<(), SaveError
         Err(e) if e.kind() == io::ErrorKind::NotFound => (String::new(), None),
         Err(e) => return Err(e.into()),
     };
-    if toml::from_str::<toml::Table>(&text).is_err() {
-        return Err(SaveError::InvalidToml);
-    }
+    let mut before: toml::Table = toml::from_str(&text).map_err(|_| SaveError::InvalidToml)?;
     let edited = set_extension(&text, name, on);
-    let table: toml::Table = toml::from_str(&edited).map_err(|_| SaveError::InvalidToml)?;
-    let set = table
+    let unsupported = || SaveError::Unsupported(name.to_owned());
+    let mut after: toml::Table = toml::from_str(&edited).map_err(|_| unsupported())?;
+    let set = after
         .get("extensions")
         .and_then(|e| e.get(name))
         .and_then(toml::Value::as_bool);
     if set != Some(on) {
-        return Err(SaveError::InvalidToml);
+        return Err(unsupported());
+    }
+    // Only `extensions.<name>` may differ.
+    for t in [&mut before, &mut after] {
+        if let Some(toml::Value::Table(e)) = t.get_mut("extensions") {
+            e.remove(name);
+            if e.is_empty() {
+                t.remove("extensions");
+            }
+        }
+    }
+    if before != after {
+        return Err(unsupported());
     }
     paths::write_atomic(&path, edited.as_bytes())?;
     if let Some(mode) = mode.filter(|m| *m != 0o600) {
@@ -700,16 +725,37 @@ default = "x"
         let err = save_extension(&path, "diagram", false).unwrap_err();
         assert_eq!(err.to_string(), "config.toml is not valid TOML");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
-        // An edit that would not parse (a dotted `extensions` key already
+        // A valid file the edit cannot handle (a dotted `extensions` key already
         // defines the table) is refused too.
         let dotted = "extensions.diagram = true\n";
         std::fs::write(&path, dotted).unwrap();
         let err = save_extension(&path, "search", false).unwrap_err();
-        assert_eq!(err.to_string(), "config.toml is not valid TOML");
+        assert_eq!(
+            err.to_string(),
+            "config.toml layout not understood; set [extensions] search = … by hand"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), dotted);
         // A name that is not an extension's is refused.
         assert!(save_extension(&path, "bad name", true).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_triple_quote_in_a_comment_does_not_open_a_string() {
+        let text = "# use \"\"\" for strings\n[extensions]\ndiagram = true\n";
+        assert_eq!(
+            set_extension(text, "diagram", false),
+            "# use \"\"\" for strings\n[extensions]\ndiagram = false\n"
+        );
+    }
+
+    #[test]
+    fn a_triple_quote_in_a_one_line_string_does_not_open_a_string() {
+        let text = "x = 'has \"\"\" inside'\n[extensions]\ndiagram = true\n";
+        assert_eq!(
+            set_extension(text, "diagram", false),
+            "x = 'has \"\"\" inside'\n[extensions]\ndiagram = false\n"
+        );
     }
 
     #[test]
