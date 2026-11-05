@@ -270,6 +270,13 @@ async fn main(launch: Launch) -> ExitCode {
         external,
         &mut key_notices,
     );
+    let dropped = registry.dropped_lenses();
+    if !dropped.is_empty() {
+        key_notices.push(format!(
+            "extensions: lenses {} left out of the session context (caps)",
+            dropped.join(", ")
+        ));
+    }
     let local_features = local_client.welcome().features.clone();
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() { Mode::Plain } else { Mode::Manager },

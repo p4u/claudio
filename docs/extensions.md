@@ -155,6 +155,9 @@ Everything a program returns is treated as untrusted:
   program is stopped and started again on the next request. After 3 failures
   (crash, protocol error, timeout) within 5 minutes the extension is disabled
   until claudio restarts, with a notice.
+- A session's context carries at most 16 lenses and 8192 bytes of lens
+  instructions; the lenses that do not fit are left out, and claudio says so
+  with a notice at start.
 - On exit claudio sends SIGTERM to the program's process group, then SIGKILL
   after a second.
 

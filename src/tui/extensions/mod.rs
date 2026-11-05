@@ -228,11 +228,25 @@ impl Registry {
     /// registry order, within the protocol's caps (a lens that would break
     /// them is left out, so the daemon never refuses the spawn).
     pub fn session_extensions(&self) -> SessionExtensions {
+        self.fit().0
+    }
+
+    /// The names of the enabled lenses [`Registry::session_extensions`]
+    /// leaves out because of the caps.
+    pub fn dropped_lenses(&self) -> Vec<String> {
+        self.fit().1
+    }
+
+    /// The enabled lenses that fit the caps, and the names of those that
+    /// do not.
+    fn fit(&self) -> (SessionExtensions, Vec<String>) {
         let mut lenses = Vec::new();
+        let mut dropped = Vec::new();
         let mut total = 0;
         for lens in self.enabled().flat_map(|e| e.lenses.iter()) {
             let size = crate::claude::latex::sanitize(&lens.instruction).len();
             if lenses.len() == MAX_LENSES || total + size > MAX_INSTRUCTIONS {
+                dropped.push(lens.name.clone());
                 continue;
             }
             total += size;
@@ -242,7 +256,7 @@ impl Registry {
                 instruction: lens.instruction.clone(),
             });
         }
-        SessionExtensions { lenses }
+        (SessionExtensions { lenses }, dropped)
     }
 
     /// The leader's actions: each enabled extension's, in order.
@@ -282,6 +296,21 @@ mod tests {
 
     fn names(ext: &SessionExtensions) -> Vec<&str> {
         ext.lenses.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    #[test]
+    fn lenses_left_out_by_the_caps_are_named() {
+        assert!(Registry::default().dropped_lenses().is_empty());
+        let mut r = Registry::default();
+        for i in 0..MAX_LENSES {
+            r.extensions
+                .push(external(&format!("x{i}"), &format!("t{i}"), 'a'));
+        }
+        // 2 built-in lenses + MAX_LENSES: the last two do not fit.
+        let last = format!("t{}", MAX_LENSES - 1);
+        let before = format!("t{}", MAX_LENSES - 2);
+        assert_eq!(r.dropped_lenses(), [before, last]);
+        assert_eq!(r.session_extensions().lenses.len(), MAX_LENSES);
     }
 
     #[test]

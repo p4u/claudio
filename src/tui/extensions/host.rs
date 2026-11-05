@@ -477,16 +477,16 @@ impl ExtensionHost {
     /// Bounded even when a request holds a program's lock: the program is
     /// then signalled by its pid, without the lock.
     pub async fn shutdown(&self) {
-        for ext in self.exts.values() {
+        futures::future::join_all(self.exts.values().map(|ext| async move {
             let Ok(mut slot) = tokio::time::timeout(STOP_GRACE, ext.proc.lock()).await else {
                 let pid = ext.lock_pid().take().map(|(_, pid)| pid);
                 signal_group(pid, libc::SIGTERM);
                 tokio::time::sleep(STOP_GRACE).await;
                 signal_group(pid, libc::SIGKILL);
-                continue;
+                return;
             };
             let Some(mut proc) = slot.take() else {
-                continue;
+                return;
             };
             drop(slot);
             *ext.lock_pid() = None;
@@ -498,7 +498,8 @@ impl ExtensionHost {
                 signal_group(proc.pid, libc::SIGKILL);
                 let _ = proc.child.wait().await;
             }
-        }
+        }))
+        .await;
     }
 }
 

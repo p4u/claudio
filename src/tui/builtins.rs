@@ -114,6 +114,9 @@ impl App {
     /// start one there resuming it, in `cwd`, with the proxy the wizard
     /// would preselect.
     pub(super) fn resume_conversation(&mut self, host: String, cwd: String, conversation: String) {
+        if cwd.is_empty() {
+            return self.notify("that conversation has no working directory to resume in");
+        }
         let open = self.sessions.iter().position(|v| {
             v.host == host && v.claude_session_id.as_deref() == Some(conversation.as_str())
         });
@@ -317,6 +320,30 @@ mod tests {
         let spec = spawned.expect("a spawn");
         assert_eq!(spec.cwd, "/home/u/p");
         assert_eq!(spec.args, ["--resume", "new-conv"]);
+    }
+
+    #[test]
+    fn a_hit_without_a_directory_is_not_resumed() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let tabs = app.sessions.len();
+        app.take_effects();
+        app.apply_result(ActionResult::Resume {
+            host: "local".into(),
+            cwd: String::new(),
+            conversation: "c".into(),
+        });
+        assert_eq!(app.sessions.len(), tabs);
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("that conversation has no working directory to resume in")
+        );
+        assert!(!app.take_effects().iter().any(|e| matches!(
+            e,
+            Effect::Request {
+                msg: Msg::Spawn(_),
+                ..
+            }
+        )));
     }
 
     #[test]
