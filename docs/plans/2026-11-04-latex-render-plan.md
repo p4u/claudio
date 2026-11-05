@@ -17,7 +17,7 @@ Every task's code is given as exact diffs against the commit the previous task l
 - Known base flakes (timing races, also seen on the base commit at about 1 run in 8): `daemon::host::tests::probe_runs_claude_with_the_given_path`, `daemon::login_path::tests::capture_times_out_and_kills_the_shell`, `daemon::tests::freshness::an_outdated_idle_daemon_is_replaced_and_its_sessions_come_back`. If one of them, and nothing else, fails, run the suite once more. Report a second failure.
 - No repo-wide `cargo fmt`: the tree is not rustfmt-clean. Only `src/config.rs`, `src/claude/hooks.rs` and `src/cli.rs` were clean before, and they must stay clean (`rustfmt --edition 2021 --check <file>`). The new files `src/claude/latex.rs`, `src/tui/latex.rs`, `src/tui/formulas.rs` and `src/tui/ui/formulas.rs` must be rustfmt-clean. Leave the formatting of every other file alone and match its style.
 - Match the repo's comment density and naming: a doc comment on each item that says why, plain sentences, no banners beyond the existing `// ── Section ──` style.
-- `app.rs` and the `App` methods in `interaction.rs`/`sessions.rs` stay pure (no I/O, no threads, no rendering). Threads and I/O live in `tui/mod.rs`. `tui/latex.rs`'s `render` is called only from `render_formula` in `tui/mod.rs`, never from `App`, a draw or a test thread.
+- `app.rs` and the `App` methods in `interaction.rs`/`sessions.rs` stay pure (no I/O, no threads, no rendering). Threads and I/O live in `tui/mod.rs`. `tui/latex.rs`'s `render` is called only from `render_formula` in `tui/mod.rs`, never from `App`, a draw, or a test with hostile input (Task 4's unit tests call it with benign formulas only).
 - Protocol additions stay backward compatible: a new `SessionEvent` kind only (old clients decode it as `Unknown`), no `PROTO` bump, no new field on an existing message.
 - Manager (PTY) tests assert on the rendered screen model, never on raw bytes. Run them single-threaded (`-- --test-threads=1`) and with nothing else heavy running on the machine.
 - No secrets and no formula text in argv, logs or state files. `__context` prints a constant.
@@ -33,9 +33,9 @@ Every task's code is given as exact diffs against the commit the previous task l
 - src/claude/projects.rs:323 the scan happens before the `usage` early return, skips sidechains and reads only `text` blocks; :276 the list is cleared on a rewritten transcript; :359 `push_latex`.
 - src/tui/latex.rs:89 `too_complex` (token and depth counting) and :131 `render` (caps, sanitizing).
 - src/tui/latex.rs:493 `overlay`, :552 `rebuild_row`, :591 `overlay_span`, :658 `matching`, :678 `text_cells`, :719 `write_row`. Rows are rebuilt from the original cells, left to right. Any overflow leaves the row raw. Wide clusters keep their covered cell. No row outside a span changes.
-- src/daemon/session.rs:605 `latex_event` (seq only grows within a conversation; a new cursor starts over) and :583 its call under the slot lock; :463 `Subscriber::attach` and :856 the replay of the last list after `Attached` + snapshot.
+- src/daemon/session.rs:605 `latex_event` (seq grows for the actor's whole life; a new cursor sends an empty list under the next seq, never seq 1 again — ruling R15) and :583 its call under the slot lock; :463 `Subscriber::attach` and :856 the replay of the last list after `Attached` + snapshot.
 - src/tui/interaction.rs:756 the `seq > latex_seq` rule, :708/:716 the resets on `ClaudeSession`/`ClaudeSessionCleared`, :775 `on_latex_rendered` (kept only for the `seq` held).
-- src/claude/hooks.rs:68 the only change to the settings JSON (an extra SessionStart command when `latex`); :97 `context` drains stdin and touches no socket.
+- src/claude/hooks.rs:68 the only change to the settings JSON (an extra SessionStart command when `latex`); :97 `context` / :102 `context_to`: the drain is in `context_to` and touches no socket.
 
 ## Task order and parallelism
 | Task | Depends on | Repo/files | May run in parallel with |
@@ -50,7 +50,7 @@ Every task's code is given as exact diffs against the commit the previous task l
 | 8 | 7 | tests/manager.rs, tests/common/mod.rs | 9 |
 | 9 | 7 | README.md, docs/manager-design.md, CLAUDE.md | 8 |
 
-The parallel pairs (1∥2, 3∥4, 8∥9) touch disjoint files, so the controller may run each pair in two git worktrees of `feat/latex-render` and then cherry-pick both commits onto the branch, in task order. The diffs apply in either order within a pair. Only the suite totals in the "Expected" lines assume strict task order (base 783 unit tests; after Task 1: 787, 2: 796, 3: 799, 4: 804, 5: 810, 6: 820, 7: 827). Per-task filtered counts do not depend on the order.
+The parallel pairs (1∥2, 3∥4, 8∥9) touch disjoint files, so the controller may run each pair in two git worktrees of `feat/latex-render` and then cherry-pick both commits onto the branch, in task order. The diffs apply in either order within a pair. The `N passed` figures per task do not depend on the order. The `M filtered out` figures and the `make test-unit` totals do: they assume strict task order (base 783; after Task 1: 787, 2: 796, 3: 799, 4: 804, 5: 810, 6: 820, 7: 827). In a worktree without its pair partner, Task 2 reads `57 passed … 735 filtered out` then `792 passed`, and Task 4 reads `5 passed … 796 filtered out` then `801 passed`; Tasks 1 and 3 are unchanged.
 
 ## Tasks
 
@@ -58,7 +58,7 @@ The parallel pairs (1∥2, 3∥4, 8∥9) touch disjoint files, so the controller
 Model: haiku   Repo: /volumes/repos/claudio   Files: src/config.rs, src/claude/hooks.rs, src/daemon/mod.rs, src/daemon/session.rs, src/daemon/tests.rs, src/main.rs
 Goal: AC1 and AC2, plus the config header comment of AC12. `ClaudeSection` and `daemon::Config` gain `latex: bool`, and `hooks::settings` gains a `latex` parameter that adds exactly one `'<bin>' __context latex` command to `SessionStart`. The new hidden subcommand prints the instruction as one JSON line.
 
-Step 1: write the failing tests. These are new tests in src/config.rs, src/claude/hooks.rs and src/daemon/session.rs; the existing `settings(…)` calls gain a `false` argument, and the `daemon::Config` literals in tests (src/daemon/session.rs, src/daemon/tests.rs) gain `latex: false`.
+Step 1: write the failing tests. New tests in src/config.rs, src/claude/hooks.rs and src/daemon/session.rs; the existing `settings(…)` calls gain a `false` argument. This step also adds the `latex: bool` field to `daemon::Config` and reads it in `from_env` (so the error list below includes the three `daemon::Config` literals of src/daemon/tests.rs that Step 2 updates, and `claude.latex` on a `ClaudeSection` that has no such field yet).
 `````diff
 diff --git a/src/claude/hooks.rs b/src/claude/hooks.rs
 index a11751b..a7e0f32 100644
@@ -935,7 +935,7 @@ Interfaces this task provides to later tasks: `crate::claude::latex::{sanitize(&
 
 ### Task 3: the `Latex { seq, formulas }` event, the refresher's slot and the attach replay
 Model: sonnet   Repo: /volumes/repos/claudio   Files: src/proto.rs, src/daemon/session.rs, src/tui/interaction.rs
-Goal: AC5 and the daemon half of AC4. After each refresh, `MetaRefresher` compares the cursor's list with the last one it sent. When they differ it stores the new list under its lock with the next `seq` and broadcasts it. A new conversation (a new cursor) starts over at seq 1. `Actor::attach` queues the last list right after `Attached` + snapshot. The TUI ignores the event until Task 5 (a placeholder match arm).
+Goal: AC5 and the daemon half of AC4. After each refresh, `MetaRefresher` compares the cursor's list with the last one it sent. When they differ it stores the new list under its lock with the next `seq` and broadcasts it. A new conversation (a new cursor) sends its empty list under the next `seq`; `seq` never restarts while the actor lives (ruling R15 — apply it on top of this task's diffs). `Actor::attach` queues the last list right after `Attached` + snapshot. The TUI ignores the event until Task 5 (a placeholder match arm).
 
 Step 1: write the failing tests.
 `````diff
@@ -4275,19 +4275,21 @@ Interfaces this task provides to later tasks: none.
    - `umask 022; cargo test --locked --test manager -- --test-threads=1` → `test result: ok. 44 passed; 0 failed` (about 126 s in the scratch run).
    - `make` → a clean release build. Then `stat -c %s target/release/claudio`. The scratch run measured 11,631,232 bytes against 11,324,032 at v0.3.7: +307,200 bytes (+2.7%). Report the real figure in the gate audit and the release notes (AC12).
    - `make static` → `statically linked` (it was in the scratch run, with no warnings).
-2. Merge: `feat/latex-render` → `main`, fast-forward or a merge commit (the owner's choice). `main` is 76c2b27 and the branch is linear on top of it.
-3. Release v0.4.0 (a feature release):
-   - Set `version = "0.4.0"` in Cargo.toml and run `cargo build --locked` (or `cargo build`, then check that Cargo.lock changed only claudio's own version line).
+2. AC11, by the controller, with the branch's `target/release/claudio` (before any merge):
+   - Local: `[claude] latex = true` in `~/.config/claudio/config.toml`, then `target/release/claudio daemon restart`; start `target/release/claudio`, open a new session and ask "what is the quadratic formula?". The answer shows a cyan one-line formula in place of the `<latex>` tag, and Alt+u shows it in 2D above its source.
+   - `ssh z6` (owner-approved test host): connect from that same TUI so the branch binary is uploaded; set the same key in z6's `~/.config/claudio/config.toml` and run `claudio daemon restart` on z6. The same check passes in a z6 session.
+   - With the key off (or removed) and the daemon restarted, a new session's `--settings` has no `__context` command (`ps -o args= -p <claude pid>` shows the `--settings` JSON), and asking claude whether it was told about `<latex>` tags gets "no".
+   - An old client (v0.3.7 binary) on the new daemon keeps working (the `Unknown` event).
+   Record the four results in progress.md; a failure here is a fix task, not a release note.
+3. Fable gate audit of the branch (Lifecycle 8); fixes re-reviewed.
+4. **Owner OK required** to merge. Merge: `feat/latex-render` → `main`, fast-forward or a merge commit (the owner's choice). `main` is 76c2b27 and the branch is linear on top of it.
+5. Release v0.4.0 (a feature release):
+   - Set `version = "0.4.0"` in Cargo.toml, run `cargo update --workspace --offline` (updates only claudio's own entry) and check `git diff --stat` shows `Cargo.lock | 2 +-` and `Cargo.toml | 2 +-`. Then `cargo build --locked` must succeed.
    - Commit `git commit -m "release v0.4.0" -- Cargo.toml Cargo.lock`, with no trailer.
    - Tag: `git tag v0.4.0`. The release workflow checks that the tag matches Cargo.toml.
-4. **Owner OK required before:**
+6. **Owner OK required before:**
    - pushing `main`;
    - pushing the tag `v0.4.0`.
-5. Post-release checks (the controller does them, AC11):
-   - Local, with `[claude] latex = true` in `~/.config/claudio/config.toml` and then `claudio daemon restart`: open a new session and ask "what is the quadratic formula?". The answer shows a cyan one-line formula in place of the `<latex>` tag, and Alt+u shows it in 2D above its source.
-   - `ssh z6`: set the same key in z6's `~/.config/claudio/config.toml` and run `claudio daemon restart` on z6 (after the TUI has upgraded the remote binary). The same check passes in a z6 session.
-   - With the key off (or removed) and the daemon restarted, a new session's `--settings` has no `__context` command. Check with `ps -o args= -p <claude pid>`, which shows the `--settings` JSON, or by asking claude whether it was told about `<latex>` tags.
-   - An old client on a new daemon is not affected (the `Unknown` event).
 
 ## Scratch verification record
 - Where: `~/.cache/claudio/scratch/plan-latex-replay`, a fresh clone at 5ef0aed. The tasks were applied in order by script: Step 1 diff → Step 1 command → Step 2 diff → Step 2 commands → the Step 3 commit command. Every diff block in this plan is the `git diff` of that run, and every "Expected" line is copied from its output. Build output went to `~/.cache/claudio/scratch/plan-latex/target`.
