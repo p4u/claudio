@@ -16,6 +16,9 @@
 //! latex = true                    # ask claude to wrap math in <latex> tags
 //!                                 # (read at daemon start: `claudio daemon restart`)
 //!
+//! [extensions]
+//! diagram = false                 # any extension, built-in or external, by name
+//!
 //! [keys]
 //! overview    = "alt+g"
 //! help        = "alt+h"
@@ -136,6 +139,10 @@ impl Default for ClaudeSection {
 /// names and invalid key specs are ignored with a notice.
 pub type KeysSection = BTreeMap<String, String>;
 
+/// The `[extensions]` section of `config.toml`: extension name → on/off
+/// (every extension is on unless listed as `false`).
+pub type ExtensionsSection = BTreeMap<String, bool>;
+
 /// The subset of `config.toml` that this module owns. Other sections (e.g.
 /// `[proxy]`) are preserved via `extra` on round-trip.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -148,6 +155,8 @@ struct ConfigFile {
     pub update: Option<UpdateSection>,
     #[serde(default)]
     pub claude: Option<ClaudeSection>,
+    #[serde(default)]
+    pub extensions: Option<ExtensionsSection>,
     /// All other TOML keys — preserved on write.
     #[serde(flatten)]
     extra: toml::Table,
@@ -162,6 +171,7 @@ pub struct Config {
     pub keys: KeysSection,
     pub update: UpdateSection,
     pub claude: ClaudeSection,
+    pub extensions: ExtensionsSection,
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -215,6 +225,7 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
         keys: file.keys.unwrap_or_default(),
         update: file.update.unwrap_or_default(),
         claude: file.claude.unwrap_or_default(),
+        extensions: file.extensions.unwrap_or_default(),
     })
 }
 
@@ -319,6 +330,19 @@ default = "x"
             err
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extensions_section_turns_extensions_on_and_off() {
+        let dir = std::env::temp_dir().join(format!("claudio-cfg-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[extensions]\ndiagram = false\nkeys = true\n").unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.extensions.get("diagram"), Some(&false));
+        assert_eq!(cfg.extensions.get("keys"), Some(&true));
+        assert!(load_from(&dir.join("missing.toml")).extensions.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

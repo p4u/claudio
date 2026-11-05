@@ -10,6 +10,7 @@ mod confirm;
 mod connections;
 #[allow(dead_code)] // Wired into the reader by Task 11, which removes this.
 mod diagram;
+mod extensions;
 mod fmt;
 mod formulas;
 mod git_app;
@@ -261,7 +262,16 @@ async fn main(launch: Launch) -> ExitCode {
         }
     };
     let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
-    let app = App::new(AppConfig {
+    // External extensions are read once, at start.
+    let external = extensions::manifest::load(&extensions::manifest::dir(), &mut key_notices);
+    let registry = extensions::Registry::new(
+        &config.extensions,
+        config.claude.latex,
+        external,
+        &mut key_notices,
+    );
+    let local_features = local_client.welcome().features.clone();
+    let mut app = App::new(AppConfig {
         mode: if plain.is_some() { Mode::Plain } else { Mode::Manager },
         size,
         home: local_client.welcome().host.home.clone(),
@@ -282,6 +292,8 @@ async fn main(launch: Launch) -> ExitCode {
             None => crate::remote::hosts::candidates(),
         },
     });
+    app.extensions = registry;
+    app.set_host_features("local", &local_features);
     let start = match plain {
         Some(start) => Start::Plain(start),
         None => Start::Manager { saved, live },
@@ -879,6 +891,7 @@ async fn event_loop(
                     }
                     let home = client.welcome().host.home.clone();
                     let remote_claude = client_claude(&client);
+                    app.set_host_features(&host, &client.welcome().features);
                     conns.reset_delay(&host);
                     // Start the reader tagged with the current generation.
                     let cur_gen = conns.current_generation(&host);
@@ -921,6 +934,7 @@ async fn event_loop(
                         spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
                     }
                     app.set_local_claude(client_claude(&client));
+                    app.set_host_features("local", &client.welcome().features);
                     conns.connected("local", client);
                     app.on_reconnected_local(&sessions, home);
                 }

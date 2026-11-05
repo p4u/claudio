@@ -1,0 +1,336 @@
+//! The extension registry: what claudio renders (lenses) and what the
+//! leader key (Alt+z) offers (actions), from built-in extensions and from
+//! external ones (`~/.config/claudio/extensions/<name>/`, see
+//! [`manifest`]).
+//!
+//! Pure: the manifests are read by `tui/mod.rs` at start, external programs
+//! run in the extension host it drives, and built-in renderers on the
+//! render worker. Everything else in the TUI asks the registry: which tag
+//! lenses the pane and the reader render, which fence lenses the reader
+//! draws, the context a spawn carries ([`Registry::session_extensions`]) and
+//! the leader's actions.
+
+pub mod manifest;
+
+use std::collections::BTreeMap;
+
+use crate::proto::{LensKind, LensSpec, SessionExtensions, MAX_INSTRUCTIONS, MAX_LENSES};
+
+/// The diagram extension's instruction (spec §7).
+pub const DIAGRAM_CONTEXT: &str = "This terminal draws Mermaid diagrams. When a diagram \
+helps (architecture, data or control flow, state machines, message sequences), write it as \
+a fenced code block with the language `mermaid`, using `flowchart TD`/`flowchart LR` or \
+`sequenceDiagram`. Keep labels short (under 30 characters) and diagrams small (under 20 \
+nodes). Do not draw box diagrams with characters yourself.";
+
+/// One lens of an extension.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lens {
+    /// The tag, or the fence's info word.
+    pub name: String,
+    pub kind: LensKind,
+    /// What claude is told about it (may be empty).
+    pub instruction: String,
+}
+
+/// One action under the leader key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionDecl {
+    pub key: char,
+    pub title: String,
+    /// The name passed back to the extension.
+    pub id: String,
+    /// Ask for a line of input first, with this prompt.
+    pub input: Option<String>,
+}
+
+/// Where an extension's code is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    /// Rust code in claudio.
+    BuiltIn,
+    /// A program the extension host runs.
+    External(manifest::Program),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extension {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub lenses: Vec<Lens>,
+    pub actions: Vec<ActionDecl>,
+    pub source: Source,
+}
+
+impl Extension {
+    pub fn is_external(&self) -> bool {
+        matches!(self.source, Source::External(_))
+    }
+}
+
+/// The built-in extensions, in registry order, all enabled.
+pub fn builtins() -> Vec<Extension> {
+    let builtin = |name: &str, description: &str| Extension {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        enabled: true,
+        lenses: Vec::new(),
+        actions: Vec::new(),
+        source: Source::BuiltIn,
+    };
+    let action = |key, title: &str, id: &str, input: Option<&str>| ActionDecl {
+        key,
+        title: title.to_owned(),
+        id: id.to_owned(),
+        input: input.map(str::to_owned),
+    };
+    let lens = |name: &str, kind, instruction: &str| Lens {
+        name: name.to_owned(),
+        kind,
+        instruction: instruction.to_owned(),
+    };
+    let mut latex = builtin("latex", "math typeset from <latex> tags");
+    latex.lenses = vec![lens(
+        "latex",
+        LensKind::Tag,
+        crate::claude::hooks::LATEX_CONTEXT,
+    )];
+    let mut diagram = builtin("diagram", "Mermaid diagrams drawn in the reader");
+    diagram.lenses = vec![lens("mermaid", LensKind::Fence, DIAGRAM_CONTEXT)];
+    let mut search = builtin("search", "search claude conversations");
+    search.actions = vec![action(
+        's',
+        "search conversations",
+        "search",
+        Some("search conversations"),
+    )];
+    let mut snippets = builtin("snippets", "saved prompts");
+    snippets.actions = vec![
+        action('p', "insert snippet", "insert", None),
+        action('P', "save last prompt as snippet", "save", None),
+    ];
+    vec![latex, diagram, search, snippets]
+}
+
+/// The reader's leader key: always offered, not an extension's.
+pub const READER_KEY: char = 'u';
+
+/// The extensions this client runs with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Registry {
+    pub extensions: Vec<Extension>,
+}
+
+impl Default for Registry {
+    /// The built-ins, all on.
+    fn default() -> Self {
+        Registry {
+            extensions: builtins(),
+        }
+    }
+}
+
+impl Registry {
+    /// The built-ins, then `external` (already validated against each
+    /// other and the built-ins by [`manifest::admit`]), with `[extensions]`
+    /// (`enabled`) applied; `[claude] latex = false` (`latex`) turns latex
+    /// off too. A name in `enabled` that matches nothing gets a notice.
+    pub fn new(
+        enabled: &BTreeMap<String, bool>,
+        latex: bool,
+        external: Vec<Extension>,
+        notices: &mut Vec<String>,
+    ) -> Registry {
+        let mut extensions = builtins();
+        extensions.extend(external);
+        for ext in &mut extensions {
+            if let Some(on) = enabled.get(&ext.name) {
+                ext.enabled = *on;
+            }
+            if ext.name == "latex" && !latex {
+                ext.enabled = false;
+            }
+        }
+        for name in enabled.keys() {
+            if !extensions.iter().any(|e| &e.name == name) {
+                notices.push(format!(
+                    "config.toml [extensions]: no extension named '{name}'"
+                ));
+            }
+        }
+        Registry { extensions }
+    }
+
+    /// The enabled extensions, in order.
+    pub fn enabled(&self) -> impl Iterator<Item = &Extension> {
+        self.extensions.iter().filter(|e| e.enabled)
+    }
+
+    /// The enabled lenses of `kind`, with their extension, in order.
+    pub fn lenses(&self, kind: LensKind) -> Vec<(&Extension, &Lens)> {
+        self.enabled()
+            .flat_map(|e| e.lenses.iter().map(move |l| (e, l)))
+            .filter(|(_, l)| l.kind == kind)
+            .collect()
+    }
+
+    /// The names of the enabled tag lenses.
+    pub fn tag_lenses(&self) -> Vec<&str> {
+        let lenses = self.lenses(LensKind::Tag);
+        lenses.into_iter().map(|(_, l)| l.name.as_str()).collect()
+    }
+
+    /// The names of the enabled fence lenses.
+    pub fn fence_lenses(&self) -> Vec<&str> {
+        let lenses = self.lenses(LensKind::Fence);
+        lenses.into_iter().map(|(_, l)| l.name.as_str()).collect()
+    }
+
+    /// The external extension that owns enabled lens `name`, if one does.
+    pub fn external_lens(&self, name: &str) -> Option<&Extension> {
+        self.enabled()
+            .find(|e| e.lenses.iter().any(|l| l.name == name))
+            .filter(|e| e.is_external())
+    }
+
+    /// The session context a claude spawn carries: the enabled lenses in
+    /// registry order, within the protocol's caps (a lens that would break
+    /// them is left out, so the daemon never refuses the spawn).
+    pub fn session_extensions(&self) -> SessionExtensions {
+        let mut lenses = Vec::new();
+        let mut total = 0;
+        for lens in self.enabled().flat_map(|e| e.lenses.iter()) {
+            let size = crate::claude::latex::sanitize(&lens.instruction).len();
+            if lenses.len() == MAX_LENSES || total + size > MAX_INSTRUCTIONS {
+                continue;
+            }
+            total += size;
+            lenses.push(LensSpec {
+                name: lens.name.clone(),
+                kind: lens.kind,
+                instruction: lens.instruction.clone(),
+            });
+        }
+        SessionExtensions { lenses }
+    }
+
+    /// The leader's actions: each enabled extension's, in order.
+    pub fn actions(&self) -> Vec<(&Extension, &ActionDecl)> {
+        self.enabled()
+            .flat_map(|e| e.actions.iter().map(move |a| (e, a)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn external(name: &str, tag: &str, key: char) -> Extension {
+        Extension {
+            name: name.into(),
+            description: String::new(),
+            enabled: true,
+            lenses: vec![Lens {
+                name: tag.into(),
+                kind: LensKind::Tag,
+                instruction: format!("write <{tag}>"),
+            }],
+            actions: vec![ActionDecl {
+                key,
+                title: "t".into(),
+                id: "a".into(),
+                input: None,
+            }],
+            source: Source::External(manifest::Program {
+                dir: "/x".into(),
+                command: vec!["prog".into()],
+            }),
+        }
+    }
+
+    fn names(ext: &SessionExtensions) -> Vec<&str> {
+        ext.lenses.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_builtins_give_latex_and_mermaid_and_the_leader_actions() {
+        let r = Registry::default();
+        assert_eq!(r.tag_lenses(), ["latex"]);
+        assert_eq!(r.fence_lenses(), ["mermaid"]);
+        let ext = r.session_extensions();
+        assert_eq!(names(&ext), ["latex", "mermaid"]);
+        assert_eq!(
+            ext.lenses[0].instruction,
+            crate::claude::hooks::LATEX_CONTEXT
+        );
+        assert_eq!(ext.lenses[1].kind, LensKind::Fence);
+        assert_eq!(ext.validate(), Ok(()));
+        let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
+        assert_eq!(keys, ['s', 'p', 'P']);
+        assert!(r.external_lens("latex").is_none());
+    }
+
+    #[test]
+    fn config_turns_extensions_off_and_names_unknown_ones() {
+        let mut notices = Vec::new();
+        let enabled = BTreeMap::from([
+            ("diagram".to_owned(), false),
+            ("snippets".to_owned(), false),
+            ("nope".to_owned(), false),
+        ]);
+        let r = Registry::new(&enabled, true, vec![], &mut notices);
+        assert_eq!(names(&r.session_extensions()), ["latex"]);
+        assert!(r.fence_lenses().is_empty());
+        let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
+        assert_eq!(keys, ['s']);
+        assert_eq!(
+            notices,
+            ["config.toml [extensions]: no extension named 'nope'"]
+        );
+        // `[claude] latex = false` is the latex extension off.
+        let r = Registry::new(&BTreeMap::new(), false, vec![], &mut notices);
+        assert!(r.tag_lenses().is_empty());
+        assert_eq!(names(&r.session_extensions()), ["mermaid"]);
+    }
+
+    #[test]
+    fn external_extensions_follow_the_builtins() {
+        let mut notices = Vec::new();
+        let ext = vec![external("keys", "keys", 'k')];
+        let r = Registry::new(&BTreeMap::new(), true, ext, &mut notices);
+        assert_eq!(r.tag_lenses(), ["latex", "keys"]);
+        assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
+        assert_eq!(
+            r.external_lens("keys").map(|e| e.name.as_str()),
+            Some("keys")
+        );
+        let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
+        assert_eq!(keys, ['s', 'p', 'P', 'k']);
+        let off = BTreeMap::from([("keys".to_owned(), false)]);
+        let r = Registry::new(
+            &off,
+            true,
+            vec![external("keys", "keys", 'k')],
+            &mut notices,
+        );
+        assert!(r.external_lens("keys").is_none());
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn the_session_context_stays_within_the_caps() {
+        let mut ext: Vec<Extension> = (0..16)
+            .map(|i| external(&format!("e{i}"), &format!("t{i}"), 'k'))
+            .collect();
+        ext[0].lenses[0].instruction = "i".repeat(2048);
+        ext[1].lenses[0].instruction = "i".repeat(2048);
+        ext[2].lenses[0].instruction = "i".repeat(2048);
+        let r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
+        let ctx = r.session_extensions();
+        assert_eq!(ctx.validate(), Ok(()));
+        assert_eq!(ctx.lenses.len(), 16);
+        assert_eq!(&names(&ctx)[..3], ["latex", "mermaid", "t0"]);
+    }
+}

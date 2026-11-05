@@ -7,8 +7,8 @@
 use uuid::Uuid;
 
 use crate::proto::{
-    GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
-    SpawnSpec,
+    GitStatus, LensItem, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState,
+    ShellSpec, SpawnSpec,
 };
 use crate::term::screen::Screen;
 
@@ -68,13 +68,20 @@ pub struct SessionView {
     pub turns: Option<u32>,
     /// Claude, or a plain terminal tab.
     pub kind: SessionKind,
-    /// The `seq` of the newest formula list taken (0: none yet), and its
-    /// formulas' sources, oldest first.
+    /// The `seq` of the newest lens list taken (0: none yet; a `Latex`
+    /// list from a daemon without the `lens` feature), and its formulas'
+    /// sources, oldest first.
     pub latex_seq: u64,
     pub latex_srcs: Vec<String>,
     /// Those formulas rendered; until the render worker is done with a new
     /// list, the previous one.
     pub latex: Vec<Formula>,
+    /// That list's items of every enabled tag lens (`latex` included),
+    /// oldest first.
+    pub lens_items: Vec<LensItem>,
+    /// The external tag lenses' items rendered, by tag (the extension host
+    /// fills it); until a list's renderings come, the previous ones.
+    pub lens: Vec<(String, Formula)>,
 }
 
 impl SessionView {
@@ -114,6 +121,8 @@ impl SessionView {
             latex_seq: 0,
             latex_srcs: Vec::new(),
             latex: Vec::new(),
+            lens_items: Vec::new(),
+            lens: Vec::new(),
         }
     }
 
@@ -122,6 +131,8 @@ impl SessionView {
         self.latex_seq = 0;
         self.latex_srcs.clear();
         self.latex.clear();
+        self.lens_items.clear();
+        self.lens.clear();
     }
 
     /// The view of a session `host`'s daemon reports.
@@ -423,7 +434,7 @@ impl App {
             cols,
             // `--plain`'s session is not one for a manager to show.
             ephemeral: self.mode == Mode::Plain,
-            extensions: None,
+            extensions: Some(self.extensions.session_extensions()),
         };
         self.send_with_proxy(
             host,
@@ -546,7 +557,7 @@ impl App {
             env: vec![], // filled by `send_with_proxy`
             rows,
             cols,
-            extensions: None,
+            extensions: Some(self.extensions.session_extensions()),
         });
         match self.send_with_proxy(
             &host,

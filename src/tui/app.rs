@@ -301,6 +301,13 @@ pub struct App {
     pub selection: Option<Selection>,
     /// Press timing for double and triple clicks.
     pub(super) clicks: Clicks,
+    /// The extensions (built-in and external) this client runs with; the
+    /// event loop sets the configured ones at start.
+    pub extensions: super::extensions::Registry,
+    /// Hosts whose daemon has the `lens` feature: their `Lens` events are
+    /// taken and their `Latex` events ignored (an older daemon's `Latex`
+    /// events are taken as `latex` items instead).
+    pub(super) lens_hosts: HashSet<String>,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -340,6 +347,7 @@ pub struct AppConfig {
 impl App {
     pub fn new(cfg: AppConfig) -> App {
         let (width, height) = cfg.size;
+        let latex = cfg.claude.latex;
         App {
             mode: cfg.mode,
             exit: Default::default(),
@@ -383,6 +391,22 @@ impl App {
             copy_on_select: cfg.copy_on_select,
             selection: None,
             clicks: Clicks::default(),
+            extensions: super::extensions::Registry::new(
+                &Default::default(),
+                latex,
+                Vec::new(),
+                &mut Vec::new(),
+            ),
+            lens_hosts: HashSet::new(),
+        }
+    }
+
+    /// What `host`'s daemon said it can do (its `Welcome.features`).
+    pub fn set_host_features(&mut self, host: &str, features: &[String]) {
+        if features.iter().any(|f| f == "lens") {
+            self.lens_hosts.insert(host.to_owned());
+        } else {
+            self.lens_hosts.remove(host);
         }
     }
 

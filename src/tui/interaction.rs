@@ -13,7 +13,7 @@ use std::io;
 use std::time::Instant;
 
 use crate::client::Incoming;
-use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
+use crate::proto::{LensItem, Msg, SessionEvent, SessionId, SessionKind, SessionState};
 use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::{MouseMode, Screen};
 
@@ -820,25 +820,57 @@ impl App {
                     v.turns = turns;
                 }
             }
-            // A replay and a broadcast may cross: only a newer list counts.
-            // It is rendered off the UI thread; the old one stays meanwhile.
+            // A daemon without the `lens` feature sends formulas only: they
+            // are its `latex` items. A lens daemon's are in its `Lens` events.
             SessionEvent::Latex { seq, formulas } => {
-                if seq > v.latex_seq {
-                    v.latex_seq = seq;
-                    v.latex_srcs = formulas;
-                    let render = Effect::RenderLatex {
-                        host: v.host.clone(),
-                        id: v.id,
-                        seq,
-                        srcs: v.latex_srcs.clone(),
-                    };
-                    self.emit(render);
+                if !self.lens_hosts.contains(host) {
+                    let items = formulas
+                        .into_iter()
+                        .map(|text| LensItem {
+                            tag: "latex".to_owned(),
+                            text,
+                        })
+                        .collect();
+                    self.take_lens_items(i, seq, items);
                 }
             }
-            // Taken from Task 3 on (`Welcome.features`).
-            SessionEvent::Lens { .. } => {}
+            SessionEvent::Lens { seq, items } => {
+                if self.lens_hosts.contains(host) {
+                    self.take_lens_items(i, seq, items);
+                }
+            }
             SessionEvent::Unknown => {}
         }
+    }
+
+    /// Take lens list `seq` of session `i`, unless a newer one is held (a
+    /// replay and a broadcast may cross): the items of the enabled tag
+    /// lenses. Its formulas are rendered off the UI thread; the old ones
+    /// stay meanwhile.
+    fn take_lens_items(&mut self, i: usize, seq: u64, items: Vec<LensItem>) {
+        let tags = self.extensions.tag_lenses();
+        let items: Vec<LensItem> = items
+            .into_iter()
+            .filter(|item| tags.contains(&item.tag.as_str()))
+            .collect();
+        let v = &mut self.sessions[i];
+        if seq <= v.latex_seq {
+            return;
+        }
+        v.latex_seq = seq;
+        v.latex_srcs = items
+            .iter()
+            .filter(|item| item.tag == "latex")
+            .map(|item| item.text.clone())
+            .collect();
+        v.lens_items = items;
+        let render = Effect::RenderLatex {
+            host: v.host.clone(),
+            id: v.id,
+            seq,
+            srcs: v.latex_srcs.clone(),
+        };
+        self.emit(render);
     }
 
     /// The render worker is done with list `seq` of session `id` on `host`:
@@ -996,6 +1028,7 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
 mod tests {
     use super::*;
     use crate::tui::app::AppConfig;
+    use crate::tui::extensions::Registry;
     use crate::tui::test_support::{self, app_with, info, press};
     use crossterm::event::Event;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1260,6 +1293,87 @@ mod tests {
             .take_effects()
             .iter()
             .any(|e| matches!(e, Effect::RenderLatex { seq: 1, .. })));
+    }
+
+    #[test]
+    fn a_lens_daemon_sends_lens_items_and_an_old_one_latex() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let (id, host) = (app.sessions[0].id, app.sessions[0].host.clone());
+        let item = |tag: &str, text: &str| LensItem {
+            tag: tag.into(),
+            text: text.into(),
+        };
+        let lens = |seq, items: Vec<LensItem>| Incoming::Event {
+            id,
+            event: SessionEvent::Lens { seq, items },
+        };
+        let latex = |seq, list: &[&str]| Incoming::Event {
+            id,
+            event: SessionEvent::Latex {
+                seq,
+                formulas: list.iter().map(|f| f.to_string()).collect(),
+            },
+        };
+        let renders = |app: &mut App| -> Vec<(u64, Vec<String>)> {
+            app.take_effects()
+                .into_iter()
+                .filter_map(|e| match e {
+                    Effect::RenderLatex { seq, srcs, .. } => Some((seq, srcs)),
+                    _ => None,
+                })
+                .collect()
+        };
+        // An old daemon: its formulas are latex items; Lens is not its.
+        app.on_incoming_from(&host, lens(5, vec![item("latex", "z")]));
+        assert!(renders(&mut app).is_empty());
+        app.on_incoming_from(&host, latex(1, &["a"]));
+        assert_eq!(renders(&mut app), [(1, vec!["a".to_owned()])]);
+        assert_eq!(app.sessions[0].lens_items, [item("latex", "a")]);
+
+        // A lens daemon: Lens is taken, Latex ignored; items of lenses
+        // that are not enabled are dropped.
+        app.set_host_features(&host, &["lens".to_owned()]);
+        app.on_incoming_from(&host, latex(7, &["ignored"]));
+        assert!(renders(&mut app).is_empty());
+        let items = vec![item("keys", "k"), item("latex", "b"), item("latex", "c")];
+        app.on_incoming_from(&host, lens(2, items));
+        assert_eq!(renders(&mut app), [(2, vec!["b".to_owned(), "c".to_owned()])]);
+        assert_eq!(app.sessions[0].lens_items, [item("latex", "b"), item("latex", "c")]);
+        // An older list is ignored, as for latex.
+        app.on_incoming_from(&host, lens(1, vec![item("latex", "old")]));
+        assert!(renders(&mut app).is_empty());
+        // A daemon that lost the feature (a downgrade) is an old one again.
+        app.set_host_features(&host, &[]);
+        app.on_incoming_from(&host, latex(3, &["d"]));
+        assert_eq!(renders(&mut app), [(3, vec!["d".to_owned()])]);
+    }
+
+    #[test]
+    fn with_latex_off_formulas_are_not_rendered_and_spawns_say_so() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let (id, host) = (app.sessions[0].id, app.sessions[0].host.clone());
+        let off = std::collections::BTreeMap::from([("latex".to_owned(), false)]);
+        app.extensions = Registry::new(&off, true, vec![], &mut Vec::new());
+        let event = SessionEvent::Latex {
+            seq: 1,
+            formulas: vec!["x".into()],
+        };
+        app.on_incoming_from(&host, Incoming::Event { id, event });
+        assert!(app.sessions[0].latex_srcs.is_empty());
+        assert!(app.sessions[0].lens_items.is_empty());
+        // A respawn carries the client's lenses: mermaid only.
+        app.take_effects();
+        app.reset_session(id, false);
+        let sent = app.take_effects().into_iter().find_map(|e| match e {
+            Effect::Request {
+                msg: Msg::Respawn(spec),
+                ..
+            } => Some(spec),
+            _ => None,
+        });
+        let ext = sent.expect("a respawn").extensions.expect("extensions");
+        let names: Vec<&str> = ext.lenses.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["mermaid"]);
     }
 
     #[test]
