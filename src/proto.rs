@@ -123,6 +123,13 @@ pub enum Msg {
     Answers {
         id: SessionId,
     },
+    /// The newest prompt of the session's conversation, answered or not,
+    /// for saving as a snippet. Answered by `LastPromptReply`; an unknown
+    /// session by `Error "no such session: …"`. An older daemon answers
+    /// `Error "unsupported op…"`.
+    LastPrompt {
+        id: SessionId,
+    },
     /// Directories with claude history on this host, newest first (seeds the
     /// new-session directory picker).
     RecentProjects {
@@ -222,6 +229,14 @@ pub enum Msg {
     AnswersReply {
         id: SessionId,
         answers: Vec<Answer>,
+    },
+    /// Reply to `LastPrompt`: sanitized, at most 64 KiB (`cut` when it was
+    /// longer); `None` when the conversation has no prompt yet.
+    LastPromptReply {
+        id: SessionId,
+        prompt: Option<String>,
+        #[serde(default)]
+        cut: bool,
     },
     Projects {
         dirs: Vec<ProjectDir>,
@@ -1165,6 +1180,45 @@ mod tests {
         assert!(json.contains(r#""op":"answers_reply""#), "{json}");
         assert_eq!(serde_json::from_str::<V04>(&json).unwrap(), V04::Unknown);
     }
+
+    #[test]
+    fn last_prompt_round_trips_and_is_unknown_to_older_daemons() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum V05 {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let ask = Msg::LastPrompt { id: Uuid::nil() };
+        let json = serde_json::to_string(&Envelope::request(4, ask.clone())).unwrap();
+        assert!(json.contains(r#""op":"last_prompt""#), "{json}");
+        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, ask);
+        // The largest reply (64 KiB of quotes, escaped) fits a frame.
+        let reply = Msg::LastPromptReply {
+            id: Uuid::nil(),
+            prompt: Some("\"".repeat(64 * 1024)),
+            cut: true,
+        };
+        let frame = Frame::Control(Envelope::request(4, reply.clone()));
+        assert!(frame.encode().len() - 4 <= MAX_FRAME);
+        assert_eq!(roundtrip(frame.clone()), frame);
+        let old: Msg = serde_json::from_str(&format!(
+            r#"{{"op":"last_prompt_reply","id":"{}","prompt":null}}"#,
+            Uuid::nil()
+        ))
+        .unwrap();
+        assert_eq!(
+            old,
+            Msg::LastPromptReply {
+                id: Uuid::nil(),
+                prompt: None,
+                cut: false
+            }
+        );
+    }
+
 
     #[test]
     fn an_answers_reply_always_fits_a_frame() {

@@ -501,6 +501,16 @@ impl Client {
                 });
                 return;
             }
+            Msg::LastPrompt { id } => {
+                // A transcript read, like `Answers`.
+                let conversation = self.daemon.conversation(id);
+                let queue = self.queue.clone();
+                tokio::spawn(async move {
+                    let msg = last_prompt(id, conversation).await;
+                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                });
+                return;
+            }
             Msg::RecentProjects { limit } => recent_projects(limit).await,
             Msg::SubscribeHostStats => {
                 // Spawn a task that watches the stats channel and pushes
@@ -705,17 +715,9 @@ async fn answers(id: SessionId, conversation: Option<(String, Option<String>)>) 
             message: format!("no such session: {id}"),
         };
     };
-    // A claude session id is a UUID; anything else must not become a path.
-    let sid = sid.filter(|sid| {
-        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-        !sid.is_empty() && sid.chars().all(safe)
-    });
     let read = tokio::task::spawn_blocking(move || {
-        let answers = match sid {
-            Some(sid) => {
-                let path = projects::transcript_path(&host::expand_tilde(&cwd), &sid);
-                projects::read_answers(&path)
-            }
+        let answers = match transcript(&cwd, sid) {
+            Some(path) => projects::read_answers(&path),
             None => Vec::new(),
         };
         proto::answers_reply(id, answers)
@@ -723,6 +725,36 @@ async fn answers(id: SessionId, conversation: Option<(String, Option<String>)>) 
     read.await.unwrap_or_else(|e| Msg::Error {
         message: format!("answers failed: {e}"),
     })
+}
+
+/// The `LastPromptReply` for session `id`, whose `conversation` is
+/// [`Daemon::conversation`]'s, read on a blocking thread. No conversation
+/// yet, no prompt.
+async fn last_prompt(id: SessionId, conversation: Option<(String, Option<String>)>) -> Msg {
+    let Some((cwd, sid)) = conversation else {
+        return Msg::Error {
+            message: format!("no such session: {id}"),
+        };
+    };
+    let read = tokio::task::spawn_blocking(move || {
+        let found = transcript(&cwd, sid).and_then(|path| projects::read_last_prompt(&path));
+        let (prompt, cut) = match found {
+            Some((prompt, cut)) => (Some(prompt), cut),
+            None => (None, false),
+        };
+        Msg::LastPromptReply { id, prompt, cut }
+    });
+    read.await.unwrap_or_else(|e| Msg::Error {
+        message: format!("last prompt failed: {e}"),
+    })
+}
+
+/// The transcript of claude session `sid` run in `cwd`. A claude session id
+/// is a UUID; anything else must not become a path.
+fn transcript(cwd: &str, sid: Option<String>) -> Option<std::path::PathBuf> {
+    let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let sid = sid.filter(|sid| !sid.is_empty() && sid.chars().all(safe))?;
+    Some(projects::transcript_path(&host::expand_tilde(cwd), &sid))
 }
 
 async fn recent_projects(limit: u32) -> Msg {

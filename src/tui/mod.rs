@@ -23,6 +23,8 @@ mod proxy_state;
 mod reader;
 mod selection;
 mod sessions;
+#[allow(dead_code)] // Wired into the snippets actions by Task 11, which removes this.
+mod snippets;
 mod state;
 mod stats_view;
 mod typeset;

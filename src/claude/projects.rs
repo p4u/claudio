@@ -541,9 +541,22 @@ const NOT_PROMPTS: [&str; 5] = [
 ];
 
 /// The [`recent_answers`] of the transcript at `path`, from its last
-/// [`ANSWERS_TAIL`] bytes; a tail's first (partial) line is skipped. A
-/// missing or unreadable transcript has none. Blocking I/O.
+/// [`ANSWERS_TAIL`] bytes ([`read_tail`]). A missing or unreadable
+/// transcript has none. Blocking I/O.
 pub fn read_answers(path: &Path) -> Vec<Answer> {
+    recent_answers(&read_tail(path))
+}
+
+/// The [`last_prompt`] of the transcript at `path`, from its last
+/// [`ANSWERS_TAIL`] bytes ([`read_tail`]). Blocking I/O.
+pub fn read_last_prompt(path: &Path) -> Option<(String, bool)> {
+    last_prompt(&read_tail(path))
+}
+
+/// The whole lines of the last [`ANSWERS_TAIL`] bytes of the transcript at
+/// `path`: a tail's first (partial) line is skipped. Empty when the file is
+/// missing or unreadable.
+fn read_tail(path: &Path) -> Vec<u8> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
         return Vec::new();
@@ -556,12 +569,11 @@ pub fn read_answers(path: &Path) -> Vec<Answer> {
     {
         return Vec::new();
     }
-    let lines = match buf.iter().position(|&b| b == b'\n') {
-        Some(nl) if start > 0 => &buf[nl + 1..],
-        None if start > 0 => &[],
-        _ => &buf[..],
-    };
-    recent_answers(lines)
+    match buf.iter().position(|&b| b == b'\n') {
+        Some(nl) if start > 0 => buf.split_off(nl + 1),
+        None if start > 0 => Vec::new(),
+        _ => buf,
+    }
 }
 
 /// The answers of a transcript's lines, oldest first: the last
@@ -692,6 +704,40 @@ fn cut(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}{CUT_MARK}", &s[..end])
+}
+
+/// The longest prompt [`last_prompt`] returns whole.
+pub const MAX_LAST_PROMPT: usize = 64 * 1024;
+
+/// The newest real prompt of a transcript's lines, answered or not (the
+/// prompts of [`recent_answers`]; sidechain records are skipped):
+/// [`sanitize`]d and trimmed, and cut to [`MAX_LAST_PROMPT`] bytes on a char
+/// boundary, with no mark, when longer (then `true`). `None` when there is
+/// none.
+pub fn last_prompt(bytes: &[u8]) -> Option<(String, bool)> {
+    bytes.split(|&b| b == b'\n').rev().find_map(|line| {
+        if !line.windows(6).any(|w| w == b"\"user\"") {
+            return None;
+        }
+        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+        let user = record.get("type").and_then(|t| t.as_str()) == Some("user");
+        if !user || flag(&record, "isSidechain") {
+            return None;
+        }
+        let prompt = sanitize(answer_prompt(&record)?.trim());
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return None;
+        }
+        if prompt.len() <= MAX_LAST_PROMPT {
+            return Some((prompt.to_owned(), false));
+        }
+        let mut end = MAX_LAST_PROMPT;
+        while !prompt.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some((prompt[..end].to_owned(), true))
+    })
 }
 
 /// Extract `ai-title` (last occurrence) and `last-prompt` from the tail bytes.
@@ -1476,6 +1522,73 @@ mod tests {
         .unwrap();
         assert_eq!(read_answers(&path), [answer("q", "a")]);
         assert!(read_answers(&dir.join("missing.jsonl")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    // ── last_prompt ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_last_prompt_is_the_newest_real_one_answered_or_not() {
+        use serde_json::json;
+        let mut meta = prompt_record(json!("caveat"));
+        meta["isMeta"] = json!(true);
+        let mut side = prompt_record(json!("a subagent's task"));
+        side["isSidechain"] = json!(true);
+        let transcript = jsonl(&[
+            prompt_record(json!("old question")),
+            answer_record(json!("old answer")),
+            prompt_record(json!([{"type": "text", "text": "  the newest\nquestion  "}])),
+            // Still unanswered: tool calls and their results only.
+            answer_record(json!([{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}])),
+            prompt_record(json!([{"type": "tool_result", "tool_use_id": "t", "content": "out"}])),
+            prompt_record(json!("<command-name>/model</command-name>")),
+            meta,
+            side,
+            json!({"type": "system", "subtype": "compact_boundary"}),
+        ]);
+        assert_eq!(
+            last_prompt(&transcript),
+            Some(("the newest\nquestion".into(), false))
+        );
+        assert_eq!(last_prompt(b""), None);
+        assert_eq!(
+            last_prompt(&jsonl(&[answer_record(json!("no prompt"))])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_last_prompt_is_sanitized_and_cut_without_a_mark() {
+        use serde_json::json;
+        let dirty = jsonl(&[prompt_record(json!("why\u{1b}[2J\u{202e}?"))]);
+        assert_eq!(last_prompt(&dirty), Some(("why[2J?".into(), false)));
+        let long = format!("{}é{}", "p".repeat(MAX_LAST_PROMPT - 1), "q".repeat(10));
+        let (text, cut) = last_prompt(&jsonl(&[prompt_record(json!(long))])).unwrap();
+        assert!(cut);
+        assert_eq!(text, "p".repeat(MAX_LAST_PROMPT - 1));
+        let exact = "x".repeat(MAX_LAST_PROMPT);
+        assert_eq!(
+            last_prompt(&jsonl(&[prompt_record(json!(exact.clone()))])),
+            Some((exact, false))
+        );
+    }
+
+    #[test]
+    fn the_last_prompt_is_read_from_the_tail_of_a_transcript() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("claudio-last-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let mut transcript = jsonl(&[prompt_record(json!("x".repeat(ANSWERS_TAIL as usize)))]);
+        transcript.extend(jsonl(&[answer_record(json!("a"))]));
+        std::fs::write(&path, &transcript).unwrap();
+        // The only prompt starts before the tail: none is read.
+        assert_eq!(read_last_prompt(&path), None);
+        transcript.extend(jsonl(&[prompt_record(json!("again"))]));
+        std::fs::write(&path, &transcript).unwrap();
+        assert_eq!(read_last_prompt(&path), Some(("again".into(), false)));
+        assert_eq!(read_last_prompt(&dir.join("missing.jsonl")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
