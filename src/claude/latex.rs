@@ -79,7 +79,7 @@ fn is_private_or_unassigned(c: char) -> bool {
 /// The combining-mark (`Mn`) blocks a formula may carry: diacritics, their
 /// extensions and supplements, the marks for symbols, half marks and
 /// variation selectors.
-fn is_combining(c: char) -> bool {
+pub fn is_combining(c: char) -> bool {
     matches!(
         c as u32,
         0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE00..=0xFE0F
@@ -94,6 +94,17 @@ fn is_combining(c: char) -> bool {
 /// are not formulas. Empty formulas, and ones longer than
 /// [`MAX_FORMULA_BYTES`], are dropped.
 pub fn extract_latex(text: &str) -> Vec<String> {
+    latex_tags(text)
+        .into_iter()
+        .map(|(_, formula)| formula)
+        .collect()
+}
+
+/// The formula tags of one assistant text, by [`extract_latex`]'s rules:
+/// each tag's byte range in `text` (from its `<latex>` to the end of its
+/// `</latex>`) and its formula. Tags that are not formulas (in code, empty,
+/// too long) are not listed.
+pub fn latex_tags(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let mut out = Vec::new();
     if !text.contains("<latex>") {
         return out;
@@ -126,10 +137,10 @@ pub fn extract_latex(text: &str) -> Vec<String> {
         };
         let formula = sanitize(&text[inner..close]);
         let formula = formula.trim();
-        if !formula.is_empty() && formula.len() <= MAX_FORMULA_BYTES {
-            out.push(formula.to_owned());
-        }
         at = close + CLOSE.len();
+        if !formula.is_empty() && formula.len() <= MAX_FORMULA_BYTES {
+            out.push((open..at, formula.to_owned()));
+        }
     }
     out
 }
@@ -217,6 +228,17 @@ mod tests {
         let max = "y".repeat(MAX_FORMULA_BYTES);
         let text = format!("<latex>  </latex><latex>{big}</latex><latex>{max}</latex>");
         assert_eq!(extract_latex(&text), [max]);
+    }
+
+    #[test]
+    fn tags_come_with_their_byte_ranges() {
+        let text = "é <latex> x </latex> `<latex>y</latex>` <latex></latex><latex>z</latex>";
+        let tags = latex_tags(text);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(&text[tags[0].0.clone()], "<latex> x </latex>");
+        assert_eq!(tags[0].1, "x");
+        assert_eq!(&text[tags[1].0.clone()], "<latex>z</latex>");
+        assert_eq!(tags[1].1, "z");
     }
 
     #[test]

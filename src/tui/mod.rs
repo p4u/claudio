@@ -18,6 +18,9 @@ mod latex;
 mod notifications;
 mod plain;
 mod proxy_state;
+// Nothing uses the reader until the worker and the view do (later tasks).
+#[allow(dead_code)]
+mod reader;
 mod selection;
 mod sessions;
 mod state;

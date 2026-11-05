@@ -57,6 +57,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rust-latex-parser = "=0.1.1"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+# The reader view's markdown (claude's answers). Pure Rust; no default
+# features (no HTML output). Pinned exactly like the parser: the reader's
+# hostile-input bounds were measured against this version.
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 
 # Only needed in integration tests (no runtime dep).
 [dev-dependencies]
