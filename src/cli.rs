@@ -345,7 +345,7 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20                              Run one plain interactive claude, full screen, with the proxy env of a\n\
 \x20                              manager session: no tabs, status bar or wizard. Alt+h (help), Alt+s\n\
 \x20                              (proxy stats), Alt+l (git history), Alt+e (restart) and Alt+u\n\
-\x20                              (formulas) are claudio's; every other key goes to claude. Exits with\n\
+\x20                              (reader view) are claudio's; every other key goes to claude. Exits with\n\
 \x20                              claude; the session is not kept. Must be the first argument;\n\
 \x20                              -p/--api are rejected.\n\
 \x20  --fast                      Strip human-like typing/quiescence delays for lowest latency.\n\

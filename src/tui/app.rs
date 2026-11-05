@@ -153,6 +153,14 @@ pub enum Effect {
         seq: u64,
         srcs: Vec<String>,
     },
+    /// Render the answers of session `id` for the reader view opened under
+    /// `gen`, on the `latex-render` worker; they come back through
+    /// [`App::on_answers_rendered`].
+    RenderAnswers {
+        gen: u64,
+        id: SessionId,
+        answers: Vec<crate::proto::Answer>,
+    },
 }
 
 /// What a request's reply is for.
@@ -185,6 +193,8 @@ pub enum ReplyTo {
     /// A request of the history viewer: the view's generation and the
     /// request's sequence number (see `git_view`).
     Git { gen: u64, seq: u64 },
+    /// `Answers` for the reader view opened under `gen` on session `id`.
+    Answers { gen: u64, id: SessionId },
 }
 
 impl ReplyTo {

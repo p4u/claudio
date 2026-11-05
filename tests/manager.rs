@@ -2118,6 +2118,9 @@ fn test_wizard_recent_dir_offers_resume() {
 
 // ── LaTeX formulas ────────────────────────────────────────────────────────────
 
+/// Tab, as the terminal sends it.
+const TAB: &[u8] = b"\t";
+
 /// A fake claude that answers with a formula, as real claude does by
 /// default: it saves its `--settings`, writes the assistant record to its
 /// transcript (under the test's `$HOME`), prints the answer with the tag,
@@ -2158,11 +2161,11 @@ exec cat
 }
 
 /// A formula in claude's answer is rendered in place of its `<latex>` tag
-/// and listed by Alt+u; a TUI started later gets it from the daemon's
-/// replay on attach. The default config gives the session the
-/// `__context latex` SessionStart hook.
+/// and listed by the reader view's formulas list (Alt+u, Tab); a TUI
+/// started later gets it from the daemon's replay on attach. The default
+/// config gives the session the `__context latex` SessionStart hook.
 #[test]
-fn test_latex_formula_is_rendered_in_the_pane_and_the_popup() {
+fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
     let h = ManagerHarness::new();
     // The default test config has no `latex` key: the hook is on by default.
     let settings = h.root.join("settings.json");
@@ -2176,11 +2179,13 @@ fn test_latex_formula_is_rendered_in_the_pane_and_the_popup() {
         let hooks = fs::read_to_string(&settings).unwrap();
         assert!(hooks.contains("__context latex"), "{hooks}");
 
+        // The transcript has no prompt, so no answer; Tab lists the formula.
         tui.send_keys(ALT_U);
-        tui.wait_for(" formulas ", Region::Screen, WAIT);
-        tui.wait_for("E = mc^2", Region::Screen, WAIT);
+        tui.wait_for("No answers yet", Region::Pane, WAIT);
+        tui.send_keys(TAB);
+        tui.wait_for("E = mc^2", Region::Pane, WAIT);
         tui.send_keys(ALT_U);
-        tui.wait_until(|s| !s.contains(" formulas ", Region::Screen), WAIT);
+        tui.wait_until(|s| !s.contains("E = mc^2", Region::Pane), WAIT);
         tui.send_keys(ALT_Q);
         tui.wait_exit(WAIT);
     }

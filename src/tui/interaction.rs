@@ -19,10 +19,10 @@ use crate::term::screen::{MouseMode, Screen};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
-use super::formulas::FormulasView;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::latex::Formula;
+use super::reader::{ReaderView, RenderedAnswer};
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
 use super::stats_view::StatsView;
@@ -55,8 +55,9 @@ pub enum Modal {
     Confirm(ConfirmPrompt),
     /// The commit-history viewer (full pane).
     Git(Box<GitView>),
-    /// The active session's rendered formulas (see `formulas.rs`).
-    Formulas(FormulasView),
+    /// The reader view of a session's answers (full pane, see
+    /// `reader/`). Boxed like the history viewer.
+    Reader(Box<ReaderView>),
 }
 
 impl Modal {
@@ -69,7 +70,7 @@ impl Modal {
                 | Modal::Overview { .. }
                 | Modal::Help
                 | Modal::ProxyStats { .. }
-                | Modal::Formulas(_)
+                | Modal::Reader(_)
         )
     }
 
@@ -82,13 +83,13 @@ impl Modal {
                 | (Modal::Overview { .. }, Action::Overview)
                 | (Modal::Help, Action::Help)
                 | (Modal::ProxyStats { .. }, Action::ProxyStats)
-                | (Modal::Formulas(_), Action::Formulas)
+                | (Modal::Reader(_), Action::Formulas)
         )
     }
 
     /// Whether the modal takes mouse wheel and clicks.
     fn wants_mouse(&self) -> bool {
-        matches!(self, Modal::Git(_))
+        matches!(self, Modal::Git(_) | Modal::Reader(_))
     }
 }
 
@@ -191,7 +192,7 @@ impl App {
             Action::Overview => self.open_overview(),
             Action::Help => self.open_help(),
             Action::GitLog => self.open_git_log(),
-            Action::Formulas => self.open_formulas(),
+            Action::Formulas => self.open_reader(),
             _ => {}
         }
         self.redraw = true;
@@ -208,10 +209,64 @@ impl App {
         self.redraw = true;
     }
 
-    /// The formulas popup of the active session (none without one).
-    fn open_formulas(&mut self) {
-        if let Some(id) = self.active_view().map(|v| v.id) {
-            self.modal = Some(Modal::Formulas(FormulasView::new(id)));
+    /// The reader view of the active session (none without one): it asks
+    /// the session's daemon for the answers, and shows "Loading…" until
+    /// they are rendered.
+    fn open_reader(&mut self) {
+        let Some((id, host)) = self.active_view().map(|v| (v.id, v.host.clone())) else {
+            return;
+        };
+        self.modal_gen += 1;
+        let gen = self.modal_gen;
+        self.modal = Some(Modal::Reader(Box::new(ReaderView::new(id, &host, gen))));
+        self.request(&host, Msg::Answers { id }, ReplyTo::Answers { gen, id });
+    }
+
+    /// The reader view opened under `gen` for session `id`, if it is the
+    /// one open: a reply for a closed view or another session is dropped.
+    fn reader_mut(&mut self, gen: u64, id: SessionId) -> Option<&mut ReaderView> {
+        match &mut self.modal {
+            Some(Modal::Reader(view)) if view.gen == gen && view.session == id => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The daemon's answers for the reader view: rendered on the worker
+    /// (none to render: shown at once), or why there are none.
+    fn on_answers_reply(&mut self, gen: u64, id: SessionId, reply: io::Result<Msg>) {
+        let Some(view) = self.reader_mut(gen, id) else {
+            return;
+        };
+        let host = view.host.clone();
+        match reply {
+            Ok(Msg::AnswersReply { answers, .. }) if answers.is_empty() => {
+                view.set_answers(Vec::new())
+            }
+            Ok(Msg::AnswersReply { answers, .. }) => {
+                self.emit(Effect::RenderAnswers { gen, id, answers })
+            }
+            Ok(_) => view.set_failed("unexpected reply from the daemon"),
+            Err(e) => {
+                let why = App::older_daemon_notice(&host, &e).unwrap_or_else(|| e.to_string());
+                view.set_failed(why);
+            }
+        }
+    }
+
+    /// The render worker is done with the answers of the reader view
+    /// opened under `gen` for session `id`: shown, if that view is open.
+    pub fn on_answers_rendered(&mut self, gen: u64, id: SessionId, answers: Vec<RenderedAnswer>) {
+        if let Some(view) = self.reader_mut(gen, id) {
+            view.set_answers(answers);
+            self.redraw = true;
+        }
+    }
+
+    /// The answers of the reader view `gen` could not be rendered.
+    pub fn on_answers_failed(&mut self, gen: u64, id: SessionId, why: &str) {
+        if let Some(view) = self.reader_mut(gen, id) {
+            view.set_failed(why);
+            self.redraw = true;
         }
     }
 
@@ -315,7 +370,7 @@ impl App {
                 let outcome = view.on_key(&key, rows);
                 self.git_outcome(outcome);
             }
-            Modal::Formulas(view) => {
+            Modal::Reader(view) => {
                 if view.on_key(&key) {
                     self.modal = None;
                 }
@@ -326,6 +381,15 @@ impl App {
     /// A mouse event while a modal that wants the mouse is open.
     fn modal_mouse(&mut self, m: MouseEvent) {
         let rows = self.pane_size().0 as usize;
+        if let Some(Modal::Reader(view)) = &mut self.modal {
+            match m.kind {
+                MouseEventKind::ScrollDown => view.on_wheel(true),
+                MouseEventKind::ScrollUp => view.on_wheel(false),
+                _ => return,
+            }
+            self.redraw = true;
+            return;
+        }
         let Some(Modal::Git(view)) = &mut self.modal else { return };
         // Pane rows start below the tab bar; the status bar is not the pane.
         let above = self.mode.rows_above() as usize;
@@ -356,7 +420,7 @@ impl App {
                 | Modal::Overview { .. }
                 | Modal::Help
                 | Modal::Confirm(_)
-                | Modal::Formulas(_),
+                | Modal::Reader(_),
             ) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
@@ -858,6 +922,7 @@ impl App {
                 }
             }
             (ReplyTo::Git { gen, seq }, reply) => self.on_git_reply(gen, seq, reply),
+            (ReplyTo::Answers { gen, id }, reply) => self.on_answers_reply(gen, id, reply),
             (ReplyTo::Respawned(id), reply) => self.on_respawned(id, reply),
             (ReplyTo::SpawnedDeferred(id), Ok(_)) => {
                 // Re-attach the active view: its first Attach raced the Spawn.
@@ -1196,14 +1261,26 @@ mod tests {
     }
 
     #[test]
-    fn alt_u_opens_and_closes_the_formulas_popup() {
+    fn alt_u_opens_and_closes_the_reader() {
         use crate::tui::test_support::alt;
         let mut app = app_with(&[info(Some(1), None)]);
+        let id = app.sessions[0].id;
         app.on_terminal(alt('u'));
-        let Some(Modal::Formulas(view)) = &app.modal else {
-            panic!("no formulas popup")
+        let Some(Modal::Reader(view)) = &app.modal else {
+            panic!("no reader")
         };
-        assert_eq!(view.session, app.sessions[0].id);
+        assert_eq!(view.session, id);
+        // It asks the session's daemon for the answers.
+        let gen = view.gen;
+        let effects = app.take_effects();
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::Request { host, msg: Msg::Answers { id: asked }, to }]
+                    if host == "local" && *asked == id && *to == ReplyTo::Answers { gen, id }
+            ),
+            "{effects:?}"
+        );
         // Its own key closes it; so does Esc.
         app.on_terminal(alt('u'));
         assert!(app.modal.is_none());
@@ -1213,10 +1290,93 @@ mod tests {
         // It is read-only: another manager key closes it and acts, and a
         // paste goes nowhere.
         app.on_terminal(alt('u'));
+        app.take_effects();
         app.on_terminal(Event::Paste("text".into()));
-        assert!(app.take_effects().is_empty(), "the paste reached the session");
+        assert!(
+            app.take_effects().is_empty(),
+            "the paste reached the session"
+        );
         app.on_terminal(alt('h'));
         assert!(matches!(app.modal, Some(Modal::Help)));
+    }
+
+    #[test]
+    fn answers_for_another_view_are_dropped() {
+        use crate::proto::Answer;
+        use crate::tui::reader::Content;
+        use crate::tui::test_support::alt;
+        let mut app = app_with(&[info(Some(1), None)]);
+        let id = app.sessions[0].id;
+        let reply = |answers: Vec<Answer>| Ok(Msg::AnswersReply { id, answers });
+        let one = vec![Answer {
+            prompt: "p".into(),
+            text: "t".into(),
+        }];
+        let renders = |app: &mut App| {
+            app.take_effects()
+                .into_iter()
+                .filter(|e| matches!(e, Effect::RenderAnswers { .. }))
+                .count()
+        };
+        app.on_terminal(alt('u'));
+        let first = app.modal_gen;
+        app.on_terminal(press(KeyCode::Esc));
+        // The view was closed: its reply goes nowhere.
+        app.on_reply(ReplyTo::Answers { gen: first, id }, reply(one.clone()));
+        assert_eq!(renders(&mut app), 0);
+        // Reopened: only the reply for the new view counts.
+        app.on_terminal(alt('u'));
+        let second = app.modal_gen;
+        app.on_reply(ReplyTo::Answers { gen: first, id }, reply(one.clone()));
+        let other = uuid::Uuid::new_v4();
+        app.on_reply(
+            ReplyTo::Answers {
+                gen: second,
+                id: other,
+            },
+            reply(one.clone()),
+        );
+        assert_eq!(renders(&mut app), 0);
+        app.on_reply(ReplyTo::Answers { gen: second, id }, reply(one));
+        assert_eq!(renders(&mut app), 1);
+        let content = |app: &App| match &app.modal {
+            Some(Modal::Reader(view)) => view.content.clone(),
+            _ => panic!("no reader"),
+        };
+        assert_eq!(content(&app), Content::Loading, "until rendered");
+        app.on_answers_rendered(first, id, Vec::new());
+        assert_eq!(content(&app), Content::Loading, "another view's rendering");
+        app.on_answers_rendered(second, id, Vec::new());
+        assert_eq!(content(&app), Content::Ready(Vec::new()));
+        // An empty reply needs no rendering; an error is shown as it is.
+        app.on_terminal(press(KeyCode::Esc));
+        app.on_terminal(alt('u'));
+        let gen = app.modal_gen;
+        app.on_reply(ReplyTo::Answers { gen, id }, reply(Vec::new()));
+        assert_eq!(
+            (renders(&mut app), content(&app)),
+            (0, Content::Ready(Vec::new()))
+        );
+        let missing = std::io::Error::other(format!("no such session: {id}"));
+        app.on_reply(ReplyTo::Answers { gen, id }, Err(missing));
+        assert_eq!(
+            content(&app),
+            Content::Failed(format!("no such session: {id}"))
+        );
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_reader() {
+        use crate::tui::test_support::alt;
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('u'));
+        app.on_terminal(mouse(MouseEventKind::ScrollDown, 10, 5));
+        app.on_terminal(mouse(MouseEventKind::ScrollDown, 10, 5));
+        app.on_terminal(mouse(MouseEventKind::ScrollUp, 10, 5));
+        let Some(Modal::Reader(view)) = &app.modal else {
+            panic!("no reader")
+        };
+        assert_eq!(view.scroll(), 3);
     }
 
     #[test]

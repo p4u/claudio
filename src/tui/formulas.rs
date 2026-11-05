@@ -1,20 +1,11 @@
-//! The formulas popup (Alt+u): the active session's recent `<latex>`
-//! formulas, oldest first, each rendered in 2D above its source. The view's
-//! state and keys are here, its lines too (pure); drawing is in
-//! `ui/formulas.rs`.
-
-use std::cell::Cell;
-
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+//! The reader view's formulas list (Tab in Alt+u): the active session's
+//! recent `<latex>` formulas, oldest first, each rendered in 2D above its
+//! source. Its lines are here (pure); the reader draws them.
 
 use super::latex;
 use super::sessions::SessionView;
-use crate::proto::SessionId;
 
-/// How far PageUp/PageDown (and Space) scroll.
-const PAGE: u16 = 10;
-
-/// What the popup shows when the session has no formulas.
+/// What the list shows when the session has no formulas.
 pub const EMPTY: [&str; 4] = [
     "No formulas yet.",
     "",
@@ -22,15 +13,7 @@ pub const EMPTY: [&str; 4] = [
     "`latex = false` under [claude] on the session's host, then `claudio daemon restart`).",
 ];
 
-/// The popup's state: whose formulas, and how far down.
-pub struct FormulasView {
-    pub session: SessionId,
-    scroll: u16,
-    /// The largest useful scroll, known once drawn (see `ui/formulas.rs`).
-    max_scroll: Cell<u16>,
-}
-
-/// One line of the popup.
+/// One line of the list.
 #[derive(Debug, PartialEq)]
 pub enum Line {
     /// A row of a formula's rendering.
@@ -42,51 +25,7 @@ pub enum Line {
     Blank,
 }
 
-impl FormulasView {
-    /// The popup for `session`, scrolled to its newest formulas.
-    pub fn new(session: SessionId) -> FormulasView {
-        FormulasView {
-            session,
-            scroll: u16::MAX,
-            max_scroll: Cell::new(u16::MAX),
-        }
-    }
-
-    /// The scroll offset to draw at.
-    pub fn scroll(&self) -> u16 {
-        self.scroll.min(self.max_scroll.get())
-    }
-
-    /// Record the largest useful scroll offset of what is being drawn.
-    pub fn set_max_scroll(&self, max: u16) {
-        self.max_scroll.set(max);
-    }
-
-    /// Handle a key; `true` closes the popup. Ctrl and Alt chords are not
-    /// its own (a manager key reaches the app before this).
-    pub fn on_key(&mut self, key: &KeyEvent) -> bool {
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return false;
-        }
-        let at = self.scroll();
-        self.scroll = match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return true,
-            KeyCode::Down | KeyCode::Char('j') => at.saturating_add(1),
-            KeyCode::Up | KeyCode::Char('k') => at.saturating_sub(1),
-            KeyCode::PageDown | KeyCode::Char(' ') => at.saturating_add(PAGE),
-            KeyCode::PageUp => at.saturating_sub(PAGE),
-            KeyCode::Home | KeyCode::Char('g') => 0,
-            KeyCode::End | KeyCode::Char('G') => u16::MAX,
-            _ => at,
-        };
-        false
-    }
-}
-
-/// The popup's lines for session `v`: its formulas oldest first, each its
+/// The list's lines for session `v`: its formulas oldest first, each its
 /// 2D rendering (else its one-line one, else its source) then its source,
 /// with a blank line between them. A formula of a list still being rendered
 /// shows its source. With no formulas, how to get them.
@@ -125,7 +64,6 @@ mod tests {
     use crate::proto::SessionKind;
     use crate::tui::latex::{Formula, Rendered};
     use crate::tui::typeset::Laid;
-    use crossterm::event::KeyEvent;
 
     fn view_with(srcs: &[&str], rendered: Vec<Formula>) -> SessionView {
         let mut v = SessionView::new(
@@ -183,30 +121,5 @@ mod tests {
         let text: Vec<Line> = lines(&v);
         assert_eq!(text[0], Line::Hint("No formulas yet."));
         assert!(text.contains(&Line::Hint(EMPTY[3])));
-    }
-
-    #[test]
-    fn keys_scroll_and_close() {
-        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        let mut view = FormulasView::new(uuid::Uuid::nil());
-        view.set_max_scroll(30);
-        assert_eq!(view.scroll(), 30, "opens at the newest");
-        assert!(!view.on_key(&key(KeyCode::Up)));
-        assert_eq!(view.scroll(), 29);
-        view.on_key(&key(KeyCode::PageUp));
-        assert_eq!(view.scroll(), 19);
-        view.on_key(&key(KeyCode::Char('g')));
-        assert_eq!(view.scroll(), 0);
-        view.on_key(&key(KeyCode::Char('j')));
-        view.on_key(&key(KeyCode::Char(' ')));
-        assert_eq!(view.scroll(), 11);
-        view.on_key(&key(KeyCode::End));
-        assert_eq!(view.scroll(), 30);
-        // A chord is not the popup's.
-        let alt_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT);
-        assert!(!view.on_key(&alt_k));
-        assert_eq!(view.scroll(), 30);
-        assert!(view.on_key(&key(KeyCode::Char('q'))));
-        assert!(view.on_key(&key(KeyCode::Esc)));
     }
 }

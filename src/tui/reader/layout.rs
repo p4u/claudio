@@ -38,6 +38,7 @@ pub struct Seg {
 
 impl Line {
     /// The line's text, styles dropped.
+    #[cfg(test)]
     pub fn text(&self) -> String {
         self.0.iter().map(|s| s.text.as_str()).collect()
     }
@@ -104,7 +105,7 @@ fn emphasized(style: Style, emphasis: Emphasis) -> Style {
 
 /// `s` with every grapheme wider than two columns replaced by `�`, so no
 /// line is lost to one (the cells take at most two columns each).
-fn safe(s: &str) -> String {
+pub fn safe(s: &str) -> String {
     s.graphemes(true)
         .map(|g| if g.width() > 2 { "\u{fffd}" } else { g })
         .collect()

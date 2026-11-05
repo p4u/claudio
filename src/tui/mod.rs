@@ -18,8 +18,6 @@ mod latex;
 mod notifications;
 mod plain;
 mod proxy_state;
-// Nothing uses the reader until the worker and the view do (later tasks).
-#[allow(dead_code)]
 mod reader;
 mod selection;
 mod sessions;
@@ -492,6 +490,12 @@ enum HostEvent {
         seq: u64,
         formulas: Vec<latex::Formula>,
     },
+    /// The render worker finished the answers of a reader view.
+    AnswersRendered {
+        gen: u64,
+        id: crate::proto::SessionId,
+        answers: Vec<reader::RenderedAnswer>,
+    },
 }
 
 // ── Formula rendering ─────────────────────────────────────────────────────────
@@ -504,29 +508,84 @@ struct LatexJob {
     srcs: Vec<String>,
 }
 
-/// Start the `latex-render` thread: it renders each job's formulas (from
-/// its cache when it can) and hands them to `done`. It ends when the
+/// One [`Effect::RenderAnswers`]: the answers of the reader view `gen`
+/// shows for session `id`.
+struct AnswersJob {
+    gen: u64,
+    id: crate::proto::SessionId,
+    answers: Vec<crate::proto::Answer>,
+}
+
+/// Work for the `latex-render` thread, one job at a time.
+enum RenderJob {
+    Latex(LatexJob),
+    Answers(AnswersJob),
+}
+
+/// What the `latex-render` thread made of a job.
+enum Rendered {
+    Latex(LatexJob, Vec<latex::Formula>),
+    Answers(AnswersJob, Vec<reader::RenderedAnswer>),
+}
+
+/// Start the `latex-render` thread: it renders each job (its formulas from
+/// its cache when it can) and hands the result to `done`. It ends when the
 /// returned sender is dropped. Rendering never runs on the UI thread: one
-/// hostile formula can take a minute to parse.
+/// hostile formula can take a minute to parse, and markdown is parsed here
+/// too.
 fn spawn_latex_worker(
-    done: impl Fn(LatexJob, Vec<latex::Formula>) + Send + 'static,
-) -> io::Result<std::sync::mpsc::Sender<LatexJob>> {
-    let (jobs, queue) = std::sync::mpsc::channel::<LatexJob>();
+    done: impl Fn(Rendered) + Send + 'static,
+) -> io::Result<std::sync::mpsc::Sender<RenderJob>> {
+    let (jobs, queue) = std::sync::mpsc::channel::<RenderJob>();
     std::thread::Builder::new()
         .name(RENDER_THREAD.to_owned())
         .spawn(move || {
             let mut cache = RenderCache::default();
             let running = Arc::new(AtomicUsize::new(0));
             for job in queue {
-                let formulas = job
-                    .srcs
-                    .iter()
-                    .map(|src| cache.formula(src, &running))
-                    .collect();
-                done(job, formulas);
+                match job {
+                    RenderJob::Latex(job) => {
+                        let formulas = job
+                            .srcs
+                            .iter()
+                            .map(|src| cache.formula(src, &running))
+                            .collect();
+                        done(Rendered::Latex(job, formulas));
+                    }
+                    RenderJob::Answers(job) => {
+                        let answers = render_answers(&job.answers, &mut cache, &running);
+                        done(Rendered::Answers(job, answers));
+                    }
+                }
             }
         })?;
     Ok(jobs)
+}
+
+/// `answers` as the reader shows them: each a markdown document whose
+/// formulas (the first `MAX_FORMULAS`) are rendered through the guard and
+/// its cache, like the pane's.
+fn render_answers(
+    answers: &[crate::proto::Answer],
+    cache: &mut RenderCache,
+    running: &Arc<AtomicUsize>,
+) -> Vec<reader::RenderedAnswer> {
+    answers
+        .iter()
+        .map(|answer| {
+            let prepared = reader::doc::prepare(&answer.text);
+            let formulas = prepared
+                .tags
+                .iter()
+                .map(|tag| cache.formula(&tag.src, running))
+                .collect();
+            reader::RenderedAnswer {
+                prompt: answer.prompt.clone(),
+                doc: reader::doc::parse(&prepared),
+                formulas,
+            }
+        })
+        .collect()
 }
 
 /// Rendered formulas by source, the [`CACHE_SIZE`] most recently used: each
@@ -723,15 +782,24 @@ async fn event_loop(
         });
     }
 
-    // Formulas are rendered on their own thread; the results come back here.
+    // Formulas and answers are rendered on their own thread; the results
+    // come back here.
     let rendered = ev_tx.clone();
-    let latex_jobs = spawn_latex_worker(move |job, formulas| {
-        let _ = rendered.blocking_send(HostEvent::LatexRendered {
-            host: job.host,
-            id: job.id,
-            seq: job.seq,
-            formulas,
-        });
+    let latex_jobs = spawn_latex_worker(move |done| {
+        let event = match done {
+            Rendered::Latex(job, formulas) => HostEvent::LatexRendered {
+                host: job.host,
+                id: job.id,
+                seq: job.seq,
+                formulas,
+            },
+            Rendered::Answers(job, answers) => HostEvent::AnswersRendered {
+                gen: job.gen,
+                id: job.id,
+                answers,
+            },
+        };
+        let _ = rendered.blocking_send(event);
     })
     .ok();
 
@@ -898,6 +966,9 @@ async fn event_loop(
                 Some(HostEvent::LatexRendered { host, id, seq, formulas }) => {
                     app.on_latex_rendered(&host, id, seq, formulas);
                 }
+                Some(HostEvent::AnswersRendered { gen, id, answers }) => {
+                    app.on_answers_rendered(gen, id, answers);
+                }
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -934,7 +1005,7 @@ fn run_effect(
     conns: &mut Connections,
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
-    latex_jobs: Option<&std::sync::mpsc::Sender<LatexJob>>,
+    latex_jobs: Option<&std::sync::mpsc::Sender<RenderJob>>,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -990,7 +1061,13 @@ fn run_effect(
         Effect::RenderLatex { host, id, seq, srcs } => {
             // Without a worker (it could not start) formulas stay raw.
             if let Some(jobs) = latex_jobs {
-                let _ = jobs.send(LatexJob { host, id, seq, srcs });
+                let _ = jobs.send(RenderJob::Latex(LatexJob { host, id, seq, srcs }));
+            }
+        }
+        Effect::RenderAnswers { gen, id, answers } => {
+            let job = RenderJob::Answers(AnswersJob { gen, id, answers });
+            if latex_jobs.is_none_or(|jobs| jobs.send(job).is_err()) {
+                app.on_answers_failed(gen, id, "the render thread is not running");
             }
         }
         Effect::Save => {
@@ -1414,16 +1491,20 @@ mod tests {
     #[test]
     fn the_worker_renders_each_job_and_passes_its_seq_on() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let jobs = spawn_latex_worker(move |job, formulas| {
-            let _ = tx.send((job.seq, formulas));
+        let jobs = spawn_latex_worker(move |done| {
+            if let Rendered::Latex(job, formulas) = done {
+                let _ = tx.send((job.seq, formulas));
+            }
         })
         .unwrap();
         let id = uuid::Uuid::new_v4();
-        let job = |seq, srcs: Vec<String>| LatexJob {
-            host: "local".into(),
-            id,
-            seq,
-            srcs,
+        let job = |seq, srcs: Vec<String>| {
+            RenderJob::Latex(LatexJob {
+                host: "local".into(),
+                id,
+                seq,
+                srcs,
+            })
         };
         let deep = "\\frac ".repeat(300);
         jobs.send(job(1, vec!["E = mc^2".into()])).unwrap();
@@ -1436,6 +1517,93 @@ mod tests {
         assert_eq!(seq, 2);
         assert_eq!(second[0], first[0]);
         assert_eq!(second[1], latex::Formula::raw(&deep), "too complex: raw");
+    }
+
+    /// AC7: answers go through the same worker and guard. Hostile ones
+    /// (thousands of tags, a 32-deep nested script, the hostile formula
+    /// corpus, a 64 KiB line, private-use input) come back bounded and
+    /// sanitized, and lay out with no inline box taller than three rows.
+    #[test]
+    fn hostile_answers_are_rendered_bounded_and_sanitized() {
+        use crate::proto::Answer;
+        use reader::layout::layout;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let jobs = spawn_latex_worker(move |done| {
+            if let Rendered::Answers(job, answers) = done {
+                let _ = tx.send((job.gen, answers));
+            }
+        })
+        .unwrap();
+        let nested = format!("x{}{}", "_{a".repeat(32), "}".repeat(32));
+        let corpus = [
+            "\\frac ".repeat(340),
+            "x/".repeat(255),
+            "x\u{1b}[2J\u{1b}]52;c;AAAA\u{7}y".to_owned(),
+            "a\u{202e}b\u{200b}c".to_owned(),
+        ];
+        let texts = [
+            "<latex>x</latex> ".repeat(4000),
+            format!("inline <latex>{nested}</latex> end\n\n<latex>{nested}</latex>"),
+            corpus
+                .iter()
+                .map(|f| format!("<latex>{f}</latex>\n\n"))
+                .collect(),
+            "w".repeat(64 * 1024),
+            "\u{e000}forged\u{e001} <latex>\u{e002}y</latex>".to_owned(),
+        ];
+        let answers: Vec<Answer> = texts
+            .iter()
+            .map(|text| Answer {
+                prompt: "p\u{1b}[2J".into(),
+                text: text.clone(),
+            })
+            .collect();
+        let started = Instant::now();
+        let job = AnswersJob {
+            gen: 7,
+            id: uuid::Uuid::new_v4(),
+            answers,
+        };
+        jobs.send(RenderJob::Answers(job)).unwrap();
+        let (gen, rendered) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(gen, 7);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(rendered.len(), texts.len());
+        assert_eq!(
+            rendered[0].formulas.len(),
+            crate::claude::latex::MAX_FORMULAS
+        );
+        for answer in &rendered {
+            for f in &answer.formulas {
+                let laid = f.block.iter().chain(&f.text);
+                for text in f.inline.iter().chain(laid.flat_map(|l| &l.rows)) {
+                    assert_eq!(*text, crate::claude::latex::sanitize(text));
+                }
+            }
+            for line in layout(&answer.doc, &answer.formulas, 80) {
+                let text = line.text();
+                assert_eq!(text, crate::claude::latex::sanitize(&text));
+                assert!(!text.contains(['\u{e000}', '\u{e001}', '\u{e002}']));
+            }
+        }
+        // The nested script is taller than three rows: inline, it is its
+        // one-line form, so its paragraph is one line.
+        let nested_doc = &rendered[1];
+        assert!(nested_doc.formulas[0].text.as_ref().unwrap().rows.len() > 3);
+        let lines = layout(&nested_doc.doc, &nested_doc.formulas, 200);
+        assert!(
+            lines[0].text().starts_with("inline x"),
+            "{:?}",
+            lines[0].text()
+        );
+        assert!(
+            lines[1].text().is_empty(),
+            "one line, then the display formula"
+        );
     }
 
     #[test]

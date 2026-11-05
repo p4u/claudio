@@ -37,7 +37,9 @@ pub enum Action {
     GitLog,
     /// Restart the active session in its tab (asks how).
     Reset,
-    /// Open the popup of the active session's rendered formulas.
+    /// Open the reader view of the active session's answers. Its config
+    /// name stays `formulas` (the v0.4.0 popup it replaced), so existing
+    /// `[keys]` keep working.
     Formulas,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
@@ -198,13 +200,13 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         action: Action::ToggleHidden,
         scope: Scope::Wizard,
     },
-    // Alt+u: the formulas popup. Verified free in Claude Code 2.1.312 (no
+    // Alt+u: the reader view. Verified free in Claude Code 2.1.312 (no
     // alt+u/meta+u in its bundle); readline's Alt+u (upcase-word) is
     // shadowed in terminal tabs, like Alt+l and Alt+c.
     Binding {
         code: KeyCode::Char('u'),
         mods: KeyModifiers::ALT,
-        label: "rendered formulas of the session",
+        label: "reader view",
         action: Action::Formulas,
         scope: Scope::Global,
     },
@@ -597,6 +599,24 @@ mod tests {
             Some(Action::Formulas)
         );
         assert_eq!(Action::Formulas.name(), "formulas");
+    }
+
+    /// The reader view keeps the v0.4.0 popup's config name, `formulas`.
+    #[test]
+    fn the_reader_view_is_bound_as_formulas() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("formulas".to_owned(), "alt+y".to_owned());
+        let mut notices = Vec::new();
+        let km = Keymap::build(&overrides, &mut notices);
+        assert!(notices.is_empty(), "{notices:?}");
+        let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(km.lookup(&alt('y')), Some(Action::Formulas));
+        assert_eq!(km.lookup(&alt('u')), None);
+        let help = Keymap::default().help_entries();
+        assert!(
+            help.contains(&("Alt+u".to_owned(), "reader view")),
+            "{help:?}"
+        );
     }
 
     /// No two default bindings of one scope share a key.

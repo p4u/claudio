@@ -12,14 +12,14 @@ use ratatui::Frame;
 use crate::proto::{SessionKind, SessionState};
 
 mod confirm;
-mod formulas;
 mod git;
+mod reader;
 mod stats;
 mod status;
 
 use confirm::draw_confirm;
-use formulas::draw_formulas;
 use git::draw_git;
+use reader::draw_reader;
 use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
@@ -97,7 +97,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::Help) => draw_help(frame, app),
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
         Some(Modal::Git(view)) => draw_git(frame, view, app.now, pane),
-        Some(Modal::Formulas(view)) => draw_formulas(frame, app, view),
+        Some(Modal::Reader(view)) => draw_reader(frame, app, view, pane),
         None => {}
     }
 }
