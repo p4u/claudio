@@ -2279,3 +2279,214 @@ fn test_reader_shows_the_answers_with_formulas_in_2d() {
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
+
+// ── Extensions ────────────────────────────────────────────────────────────────
+
+const ALT_Z: &[u8] = b"\x1bz";
+
+/// The external extension the extension tests install: a tag lens `keys`
+/// drawn as `⌨ <source>`, and actions that paste (with the API key it
+/// sees, which must be none), list, show a document, and hang.
+const FAKE_EXTENSION: &str = r#"name = "fake"
+description = "a fake extension"
+command = ["./fake.sh"]
+[[lens]]
+tag = "keys"
+instruction = "Write keys as <keys>Ctrl+C</keys>. EXT-INSTRUCTION"
+[[action]]
+key = "k"
+title = "paste a stamp"
+id = "stamp"
+[[action]]
+key = "l"
+title = "pick one"
+id = "pick"
+[[action]]
+key = "d"
+title = "show a document"
+id = "doc"
+[[action]]
+key = "h"
+title = "hang"
+id = "hang"
+"#;
+
+const FAKE_EXTENSION_PROGRAM: &str = r##"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/^{"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"render"'*)
+      src=$(printf '%s' "$line" | sed 's/.*"source":"\([^"]*\)".*/\1/')
+      printf '{"id":%s,"result":{"inline":"⌨ %s"}}\n' "$id" "$src" ;;
+    *'"action":"stamp"'*)
+      printf '{"id":%s,"result":{"kind":"paste","text":"PASTED-%s"}}\n' "$id" "${ANTHROPIC_API_KEY:-nokey}" ;;
+    *'"action":"pick"'*)
+      printf '{"id":%s,"result":{"kind":"list","title":"Fake list","items":[{"label":"first","result":{"kind":"paste","text":"PICKED-FIRST"}},{"label":"second","detail":"the other one","result":{"kind":"paste","text":"PICKED-SECOND"}}]}}\n' "$id" ;;
+    *'"action":"doc"'*)
+      printf '{"id":%s,"result":{"kind":"document","title":"Fake doc","markdown":"# Heading\\n\\nPress <keys>Esc</keys> now."}}\n' "$id" ;;
+    *) ;;
+  esac
+done
+"##;
+
+/// Install the fake extension in the harness's config dir.
+fn install_fake_extension(h: &ManagerHarness) {
+    let dir = h.config_home.join("claudio/extensions/fake");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("extension.toml"), FAKE_EXTENSION).unwrap();
+    let program = dir.join("fake.sh");
+    fs::write(&program, FAKE_EXTENSION_PROGRAM).unwrap();
+    fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+}
+
+/// A fake claude whose answer has a `<keys>` tag: it saves its `--settings`
+/// and argv, writes the transcript (a prompt and the answer), prints the
+/// answer, turns bracketed paste on, runs its SessionStart hook, then
+/// echoes lines; a line ending in `off` turns bracketed paste off.
+fn write_keys_fake_claude(h: &ManagerHarness, settings: &std::path::Path, argv: &std::path::Path) {
+    let sid = "cccccccc-dddd-4eee-8fff-000000000000";
+    let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
+    let project = h.home.join(".claude/projects").join(encode_cwd(&cwd));
+    let prompt = serde_json::json!({"type": "user", "message": {"role": "user", "content": "How do I stop it?"}});
+    let answer = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "m1",
+            "model": "claude-fake",
+            "content": [{"type": "text", "text": "Press <keys>Ctrl+C</keys> to stop."}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    });
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "claude 0.0.0-fake"; exit 0; fi
+if [ "$1" = "--help" ]; then exit 0; fi
+printf '%s' "$2" > "{settings}"
+printf '%s\n' "$@" > "{argv}"
+mkdir -p "{project}"
+printf '%s\n' '{prompt}' '{answer}' > "{project}/{sid}.jsonl"
+echo "FAKE_CLAUDE_BANNER pid=$$"
+echo 'Press <keys>Ctrl+C</keys> to stop.'
+printf '\033[?2004h'
+HOOK=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook SessionStart[^"]*\)".*/\1/p')
+printf '{{"session_id":"{sid}","source":"startup"}}' | eval "$HOOK"
+while IFS= read -r line; do
+  case "$line" in
+    *off) printf '\033[?2004l' ;;
+    *) printf 'GOT %s\n' "$line" ;;
+  esac
+done
+"#,
+        settings = settings.display(),
+        argv = argv.display(),
+        project = project.display(),
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+}
+
+/// AC2, AC5, AC6, AC7: an external extension's tag lens is rendered by its
+/// program in the pane and in the reader; its instruction reaches claude
+/// through the context file only; Alt+z lists the built-in and external
+/// actions, Esc closes it with nothing sent, Alt+z u is the reader; the
+/// program's paste reaches claude without Enter (and is refused once
+/// bracketed paste is off), its list picks, its document shows (its own
+/// lens rendered), and a hanging action times out with a notice.
+#[test]
+fn test_external_extension_lens_leader_and_actions() {
+    let h = ManagerHarness::new();
+    install_fake_extension(&h);
+    let (settings, argv) = (h.root.join("settings.json"), h.root.join("argv.txt"));
+    write_keys_fake_claude(&h, &settings, &argv);
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    // AC5: the pane shows the program's rendering of the tag.
+    tui.wait_for("Press ⌨ Ctrl+C to stop.", Region::Pane, DAEMON_WAIT);
+
+    // AC2: the hook has the context file's path; the text is only in it.
+    let hooks = fs::read_to_string(&settings).unwrap();
+    assert!(hooks.contains("__context file"), "{hooks}");
+    assert!(!hooks.contains("EXT-INSTRUCTION"), "{hooks}");
+    assert!(!fs::read_to_string(&argv).unwrap().contains("EXT-INSTRUCTION"));
+    let context_dir = h.runtime_dir.join("claudio/context");
+    let context: Vec<String> = fs::read_dir(&context_dir)
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(context.len(), 1);
+    assert!(context[0].contains("EXT-INSTRUCTION"), "{context:?}");
+    assert!(context[0].contains("<latex>"), "the built-in lenses too");
+
+    // AC5: the reader renders it as well.
+    tui.send_keys(ALT_U);
+    tui.wait_for("answer 1/1 · How do I stop it?", Region::Pane, DAEMON_WAIT);
+    tui.wait_for("Press ⌨ Ctrl+C to stop.", Region::Pane, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
+
+    // AC6: the leader lists built-in and external actions; Esc sends nothing.
+    tui.send_keys(ALT_Z);
+    tui.wait_for("search conversations", Region::Screen, WAIT);
+    let shown = tui.screen_text(Region::Screen);
+    for row in ["u  reader view", "p  insert snippet", "k  paste a stamp  (fake)"] {
+        assert!(shown.contains(row), "missing {row:?} in:\n{shown}");
+    }
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("paste a stamp", Region::Screen), WAIT);
+    thread::sleep(Duration::from_millis(300));
+    assert!(!tui.screen_text(Region::Pane).contains("^["), "nothing reached claude");
+    tui.send_keys(ALT_Z);
+    tui.wait_for("paste a stamp", Region::Screen, WAIT);
+    tui.send_keys(b"u");
+    tui.wait_for("answer 1/1 · How do I stop it?", Region::Pane, DAEMON_WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
+
+    // AC7: a paste reaches claude without Enter (no `GOT` line), and no API
+    // key reaches the program.
+    tui.send_keys(ALT_Z);
+    tui.wait_for("paste a stamp", Region::Screen, WAIT);
+    tui.send_keys(b"k");
+    tui.wait_for("PASTED-nokey", Region::Pane, WAIT);
+    thread::sleep(Duration::from_millis(300));
+    let pane = tui.screen_text(Region::Pane);
+    assert_eq!(pane.matches("PASTED-nokey").count(), 1, "{pane}");
+    assert!(!pane.contains("GOT"), "no Enter followed the paste:\n{pane}");
+
+    // A list: Down, Enter pastes the second item's text.
+    tui.send_keys(ALT_Z);
+    tui.wait_for("pick one", Region::Screen, WAIT);
+    tui.send_keys(b"l");
+    tui.wait_for("Fake list", Region::Screen, WAIT);
+    tui.wait_for("the other one", Region::Screen, WAIT);
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(ENTER);
+    tui.wait_for("PICKED-SECOND", Region::Pane, WAIT);
+
+    // A document, its own lens rendered by the program.
+    tui.send_keys(ALT_Z);
+    tui.wait_for("show a document", Region::Screen, WAIT);
+    tui.send_keys(b"d");
+    tui.wait_for("Fake doc", Region::Pane, WAIT);
+    tui.wait_for("Press ⌨ Esc now.", Region::Pane, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Fake doc", Region::Pane), WAIT);
+
+    // Bracketed paste off: the paste is refused with a notice.
+    tui.send_keys(b"off\r");
+    thread::sleep(Duration::from_millis(300));
+    tui.send_keys(ALT_Z);
+    tui.wait_for("paste a stamp", Region::Screen, WAIT);
+    tui.send_keys(b"k");
+    tui.wait_for("bracketed paste is off", Region::StatusBar, WAIT);
+
+    // A hanging action times out (15 s) with a notice.
+    tui.send_keys(ALT_Z);
+    tui.wait_for("hang", Region::Screen, WAIT);
+    tui.send_keys(b"h");
+    tui.wait_for("extension fake timed out", Region::StatusBar, Duration::from_secs(25));
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
