@@ -5,10 +5,10 @@
 //! logic live in [`app`], rendering in [`ui`].
 
 pub mod app;
+mod builtins;
 mod claude_update;
 mod confirm;
 mod connections;
-#[allow(dead_code)] // Wired into the reader by Task 11, which removes this.
 mod diagram;
 mod extensions;
 mod fmt;
@@ -25,7 +25,6 @@ mod proxy_state;
 mod reader;
 mod selection;
 mod sessions;
-#[allow(dead_code)] // Wired into the snippets actions by Task 11, which removes this.
 mod snippets;
 mod state;
 mod stats_view;
@@ -531,6 +530,18 @@ enum HostEvent {
     },
     /// A notice from the extension host (an extension was disabled).
     ExtensionNotice(String),
+    /// The snippets (name, text) read for the action started under `gen`,
+    /// from `dir`.
+    SnippetsLoaded {
+        gen: u64,
+        dir: String,
+        result: Result<Vec<(String, String)>, String>,
+    },
+    /// A snippet was saved (its name), or why not; `cut` as asked.
+    SnippetSaved {
+        result: Result<String, String>,
+        cut: bool,
+    },
     /// An external action started under `gen` ended.
     ActionDone {
         gen: u64,
@@ -729,7 +740,31 @@ impl RenderCache {
 fn render_lens(lens: &str, src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
     match lens {
         "latex" => render_formula(src, running),
+        "mermaid" => render_diagram(src, running),
         _ => (latex::Formula::raw(src), true),
+    }
+}
+
+/// Draw one Mermaid diagram within [`RENDER_BUDGET`], as `render_formula`
+/// renders a formula: what the pre-check turns away, is unsupported, times
+/// out or panics stays its code block (raw); its rows are the block.
+fn render_diagram(src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
+    if diagram::too_complex(src) {
+        return (latex::Formula::raw(src), true);
+    }
+    let owned = src.to_owned();
+    match guarded(move || diagram::render(&owned), running) {
+        Guarded::Done(Ok(rows)) => {
+            let block = Some(typeset::Laid { rows, baseline: 0 });
+            let rendered = latex::Rendered {
+                inline: None,
+                block,
+                text: None,
+            };
+            (latex::Formula::new(src, rendered), true)
+        }
+        Guarded::Done(Err(_)) | Guarded::Failed => (latex::Formula::raw(src), true),
+        Guarded::Busy => (latex::Formula::raw(src), false),
     }
 }
 
@@ -1142,6 +1177,10 @@ async fn event_loop(
                 }
                 Some(HostEvent::ExtensionNotice(text)) => app.notify(text),
                 Some(HostEvent::ActionDone { gen, result }) => app.on_action_result(gen, result),
+                Some(HostEvent::SnippetsLoaded { gen, dir, result }) => {
+                    app.on_snippets(gen, &dir, result);
+                }
+                Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -1262,6 +1301,37 @@ fn run_effect(
                         items,
                     })
                     .await;
+            });
+        }
+        Effect::LoadSnippets { gen } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let dir = snippets::dir();
+                let shown = dir.display().to_string();
+                let read = tokio::task::spawn_blocking(move || snippets::load(&dir)).await;
+                let result = match read {
+                    Ok(Ok(list)) => Ok(list.into_iter().map(|s| (s.name, s.text)).collect()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let event = HostEvent::SnippetsLoaded {
+                    gen,
+                    dir: shown,
+                    result,
+                };
+                let _ = tx.send(event).await;
+            });
+        }
+        Effect::SaveSnippet { text, cut } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let save = move || snippets::save(&snippets::dir(), &text);
+                let result = match tokio::task::spawn_blocking(save).await {
+                    Ok(Ok(name)) => Ok(name),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = tx.send(HostEvent::SnippetSaved { result, cut }).await;
             });
         }
         Effect::RunAction {
@@ -1917,5 +1987,21 @@ mod tests {
         assert_eq!(latex.inline.as_deref(), Some("x²"));
         assert_eq!(keys, latex::Formula::raw("x^2"));
         assert_eq!(cache.entries.len(), 2);
+    }
+
+    /// AC8: a Mermaid fence is drawn on the worker through the guard; an
+    /// unsupported or too large one stays its code block.
+    #[test]
+    fn mermaid_fences_are_drawn_through_the_guard() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let drawn = render_lens("mermaid", "flowchart LR\n  alpha --> beta", &running);
+        let rows = drawn.0.block.expect("drawn").rows;
+        assert!(rows.iter().any(|r| r.contains("alpha")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.contains("beta")), "{rows:?}");
+        for src in ["classDiagram\n  A <|-- B".to_owned(), "flowchart LR\n".repeat(300)] {
+            let (raw, keep) = render_lens("mermaid", &src, &running);
+            assert_eq!(raw, latex::Formula::raw(&src));
+            assert!(keep);
+        }
     }
 }

@@ -2490,3 +2490,180 @@ fn test_external_extension_lens_leader_and_actions() {
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
+
+// ── Built-in extensions: diagram, search, snippets ───────────────────────────
+
+/// A fake claude for the built-in extension tests: logs `<pwd> <args>` per
+/// launch to `log`; unless resuming, writes `records` (JSON lines) as
+/// conversation `sid` under its directory's project; prints a banner, turns
+/// bracketed paste on, runs its SessionStart hook, then echoes lines.
+fn write_conversation_fake_claude(
+    h: &ManagerHarness,
+    sid: &str,
+    records: &[serde_json::Value],
+    log: &std::path::Path,
+) {
+    let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
+    let project = h.home.join(".claude/projects").join(encode_cwd(&cwd));
+    let lines: Vec<String> = records.iter().map(|r| format!("'{r}'")).collect();
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "claude 0.0.0-fake"; exit 0; fi
+if [ "$1" = "--help" ]; then exit 0; fi
+echo "$(pwd) $*" >> "{log}"
+case "$*" in
+  *--resume*) ;;
+  *) mkdir -p "{project}"; printf '%s\n' {lines} > "{project}/{sid}.jsonl" ;;
+esac
+echo "FAKE_CLAUDE_BANNER pid=$$"
+printf '\033[?2004h'
+HOOK=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook SessionStart[^"]*\)".*/\1/p')
+printf '{{"session_id":"{sid}","source":"startup"}}' | eval "$HOOK"
+while IFS= read -r line; do printf 'GOT %s\n' "$line"; done
+"#,
+        log = log.display(),
+        project = project.display(),
+        lines = lines.join(" "),
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+}
+
+fn user_record(text: &str, cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user",
+        "cwd": cwd.display().to_string(),
+        "message": {"role": "user", "content": text},
+    })
+}
+
+fn assistant_record(text: &str, cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "assistant",
+        "cwd": cwd.display().to_string(),
+        "message": {
+            "model": "claude-fake",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    })
+}
+
+/// AC8: a ```mermaid answer is drawn with box characters in the reader;
+/// its source is not shown.
+#[test]
+fn test_reader_draws_a_mermaid_diagram() {
+    let h = ManagerHarness::new();
+    let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
+    let answer = "Here it is:\n\n```mermaid\nflowchart LR\n  alpha --> beta\n```\n";
+    let records = [user_record("Draw it", &cwd), assistant_record(answer, &cwd)];
+    let log = h.root.join("launches.log");
+    write_conversation_fake_claude(&h, "dddddddd-eeee-4fff-8000-111111111111", &records, &log);
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    tui.send_keys(ALT_U);
+    tui.wait_for("answer 1/1 · Draw it", Region::Pane, DAEMON_WAIT);
+    tui.wait_for("alpha", Region::Pane, WAIT);
+    let pane = tui.screen_text(Region::Pane);
+    assert!(pane.contains("beta"), "{pane}");
+    assert!(pane.contains('┌') || pane.contains('╭'), "boxes:\n{pane}");
+    assert!(!pane.contains("flowchart LR"), "the source is not shown:\n{pane}");
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// AC9: Alt+z s finds a conversation of another directory by a word in its
+/// prompt, and Enter resumes it there in a new tab (`--resume <id>` reaches
+/// claude).
+#[test]
+fn test_search_finds_and_resumes_a_conversation() {
+    let h = ManagerHarness::new();
+    let here = fs::canonicalize(&h.dirs[0]).unwrap();
+    let there = fs::canonicalize(&h.dirs[1]).unwrap();
+    let log = h.root.join("launches.log");
+    let records = [user_record("Say hi", &here), assistant_record("Hi.", &here)];
+    write_conversation_fake_claude(&h, "eeeeeeee-ffff-4000-8111-222222222222", &records, &log);
+    // Another conversation, in the other directory.
+    let other = "ffffffff-0000-4111-8222-333333333333";
+    let project = h.home.join(".claude/projects").join(encode_cwd(&there));
+    fs::create_dir_all(&project).unwrap();
+    let lines = [
+        user_record("Where is the needle in this haystack?", &there),
+        assistant_record("Under the hay.", &there),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(project.join(format!("{other}.jsonl")), text).unwrap();
+
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    tui.send_keys(ALT_Z);
+    tui.wait_for("search conversations", Region::Screen, WAIT);
+    tui.send_keys(b"s");
+    tui.wait_for("(Enter run · Esc cancel)", Region::Screen, WAIT);
+    tui.send_keys(b"needle");
+    tui.send_keys(ENTER);
+    tui.wait_for("1 conversations · \"needle\"", Region::Screen, DAEMON_WAIT);
+    tui.send_keys(ENTER);
+    // The new launch runs in the other directory, resuming that conversation.
+    let resumed = |log: &str| {
+        log.lines().any(|l| {
+            l.starts_with(&format!("{} ", there.display()))
+                && l.ends_with(&format!("--resume {other}"))
+        })
+    };
+    let deadline = Instant::now() + DAEMON_WAIT;
+    while !resumed(&fs::read_to_string(&log).unwrap_or_default()) {
+        assert!(Instant::now() < deadline, "no resume of {other} in {}", there.display());
+        thread::sleep(Duration::from_millis(100));
+    }
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// AC10: Alt+z p lists the snippets, the filter picks one, Enter pastes it
+/// into claude without Enter; Alt+z P saves the last prompt as a snippet.
+#[test]
+fn test_snippets_paste_and_save_the_last_prompt() {
+    let h = ManagerHarness::new();
+    let here = fs::canonicalize(&h.dirs[0]).unwrap();
+    let snippets = h.config_home.join("claudio/snippets");
+    fs::create_dir_all(&snippets).unwrap();
+    fs::write(snippets.join("review.md"), "Review this change carefully.").unwrap();
+    fs::write(snippets.join("deploy.txt"), "Deploy to staging.").unwrap();
+    let log = h.root.join("launches.log");
+    let records = [
+        user_record("Say hello to the world", &here),
+        assistant_record("Hello, world.", &here),
+    ];
+    write_conversation_fake_claude(&h, "00000000-1111-4222-8333-444444444444", &records, &log);
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    tui.send_keys(ALT_Z);
+    tui.wait_for("insert snippet", Region::Screen, WAIT);
+    tui.send_keys(b"p");
+    tui.wait_for("Snippets", Region::Screen, WAIT);
+    tui.wait_for("Deploy to staging.", Region::Screen, WAIT);
+    tui.send_keys(b"rev");
+    tui.wait_until(|s| !s.contains("Deploy to staging.", Region::Screen), WAIT);
+    tui.send_keys(ENTER);
+    tui.wait_for("Review this change carefully.", Region::Pane, WAIT);
+    thread::sleep(Duration::from_millis(300));
+    assert!(!tui.screen_text(Region::Pane).contains("GOT"), "no Enter after the paste");
+
+    tui.send_keys(ALT_Z);
+    tui.wait_for("save last prompt as snippet", Region::Screen, WAIT);
+    tui.send_keys(b"P");
+    tui.wait_for("saved snippet ", Region::StatusBar, DAEMON_WAIT);
+    let saved: Vec<String> = fs::read_dir(&snippets)
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(saved.iter().any(|t| t.contains("Say hello to the world")), "{saved:?}");
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}

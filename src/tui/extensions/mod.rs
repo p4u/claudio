@@ -57,6 +57,13 @@ pub enum ActionResult {
     Paste { text: String },
     /// A list to pick from; each item carries its own result (not a list).
     List { title: String, items: Vec<ListItem> },
+    /// Built-ins only (search; never from an external program): show
+    /// `conversation` on `host`, resuming it in `cwd` if no tab has it.
+    Resume {
+        host: String,
+        cwd: String,
+        conversation: String,
+    },
 }
 
 /// One entry of [`ActionResult::List`].

@@ -161,6 +161,12 @@ pub enum Effect {
         seq: u64,
         items: Vec<crate::proto::LensItem>,
     },
+    /// Read the snippets (off the UI thread); they go to
+    /// [`App::on_snippets`] with `gen`.
+    LoadSnippets { gen: u64 },
+    /// Save `text` (the last prompt; `cut` at 64 KiB) as a snippet; the
+    /// outcome goes to [`App::on_snippet_saved`].
+    SaveSnippet { text: String, cut: bool },
     /// Run an external extension's action in the extension host; the
     /// result goes to [`App::on_action_result`] with `gen`.
     RunAction {
@@ -212,6 +218,10 @@ pub enum ReplyTo {
     Git { gen: u64, seq: u64 },
     /// `Answers` for the reader view opened under `gen` on session `id`.
     Answers { gen: u64, id: SessionId },
+    /// `Search` on `host`, for the search action started under `gen`.
+    Search { gen: u64, host: String },
+    /// `LastPrompt` on `host`, for the snippet save started under `gen`.
+    LastPrompt { gen: u64, host: String },
 }
 
 impl ReplyTo {

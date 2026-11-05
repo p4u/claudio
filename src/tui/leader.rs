@@ -314,11 +314,6 @@ impl App {
         });
     }
 
-    /// A built-in extension's action.
-    fn builtin_action(&mut self, ext: &str, action: &str, _input: Option<String>) {
-        self.notify(format!("{ext}: {action} is not available"));
-    }
-
     /// The result of the external action started under `gen` (or the
     /// notice saying why there is none). Dropped when another action has
     /// started since, or a modal is open.
@@ -346,6 +341,11 @@ impl App {
                 self.modal = Some(Modal::Picker(Box::new(Picker::new(title, items))));
             }
             ActionResult::Document { title, markdown } => self.open_document(title, markdown),
+            ActionResult::Resume {
+                host,
+                cwd,
+                conversation,
+            } => self.resume_conversation(host, cwd, conversation),
         }
         self.redraw = true;
     }

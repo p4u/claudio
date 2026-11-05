@@ -595,17 +595,23 @@ impl App {
         }
     }
 
-    pub(super) fn open_wizard(&mut self) {
+    /// The proxy the wizard preselects: the active session's, else the
+    /// startup override, else the config default.
+    pub(super) fn preselected_proxy(&self) -> Option<String> {
         let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
+        active_proxy.or_else(|| {
+            let picked = self.proxy_override.pick(self.proxy_default.as_deref());
+            picked.map(str::to_owned)
+        })
+    }
+
+    pub(super) fn open_wizard(&mut self) {
         let active_host = self.active_host();
         // The wizard starts on the active host; picking another host seeds
         // it again (see `on_host_connected`).
         let seeds = wizard::assemble(None, &self.wizard_seeds(&active_host), &self.projects);
-        // Effective proxy default for the wizard:
-        // active session's proxy > startup override > config default.
-        let proxy_default = active_proxy
-            .as_deref()
-            .or_else(|| self.proxy_override.pick(self.proxy_default.as_deref()));
+        let proxy_default = self.preselected_proxy();
+        let proxy_default = proxy_default.as_deref();
         self.modal_gen += 1;
         let wizard = Wizard::new(
             seeds,

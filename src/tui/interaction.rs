@@ -1057,6 +1057,10 @@ impl App {
             }
             (ReplyTo::Git { gen, seq }, reply) => self.on_git_reply(gen, seq, reply),
             (ReplyTo::Answers { gen, id }, reply) => self.on_answers_reply(gen, id, reply),
+            (ReplyTo::Search { gen, host }, reply) => self.on_search_reply(gen, &host, reply),
+            (ReplyTo::LastPrompt { gen, host }, reply) => {
+                self.on_last_prompt_reply(gen, &host, reply)
+            }
             (ReplyTo::Respawned(id), reply) => self.on_respawned(id, reply),
             (ReplyTo::SpawnedDeferred(id), Ok(_)) => {
                 // Re-attach the active view: its first Attach raced the Spawn.
