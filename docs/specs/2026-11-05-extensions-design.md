@@ -1,6 +1,6 @@
 # Extensions: design
 
-Status: draft   Class: architectural
+Status: audited (rev 2: spec audit F1–F13 folded in)   Class: architectural
 Owner decisions so far (2026-11-05):
 - Turn the LaTeX feature into one instance of a general mechanism ("plugins"): an add-on
   declares tags, gets its instruction injected through the SessionStart hook, is called when
@@ -76,8 +76,10 @@ key is a hard-coded `Alt+<letter>` in `src/tui/keymap.rs:97`, and few free Alt l
   never moves rows). No status-bar segments from extensions (later).
 - No extension marketplace, install command or auto-update; external extensions are files
   the user puts in place.
-- External extensions run on the client's machine only; they cannot run code on an SSH
-  host, and they never see a proxy token.
+- External extensions run on the client's machine only; they cannot run code on an SSH host.
+  claudio never hands them a proxy token or API key (env scrubbed, nothing secret in
+  requests), but they run as the user and could read `config.toml` themselves: they are
+  trusted like it.
 - No sandboxing of external programs beyond what is listed: they are the user's own code,
   trusted like `config.toml`. What they *return* is untrusted.
 - Search is a substring search (no index, no regex, no fuzzy ranking).
@@ -113,7 +115,9 @@ key is a hard-coded `Alt+<letter>` in `src/tui/keymap.rs:97`, and few free Alt l
   checks; plain mode keeps Alt+h/s/l/e/u (`build_plain`, `:287`).
 - **Spawn.** `SpawnSpec{id,cwd,name,args,env,rows,cols,ephemeral}` and `RespawnSpec`
   (`src/proto.rs:330-370`); the journal `Entry` (`src/daemon/journal.rs:35`) stores
-  cwd/name/args/kind/claude_session_id; recovery re-spawns from it.
+  cwd/name/args/kind/claude_session_id; the client re-spawns dormant entries with `Spawn` at
+  recovery (`src/tui/sessions.rs:704-736`); the daemon's `respawn` and `retry_spawn_fresh`
+  rebuild a spec from the entry.
 - **Resume.** `App::spawn(host, cwd, resume, proxy)` (`src/tui/sessions.rs:316`) adds
   `--resume <id>`.
 
@@ -127,8 +131,7 @@ Lens      { name /* tag or fence info word */, kind: Tag | Fence, instruction: S
 ActionDecl{ key: char, title, id /* action name passed back */, input: Option<String> /* prompt */ }
 ```
 
-`src/tui/extensions/` owns the registry: built-ins (latex, diagram, reader, search,
-snippets) plus external ones loaded from manifests. Everything else in the TUI asks the
+`src/tui/extensions/` owns the registry: built-ins (latex, diagram, search, snippets) plus external ones loaded from manifests. Everything else in the TUI asks the
 registry: which tag lenses exist (overlay, reader), which fence lenses (reader), the
 session context to send at spawn, and the leader's actions. Built-ins are Rust code (a
 trait or a closed enum) whose rendering runs on the render worker, never on the UI thread.
@@ -139,9 +142,11 @@ Built-ins and their contributions:
 |---|---|---|---|
 | latex | tag `latex` (existing instruction, renderer, overlay) | — | on (also off with `[claude] latex = false`) |
 | diagram | fence `mermaid`, instruction below | — | on |
-| reader | — | `u` reader view (same as Alt+u) | on, cannot be disabled |
 | search | — | `s` search conversations | on |
 | snippets | — | `p` insert snippet, `P` save last prompt as snippet | on |
+
+The leader's `u` row is the built-in reader action (`Action::Formulas`), not an extension; it
+is always present.
 
 Config (`config.toml`, client side):
 
@@ -150,8 +155,8 @@ Config (`config.toml`, client side):
 diagram = false        # any extension, built-in or external, by name; default true
 ```
 
-`[claude] latex = false` keeps working and disables the latex extension (on the client
-that spawns). A name that matches nothing is ignored with a one-time notice.
+`[claude] latex = false` keeps working: on the client it disables the latex extension; on a
+daemon's host it removes the latex lens from that host's sessions (§2). A name that matches nothing is ignored with a one-time notice.
 
 ### 2. Session context: from the client to claude
 
@@ -160,31 +165,44 @@ its enabled lenses:
 
 ```rust
 pub struct SessionExtensions {          // proto.rs
-    /// Instructions for claude, one per lens, in registry order.
-    pub context: Vec<String>,
-    /// Tag lenses the daemon extracts for this session (`latex`, …).
-    pub tags: Vec<String>,
+    /// The session's lenses, in registry order.
+    pub lenses: Vec<LensSpec>,
+}
+pub struct LensSpec {
+    pub name: String,                   // ^[a-z][a-z0-9-]{0,23}$
+    pub kind: LensKind,                 // Tag | Fence (serde: "tag" | "fence"; unknown → the lens is dropped)
+    pub instruction: String,            // ≤ 2048 bytes after `sanitize`; may be empty
 }
 SpawnSpec   { …, #[serde(default)] pub extensions: Option<SessionExtensions> }
 RespawnSpec { …, #[serde(default)] pub extensions: Option<SessionExtensions> }
 ```
 
 Caps (validated by the daemon, which rejects the spawn with `Error` beyond them, and by the
-client, which never builds such a value): ≤ 16 instructions, each ≤ 2048 bytes after
-`sanitize`, ≤ 8192 bytes total; ≤ 16 tags, each matching `^[a-z][a-z0-9-]{0,23}$`.
+client, which never builds such a value): ≤ 16 lenses, unique names, each instruction ≤ 2048
+bytes after `sanitize`, ≤ 8192 bytes of instructions in total. The daemon extracts the `Tag`
+lenses' names; the context is the non-empty instructions joined by a blank line.
 
 Daemon:
-- `Some(ext)` → the session uses exactly `ext`. `None` (an old client) → legacy: the daemon's
-  `[claude] latex` gives `context = [LATEX_CONTEXT]`, `tags = ["latex"]` (or nothing).
-- The journal `Entry` gains `#[serde(default)] extensions: Option<SessionExtensions>`; a
-  respawn with `Some` replaces it; recovery uses the journaled value.
-- At each launch (spawn, respawn, resume retry, recovery) the daemon writes the joined
-  context (instructions separated by a blank line) to a file
-  `<daemon runtime dir>/context/<session-uuid>.txt` (dir 0700, file 0600, atomic write), and
-  SessionStart runs `'<bin>' __context file '<path>'` instead of `__context latex`. No
-  context → no context hook. The file is removed when the session is removed.
-- `claudio __context file <path>`: drains stdin like today, reads at most 16 KiB of the file
-  (only a regular file, not a symlink, owned by the current uid), sanitizes it, and prints
+- The effective value of a launch: `Some(ext)` in the request replaces the journal entry's;
+  `None` (an old client) keeps the journal entry's value; an entry without one gets the
+  legacy value, `[LensSpec { name: "latex", kind: Tag, instruction: LATEX_CONTEXT }]` when the
+  daemon's `[claude] latex` is on, else `[]`. This applies to `Spawn` (new or journaled id),
+  `Respawn`, `retry_spawn_fresh` and the client's recovery (which is a `Spawn`).
+- The daemon's `[claude] latex = false` removes the lens named `latex` from every effective
+  value before use (so a host that turned math off stays off, as today).
+- The journal `Entry` gains `#[serde(default)] extensions: Option<SessionExtensions>`,
+  written with the effective value.
+- At each launch the daemon writes the context to `<daemon runtime dir>/context/<session-uuid>.txt`
+  (dir 0700, file 0600, atomic write), and SessionStart runs `'<bin>' __context file '<path>'`
+  instead of `__context latex`. Empty context → no file and no context hook. The file is
+  removed when the session is removed, and orphans in `context/` are removed at daemon start.
+  The path is stable for the session's life (`<session-uuid>.txt`, not per launch): `/clear`
+  and compaction re-read the same file. At daemon start the `context/` dir is cleared before
+  any launch; a running claude from a previous daemon is being stopped at that point and its
+  hook, if it fires, prints nothing.
+- `claudio __context file <path>`: drains stdin like today, opens the file with
+  `O_NOFOLLOW | O_RDONLY` (no symlink is followed), then `fstat`s the open descriptor and reads
+  at most 16 KiB only if it is a regular file owned by the current uid, sanitizes it, and prints
   the same one JSON line with that text as `additionalContext`; prints nothing if the file
   is missing, empty or not acceptable; always exits 0. `__context latex` keeps working
   unchanged (old sessions).
@@ -195,7 +213,7 @@ Daemon:
 ```rust
 SessionEvent::Lens { seq: u64, items: Vec<LensItem> }      // proto.rs
 pub struct LensItem { pub tag: String, pub text: String }
-Welcome { …, #[serde(default)] pub features: Vec<String> }  // contains "lens", "search"
+Welcome { …, #[serde(default)] pub features: Vec<String> }  // contains "lens", "search", "last_prompt"
 ```
 
 - `latex_tags` generalizes to `lens_tags(text, tags: &[&str])` with the same rules (outside
@@ -214,8 +232,8 @@ Welcome { …, #[serde(default)] pub features: Vec<String> }  // contains "lens"
 
 ### 4. Rendering lenses (client)
 
-All rendering stays on the `latex-render` worker (renaming it `lens-render` is allowed)
-through the existing guard: pre-check, scratch thread, 150 ms budget, abandon cap, LRU cache
+All built-in rendering stays on the `latex-render` worker (renaming it `lens-render` is
+allowed) through the existing guard: pre-check, scratch thread, 150 ms budget, abandon cap, LRU cache
 keyed by `(lens, source)`.
 
 - **Tag lens → a rendering with `inline: Option<String>`, `block: Option<Laid>`, `text:
@@ -230,11 +248,15 @@ keyed by `(lens, source)`.
   becomes a lens block, rendered on the worker to rows; a failed or too-large rendering
   shows the code block as it was. Diagram rows wider than the reader width show the code
   block plus one dim line `diagram is N columns wide`.
-- **External lens**: rendered by its program through the extension host (§6) with a 1 s
-  timeout per item and a 3 s budget per worker job; items past the budget or timed out stay
-  raw for that job and are retried on the next one; results are cached like built-ins.
-  Inline renderings are used by the pane and inline reader spans, block renderings by
-  display placements and fence lenses.
+- **External lens**: never rendered on the render worker. The worker renders built-ins only
+  and leaves an external lens's items `raw`; `App::on_lens_rendered` then asks the extension
+  host (§6) for the still-raw external items as one batch (`Effect::RenderExternal { host,
+  id, seq, items }`). The host runs them asynchronously (1 s timeout per item, ≤ 16 in
+  flight), caches results by `(lens, source)` (also a timeout or error, as raw, for 60 s), and
+  answers with `HostEvent::ExternalRendered { host, id, seq, items }`, applied only if `seq`
+  is still the session's current list. The reader does the same for its document's external
+  placeholders and fence blocks under its `gen`. Inline renderings are used by the pane and
+  inline reader spans, block renderings by display placements and fence lenses.
 
 ### 5. Leader and actions (client)
 
@@ -266,9 +288,13 @@ pub struct ListItem { label: String, detail: Option<String>, result: ActionResul
   selected item's result, Esc closes. Shows `label` and, dimmed, `detail` cut to the width.
 - **Document**: the reader view's drawing and keys (scroll, wheel, Esc) on a single
   document; markdown goes through the same `doc`/`layout` path on the worker.
-- **Paste**: the text is sanitized (no controls but `\n`/`\t`), ≤ 64 KiB, and written to the
-  active session as `ESC[200~ … ESC[201~` (bracketed paste; claude enables it), never
-  followed by Enter.
+- **Paste**: the text is sanitized (no controls but `\n`/`\t`), ≤ 64 KiB. It is written to the
+  active session only when that session is a claude session (`SessionKind::Claude`), is
+  attached, and its mirror reports bracketed paste on (`Screen::modes().bracketed_paste`, the
+  same check `encode_paste` makes); then as `ESC[200~ … ESC[201~`, never followed by Enter.
+  Otherwise nothing is written and a notice says `paste needs claude's prompt (bracketed
+  paste is off)`. A paste into a terminal tab is refused with `paste goes to claude sessions
+  only`.
 
 ### 6. External extensions
 
@@ -276,13 +302,13 @@ Layout: `~/.config/claudio/extensions/<name>/extension.toml` (`$XDG_CONFIG_HOME`
 as for `config.toml`).
 
 ```toml
-name = "kbd"                       # must equal the directory name; ^[a-z][a-z0-9-]{0,31}$
+name = "keys"                      # must equal the directory name; ^[a-z][a-z0-9-]{0,31}$
 description = "keyboard keys"      # ≤ 120 chars
-command = ["python3", "kbd.py"]    # argv, no shell; a first element containing '/' resolves
+command = ["python3", "keys.py"]   # argv, no shell; a first element containing '/' resolves
                                    # against the extension dir; otherwise looked up in PATH
 [[lens]]
-tag = "kbd"                        # or: fence = "abc"  (exactly one of tag/fence)
-instruction = "Write keyboard keys as <kbd>Ctrl+C</kbd>."
+tag = "keys"                       # or: fence = "abc"  (exactly one of tag/fence)
+instruction = "Write keyboard keys as <keys>Ctrl+C</keys>."
 [[action]]
 key = "k"                          # one char [A-Za-z0-9], unique among all actions
 title = "insert a timestamp"       # ≤ 60 chars
@@ -293,7 +319,11 @@ input = "label"                    # optional: ask for a line of input first
 Loading (at client start): manifests ≤ 64 KiB; invalid manifests, names that clash with a
 built-in or another extension, tags/fences already taken, and action keys already taken are
 skipped (the whole extension, or the one action for a key clash) with one notice each at
-start. At most 16 external extensions.
+start. At most 16 external extensions. A tag that is an HTML element name (the WHATWG list:
+`a`, `b`, `br`, `code`, `details`, `kbd`, `p`, `pre`, `sub`, `sup`, `summary`, `table`, … — a
+`const` in `extensions/manifest.rs`) is rejected with the notice `tag <x> is an HTML element;
+pick another name`, except that a manifest may set `html = true` on the lens to accept the
+shadowing knowingly.
 
 Process: started lazily on first request, cwd = the extension dir, stdin/stdout piped,
 stderr discarded, its own process group. Environment: the client's environment minus
@@ -308,7 +338,7 @@ Protocol v1 (UTF-8 JSON, one object per line, each line ≤ 1 MiB, ids are u64 c
 claudio; the program may answer out of order):
 
 ```
-→ {"id":1,"method":"render","params":{"lens":"kbd","kind":"tag","source":"Ctrl+C"}}
+→ {"id":1,"method":"render","params":{"lens":"keys","kind":"tag","source":"Ctrl+C"}}
 ← {"id":1,"result":{"inline":"⌃C","block":["┌────┐","│ ⌃C │","└────┘"]}}
 → {"id":2,"method":"action","params":{"action":"stamp","input":"x",
      "session":{"host":"local","cwd":"/home/u/p","name":null,"conversation":"<uuid>"}}}
@@ -324,12 +354,16 @@ per extension. Caps applied to every result before use: inline ≤ 512 columns, 
 columns × 100 rows, document markdown ≤ 256 KiB, list ≤ 500 items with label ≤ 200 and
 detail ≤ 400 chars, paste ≤ 64 KiB, notice ≤ 200 chars, title ≤ 120 chars. Every string
 goes through `sanitize`; inline, labels, details, notices and titles also lose `\n`/`\t`.
+Widths are `unicode-width` columns after `sanitize`. A render result over any cap is
+discarded (the item stays raw, counted as an error). For action results: markdown and paste
+text over cap are discarded with a notice `result too large`; lists keep their first 500
+items; labels, details, notices and titles are cut to the cap on a char boundary.
 A line that is not valid JSON is a protocol error (the process is restarted). A JSON
 object without a known `id` is ignored.
 
-The extension host runs off the UI thread (its own threads or tokio tasks); `App` only emits
-effects and receives events. Render calls come from the render worker (blocking with
-timeout); action calls come from the effect runner (async, result as a `HostEvent`).
+The extension host runs off the UI thread (tokio tasks owned by `tui/mod.rs`); `App` only
+emits effects and receives events. Both render and action calls are async requests to the
+host, answered as `HostEvent`s. The render worker never waits on an external process.
 
 ### 7. diagram (built-in fence lens `mermaid`)
 
@@ -360,11 +394,19 @@ pub fn render(src: &str) -> Result<Vec<String>, Unsupported>;
   (`┃`/`━`) lines where possible, labels beside the edge. BT/RL draw as TD/LR with the
   layer order reversed. An edge the router cannot place is listed under the diagram as
   `a ──label──▶ b`. Labels wrap at 24 columns, at most 3 lines.
+  v1 draws distinctly: rect `[]`, rounded `()`/`([])`, decision `{}`; solid `-->`/`---` and
+  dotted `-.->`/`-.-`; `|t|` labels. Everything else listed is parsed and drawn as the
+  nearest of those (other shapes as rect, `==>`/`===` as solid, `--o`/`--x` as plain arrows,
+  `<-->` as two edges, `-- t -->` as `|t|`). BT/RL draw as TD/LR reversed; `subgraph`
+  members are kept, no frame.
 - **Sequence** (`sequenceDiagram`): `participant`/`actor` (with `as` alias), implicit
   participants, messages `->`, `-->`, `->>`, `-->>`, `-x`, `--x`, `-)`, `--)` with text,
   self-messages, `Note left of|right of|over a[,b]: t`, `loop|alt|else|opt|par|and|critical|
   break|rect … end` drawn as labeled separators across the lifelines, `autonumber`,
   `activate`/`deactivate` and `+`/`-` suffixes ignored.
+  v1 draws distinctly: solid and dotted arrows with/without heads, `Note`, and
+  `loop|alt|else|opt` blocks; `par|and|critical|break|rect` are drawn as `opt`-style labeled
+  blocks; `-x`/`-)` variants as plain arrows. AC8 goldens cover the v1-distinct set.
 - Caps: ≤ 64 nodes/participants, ≤ 128 edges/messages, output ≤ 200 columns × 150 rows;
   beyond → `Unsupported`. Everything else (`classDiagram`, `stateDiagram`, `gantt`, …) →
   `Unsupported`, and the reader shows the code block.
@@ -391,9 +433,13 @@ Daemon (`src/claude/search.rs`, run in `spawn_blocking` from a spawned task, as 
 - One hit per conversation: `matches` = matching messages; `snippet` = ≤ 160 chars around
   the first term in the newest matching message, newlines as spaces; `title` = the first
   real prompt (≤ 80 chars); `cwd` from the transcript lines; all `sanitize`d.
-- Budget: stops after 3 s or 1 GiB read or `limit` (≤ 100, default 50) hits, setting
-  `truncated`; `scanned`/`total` count files. A line > 16 MiB is skipped. Reply ≤ 512 KiB
-  encoded (hits dropped from the end).
+- Budget: files are read as a stream with a `BufReader` (64 KiB buffer) line by line; a line
+  > 1 MiB is skipped without being buffered (bytes are discarded until the next `\n`); at most
+  the last 64 MiB of a file are read (seek to `len - 64 MiB`, skip the partial first line).
+  The search stops after 3 s, 1 GiB read in total, or `limit` (≤ 100, default 50) hits,
+  setting `truncated`; `scanned`/`total` count files. One search runs at a time per daemon:
+  a second `Search` while one runs is answered `Error "search busy"` at once, and the client
+  shows `search busy, try again`. Reply ≤ 512 KiB encoded (hits dropped from the end).
 - Unknown op on an old daemon → `Error "unsupported op…"` → the usual restart notice.
   `features` contains `"search"`.
 
@@ -411,10 +457,13 @@ choice the wizard would preselect there. The search runs on the active session's
   off the UI thread.
 - Alt+z p → list `Snippets` (label = name, detail = first non-empty line); Enter pastes the
   snippet's text (§5 Paste). Empty or missing dir → notice `no snippets in <dir>`.
-- Alt+z P → fetch the active session's answers (`Msg::Answers`) and save the newest
-  answer's prompt as `<slug>.md` (slug: the first words, lowercase `[a-z0-9-]`, ≤ 40 chars,
-  `-2`, `-3`… if taken; `snippet` if empty), dir created 0700, file 0600, atomic write;
-  notice `saved snippet <name>`. No prompt → notice `no prompt to save`.
+- Alt+z P → `Msg::LastPrompt { id }` (new op; `features` contains `"last_prompt"`), answered
+  by `Msg::LastPromptReply { id, prompt: Option<String>, cut: bool }`: the newest real prompt
+  of the transcript tail (`answer_prompt`'s rules, answered or not), sanitized, ≤ 64 KiB (cut,
+  with `cut` set). Saved as `<slug>.md` (slug: the first words, lowercase `[a-z0-9-]`, ≤ 40
+  chars, `-2`, `-3`… if taken; `snippet` if empty), dir created 0700, file 0600, atomic
+  write; notice `saved snippet <name>` (`… (cut at 64 KiB)` when `cut`). No prompt → notice
+  `no prompt to save`. On an old daemon the usual restart notice.
 
 ### Alternatives considered
 
@@ -442,7 +491,11 @@ choice the wizard would preselect there. The search runs on the active session's
 - Running claude sessions started by old daemons keep their `__context latex` hook.
 - Keys: Alt+z is new; a user's `[keys]` binding on Alt+z goes through the existing collision
   handling.
-- Rollback: reinstall v0.5.0; new journal fields are ignored by it.
+- Rollback: reinstall v0.5.0, then `claudio daemon stop` on every host (an older binary never
+  replaces a newer daemon). The v0.5.0 daemon ignores the journal's `extensions` field and
+  leaves `<runtime dir>/context/` alone (harmless; removed by the next new daemon or a
+  reboot). Sessions started by the new daemon keep calling `__context file`, which v0.5.0's
+  `__context` answers with nothing (exit 0).
 
 ## Failure modes and security
 
@@ -451,9 +504,11 @@ choice the wizard would preselect there. The search runs on the active session's
   terminal (renderings, document markdown, list labels, notices, paste text, search
   snippets) goes through `sanitize` and the caps above, then through the reader's `safe`
   width rules when drawn. Paste text cannot contain ESC (sanitize removes controls), so it
-  cannot end the bracketed paste early.
+  cannot end the bracketed paste early. A paste is refused unless the pane has bracketed
+  paste on, so a `\n` in the text can never act as Enter (AC7 and AC10 test the refusal).
 - **External programs**: lazily started, killed with the client, restarted at most 3 times
-  per 5 min, timeouts on every request, line and in-flight caps, no tokens in their env, no
+  per 5 min, timeouts on every request, line and in-flight caps, no tokens handed to them
+  (env scrubbed, none in requests), no
   claude content in argv. A hung program never blocks the UI thread, and blocks the render
   worker at most for the stated budgets.
 - **Context file**: daemon-chosen path in its 0700 runtime dir; `__context file` refuses
@@ -470,19 +525,22 @@ choice the wizard would preselect there. The search runs on the active session's
 
 ## Acceptance criteria
 
-- [ ] AC1 (no regression): all existing unit and manager tests pass; latex pane overlay,
-  reader view, Tab list and `[claude] latex = false` behave as in v0.5.0.
+- [ ] AC1 (no regression): all existing unit and manager tests pass, the only permitted edits
+  being the plain-mode key-set assertions (`src/tui/plain.rs`, `keymap.rs` `PLAIN_ACTIONS`)
+  extended with Alt+z; latex pane overlay, reader view, Tab list and `[claude] latex = false`
+  behave as in v0.5.0.
 - [ ] AC2 (context): a spawn with `extensions` writes the context file 0600 and the
   SessionStart hooks run `__context file`; `__context file` prints the JSON line for a good
   file and nothing for a missing, symlinked, foreign-owned or non-regular one (unit tests);
-  `__context latex` still works (existing test).
+  `__context latex` still works (existing test); the `--settings` JSON and the claude argv the
+  fake records contain the hook path but no instruction text (manager test).
 - [ ] AC3 (journal/respawn): a respawn with `extensions` replaces the journaled value; a
   journal entry without the field loads as `None` and a new one round-trips (unit tests).
 - [ ] AC4 (lens events): `lens_tags` extracts several tags with latex's rules; the daemon
   sends `Lens` with the seq rules and replays it on attach; the client ignores `Latex` from a
   lens daemon and maps it from an old one (unit tests).
 - [ ] AC5 (external lens): a manager test with a fake external extension (shell script) that
-  renders `<kbd>` shows the rendering in the pane overlay and in the reader.
+  renders `<keys>` shows the rendering in the pane overlay and in the reader.
 - [ ] AC6 (leader): Alt+z shows the leader popup with the built-in actions and the external
   one; Esc closes it and nothing reaches the session; Alt+z u opens the reader (manager test).
 - [ ] AC7 (external action): the fake extension's `paste`, `list` and `document` results work
@@ -518,8 +576,8 @@ choice the wizard would preselect there. The search runs on the active session's
 - Nothing is rendered or parsed on the UI thread: latex, diagram, markdown and external
   renders all go through the worker and its guard (external: through the host with
   timeouts).
-- Secrets never in argv, logs, journal or `state.json`; external extensions never get proxy
-  tokens or API keys.
+- Secrets never in argv, logs, journal or `state.json`; claudio never passes external
+  extensions a proxy token or API key.
 - Tests: manager tests assert on the screen model only; fake claudes ignore `--help` and
   `--version`; test configs set `update_check/remote_check = "off"`; never touch the user's
   daemon (isolated XDG dirs).
