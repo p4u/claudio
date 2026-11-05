@@ -35,7 +35,9 @@ diagram = false        # by name, built-in or external; every extension is on by
 
 `[claude] latex = false` still turns math off. On the client it turns the
 `latex` extension off; on a host it keeps the latex instruction out of that
-host's sessions.
+host's sessions. On a host whose daemon has `[claude] latex = false`, a new
+client overlays no `<latex>` tags for that host's sessions (the daemon extracts
+none); v0.5.0 clients still get them through `Latex`.
 
 Snippets are files in `~/.config/claudio/snippets/` (`*.md` or `*.txt`, the
 file name without its extension is the snippet's name). A paste never presses
@@ -145,8 +147,10 @@ Everything a program returns is treated as untrusted:
   rendering over a cap is dropped. Markdown or paste text over its cap is
   dropped with the notice `result too large`. Lists keep their first 500
   items, and long labels, details, notices and titles are cut.
-- Timeouts: a render has 1 s, an action 15 s. At most 16 requests are in
-  flight per extension; failed renders are not asked again for 60 s.
+- Timeouts: a render has 1 s, an action 15 s. A request that cannot be
+  written to the program within its timeout counts as a timeout too, and the
+  program is stopped. At most 16 requests are in flight per extension; failed
+  renders are not asked again for 60 s.
 - A line that is not JSON, or one over 1 MiB, is a protocol error: the
   program is stopped and started again on the next request. After 3 failures
   (crash, protocol error, timeout) within 5 minutes the extension is disabled

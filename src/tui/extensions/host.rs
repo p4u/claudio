@@ -12,8 +12,10 @@
 //!   [`protocol::MAX_LINE`]) or a timeout is a failure; the program is
 //!   started again on the next request, and [`FAILURES`] failures within
 //!   [`FAILURE_WINDOW`] disable the extension for the rest of the run;
+//! - a request that cannot be written within its timeout (a program that
+//!   stopped reading) is a timeout too, and the program is stopped;
 //! - [`ExtensionHost::shutdown`] stops every program (SIGTERM to its group,
-//!   SIGKILL after a second).
+//!   SIGKILL after a second), even one a stuck request still holds.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -97,6 +99,9 @@ struct Ext {
     name: String,
     program: Program,
     proc: Mutex<Option<Proc>>,
+    /// The running start and its pid, outside `proc`'s lock: what
+    /// `shutdown` and `lost` signal when they cannot get that lock in time.
+    pid: StdMutex<Option<(u64, u32)>>,
     pending: Pending,
     /// Failure times within the window, and whether it is disabled.
     health: StdMutex<(VecDeque<Instant>, bool)>,
@@ -144,13 +149,23 @@ impl Ext {
             return Err(Failure::Disabled);
         }
         let _slot = self.slots.acquire().await.map_err(|_| Failure::Disabled)?;
+        // It may have been disabled while this waited for a slot.
+        if self.disabled() {
+            return Err(Failure::Disabled);
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         self.lock_pending().insert(id, tx);
         let mut line = protocol::request(id, method, params);
         line.push('\n');
+        let deadline;
         let written = {
             let mut slot = self.proc.lock().await;
+            // Or while it waited for the program: do not start it again.
+            if self.disabled() {
+                self.lock_pending().remove(&id);
+                return Err(Failure::Disabled);
+            }
             if slot.is_none() {
                 match self.start() {
                     Ok(proc) => *slot = Some(proc),
@@ -163,9 +178,23 @@ impl Ext {
             }
             let proc = slot.as_mut().expect("started above");
             let stdin = &mut proc.stdin;
-            match stdin.write_all(line.as_bytes()).await {
-                Ok(()) => stdin.flush().await,
-                Err(e) => Err(e),
+            // A program that stopped reading fills the pipe and the write
+            // waits forever, holding the lock: bound it like the reply.
+            deadline = tokio::time::Instant::now() + timeout;
+            let write = async {
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.flush().await
+            };
+            match tokio::time::timeout_at(deadline, write).await {
+                Ok(written) => written,
+                Err(_) => {
+                    if let Some(proc) = slot.take() {
+                        self.stop(proc);
+                    }
+                    self.lock_pending().clear();
+                    self.fail("timed out");
+                    return Err(Failure::Timeout);
+                }
             }
         };
         if written.is_err() {
@@ -173,7 +202,7 @@ impl Ext {
             self.lock_pending().remove(&id);
             return Err(Failure::Crashed);
         }
-        match tokio::time::timeout(timeout, rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(why))) => Err(Failure::Error(why)),
             Ok(Err(_)) => Err(Failure::Crashed),
@@ -213,6 +242,7 @@ impl Ext {
             return Err(std::io::Error::other("no pipes"));
         };
         let gen = self.gen.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.lock_pid() = child.id().map(|pid| (gen, pid));
         tokio::spawn(read_replies(Arc::downgrade(self), gen, stdout));
         Ok(Proc {
             gen,
@@ -222,12 +252,41 @@ impl Ext {
         })
     }
 
+    fn lock_pid(&self) -> std::sync::MutexGuard<'_, Option<(u64, u32)>> {
+        self.pid.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pid of start `gen` if it is still the running one.
+    fn pid_of(&self, gen: u64) -> Option<u32> {
+        self.lock_pid()
+            .filter(|(g, _)| *g == gen)
+            .map(|(_, pid)| pid)
+    }
+
+    /// Stop `proc` (see [`stop`]) and forget its pid.
+    fn stop(&self, proc: Proc) {
+        let mut pid = self.lock_pid();
+        if pid.is_some_and(|(g, _)| g == proc.gen) {
+            *pid = None;
+        }
+        drop(pid);
+        stop(proc);
+    }
+
     /// Start `gen` ended (`why`): stop it, fail what waits on it, count it.
     async fn lost(&self, gen: u64, why: &str) {
-        let mut slot = self.proc.lock().await;
+        let mut slot = match tokio::time::timeout(STOP_GRACE, self.proc.lock()).await {
+            Ok(slot) => slot,
+            Err(_) => {
+                // A request holds the lock writing to it: end it by its
+                // pid, so that write fails and lets go of the lock.
+                signal_group(self.pid_of(gen), libc::SIGTERM);
+                self.proc.lock().await
+            }
+        };
         if slot.as_ref().is_some_and(|p| p.gen == gen) {
             if let Some(proc) = slot.take() {
-                stop(proc);
+                self.stop(proc);
             }
             self.lock_pending().clear();
             self.fail(why);
@@ -325,6 +384,7 @@ impl ExtensionHost {
                 name: ext.name.clone(),
                 program: program.clone(),
                 proc: Mutex::new(None),
+                pid: StdMutex::new(None),
                 pending: Arc::default(),
                 health: StdMutex::new((VecDeque::new(), false)),
                 slots: Semaphore::new(MAX_IN_FLIGHT),
@@ -414,11 +474,22 @@ impl ExtensionHost {
     }
 
     /// Stop every program: SIGTERM to its group, SIGKILL after a second.
+    /// Bounded even when a request holds a program's lock: the program is
+    /// then signalled by its pid, without the lock.
     pub async fn shutdown(&self) {
         for ext in self.exts.values() {
-            let Some(mut proc) = ext.proc.lock().await.take() else {
+            let Ok(mut slot) = tokio::time::timeout(STOP_GRACE, ext.proc.lock()).await else {
+                let pid = ext.lock_pid().take().map(|(_, pid)| pid);
+                signal_group(pid, libc::SIGTERM);
+                tokio::time::sleep(STOP_GRACE).await;
+                signal_group(pid, libc::SIGKILL);
                 continue;
             };
+            let Some(mut proc) = slot.take() else {
+                continue;
+            };
+            drop(slot);
+            *ext.lock_pid() = None;
             signal_group(proc.pid, libc::SIGTERM);
             if tokio::time::timeout(STOP_GRACE, proc.child.wait())
                 .await
@@ -555,6 +626,51 @@ mod tests {
             result,
             Err("extension fake: disabled after 3 failures".to_owned())
         );
+        host.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_program_that_never_reads_stdin_does_not_block_quit() {
+        let (dir, host, mut notices) = host("exec sleep 30\n");
+        // More than a pipe holds, past the in-flight limit: requests that
+        // wait for a slot must see the extension disabled meanwhile.
+        let renders: Vec<_> = (0..40)
+            .map(|i| {
+                let source = format!("{i:04}{}", "x".repeat(2044));
+                tokio::spawn(host.render("keys", LensKind::Tag, &source))
+            })
+            .collect();
+        let all = futures::future::join_all(renders);
+        let rendered = tokio::time::timeout(Duration::from_secs(10), all)
+            .await
+            .expect("the renders end");
+        assert!(rendered.into_iter().all(|r| r.unwrap().is_none()));
+        let quit = tokio::time::timeout(Duration::from_secs(5), host.shutdown()).await;
+        assert!(quit.is_ok(), "shutdown is bounded");
+        assert_eq!(
+            notices.try_recv().unwrap(),
+            "extension fake disabled after 3 failures (timed out)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cannot_be_written_times_out_and_stops_the_program() {
+        let (dir, host, _notices) = host("exec sleep 30\n");
+        // Bigger than any pipe: the write cannot finish.
+        let source = "x".repeat(1 << 20);
+        let started = Instant::now();
+        let render = host.render("keys", LensKind::Tag, &source);
+        let rendered = tokio::time::timeout(Duration::from_secs(5), render)
+            .await
+            .expect("the write is bounded");
+        assert_eq!(rendered, None);
+        assert!(started.elapsed() >= RENDER_TIMEOUT);
+        let ext = &host.exts["fake"];
+        assert!(ext.proc.lock().await.is_none(), "the program is stopped");
+        assert_eq!(*ext.lock_pid(), None);
+        assert_eq!(ext.health.lock().unwrap().0.len(), 1, "one failure");
         host.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();
     }
