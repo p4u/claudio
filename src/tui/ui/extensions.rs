@@ -18,10 +18,18 @@ use crate::tui::reader::layout::safe;
 /// The extensions screen over the whole terminal.
 pub fn draw_extensions(frame: &mut Frame, app: &App, view: &ExtensionsView) {
     let area = frame.area();
+    // Sized to the content: rows, a blank line, the tallest details, a
+    // blank line, the footer, and the borders; capped to the pane.
+    let rows_n = app.extension_rows().len();
+    let tallest = (0..rows_n)
+        .map(|i| app.extension_details(i).len())
+        .max()
+        .unwrap_or(0);
+    let wanted = (rows_n + tallest + 5).min(u16::MAX as usize) as u16;
     let rect = centered(
         area,
         100.min(area.width.saturating_sub(2)),
-        area.height.saturating_sub(4).max(3),
+        wanted.min(area.height.saturating_sub(4).max(3)),
     );
     let inner = popup(frame, rect, TITLE);
     if inner.height == 0 || inner.width == 0 {
