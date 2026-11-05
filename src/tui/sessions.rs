@@ -15,6 +15,7 @@ use crate::term::screen::Screen;
 use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
+use super::latex::Formula;
 use super::state::{self, ClientState, KillTombstone, SavedSession};
 use super::wizard::{self, Wizard};
 
@@ -67,6 +68,13 @@ pub struct SessionView {
     pub turns: Option<u32>,
     /// Claude, or a plain terminal tab.
     pub kind: SessionKind,
+    /// The `seq` of the newest formula list taken (0: none yet), and its
+    /// formulas' sources, oldest first.
+    pub latex_seq: u64,
+    pub latex_srcs: Vec<String>,
+    /// Those formulas rendered; until the render worker is done with a new
+    /// list, the previous one.
+    pub latex: Vec<Formula>,
 }
 
 impl SessionView {
@@ -103,7 +111,17 @@ impl SessionView {
             output_tokens: None,
             turns: None,
             kind,
+            latex_seq: 0,
+            latex_srcs: Vec::new(),
+            latex: Vec::new(),
         }
+    }
+
+    /// Forget the formulas: a new conversation has its own, from seq 1.
+    pub fn clear_latex(&mut self) {
+        self.latex_seq = 0;
+        self.latex_srcs.clear();
+        self.latex.clear();
     }
 
     /// The view of a session `host`'s daemon reports.

@@ -145,6 +145,14 @@ pub enum Effect {
     },
     /// Put this text on the outer terminal's clipboard (OSC 52).
     CopyToClipboard(String),
+    /// Render session `id`'s formulas, as of `seq`, on the `latex-render`
+    /// worker; they come back through [`App::on_latex_rendered`].
+    RenderLatex {
+        host: String,
+        id: SessionId,
+        seq: u64,
+        srcs: Vec<String>,
+    },
 }
 
 /// What a request's reply is for.

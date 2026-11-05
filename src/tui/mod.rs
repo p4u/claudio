@@ -13,8 +13,6 @@ mod git_app;
 mod git_view;
 mod interaction;
 mod keymap;
-// Its first user, the render worker, comes with the next change.
-#[allow(dead_code)]
 mod latex;
 mod notifications;
 mod plain;
@@ -41,9 +39,12 @@ mod test_support;
 mod ui;
 mod wizard;
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -80,6 +81,28 @@ const OUTDATED_RETRY: Duration = Duration::from_secs(120);
 
 /// Whether keyboard enhancement flags were pushed (and must be popped).
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// How long the render worker waits for one formula before it gives up on
+/// it (it is shown raw).
+const RENDER_BUDGET: Duration = Duration::from_millis(150);
+/// How many renders that ran over budget may still be running before new
+/// formulas are left raw (and tried again on a later list).
+const MAX_ABANDONED: usize = 2;
+/// How many rendered formulas the worker remembers, by source.
+const CACHE_SIZE: usize = 1024;
+/// The stack of a render scratch thread: deep enough for anything that
+/// passes `latex::too_complex`, in a debug or a release build.
+const SCRATCH_STACK: usize = 32 << 20;
+/// The thread names of the render worker and of its scratch threads.
+const RENDER_THREAD: &str = "latex-render";
+const SCRATCH_THREAD: &str = "latex-scratch";
+
+thread_local! {
+    /// Set on a render scratch thread. A panic there is the renderer's,
+    /// caught and shown as a raw formula: the UI's panic hook must not
+    /// touch the terminal for it (see [`panic_hook`]).
+    static QUIET_PANIC: Cell<bool> = const { Cell::new(false) };
+}
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -344,11 +367,7 @@ async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
 
 /// Set the terminal up for the UI; returns it with its size `(width, height)`.
 fn enter_terminal() -> io::Result<(Term, (u16, u16))> {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        default_hook(info);
-    }));
+    std::panic::set_hook(panic_hook(restore_terminal, std::panic::take_hook()));
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(
@@ -368,6 +387,21 @@ fn enter_terminal() -> io::Result<(Term, (u16, u16))> {
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
     let size = terminal.size()?;
     Ok((terminal, (size.width, size.height)))
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+/// The UI's panic hook: put the terminal back (`restore`), then report the
+/// panic as `default` would. A panic on a render scratch thread does
+/// neither: it is caught there, and the UI goes on.
+fn panic_hook(restore: fn(), default: PanicHook) -> PanicHook {
+    Box::new(move |info| {
+        if QUIET_PANIC.with(Cell::get) {
+            return;
+        }
+        restore();
+        default(info);
+    })
 }
 
 /// Undo everything `enter_terminal` did. Safe to call more than once and
@@ -446,6 +480,145 @@ enum HostEvent {
     UpgradeAvailable(Option<String>),
     /// The newest claude version on its release channel.
     ClaudeLatest(String),
+    /// The render worker finished a session's formula list.
+    LatexRendered {
+        host: String,
+        id: crate::proto::SessionId,
+        seq: u64,
+        formulas: Vec<latex::Formula>,
+    },
+}
+
+// ── Formula rendering ─────────────────────────────────────────────────────────
+
+/// One [`Effect::RenderLatex`]: session `id`'s formulas as of `seq`.
+struct LatexJob {
+    host: String,
+    id: crate::proto::SessionId,
+    seq: u64,
+    srcs: Vec<String>,
+}
+
+/// Start the `latex-render` thread: it renders each job's formulas (from
+/// its cache when it can) and hands them to `done`. It ends when the
+/// returned sender is dropped. Rendering never runs on the UI thread: one
+/// hostile formula can take a minute to parse.
+fn spawn_latex_worker(
+    done: impl Fn(LatexJob, Vec<latex::Formula>) + Send + 'static,
+) -> io::Result<std::sync::mpsc::Sender<LatexJob>> {
+    let (jobs, queue) = std::sync::mpsc::channel::<LatexJob>();
+    std::thread::Builder::new()
+        .name(RENDER_THREAD.to_owned())
+        .spawn(move || {
+            let mut cache = RenderCache::default();
+            let running = Arc::new(AtomicUsize::new(0));
+            for job in queue {
+                let formulas = job
+                    .srcs
+                    .iter()
+                    .map(|src| cache.formula(src, &running))
+                    .collect();
+                done(job, formulas);
+            }
+        })?;
+    Ok(jobs)
+}
+
+/// Rendered formulas by source, the [`CACHE_SIZE`] most recently used: each
+/// list resends every formula, and a source is rendered once.
+#[derive(Default)]
+struct RenderCache {
+    entries: HashMap<String, (u64, latex::Formula)>,
+    /// Bumped on every lookup; an entry keeps the value of its last use.
+    clock: u64,
+}
+
+impl RenderCache {
+    fn formula(&mut self, src: &str, running: &Arc<AtomicUsize>) -> latex::Formula {
+        self.clock += 1;
+        if let Some((used, formula)) = self.entries.get_mut(src) {
+            *used = self.clock;
+            return formula.clone();
+        }
+        let (formula, keep) = render_formula(src, running);
+        if keep {
+            if self.entries.len() >= CACHE_SIZE {
+                let oldest = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (used, _))| *used)
+                    .map(|(src, _)| src.clone());
+                if let Some(oldest) = oldest {
+                    self.entries.remove(&oldest);
+                }
+            }
+            self.entries
+                .insert(src.to_owned(), (self.clock, formula.clone()));
+        }
+        formula
+    }
+}
+
+/// Render one formula within [`RENDER_BUDGET`]: what the pre-check turns
+/// away, or what times out or panics, is shown raw. The flag says whether
+/// the result may be cached: not when too many renders were still running
+/// to start this one (a later list tries it again).
+fn render_formula(src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
+    let clean = latex::prepare(src);
+    if latex::too_complex(&clean) {
+        return (latex::Formula::raw(src), true);
+    }
+    match guarded(move || latex::render(&clean), running) {
+        Guarded::Done(rendered) => (latex::Formula::new(src, rendered), true),
+        Guarded::Failed => (latex::Formula::raw(src), true),
+        Guarded::Busy => (latex::Formula::raw(src), false),
+    }
+}
+
+/// How a [`guarded`] call ended.
+enum Guarded<T> {
+    Done(T),
+    /// It panicked or ran over budget.
+    Failed,
+    /// It was not started: [`MAX_ABANDONED`] renders still run (or no
+    /// thread could be made).
+    Busy,
+}
+
+/// Run `f` on a fresh scratch thread with a [`SCRATCH_STACK`] stack and a
+/// panic in it caught quietly ([`QUIET_PANIC`]), waiting at most
+/// [`RENDER_BUDGET`]. A thread still running then is abandoned and ends on
+/// its own. `running` counts the scratch threads alive; when this returns,
+/// those are all abandoned ones.
+fn guarded<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+    running: &Arc<AtomicUsize>,
+) -> Guarded<T> {
+    if running.load(Ordering::Acquire) >= MAX_ABANDONED {
+        return Guarded::Busy;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let alive = Arc::clone(running);
+    alive.fetch_add(1, Ordering::AcqRel);
+    let spawned = std::thread::Builder::new()
+        .name(SCRATCH_THREAD.to_owned())
+        .stack_size(SCRATCH_STACK)
+        .spawn(move || {
+            QUIET_PANIC.with(|quiet| quiet.set(true));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            // Counted out before the result goes, so a caller that has it
+            // never counts this thread as running.
+            alive.fetch_sub(1, Ordering::AcqRel);
+            let _ = tx.send(result);
+        });
+    if spawned.is_err() {
+        running.fetch_sub(1, Ordering::AcqRel);
+        return Guarded::Busy;
+    }
+    match rx.recv_timeout(RENDER_BUDGET) {
+        Ok(Ok(value)) => Guarded::Done(value),
+        Ok(Err(_)) | Err(_) => Guarded::Failed,
+    }
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -545,6 +718,18 @@ async fn event_loop(
         });
     }
 
+    // Formulas are rendered on their own thread; the results come back here.
+    let rendered = ev_tx.clone();
+    let latex_jobs = spawn_latex_worker(move |job, formulas| {
+        let _ = rendered.blocking_send(HostEvent::LatexRendered {
+            host: job.host,
+            id: job.id,
+            seq: job.seq,
+            formulas,
+        });
+    })
+    .ok();
+
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(ReplyTo, io::Result<Msg>)>();
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -561,7 +746,7 @@ async fn event_loop(
 
     loop {
         for effect in app.take_effects() {
-            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx);
+            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, latex_jobs.as_ref());
         }
         if app.quit {
             return Ok(std::mem::take(&mut app.exit));
@@ -705,6 +890,9 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
+                Some(HostEvent::LatexRendered { host, id, seq, formulas }) => {
+                    app.on_latex_rendered(&host, id, seq, formulas);
+                }
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -741,6 +929,7 @@ fn run_effect(
     conns: &mut Connections,
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
+    latex_jobs: Option<&std::sync::mpsc::Sender<LatexJob>>,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -793,6 +982,12 @@ fn run_effect(
         }
         Effect::LoadSshHosts => app.on_ssh_hosts(crate::remote::hosts::candidates()),
         Effect::CopyToClipboard(text) => copy_to_clipboard(&text),
+        Effect::RenderLatex { host, id, seq, srcs } => {
+            // Without a worker (it could not start) formulas stay raw.
+            if let Some(jobs) = latex_jobs {
+                let _ = jobs.send(LatexJob { host, id, seq, srcs });
+            }
+        }
         Effect::Save => {
             if let Err(e) = app.to_state().save(&paths::client_state()) {
                 app.notify(format!("could not save state: {e}"));
@@ -1108,5 +1303,147 @@ async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bo
                 })
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic in a render guard leaves the terminal alone: the UI's panic
+    /// hook neither restores it nor prints. One on a thread without the
+    /// guard's flag still does.
+    #[test]
+    fn a_render_panic_does_not_restore_the_terminal() {
+        static RESTORES: AtomicUsize = AtomicUsize::new(0);
+        // Other tests panic too: count only the threads this one names.
+        fn restore() {
+            if std::thread::current().name() == Some(SCRATCH_THREAD) {
+                RESTORES.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send> =
+            std::panic::take_hook().into();
+        let report = Arc::clone(&previous);
+        std::panic::set_hook(panic_hook(restore, Box::new(move |info| report(info))));
+        let running = Arc::new(AtomicUsize::new(0));
+        let caught = guarded(|| -> u8 { panic!("a renderer bug") }, &running);
+        let loud = std::thread::Builder::new()
+            .name(SCRATCH_THREAD.to_owned())
+            .spawn(|| panic!("not a render"))
+            .unwrap()
+            .join();
+        std::panic::set_hook(Box::new(move |info| previous(info)));
+        assert!(matches!(caught, Guarded::Failed));
+        assert!(loud.is_err());
+        assert_eq!(RESTORES.load(Ordering::SeqCst), 1, "only the unguarded one");
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+    }
+
+    /// Hostile formulas go through the worker's own entry point: each
+    /// comes back raw or rendered and sanitized, nothing panics or aborts the
+    /// test binary, and none holds the worker longer than twice the budget.
+    #[test]
+    fn hostile_formulas_are_raw_or_sanitized_and_bounded_in_time() {
+        let corpus = [
+            "\\frac{a}{b".to_owned(),
+            "}}}{{{x".to_owned(),
+            "{".repeat(5000) + "x" + &"}".repeat(5000),
+            "\\frac ".repeat(340),
+            "\\hat ".repeat(400),
+            "\\not".repeat(512),
+            "x/".repeat(1000),
+            // Braceless script chains: no `{`, so not counted by the pre-check.
+            "x^".repeat(1000),
+            "x_".repeat(1000),
+            "sqrt(".repeat(400),
+            "x\u{1b}[2J\u{1b}]52;c;AAAA\u{7}y\u{9b}31m".to_owned(),
+            "a\u{202e}b\u{2066}c\u{200b}d\u{feff}e".to_owned(),
+            "\\binom{}{}".to_owned(),
+            "x".repeat(10 * 1024),
+            // Past the pre-check, but seconds of parsing: it times out.
+            "x/".repeat(255),
+        ];
+        let running = Arc::new(AtomicUsize::new(0));
+        for src in &corpus {
+            let started = Instant::now();
+            let (formula, _) = render_formula(src, &running);
+            let took = started.elapsed();
+            let head: String = src.chars().take(16).collect();
+            assert!(took < 2 * RENDER_BUDGET, "{took:?} for {head:?}…");
+            for text in formula.inline.iter().chain(formula.block.iter().flatten()) {
+                assert_eq!(*text, crate::claude::latex::sanitize(text), "{head:?}");
+                assert!(!text.contains(['\u{1b}', '\u{9b}', '\u{202e}', '\u{200b}']));
+            }
+        }
+    }
+
+    /// A render over budget is abandoned. While MAX_ABANDONED of them still
+    /// run, nothing new starts (raw, and not cached); once they end,
+    /// rendering resumes. Sleeps stand in for slow parses, so the test
+    /// burns no CPU.
+    #[test]
+    fn slow_renders_are_abandoned_up_to_a_cap() {
+        let running = Arc::new(AtomicUsize::new(0));
+        for _ in 0..MAX_ABANDONED {
+            let started = Instant::now();
+            let nap = || std::thread::sleep(4 * RENDER_BUDGET);
+            assert!(matches!(guarded(nap, &running), Guarded::Failed));
+            assert!(started.elapsed() < 2 * RENDER_BUDGET);
+        }
+        assert_eq!(running.load(Ordering::SeqCst), MAX_ABANDONED);
+        let started = Instant::now();
+        let (formula, cache) = render_formula("E = mc^2", &running);
+        assert!(started.elapsed() < RENDER_BUDGET, "not even started");
+        assert_eq!((formula.inline, cache), (None, false), "busy: raw, not cached");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < deadline, "the abandoned renders never ended");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (formula, cache) = render_formula("E = mc^2", &running);
+        assert_eq!((formula.inline.as_deref(), cache), (Some("E = mc²"), true));
+    }
+
+    #[test]
+    fn the_worker_renders_each_job_and_passes_its_seq_on() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let jobs = spawn_latex_worker(move |job, formulas| {
+            let _ = tx.send((job.seq, formulas));
+        })
+        .unwrap();
+        let id = uuid::Uuid::new_v4();
+        let job = |seq, srcs: Vec<String>| LatexJob {
+            host: "local".into(),
+            id,
+            seq,
+            srcs,
+        };
+        let deep = "\\frac ".repeat(300);
+        jobs.send(job(1, vec!["E = mc^2".into()])).unwrap();
+        jobs.send(job(2, vec!["E = mc^2".into(), deep.clone()])).unwrap();
+        let wait = Duration::from_secs(10);
+        let (seq, first) = rx.recv_timeout(wait).unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(first[0].inline.as_deref(), Some("E = mc²"));
+        let (seq, second) = rx.recv_timeout(wait).unwrap();
+        assert_eq!(seq, 2);
+        assert_eq!(second[0], first[0]);
+        assert_eq!(second[1], latex::Formula::raw(&deep), "too complex: raw");
+    }
+
+    #[test]
+    fn the_cache_forgets_the_least_recently_used() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut cache = RenderCache::default();
+        cache.formula("0", &running);
+        for i in 1..CACHE_SIZE {
+            cache.formula(&i.to_string(), &running);
+        }
+        cache.formula("0", &running); // used again: "1" is now the oldest
+        cache.formula("new", &running);
+        assert_eq!(cache.entries.len(), CACHE_SIZE);
+        assert!(cache.entries.contains_key("0") && cache.entries.contains_key("new"));
+        assert!(!cache.entries.contains_key("1"));
     }
 }

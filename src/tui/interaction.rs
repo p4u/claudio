@@ -21,6 +21,7 @@ use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
+use super::latex::Formula;
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
 use super::stats_view::StatsView;
@@ -677,6 +678,7 @@ impl App {
             SessionEvent::State { state } => v.state = state,
             SessionEvent::ClaudeSession { claude_session_id } => {
                 v.claude_session_id = Some(claude_session_id);
+                v.clear_latex();
                 self.save();
                 self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
             }
@@ -684,6 +686,7 @@ impl App {
             // from what we saved.
             SessionEvent::ClaudeSessionCleared => {
                 v.claude_session_id = None;
+                v.clear_latex();
                 self.save();
             }
             SessionEvent::Title { title } => v.title = Some(title),
@@ -721,9 +724,44 @@ impl App {
                     v.turns = turns;
                 }
             }
-            // Rendered and drawn by the formulas overlay (a later change).
-            SessionEvent::Latex { .. } => {}
+            // A replay and a broadcast may cross: only a newer list counts.
+            // It is rendered off the UI thread; the old one stays meanwhile.
+            SessionEvent::Latex { seq, formulas } => {
+                if seq > v.latex_seq {
+                    v.latex_seq = seq;
+                    v.latex_srcs = formulas;
+                    let render = Effect::RenderLatex {
+                        host: v.host.clone(),
+                        id: v.id,
+                        seq,
+                        srcs: v.latex_srcs.clone(),
+                    };
+                    self.emit(render);
+                }
+            }
             SessionEvent::Unknown => {}
+        }
+    }
+
+    /// The render worker is done with list `seq` of session `id` on `host`:
+    /// shown, unless a newer list came since (it is on its way).
+    pub fn on_latex_rendered(
+        &mut self,
+        host: &str,
+        id: SessionId,
+        seq: u64,
+        formulas: Vec<Formula>,
+    ) {
+        let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].host == host) else {
+            return;
+        };
+        let v = &mut self.sessions[i];
+        if v.latex_seq != seq {
+            return;
+        }
+        v.latex = formulas;
+        if self.active == Some(i) {
+            self.redraw = true;
         }
     }
 
@@ -1046,6 +1084,54 @@ mod tests {
         app.sessions[0].mirror.feed(b"hello world");
         drag(&mut app, (6, 0), (10, 0));
         assert_eq!(copied(&mut app), ["world"]);
+    }
+
+    #[test]
+    fn the_newest_formula_list_wins_and_a_new_conversation_drops_it() {
+        use crate::tui::latex::Formula;
+        let mut app = app_with(&[info(Some(1), None)]);
+        let (id, host) = (app.sessions[0].id, app.sessions[0].host.clone());
+        let latex = |seq, list: &[&str]| Incoming::Event {
+            id,
+            event: SessionEvent::Latex {
+                seq,
+                formulas: list.iter().map(|f| f.to_string()).collect(),
+            },
+        };
+        let renders = |app: &mut App| -> Vec<(u64, Vec<String>)> {
+            app.take_effects()
+                .into_iter()
+                .filter_map(|e| match e {
+                    Effect::RenderLatex { seq, srcs, .. } => Some((seq, srcs)),
+                    _ => None,
+                })
+                .collect()
+        };
+        app.on_incoming_from(&host, latex(2, &["b"]));
+        assert_eq!(renders(&mut app), [(2, vec!["b".to_owned()])]);
+        // An older list (a replay that crossed a broadcast) is ignored.
+        app.on_incoming_from(&host, latex(1, &["a"]));
+        assert!(renders(&mut app).is_empty());
+        assert_eq!(app.sessions[0].latex_srcs, ["b"]);
+        // Only the rendering of the list held is kept.
+        app.on_latex_rendered(&host, id, 1, vec![Formula::raw("a")]);
+        assert!(app.sessions[0].latex.is_empty());
+        app.on_latex_rendered(&host, id, 2, vec![Formula::raw("b")]);
+        assert_eq!(app.sessions[0].latex, [Formula::raw("b")]);
+        // A new conversation resets the view; any later seq is taken again.
+        let new_conversation = SessionEvent::ClaudeSession {
+            claude_session_id: "c2".into(),
+        };
+        app.on_incoming_from(&host, Incoming::Event { id, event: new_conversation });
+        let v = &app.sessions[0];
+        assert_eq!(v.latex_seq, 0);
+        assert!(v.latex.is_empty() && v.latex_srcs.is_empty());
+        app.on_incoming_from(&host, latex(1, &["c"]));
+        assert_eq!(renders(&mut app), [(1, vec!["c".to_owned()])]);
+        // So does a fresh reset.
+        let cleared = SessionEvent::ClaudeSessionCleared;
+        app.on_incoming_from(&host, Incoming::Event { id, event: cleared });
+        assert_eq!(app.sessions[0].latex_seq, 0);
     }
 
     #[test]
