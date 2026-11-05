@@ -2195,3 +2195,87 @@ fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
     let tui = h.start_tui();
     tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
 }
+
+// ── Reader view ───────────────────────────────────────────────────────────────
+
+/// The answer the reader test's fake claude writes: text, an inline and a
+/// display formula, and a list.
+const ANSWER: &str = "The roots of <latex>ax^2 + bx + c = 0</latex> are\n\n\
+    <latex>x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}</latex>\n\n\
+    - first item\n- second item";
+
+/// A fake claude with a conversation of two answers in its transcript. It
+/// prints neither, so what the reader shows comes from the transcript (via
+/// the daemon); its SessionStart hook tells the daemon which transcript.
+fn write_answers_fake_claude(h: &ManagerHarness) {
+    let sid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
+    let project = h.home.join(".claude/projects").join(encode_cwd(&cwd));
+    let prompt = |text: &str| {
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+    };
+    let answer = |text: &str| {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-fake",
+                "content": [{"type": "text", "text": text}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        })
+    };
+    let records = [
+        prompt("Say hi"),
+        answer("Hello there."),
+        prompt("Explain the quadratic formula"),
+        answer(ANSWER),
+    ];
+    let lines: Vec<String> = records.iter().map(|r| format!("'{r}'")).collect();
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "claude 0.0.0-fake"; exit 0; fi
+if [ "$1" = "--help" ]; then exit 0; fi
+mkdir -p "{project}"
+printf '%s\n' {lines} > "{project}/{sid}.jsonl"
+echo "FAKE_CLAUDE_BANNER pid=$$"
+HOOK=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook SessionStart[^"]*\)".*/\1/p')
+printf '{{"session_id":"{sid}","source":"startup"}}' | eval "$HOOK"
+exec cat
+"#,
+        project = project.display(),
+        lines = lines.join(" "),
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+}
+
+/// AC10: Alt+u opens the reader on the newest answer, rendered from the
+/// transcript: its prompt in the header, text with the inline formula
+/// typeset, the display formula in 2D, the list; ← shows the older one,
+/// and Esc closes it.
+#[test]
+fn test_reader_shows_the_answers_with_formulas_in_2d() {
+    let h = ManagerHarness::new();
+    write_answers_fake_claude(&h);
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    tui.send_keys(ALT_U);
+    tui.wait_for("answer 2/2 · Explain the quadratic formula", Region::Pane, DAEMON_WAIT);
+    tui.wait_for("The roots of ax² + bx + c = 0 are", Region::Pane, WAIT);
+    let pane = tui.screen_text(Region::Pane);
+    for row in ["      -b ± √(b² - 4ac)", "  x = ────────────────", "             2a"] {
+        assert!(pane.contains(row), "missing {row:?} in:\n{pane}");
+    }
+    assert!(pane.contains("• first item") && pane.contains("• second item"), "{pane}");
+
+    tui.send_keys(LEFT_ARROW);
+    tui.wait_for("answer 1/2 · Say hi", Region::Pane, WAIT);
+    tui.wait_for("Hello there.", Region::Pane, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+    assert!(!tui.screen_text(Region::Pane).contains("Hello there."));
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
