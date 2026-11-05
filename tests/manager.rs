@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard, ManagerHarness,
-    Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R,
-    ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_X, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER,
-    ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
+    current_nonce, encode_cwd, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard,
+    ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q,
+    ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, BINARY, CTRL_U, DAEMON_WAIT,
+    DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -2114,4 +2114,81 @@ fn test_wizard_recent_dir_offers_resume() {
     tui.send_keys(ENTER);
     thread::sleep(Duration::from_millis(1500));
     tui.wait_for("resume?", Region::Screen, WAIT);
+}
+
+// ── LaTeX formulas ────────────────────────────────────────────────────────────
+
+/// A fake claude that answers with a formula, as real claude would with
+/// `[claude] latex = true`: it saves its `--settings`, writes the assistant
+/// record to its transcript (under the test's `$HOME`), prints the answer
+/// with the tag, then runs its own SessionStart hook so the daemon reads it.
+fn write_latex_fake_claude(h: &ManagerHarness, settings: &std::path::Path) {
+    let sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    let project = h.home.join(".claude/projects").join(encode_cwd(&h.dirs[0]));
+    let record = serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "id": "m1",
+            "model": "claude-fake",
+            "content": [{"type": "text", "text": "Energy: <latex>E = mc^2</latex> as promised."}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    });
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "claude 0.0.0-fake"; exit 0; fi
+if [ "$1" = "--help" ]; then exit 0; fi
+printf '%s' "$2" > "{settings}"
+mkdir -p "{project}"
+printf '%s\n' '{record}' > "{project}/{sid}.jsonl"
+echo "FAKE_CLAUDE_BANNER pid=$$"
+echo 'Energy: <latex>E = mc^2</latex> as promised.'
+HOOK=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook SessionStart[^"]*\)".*/\1/p')
+printf '{{"session_id":"{sid}","source":"startup"}}' | eval "$HOOK"
+exec cat
+"#,
+        settings = settings.display(),
+        project = project.display(),
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+}
+
+/// A formula in claude's answer is rendered in place of its `<latex>` tag
+/// and listed by Alt+u; a TUI started later gets it from the daemon's
+/// replay on attach. `[claude] latex = true` gives the session the
+/// `__context latex` SessionStart hook.
+#[test]
+fn test_latex_formula_is_rendered_in_the_pane_and_the_popup() {
+    let h = ManagerHarness::new();
+    fs::write(
+        h.config_home.join("claudio/config.toml"),
+        "[claude]\nupdate_check = \"off\"\nremote_check = \"off\"\nlatex = true\n",
+    )
+    .unwrap();
+    let settings = h.root.join("settings.json");
+    write_latex_fake_claude(&h, &settings);
+
+    {
+        let mut tui = h.start_tui();
+        wizard_pick_dir(&mut tui, &h.dirs[0]);
+        tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
+        assert!(!tui.screen_text(Region::Pane).contains("<latex>"));
+        let hooks = fs::read_to_string(&settings).unwrap();
+        assert!(hooks.contains("__context latex"), "{hooks}");
+
+        tui.send_keys(ALT_U);
+        tui.wait_for(" formulas ", Region::Screen, WAIT);
+        tui.wait_for("E = mc^2", Region::Screen, WAIT);
+        tui.send_keys(ALT_U);
+        tui.wait_until(|s| !s.contains(" formulas ", Region::Screen), WAIT);
+        tui.send_keys(ALT_Q);
+        tui.wait_exit(WAIT);
+    }
+
+    // Nothing changes in the conversation now, so only the attach replay
+    // can bring the formula to a new TUI.
+    let tui = h.start_tui();
+    tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
 }
