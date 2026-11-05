@@ -101,7 +101,7 @@ claudio                                         # new sessions now use the proxy
 claudio --plain [--proxy NAME | --no-proxy] [--first-party] [claude args…]
 ```
 
-One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only five keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart, `Alt+u` reader view. Everything else, and every argument, goes to claude.
+One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only seven keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart, `Alt+u` reader view, `Alt+z` extension actions, `Alt+i` extensions screen. Everything else, and every argument, goes to claude.
 
 ### Everyday commands
 
@@ -215,6 +215,8 @@ In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such 
 
 `Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
 
+`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in or external, with its keys and lenses, and below the list the selected one's description, actions and lenses. `Space` or `Enter` turns it on or off. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
+
 ### Keeping claude up to date
 
 Once a day claudio compares your `claude --version` with the latest release on your update channel, and asks before running `claude update`. When an SSH host connects, its claude is compared with yours. If it is older, claudio offers to update it; if it is missing, claudio offers to install it with the official installer. Either way it asks first. Prompts offer `[y] update`, `[n] not now` and `[s] skip this version`. Running sessions keep their binary; new sessions use the updated one.
@@ -240,7 +242,8 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+s` | Proxy stats |
 | `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
 | `Alt+u` | Reader view: the session's answers, formulas typeset (see [Formulas](#formulas-and-the-reader-view-altu)) |
-| `Alt+z` | Extension actions: `s` search, `p`/`P` snippets, `u` reader, and your own (see [Extensions](#extensions-altz)) |
+| `Alt+z` | Extension actions: `s` search, `p`/`P` snippets, `u` reader, `e` extensions screen, and your own (see [Extensions](#extensions-altz)) |
+| `Alt+i` | Extensions screen: describe each extension, turn it on or off (saved in `config.toml`) |
 | `Alt+h` | Help |
 | `Alt+.` | In the wizard: show or hide dot-directories |
 | `Alt+q` | Quit the UI (sessions keep running) |
@@ -293,6 +296,7 @@ latex = true                    # ask claude to write math in <latex> tags, rend
 
 [extensions]                    # every extension is on unless turned off here
 diagram = false                 # e.g. no Mermaid instruction or drawing
+                                # (Alt+i turns them on and off and writes this table)
 
 [keys]                          # rebind any manager key
 new_session = "alt+n"
@@ -301,6 +305,7 @@ git_log     = "alt+l"
 reset       = "alt+e"
 formulas    = "alt+u"           # the reader view (its v0.4.0 name)
 extensions  = "alt+z"           # the extensions' leader key
+extensions_menu = "alt+i"       # the extensions screen
 ```
 
 `CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.

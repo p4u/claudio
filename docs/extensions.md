@@ -21,7 +21,42 @@ claudio renders from claude's answers) and **actions** (keys under the leader,
 
 `Alt+z` opens the leader popup: one line per action. Press the action's key to
 run it; `Esc` or any other key closes the popup and nothing reaches claude.
-`Alt+z u` opens the reader view (also `Alt+u`).
+`Alt+z u` opens the reader view (also `Alt+u`), and `Alt+z e` the extensions
+screen (also `Alt+i`).
+
+### The extensions screen (`Alt+i`)
+
+```
+[x] latex     built-in  —          <latex>
+[ ] diagram   built-in  —          ```mermaid
+[x] search    built-in  Alt+z s    —
+[x] snippets  built-in  Alt+z p/P  —
+[x] keys      external  Alt+z k    <keys>
+```
+
+One row per extension: the built-ins, then the external ones that loaded
+(one that failed to load is not listed; its notice at start said why).
+Below the list, the selected extension's description, its actions and its
+lenses. `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the mouse wheel move;
+`Space` or `Enter` turns the selected extension on or off; `Esc` or `Alt+i`
+closes the screen.
+
+A change applies at once: the extension's keys leave the `Alt+z` popup, its
+tag lenses stop rendering in the pane (at the next draw) and in the reader,
+and sessions started from then on carry only the lenses that are on.
+Sessions already running keep the instructions they started with; `Alt+e`
+restarts one with the new ones. Turning an external extension off stops its
+program; turning it on starts it again on the next request. An extension
+disabled after 3 failures shows `(disabled after failures)` and stays
+disabled until claudio restarts.
+
+The choice is saved in `config.toml` as `name = true|false` under
+`[extensions]`: the line is replaced, or added to that table, or the table
+is appended. Comments, other sections and the file's mode stay as they
+were. If `config.toml` is not valid TOML, nothing is written and the status
+bar says so (the change still applies until claudio exits). With
+`[claude] latex = false`, the latex row says `also off by [claude] latex =
+false`: that setting turns latex off again at the next start.
 
 Each lens comes with an instruction that tells claude how to write for it. It
 reaches claude through a `SessionStart` hook that reads a private file of the
@@ -80,10 +115,12 @@ input = "label"                    # optional: ask for a line of input first
   because claude and markdown use those as HTML. Add `html = true` to the lens
   to take the name anyway.
 - An extension whose name, tag or fence is already taken is skipped. An action
-  whose key is taken is skipped on its own. At most 16 external extensions are
+  whose key is taken is skipped on its own; `u` (the reader) and `e` (the
+  extensions screen) are always taken. At most 16 external extensions are
   loaded. Each skip shows one notice at start.
 - Manifests are read when claudio starts. The program starts on the first
-  request and keeps running until claudio exits.
+  request and keeps running until claudio exits or the extension is turned
+  off.
 
 [`examples/extensions/keys/`](../examples/extensions/keys/) is a complete
 extension in Python: a `keys` tag lens and one action.

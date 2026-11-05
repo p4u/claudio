@@ -207,7 +207,15 @@ is idle (checked every 2 min).
   lines, result caps and sanitizing) and the extension host (`host.rs`: one
   program per extension, lazy start, scrubbed env, own process group,
   ≤ 16 in flight, render 1 s / action 15 s, 3 failures in 5 min disable it,
-  killed on exit; driven by `mod.rs`, never by `App`).
+  killed on exit; it knows every loaded external extension, and one turned
+  off is refused unstarted and its program stopped; driven by `mod.rs`,
+  never by `App`).
+- `extensions_view.rs` — the extensions screen (Alt+i, or Alt+z e): rows,
+  details, toggles. A toggle flips the registry at once and emits
+  `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
+  (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
+  a minimal line edit of config.toml, never a whole-file rewrite). Drawn by
+  `ui/extensions.rs`. The leader keys `u` and `e` are reserved.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -217,13 +225,14 @@ is idle (checked every 2 min).
 - `claude_update.rs` — local/remote claude version checks and updates.
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
-  `Keymap::build_plain` keeps only Alt+h/s/l/e/u; the session is killed when
+  `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
   the UI exits, and the UI exits with claude.
 - `connections.rs` — local + SSH connections, reconnect backoff.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
   ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
-  `stats.rs`, `git.rs`, `confirm.rs`, `reader.rs`.
+  `stats.rs`, `git.rs`, `confirm.rs`, `reader.rs`, `leader.rs`,
+  `extensions.rs`.
 - `fmt.rs` — shared text and number formatting.
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
