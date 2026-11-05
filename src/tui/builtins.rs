@@ -32,7 +32,7 @@ impl App {
     /// there is none) for `query`.
     fn start_search(&mut self, query: String) {
         if query.trim().is_empty() {
-            return;
+            return self.notify("search needs a query");
         }
         let host = self.active_host();
         self.modal_gen += 1;
@@ -73,6 +73,8 @@ impl App {
                     .collect();
                 if self.modal.is_none() {
                     self.modal = Some(Modal::Picker(Box::new(Picker::new(title, items))));
+                } else {
+                    self.notify("close the popup and run it again")
                 }
             }
             Ok(_) => self.notify("unexpected reply from the daemon"),
@@ -166,6 +168,8 @@ impl App {
                 if self.modal.is_none() {
                     let picker = Picker::new("Snippets".to_owned(), items);
                     self.modal = Some(Modal::Picker(Box::new(picker)));
+                } else {
+                    self.notify("close the popup and run it again")
                 }
             }
         }
@@ -318,7 +322,7 @@ mod tests {
     #[test]
     fn search_notices_say_what_went_wrong() {
         let mut app = app_with(&[info(Some(1), None)]);
-        let mut ask = |app: &mut App, reply: io::Result<Msg>| {
+        let ask = |app: &mut App, reply: io::Result<Msg>| {
             app.builtin_action("search", "search", Some("x".into()));
             let (_, to) = requests(app).remove(0);
             app.on_reply(to, reply);
@@ -342,6 +346,25 @@ mod tests {
             ask(&mut app, Err(old)),
             "daemon on local is older: run `claudio daemon restart`"
         );
+        // A list that arrives with a popup open says so instead.
+        let hits = Msg::SearchReply {
+            query: "x".into(),
+            hits: vec![hit("c", "/p")],
+            scanned: 1,
+            total: 1,
+            truncated: false,
+        };
+        app.modal = Some(Modal::Picker(Box::new(Picker::new("open".into(), vec![]))));
+        assert_eq!(ask(&mut app, Ok(hits)), "close the popup and run it again");
+        let Some(Modal::Picker(open)) = &app.modal else {
+            panic!("the open popup is gone")
+        };
+        assert_eq!(open.title, "open");
+        // An empty query asks nothing.
+        app.modal = None;
+        app.builtin_action("search", "search", Some("  ".into()));
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(app.notice.as_ref().unwrap().text, "search needs a query");
     }
 
     #[test]
@@ -375,6 +398,17 @@ mod tests {
             app.notice.as_ref().unwrap().text,
             "no snippets in /cfg/snippets"
         );
+        // A list that arrives with a popup open says so instead.
+        app.builtin_action("snippets", "insert", None);
+        let gen = app.modal_gen;
+        app.modal = Some(Modal::Picker(Box::new(Picker::new("open".into(), vec![]))));
+        let late = vec![("review".to_owned(), "Review this.".to_owned())];
+        app.on_snippets(gen, "/cfg/snippets", Ok(late));
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "close the popup and run it again"
+        );
+        app.modal = None;
 
         app.builtin_action("snippets", "save", None);
         let (msg, to) = requests(&mut app).remove(0);
