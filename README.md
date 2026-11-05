@@ -101,7 +101,7 @@ claudio                                         # new sessions now use the proxy
 claudio --plain [--proxy NAME | --no-proxy] [--first-party] [claude args…]
 ```
 
-One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only five keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart, `Alt+u` formulas. Everything else, and every argument, goes to claude.
+One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only five keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart, `Alt+u` reader view. Everything else, and every argument, goes to claude.
 
 ### Everyday commands
 
@@ -196,13 +196,13 @@ A multi-page popup for the session's claude-proxy profile:
 
 `←`/`→` or `1`–`5` switch pages, `w` changes the time window, and `r` refreshes. `n` asks the proxy to move the session to its next subscription (after a confirmation); the switch takes effect on the next message and rebuilds the prompt cache.
 
-### Formulas (`Alt+u`)
+### Formulas and the reader view (`Alt+u`)
 
 Each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. This is on by default; `latex = false` under `[claude]` in `config.toml` turns it off. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
 
 In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such as `E = mc²` or `x = (-b ± √(b² - 4ac))/(2a)`. Nothing else on the screen moves, and selecting still copies the original text. A formula claudio cannot render, or does not recognise on screen, stays as written. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
 
-`Alt+u` opens the session's last 64 formulas, oldest first, each drawn in 2D above its LaTeX source. `↑`/`↓`, `PgUp`/`PgDn` and `g`/`G` scroll; `Esc` closes. In a terminal tab, `Alt+u` shadows readline's upcase-word.
+`Alt+u` opens the reader view over the pane: claude's latest answer, rendered by claudio from the transcript, with its prompt on top. Markdown is laid out (headings, emphasis, lists, quotes, tables, code blocks) and every formula is typeset in 2D: a formula on its own line is a display formula, as tall as it needs; one inside a sentence grows its line by a row above and below at most (taller ones stay on one line). `←`/`→` (or `h`/`l`) go to the previous and next of the last 10 answers; `↑`/`↓`, `PgUp`/`PgDn`, `g`/`G` and the mouse wheel scroll; `Tab` switches to the session's last 64 formulas, each drawn in 2D above its LaTeX source; `Esc` or `Alt+u` closes. It works over SSH and in `--plain` too. A daemon older than the client shows "run `claudio daemon restart`" instead. In a terminal tab, `Alt+u` shadows readline's upcase-word.
 
 ### Keeping claude up to date
 
@@ -228,7 +228,7 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+g` | Overview of all sessions |
 | `Alt+s` | Proxy stats |
 | `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
-| `Alt+u` | The session's formulas, rendered (see [Formulas](#formulas-altu)) |
+| `Alt+u` | Reader view: the session's answers, formulas typeset (see [Formulas](#formulas-and-the-reader-view-altu)) |
 | `Alt+h` | Help |
 | `Alt+.` | In the wizard: show or hide dot-directories |
 | `Alt+q` | Quit the UI (sessions keep running) |
@@ -284,7 +284,7 @@ new_session = "alt+n"
 terminal    = "alt+c"
 git_log     = "alt+l"
 reset       = "alt+e"
-formulas    = "alt+u"
+formulas    = "alt+u"           # the reader view (its v0.4.0 name)
 ```
 
 `CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.

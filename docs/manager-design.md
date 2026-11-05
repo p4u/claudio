@@ -397,6 +397,12 @@ Spec: `docs/specs/2026-11-04-latex-render-design.md`.
 - **Rendering.** `App` never renders: a newer list becomes
   `Effect::RenderLatex`. The `latex-render` thread renders each uncached
   source (LRU cache, 1024 entries) on a scratch thread with a 32 MiB stack.
+  Since v0.5.0 the layout is claudio's own (`tui/typeset/`, spec
+  `docs/specs/2026-11-05-reader-view-design.md`): TeX's display and text
+  styles over the rust-latex-parser tree, scripts as Unicode glyphs or
+  raised and lowered rows, flat fractions inside scripts and text style.
+  The pane's one-line form is the text-style layout when it is one row,
+  else the v0.4.0 walk of the tree.
   A pre-check turns away deep or token-heavy input first (brace depth 32;
   256 `\commands`, `/` and bareword `(`). The worker then waits 150 ms. A
   render over budget or one that panics is shown raw. An over-budget thread
@@ -412,8 +418,28 @@ Spec: `docs/specs/2026-11-04-latex-render-design.md`.
   without HTML-looking runs. It rebuilds the row cell by cell with the
   one-line rendering. A row that would not fit stays raw, no row moves, and
   the mirror (selection, copy) is untouched.
-- **Popup.** `Alt+u` (`Modal::Formulas`, read-only) shows the list in 2D
-  (term-maths), each formula above its source.
+- **Answers.** `Msg::Answers { id }` (an old daemon answers `Error
+  "unsupported op…"`, shown as "run `claudio daemon restart`") is served
+  off the client loop: the transcript's last 4 MiB are read in
+  `spawn_blocking` and `projects::recent_answers` keeps the last 10
+  answers. An answer is a real prompt (not `isMeta`, a compaction summary,
+  a slash command or Claude Code's own records) and the `text` of the
+  non-sidechain assistant records after it (API errors excluded); a
+  compaction ends it. Prompts are cut at 2 KiB, texts at 64 KiB, all
+  sanitized, and the reply's encoded size is capped at 512 KiB (oldest
+  answers dropped), so it always fits a frame.
+- **Reader.** `Alt+u` (`Modal::Reader`, read-only, full pane) asks for the
+  answers; the reply becomes `Effect::RenderAnswers`. The worker sanitizes
+  each text again, replaces each formula tag (the first 64) with a
+  private-use placeholder, parses the markdown (pulldown-cmark: tables,
+  strikethrough, task lists only) into a width-free `Doc`, and renders the
+  formulas through the same guard and cache (`HostEvent::AnswersRendered`).
+  The view lays a `Doc` out for its width (cached for that width only):
+  inline formulas are line boxes of at most three rows, display formulas
+  indented blocks with a one-line fallback, tables aligned or flowed, code
+  cut at the edge. Replies and renderings for a closed view, another
+  session or an older open are dropped (`modal_gen`). `Tab` shows the
+  `Latex` list (the v0.4.0 popup's content).
 
 ## 3. UX
 

@@ -103,8 +103,11 @@ daemons coexist.
   `Config` directly, and the manager harness pins `SHELL=/bin/sh` with a temp
   `HOME`.
 - `server.rs` — accepts Unix socket connections, uid-checks peers, runs the
-  per-client loop. Slow requests (git, `UpdateClaude`, attach) reply from
-  spawned tasks through the client's queue, never inline.
+  per-client loop. Slow requests (git, `UpdateClaude`, attach, `Answers`)
+  reply from spawned tasks through the client's queue, never inline.
+  `Answers` reads the session transcript's tail (`projects::read_answers`)
+  in `spawn_blocking`; `proto::answers_reply` caps the reply's encoded size
+  (512 KiB, oldest answers dropped) so it always fits a frame.
 - `session.rs` — one actor task per live session: owns the PTY writer, VT
   engine (`alacritty_terminal`), and subscriber list. Fans PTY output to
   all attached clients. Hook events (`__hook <Event> <socket> <token>`) are
@@ -161,8 +164,11 @@ is idle (checked every 2 min).
   attention. Runs the `latex-render` worker thread (`Effect::RenderLatex` →
   `HostEvent::LatexRendered`). It renders each formula on a scratch thread
   (32 MiB stack) within a 150 ms budget, at most 2 abandoned at a time, and
-  caches by source (LRU 1024). Its panic hook stays silent for panics on
-  threads flagged `QUIET_PANIC`.
+  caches by source (LRU 1024). The same thread renders the reader's
+  answers (`Effect::RenderAnswers` → `HostEvent::AnswersRendered`):
+  markdown into a `reader::doc::Doc`, formulas through the same guard and
+  cache. Its panic hook stays silent for panics on threads flagged
+  `QUIET_PANIC`.
 - `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
   state transitions and returns `Effect` values. No I/O here; all I/O is in
   `mod.rs`. `Mode::Manager` or `Mode::Plain`.
@@ -175,13 +181,22 @@ is idle (checked every 2 min).
 - `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
   machine, and its `App` glue.
 - `stats_view.rs` — the multi-page proxy stats popup (Alt+s).
-- `latex.rs` — `<latex>` formulas, pure: `Formula` (source, one-line and 2D
-  renderings, match keys), the `too_complex` pre-check, `render` (term-maths
-  plus a one-line walk of the rust-latex-parser tree), and `overlay`. The
-  overlay swaps matched on-screen tags for their rendering in the pane's
-  buffer, cell by cell, and moves no row.
-- `formulas.rs` — the formulas popup (Alt+u): view state, keys and lines;
-  drawn by `ui/formulas.rs`.
+- `latex.rs` — `<latex>` formulas, pure: `Formula` (source, one-line form,
+  display- and text-style layouts, match keys), the `too_complex`
+  pre-check, `render` (the `typeset` engine; `aligned`-like environments
+  row by row) and `overlay`. The overlay swaps matched on-screen tags for
+  their one-line rendering in the pane's buffer, cell by cell, and moves
+  no row.
+- `typeset/` — the 2D layout engine, pure: TeX's display and text styles
+  over the rust-latex-parser tree (`typeset`), the `\sqrt[n]` rewrite, the
+  rows of `aligned`/`gather`/`array`, the math-font tables (`mathfont.rs`,
+  ported from term-maths) and the v0.4.0 one-line walk (`walk.rs`).
+- `reader/` — the reader view (Alt+u): `doc.rs` (an answer as markdown
+  blocks with formula placeholders; runs on the worker), `layout.rs` (a
+  `Doc` wrapped to a width, line boxes for formulas) and `mod.rs`
+  (`ReaderView`: answer, scroll, Tab list, layout cache). Drawn by
+  `ui/reader.rs`.
+- `formulas.rs` — the lines of the reader's formulas list (Tab).
 - `confirm.rs` — the generic confirm prompt (kill, reset, claude update).
 - `claude_update.rs` — local/remote claude version checks and updates.
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
@@ -192,7 +207,7 @@ is idle (checked every 2 min).
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
   ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
-  `stats.rs`, `git.rs`, `confirm.rs`, `formulas.rs`.
+  `stats.rs`, `git.rs`, `confirm.rs`, `reader.rs`.
 - `fmt.rs` — shared text and number formatting.
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
@@ -247,13 +262,15 @@ is idle (checked every 2 min).
 - `mod.rs` — `SESSION_MARKERS` (env a parent claude sets for its children),
   `binary()`, `exec()`.
 - `projects.rs` — scan `~/.claude/projects/` for existing sessions (feeds the
-  wizard's resume list).
+  wizard's resume list), and `recent_answers` (the reader's last 10 answers
+  of a transcript tail: real prompts and the assistant text after them).
 - `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
   to the daemon socket. Also `__context latex`, the SessionStart hook that asks
   claude to wrap math in `<latex>` tags (`[claude] latex`, on by default); it prints one
   constant JSON line and never touches the socket.
-- `latex.rs` — `extract_latex` (the formulas of an assistant text, code
-  excluded) and `sanitize`, the character filter every formula goes through
+- `latex.rs` — `extract_latex` and `latex_tags` (the formulas of an
+  assistant text, code excluded; the latter with their byte ranges) and
+  `sanitize`, the character filter every formula and answer goes through
   in the daemon and again in the client.
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
@@ -302,7 +319,9 @@ is idle (checked every 2 min).
   2 MiB stack. Call `latex::render` only through `render_formula` in
   `tui/mod.rs` (pre-check, scratch thread, budget, abandon cap), never from
   `App`, a draw, or a test with hostile input (unit tests may call it on
-  benign formulas only).
+  benign formulas only). The same goes for the `typeset` engine, and the
+  reader's markdown is parsed on the worker too; `App` and the drawing only
+  lay out what the worker made.
 
 ### Print-mode pipeline (`-p`)
 
