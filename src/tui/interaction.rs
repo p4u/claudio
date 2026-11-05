@@ -21,8 +21,9 @@ use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
-use super::latex::Formula;
-use super::reader::{ReaderView, RenderedAnswer};
+use super::extensions::protocol::Rendering;
+use super::latex::{Formula, Rendered};
+use super::reader::{External, ReaderView, RenderedAnswer};
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
 use super::stats_view::StatsView;
@@ -853,6 +854,11 @@ impl App {
             .into_iter()
             .filter(|item| tags.contains(&item.tag.as_str()))
             .collect();
+        let external: Vec<LensItem> = items
+            .iter()
+            .filter(|item| self.extensions.external_lens(&item.tag).is_some())
+            .cloned()
+            .collect();
         let v = &mut self.sessions[i];
         if seq <= v.latex_seq {
             return;
@@ -864,13 +870,71 @@ impl App {
             .map(|item| item.text.clone())
             .collect();
         v.lens_items = items;
+        let (host, id) = (v.host.clone(), v.id);
         let render = Effect::RenderLatex {
-            host: v.host.clone(),
-            id: v.id,
+            host: host.clone(),
+            id,
             seq,
             srcs: v.latex_srcs.clone(),
         };
         self.emit(render);
+        if !external.is_empty() {
+            self.emit(Effect::RenderExternal {
+                host,
+                id,
+                seq,
+                items: external,
+            });
+        }
+    }
+
+    /// The extension host rendered list `seq`'s external items of session
+    /// `id` on `host`: shown, unless a newer list came since.
+    pub fn on_external_rendered(
+        &mut self,
+        host: &str,
+        id: SessionId,
+        seq: u64,
+        items: Vec<(LensItem, Option<Rendering>)>,
+    ) {
+        let Some(i) = self.index_of(id).filter(|&i| self.sessions[i].host == host) else {
+            return;
+        };
+        let v = &mut self.sessions[i];
+        if v.latex_seq != seq {
+            return;
+        }
+        v.lens = items
+            .into_iter()
+            .map(|(item, rendering)| {
+                let formula = match rendering {
+                    Some((inline, block)) => {
+                        let text = None;
+                        Formula::new(&item.text, Rendered { inline, block, text })
+                    }
+                    None => Formula::raw(&item.text),
+                };
+                (item.tag, formula)
+            })
+            .collect();
+        if self.active == Some(i) {
+            self.redraw = true;
+        }
+    }
+
+    /// The extension host rendered the external items of reader view `gen`.
+    pub fn on_reader_external(
+        &mut self,
+        gen: u64,
+        id: SessionId,
+        rendered: Vec<(External, Option<Rendering>)>,
+    ) {
+        if let Some(view) = self.reader_mut(gen, id) {
+            for (work, rendering) in rendered {
+                view.set_external(work.answer, &work.slot, &work.source, rendering);
+            }
+            self.redraw = true;
+        }
     }
 
     /// The render worker is done with list `seq` of session `id` on `host`:
@@ -1346,6 +1410,75 @@ mod tests {
         app.set_host_features(&host, &[]);
         app.on_incoming_from(&host, latex(3, &["d"]));
         assert_eq!(renders(&mut app), [(3, vec!["d".to_owned()])]);
+    }
+
+    /// A registry with an external extension `keys` (tag lens `keys`).
+    fn with_keys(app: &mut App) {
+        use crate::tui::extensions::{manifest::Program, Extension, Lens, Source};
+        let keys = Extension {
+            name: "keys".into(),
+            description: String::new(),
+            enabled: true,
+            lenses: vec![Lens {
+                name: "keys".into(),
+                kind: crate::proto::LensKind::Tag,
+                instruction: "use <keys>".into(),
+            }],
+            actions: vec![],
+            source: Source::External(Program {
+                dir: "/x".into(),
+                command: vec!["prog".into()],
+            }),
+        };
+        app.extensions = Registry::new(&Default::default(), true, vec![keys], &mut Vec::new());
+    }
+
+    #[test]
+    fn external_items_go_to_the_host_and_their_renderings_to_the_pane() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        with_keys(&mut app);
+        let (id, host) = (app.sessions[0].id, app.sessions[0].host.clone());
+        app.set_host_features(&host, &["lens".to_owned()]);
+        let item = |tag: &str, text: &str| LensItem {
+            tag: tag.into(),
+            text: text.into(),
+        };
+        let items = vec![item("keys", "Ctrl+C"), item("latex", "x")];
+        let event = SessionEvent::Lens { seq: 3, items };
+        app.on_incoming_from(&host, Incoming::Event { id, event });
+        let external: Vec<(u64, Vec<LensItem>)> = app
+            .take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::RenderExternal { seq, items, .. } => Some((seq, items)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(external, [(3, vec![item("keys", "Ctrl+C")])]);
+        // A stale list's renderings are dropped; the current one's kept.
+        let rendered = |seq| {
+            let rendering = Some((Some("⌃C".to_owned()), None));
+            (seq, vec![(item("keys", "Ctrl+C"), rendering)])
+        };
+        let (seq, items) = rendered(2);
+        app.on_external_rendered(&host, id, seq, items);
+        assert!(app.sessions[0].lens.is_empty());
+        let (seq, items) = rendered(3);
+        app.on_external_rendered(&host, id, seq, items);
+        let (tag, formula) = &app.sessions[0].lens[0];
+        assert_eq!(tag, "keys");
+        assert_eq!(formula.inline.as_deref(), Some("⌃C"));
+        // Without the extension, nothing goes to the host.
+        app.extensions = Registry::default();
+        let event = SessionEvent::Lens {
+            seq: 4,
+            items: vec![item("keys", "k")],
+        };
+        app.on_incoming_from(&host, Incoming::Event { id, event });
+        assert!(!app
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::RenderExternal { .. })));
     }
 
     #[test]

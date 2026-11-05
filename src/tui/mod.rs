@@ -506,12 +506,30 @@ enum HostEvent {
         seq: u64,
         formulas: Vec<latex::Formula>,
     },
-    /// The render worker finished the answers of a reader view.
+    /// The render worker finished the answers of a reader view; the
+    /// external lenses' items and blocks in them are still to render.
     AnswersRendered {
         gen: u64,
         id: crate::proto::SessionId,
         answers: Vec<reader::RenderedAnswer>,
+        external: Vec<reader::External>,
     },
+    /// The extension host rendered a session's external lens items (list
+    /// `seq`), in order; `None` stays raw.
+    ExternalRendered {
+        host: String,
+        id: crate::proto::SessionId,
+        seq: u64,
+        items: Vec<(crate::proto::LensItem, Option<extensions::protocol::Rendering>)>,
+    },
+    /// The extension host rendered the external items of reader view `gen`.
+    ReaderExternalRendered {
+        gen: u64,
+        id: crate::proto::SessionId,
+        rendered: Vec<(reader::External, Option<extensions::protocol::Rendering>)>,
+    },
+    /// A notice from the extension host (an extension was disabled).
+    ExtensionNotice(String),
 }
 
 // ── Formula rendering ─────────────────────────────────────────────────────────
@@ -530,9 +548,11 @@ struct AnswersJob {
     gen: u64,
     id: crate::proto::SessionId,
     answers: Vec<crate::proto::Answer>,
-    /// The enabled tag and fence lenses (the registry's, when sent).
+    /// The enabled tag and fence lenses (the registry's, when sent), and
+    /// which of them are external.
     tags: Vec<String>,
     fences: Vec<String>,
+    external: Vec<String>,
 }
 
 /// Work for the `latex-render` thread, one job at a time.
@@ -544,7 +564,7 @@ enum RenderJob {
 /// What the `latex-render` thread made of a job.
 enum Rendered {
     Latex(LatexJob, Vec<latex::Formula>),
-    Answers(AnswersJob, Vec<reader::RenderedAnswer>),
+    Answers(AnswersJob, Vec<reader::RenderedAnswer>, Vec<reader::External>),
 }
 
 /// Start the `latex-render` thread: it renders each job (its formulas from
@@ -572,13 +592,10 @@ fn spawn_latex_worker(
                         done(Rendered::Latex(job, formulas));
                     }
                     RenderJob::Answers(job) => {
-                        let answers = render_lens_answers(
-                            &job.answers,
-                            (&job.tags, &job.fences),
-                            &mut cache,
-                            &running,
-                        );
-                        done(Rendered::Answers(job, answers));
+                        let lenses = (&job.tags[..], &job.fences[..], &job.external[..]);
+                        let (answers, work) =
+                            render_lens_answers(&job.answers, lenses, &mut cache, &running);
+                        done(Rendered::Answers(job, answers, work));
                     }
                 }
             }
@@ -595,35 +612,60 @@ fn render_answers(
     running: &Arc<AtomicUsize>,
 ) -> Vec<reader::RenderedAnswer> {
     let tags = ["latex".to_owned()];
-    render_lens_answers(answers, (&tags, &[]), cache, running)
+    render_lens_answers(answers, (&tags, &[], &[]), cache, running).0
 }
 
 /// `answers` as the reader shows them: each a markdown document whose
 /// items of tag lenses `lenses.0` (the first `MAX_FORMULAS`) and blocks of
 /// fence lenses `lenses.1` are rendered through the guard and its cache,
-/// like the pane's. An external lens's are left raw here: the extension
-/// host renders them.
+/// like the pane's. The external lenses (`lenses.2`) are left raw here and
+/// listed: the extension host renders them.
 fn render_lens_answers(
     answers: &[crate::proto::Answer],
-    lenses: (&[String], &[String]),
+    lenses: (&[String], &[String], &[String]),
     cache: &mut RenderCache,
     running: &Arc<AtomicUsize>,
-) -> Vec<reader::RenderedAnswer> {
+) -> (Vec<reader::RenderedAnswer>, Vec<reader::External>) {
+    use crate::proto::LensKind;
     let tags: Vec<&str> = lenses.0.iter().map(String::as_str).collect();
     let fences: Vec<&str> = lenses.1.iter().map(String::as_str).collect();
-    answers
+    let external = |lens: &str| lenses.2.iter().any(|e| e == lens);
+    let mut work = Vec::new();
+    let rendered = answers
         .iter()
-        .map(|answer| {
+        .enumerate()
+        .map(|(a, answer)| {
             let prepared = reader::doc::prepare_lenses(&answer.text, &tags, &fences);
-            let formulas = prepared
-                .tags
-                .iter()
-                .zip(&prepared.lenses)
-                .map(|(tag, lens)| cache.render(lens, &tag.src, running))
-                .collect();
+            let mut formulas = Vec::with_capacity(prepared.tags.len());
+            for (i, (tag, lens)) in prepared.tags.iter().zip(&prepared.lenses).enumerate() {
+                if external(lens) {
+                    work.push(reader::External {
+                        answer: a,
+                        slot: reader::Slot::Formula(i),
+                        lens: lens.clone(),
+                        kind: LensKind::Tag,
+                        source: tag.src.clone(),
+                    });
+                    formulas.push(latex::Formula::raw(&tag.src));
+                } else {
+                    formulas.push(cache.render(lens, &tag.src, running));
+                }
+            }
             let mut doc = reader::doc::parse(&prepared);
+            let mut n = 0;
             doc.each_lens(&mut |lens, src, rows| {
-                *rows = cache.render(lens, &src, running).block.map(|b| b.rows);
+                if external(lens) {
+                    work.push(reader::External {
+                        answer: a,
+                        slot: reader::Slot::Fence(n),
+                        lens: lens.to_owned(),
+                        kind: LensKind::Fence,
+                        source: src,
+                    });
+                } else {
+                    *rows = cache.render(lens, &src, running).block.map(|b| b.rows);
+                }
+                n += 1;
             });
             reader::RenderedAnswer {
                 prompt: answer.prompt.clone(),
@@ -631,7 +673,8 @@ fn render_lens_answers(
                 formulas,
             }
         })
-        .collect()
+        .collect();
+    (rendered, work)
 }
 
 /// Renderings by lens and source, the [`CACHE_SIZE`] most recently used:
@@ -746,6 +789,31 @@ fn guarded<T: Send + 'static>(
     }
 }
 
+/// Render each of `requests` (lens, kind, source) with the extension host,
+/// concurrently; the renderings in order (`None`: stays raw).
+fn render_all(
+    host: &extensions::host::ExtensionHost,
+    requests: Vec<(String, crate::proto::LensKind, String)>,
+) -> impl std::future::Future<Output = Vec<Option<extensions::protocol::Rendering>>> + Send + 'static
+{
+    let futures: Vec<_> = requests
+        .iter()
+        .map(|(lens, kind, source)| host.render(lens, *kind, source))
+        .collect();
+    async move {
+        let mut set = tokio::task::JoinSet::new();
+        let count = futures.len();
+        for (i, f) in futures.into_iter().enumerate() {
+            set.spawn(async move { (i, f.await) });
+        }
+        let mut out = vec![None; count];
+        while let Some(Ok((i, rendering))) = set.join_next().await {
+            out[i] = rendering;
+        }
+        out
+    }
+}
+
 // ── Event loop ────────────────────────────────────────────────────────────────
 
 /// Resolves when the terminal's session is hung up or the process is asked to
@@ -854,15 +922,28 @@ async fn event_loop(
                 seq: job.seq,
                 formulas,
             },
-            Rendered::Answers(job, answers) => HostEvent::AnswersRendered {
+            Rendered::Answers(job, answers, external) => HostEvent::AnswersRendered {
                 gen: job.gen,
                 id: job.id,
                 answers,
+                external,
             },
         };
         let _ = rendered.blocking_send(event);
     })
     .ok();
+
+    // External extensions' programs: started on first use, stopped on quit.
+    let (notice_tx, mut notice_rx) = mpsc::unbounded_channel();
+    let ext_host = extensions::host::ExtensionHost::new(&app.extensions, notice_tx);
+    let notices = ev_tx.clone();
+    tokio::spawn(async move {
+        while let Some(text) = notice_rx.recv().await {
+            if notices.send(HostEvent::ExtensionNotice(text)).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(ReplyTo, io::Result<Msg>)>();
     let mut events = EventStream::new();
@@ -880,9 +961,11 @@ async fn event_loop(
 
     loop {
         for effect in app.take_effects() {
-            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, latex_jobs.as_ref());
+            let workers = (latex_jobs.as_ref(), &ext_host);
+            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, workers);
         }
         if app.quit {
+            ext_host.shutdown().await;
             return Ok(std::mem::take(&mut app.exit));
         }
         let wait = FRAME.saturating_sub(last_draw.elapsed());
@@ -1029,9 +1112,29 @@ async fn event_loop(
                 Some(HostEvent::LatexRendered { host, id, seq, formulas }) => {
                     app.on_latex_rendered(&host, id, seq, formulas);
                 }
-                Some(HostEvent::AnswersRendered { gen, id, answers }) => {
+                Some(HostEvent::AnswersRendered { gen, id, answers, external }) => {
                     app.on_answers_rendered(gen, id, answers);
+                    if !external.is_empty() {
+                        let requests = external
+                            .iter()
+                            .map(|w| (w.lens.clone(), w.kind, w.source.clone()))
+                            .collect();
+                        let all = render_all(&ext_host, requests);
+                        let tx = ev_tx.clone();
+                        tokio::spawn(async move {
+                            let rendered = external.into_iter().zip(all.await).collect();
+                            let event = HostEvent::ReaderExternalRendered { gen, id, rendered };
+                            let _ = tx.send(event).await;
+                        });
+                    }
                 }
+                Some(HostEvent::ExternalRendered { host, id, seq, items }) => {
+                    app.on_external_rendered(&host, id, seq, items);
+                }
+                Some(HostEvent::ReaderExternalRendered { gen, id, rendered }) => {
+                    app.on_reader_external(gen, id, rendered);
+                }
+                Some(HostEvent::ExtensionNotice(text)) => app.notify(text),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -1068,7 +1171,10 @@ fn run_effect(
     conns: &mut Connections,
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
-    latex_jobs: Option<&std::sync::mpsc::Sender<RenderJob>>,
+    (latex_jobs, ext_host): (
+        Option<&std::sync::mpsc::Sender<RenderJob>>,
+        &extensions::host::ExtensionHost,
+    ),
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -1127,15 +1233,47 @@ fn run_effect(
                 let _ = jobs.send(RenderJob::Latex(LatexJob { host, id, seq, srcs }));
             }
         }
+        Effect::RenderExternal {
+            host,
+            id,
+            seq,
+            items,
+        } => {
+            let requests = items
+                .iter()
+                .map(|i| (i.tag.clone(), crate::proto::LensKind::Tag, i.text.clone()))
+                .collect();
+            let all = render_all(ext_host, requests);
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let items = items.into_iter().zip(all.await).collect();
+                let _ = tx
+                    .send(HostEvent::ExternalRendered {
+                        host,
+                        id,
+                        seq,
+                        items,
+                    })
+                    .await;
+            });
+        }
         Effect::RenderAnswers { gen, id, answers } => {
-            let tags = app.extensions.tag_lenses().iter().map(|t| t.to_string()).collect();
-            let fences = app.extensions.fence_lenses().iter().map(|f| f.to_string()).collect();
+            let names = |list: Vec<&str>| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+            let tags = names(app.extensions.tag_lenses());
+            let fences = names(app.extensions.fence_lenses());
+            let external = tags
+                .iter()
+                .chain(&fences)
+                .filter(|l| app.extensions.external_lens(l).is_some())
+                .cloned()
+                .collect();
             let job = RenderJob::Answers(AnswersJob {
                 gen,
                 id,
                 answers,
                 tags,
                 fences,
+                external,
             });
             if latex_jobs.is_none_or(|jobs| jobs.send(job).is_err()) {
                 app.on_answers_failed(gen, id, "the render thread is not running");
@@ -1600,7 +1738,7 @@ mod tests {
         use reader::layout::layout;
         let (tx, rx) = std::sync::mpsc::channel();
         let jobs = spawn_latex_worker(move |done| {
-            if let Rendered::Answers(job, answers) = done {
+            if let Rendered::Answers(job, answers, _) = done {
                 let _ = tx.send((job.gen, answers));
             }
         })
@@ -1636,6 +1774,7 @@ mod tests {
             answers,
             tags: vec!["latex".into()],
             fences: vec![],
+            external: vec![],
         };
         jobs.send(RenderJob::Answers(job)).unwrap();
         let (gen, rendered) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
@@ -1700,8 +1839,8 @@ mod tests {
         use crate::proto::Answer;
         let (tx, rx) = std::sync::mpsc::channel();
         let jobs = spawn_latex_worker(move |done| {
-            if let Rendered::Answers(_, answers) = done {
-                let _ = tx.send(answers);
+            if let Rendered::Answers(_, answers, external) = done {
+                let _ = tx.send((answers, external));
             }
         })
         .unwrap();
@@ -1716,12 +1855,22 @@ mod tests {
             }],
             tags: vec!["latex".into(), "keys".into()],
             fences: vec!["mermaid".into()],
+            external: vec!["keys".into()],
         };
         jobs.send(RenderJob::Answers(job)).unwrap();
-        let answers = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (answers, external) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         let answer = &answers[0];
-        // The external lens's item stays raw; latex is rendered.
+        // The external lens's item stays raw, listed for the host; latex is
+        // rendered.
         assert_eq!(answer.formulas[0], latex::Formula::raw("Ctrl+C"));
+        let want = reader::External {
+            answer: 0,
+            slot: reader::Slot::Formula(0),
+            lens: "keys".into(),
+            kind: crate::proto::LensKind::Tag,
+            source: "Ctrl+C".into(),
+        };
+        assert_eq!(external, [want]);
         assert_eq!(answer.formulas[1].inline.as_deref(), Some("x²"));
         // The fence lens is a lens block; another fence stays code.
         let lens: Vec<&reader::doc::Block> = answer

@@ -153,6 +153,14 @@ pub enum Effect {
         seq: u64,
         srcs: Vec<String>,
     },
+    /// Render session `id`'s external tag-lens items of list `seq` with the
+    /// extension host; they come back through [`App::on_external_rendered`].
+    RenderExternal {
+        host: String,
+        id: SessionId,
+        seq: u64,
+        items: Vec<crate::proto::LensItem>,
+    },
     /// Render the answers of session `id` for the reader view opened under
     /// `gen`, on the `latex-render` worker; they come back through
     /// [`App::on_answers_rendered`].

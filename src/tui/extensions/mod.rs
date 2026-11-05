@@ -10,7 +10,9 @@
 //! draws, the context a spawn carries ([`Registry::session_extensions`]) and
 //! the leader's actions.
 
+pub mod host;
 pub mod manifest;
+pub mod protocol;
 
 use std::collections::BTreeMap;
 
@@ -42,6 +44,27 @@ pub struct ActionDecl {
     pub id: String,
     /// Ask for a line of input first, with this prompt.
     pub input: Option<String>,
+}
+
+/// What an action gives (built-in and external actions share it).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActionResult {
+    /// Markdown shown in a reader-style modal, its lenses rendered.
+    Document { title: String, markdown: String },
+    /// A status-line notice.
+    Notice { text: String },
+    /// Text pasted into the active claude session (never followed by Enter).
+    Paste { text: String },
+    /// A list to pick from; each item carries its own result (not a list).
+    List { title: String, items: Vec<ListItem> },
+}
+
+/// One entry of [`ActionResult::List`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListItem {
+    pub label: String,
+    pub detail: Option<String>,
+    pub result: ActionResult,
 }
 
 /// Where an extension's code is.

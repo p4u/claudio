@@ -18,8 +18,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
+use super::extensions::protocol::Rendering;
 use super::formulas;
-use super::latex::Formula;
+use super::latex::{Formula, Rendered};
 use super::sessions::SessionView;
 use crate::proto::SessionId;
 use layout::{Line, Seg};
@@ -41,6 +42,26 @@ pub struct RenderedAnswer {
     pub doc: doc::Doc,
     /// The formulas the doc's indices point at.
     pub formulas: Vec<Formula>,
+}
+
+/// Where an external lens's rendering goes in an answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Slot {
+    /// Formula `i` (a tag lens's item).
+    Formula(usize),
+    /// The `n`th fence-lens block, in `Doc::each_lens` order.
+    Fence(usize),
+}
+
+/// An external lens's item or block in the answers: the extension host
+/// renders it after the render worker, into `slot` of answer `answer`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct External {
+    pub answer: usize,
+    pub slot: Slot,
+    pub lens: String,
+    pub kind: crate::proto::LensKind,
+    pub source: String,
 }
 
 /// What the view has to show.
@@ -97,6 +118,52 @@ impl ReaderView {
         if !self.list {
             self.scroll = 0;
         }
+    }
+
+    /// Put an external lens's rendering (from the extension host) at
+    /// `slot` of answer `answer`, whose source is `src`: a formula's
+    /// renderings, or a fence block's rows. `None` leaves it as it is.
+    pub fn set_external(
+        &mut self,
+        answer: usize,
+        slot: &Slot,
+        src: &str,
+        rendering: Option<Rendering>,
+    ) {
+        let Some((inline, block)) = rendering else {
+            return;
+        };
+        let Content::Ready(answers) = &mut self.content else {
+            return;
+        };
+        let Some(a) = answers.get_mut(answer) else {
+            return;
+        };
+        match slot {
+            Slot::Formula(i) => {
+                if let Some(f) = a.formulas.get_mut(*i) {
+                    let text = None;
+                    *f = Formula::new(
+                        src,
+                        Rendered {
+                            inline,
+                            block,
+                            text,
+                        },
+                    );
+                }
+            }
+            Slot::Fence(n) => {
+                let mut k = 0;
+                a.doc.each_lens(&mut |_, _, rows| {
+                    if k == *n {
+                        *rows = block.as_ref().map(|b| b.rows.clone());
+                    }
+                    k += 1;
+                });
+            }
+        }
+        self.layouts.borrow_mut().1.remove(&answer);
     }
 
     /// Show why there are no answers.
@@ -272,7 +339,6 @@ fn list_lines(session: &SessionView) -> Vec<Line> {
 mod tests {
     use super::*;
     use crate::proto::SessionKind;
-    use crate::tui::latex::Rendered;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -408,5 +474,31 @@ mod tests {
         view.on_key(&key(KeyCode::Tab));
         assert_eq!(texts(&view.body(Some(&v), 40)), ["text"]);
         assert_eq!(view.scroll(), 0);
+    }
+
+    #[test]
+    fn external_renderings_fill_their_slots() {
+        use crate::tui::typeset::Laid;
+        let text = "<keys>k</keys>\n\n```abc\nsrc\n```\n";
+        let prepared = doc::prepare_lenses(text, &["keys"], &["abc"]);
+        let answer = RenderedAnswer {
+            prompt: "p".into(),
+            doc: doc::parse(&prepared),
+            formulas: vec![Formula::raw("k")],
+        };
+        let mut view = ReaderView::new(uuid::Uuid::nil(), "local", 1);
+        view.set_answers(vec![answer]);
+        let before: Vec<String> = view.body(None, 40).iter().map(|l| l.text()).collect();
+        // Alone in its paragraph: display style, two columns in.
+        assert_eq!(before, ["  k", "", "  src"]);
+        let block = Laid {
+            rows: vec!["[abc]".into()],
+            baseline: 0,
+        };
+        view.set_external(0, &Slot::Formula(0), "k", Some((Some("⌨k".into()), None)));
+        view.set_external(0, &Slot::Fence(0), "src", Some((None, Some(block))));
+        view.set_external(0, &Slot::Fence(5), "x", None);
+        let after: Vec<String> = view.body(None, 40).iter().map(|l| l.text()).collect();
+        assert_eq!(after, ["  ⌨k", "", "  [abc]"]);
     }
 }
