@@ -368,6 +368,50 @@ the proxy directly. Quota signals come from `/me/stats` (`blocked_until`).
 - JSON control frames tolerate minor skew, so not every version bump is an
   upgrade.
 
+### 2.7 LaTeX formulas
+
+Spec: `docs/specs/2026-11-04-latex-render-design.md`.
+
+- **Instruction.** With `[claude] latex = true` (read at daemon start, per
+  host), `hooks::settings` gives `SessionStart` a second command,
+  `<claudio> __context latex`. It prints one `hookSpecificOutput` line whose
+  `additionalContext` asks claude to wrap math in `<latex>…</latex>`. This is
+  context, not the system prompt, so the session stays a plain interactive
+  one. The matcher `*` re-injects it after `/clear`, a resume and a compact.
+- **Extraction.** `TranscriptCursor` keeps the conversation's last 64
+  formulas. They come from the `text` blocks (or string `content`) of
+  non-sidechain assistant records, outside code fences and inline code. Each
+  is sanitized (no `Cc` but `\n`/`\t`, no `Cf`, private use or
+  noncharacters, no orphan combining marks) and capped at 2048 bytes.
+  Extraction runs whatever the setting says.
+- **Event.** After a refresh that changed the list, `MetaRefresher` sends
+  `SessionEvent::Latex { seq, formulas }`, always the whole list. `seq`
+  grows with every change for the session's whole life; a new conversation sends an empty list under the next `seq`. The
+  last list is replayed to a client right after its `Attached` + snapshot,
+  since it is not broadcast again. A client keeps only a list newer than its
+  own, so a replay and a broadcast may cross. It resets on `ClaudeSession`
+  and `ClaudeSessionCleared`. Old clients decode the event as `Unknown`.
+- **Rendering.** `App` never renders: a newer list becomes
+  `Effect::RenderLatex`. The `latex-render` thread renders each uncached
+  source (LRU cache, 1024 entries) on a scratch thread with a 32 MiB stack.
+  A pre-check turns away deep or token-heavy input first (brace depth 32;
+  256 `\commands`, `/` and bareword `(`). The worker then waits 150 ms. A
+  render over budget or one that panics is shown raw. An over-budget thread
+  is abandoned, and while two still run, new sources stay raw and uncached.
+  The TUI's panic hook ignores panics on scratch threads (`QUIET_PANIC`), so
+  a caught renderer panic never restores the terminal. Results come back as
+  `HostEvent::LatexRendered` and are kept only for the `seq` held.
+- **Pane.** `latex::overlay` runs after `Screen::render`. It locates each
+  `<latex>…</latex>` on the visible rows: one row, or up to 8 when the tag
+  is alone on its first row and continues on indented rows. It matches the
+  tag to the newest formula by key: strict (backslash escapes undone,
+  whitespace dropped), then loose (also no `*_~` and backticks), then
+  without HTML-looking runs. It rebuilds the row cell by cell with the
+  one-line rendering. A row that would not fit stays raw, no row moves, and
+  the mirror (selection, copy) is untouched.
+- **Popup.** `Alt+u` (`Modal::Formulas`, read-only) shows the list in 2D
+  (term-maths), each formula above its source.
+
 ## 3. UX
 
 ### 3.1 Layout

@@ -118,6 +118,11 @@ daemons coexist.
   turns) off the actor task: on hooks (tool-use bursts share one refresh)
   and every 10 s while a client is attached; one refresh runs at a time. The
   transcript is read incrementally (`claude::projects::TranscriptCursor`).
+  The refresh also sends the conversation's `<latex>` formulas as
+  `SessionEvent::Latex { seq, formulas }`: the whole list, only when it
+  changed (`seq` + 1, for the session's whole life; a new conversation sends an empty list under the next `seq`). The last list is
+  replayed to a client right after its `Attached` + snapshot. `command()`
+  adds the `__context latex` SessionStart hook with `[claude] latex`.
 - `git_status.rs` — `git status --porcelain=v2 --branch` for the status
   bar's `⎇` segment: 1 s deadline, capped output, same scrubbed env as
   `git.rs`.
@@ -152,7 +157,11 @@ is idle (checked every 2 min).
 - `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
   `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
   notifications (`ESC ] 9 ; … BEL`) for background sessions that need
-  attention.
+  attention. Runs the `latex-render` worker thread (`Effect::RenderLatex` →
+  `HostEvent::LatexRendered`). It renders each formula on a scratch thread
+  (32 MiB stack) within a 150 ms budget, at most 2 abandoned at a time, and
+  caches by source (LRU 1024). Its panic hook stays silent for panics on
+  threads flagged `QUIET_PANIC`.
 - `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
   state transitions and returns `Effect` values. No I/O here; all I/O is in
   `mod.rs`. `Mode::Manager` or `Mode::Plain`.
@@ -165,17 +174,24 @@ is idle (checked every 2 min).
 - `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
   machine, and its `App` glue.
 - `stats_view.rs` — the multi-page proxy stats popup (Alt+s).
+- `latex.rs` — `<latex>` formulas, pure: `Formula` (source, one-line and 2D
+  renderings, match keys), the `too_complex` pre-check, `render` (term-maths
+  plus a one-line walk of the rust-latex-parser tree), and `overlay`. The
+  overlay swaps matched on-screen tags for their rendering in the pane's
+  buffer, cell by cell, and moves no row.
+- `formulas.rs` — the formulas popup (Alt+u): view state, keys and lines;
+  drawn by `ui/formulas.rs`.
 - `confirm.rs` — the generic confirm prompt (kill, reset, claude update).
 - `claude_update.rs` — local/remote claude version checks and updates.
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
-  `Keymap::build_plain` keeps only Alt+h/s/l/e; the session is killed when
+  `Keymap::build_plain` keeps only Alt+h/s/l/e/u; the session is killed when
   the UI exits, and the UI exits with claude.
 - `connections.rs` — local + SSH connections, reconnect backoff.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
   ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
-  `stats.rs`, `git.rs`, `confirm.rs`.
+  `stats.rs`, `git.rs`, `confirm.rs`, `formulas.rs`.
 - `fmt.rs` — shared text and number formatting.
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
@@ -232,7 +248,12 @@ is idle (checked every 2 min).
 - `projects.rs` — scan `~/.claude/projects/` for existing sessions (feeds the
   wizard's resume list).
 - `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
-  to the daemon socket.
+  to the daemon socket. Also `__context latex`, the SessionStart hook that asks
+  claude to wrap math in `<latex>` tags (`[claude] latex`); it prints one
+  constant JSON line and never touches the socket.
+- `latex.rs` — `extract_latex` (the formulas of an assistant text, code
+  excluded) and `sanitize`, the character filter every formula goes through
+  in the daemon and again in the client.
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
 
@@ -275,6 +296,11 @@ is idle (checked every 2 min).
 - **`app.rs` is pure; I/O is only in `tui/mod.rs`.** `App::update` takes
   events and returns `Effect` values. `mod.rs` drives the effects. Don't add
   I/O to `app.rs`.
+- **Formulas are never rendered on the UI thread.** On hostile input inside
+  the 2048-byte cap, rust-latex-parser can take a minute or overflow a
+  2 MiB stack. Call `latex::render` only through `render_formula` in
+  `tui/mod.rs` (pre-check, scratch thread, budget, abandon cap), never from
+  `App`, a draw or a test thread.
 
 ### Print-mode pipeline (`-p`)
 

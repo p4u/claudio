@@ -101,7 +101,7 @@ claudio                                         # new sessions now use the proxy
 claudio --plain [--proxy NAME | --no-proxy] [--first-party] [claude args…]
 ```
 
-One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only four keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart. Everything else, and every argument, goes to claude.
+One full-screen claude session with the proxy configured: no tabs, no status bar, no saved state. It feels like plain `claude`, and exits when claude does, with claude's exit status. Only five keys are claudio's: `Alt+h` help, `Alt+s` proxy stats, `Alt+l` git history, `Alt+e` restart, `Alt+u` formulas. Everything else, and every argument, goes to claude.
 
 ### Everyday commands
 
@@ -196,6 +196,14 @@ A multi-page popup for the session's claude-proxy profile:
 
 `←`/`→` or `1`–`5` switch pages, `w` changes the time window, and `r` refreshes. `n` asks the proxy to move the session to its next subscription (after a confirmation); the switch takes effect on the next message and rebuilds the prompt cache.
 
+### Formulas (`Alt+u`)
+
+With `latex = true` under `[claude]` in `config.toml`, each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
+
+In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such as `E = mc²` or `x = (-b ± √(b² - 4ac))/(2a)`. Nothing else on the screen moves, and selecting still copies the original text. A formula claudio cannot render, or does not recognise on screen, stays as written. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
+
+`Alt+u` opens the session's last 64 formulas, oldest first, each drawn in 2D above its LaTeX source. `↑`/`↓`, `PgUp`/`PgDn` and `g`/`G` scroll; `Esc` closes. In a terminal tab, `Alt+u` shadows readline's upcase-word.
+
 ### Keeping claude up to date
 
 Once a day claudio compares your `claude --version` with the latest release on your update channel, and asks before running `claude update`. When an SSH host connects, its claude is compared with yours. If it is older, claudio offers to update it; if it is missing, claudio offers to install it with the official installer. Either way it asks first. Prompts offer `[y] update`, `[n] not now` and `[s] skip this version`. Running sessions keep their binary; new sessions use the updated one.
@@ -220,6 +228,7 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+g` | Overview of all sessions |
 | `Alt+s` | Proxy stats |
 | `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
+| `Alt+u` | The session's formulas, rendered (see [Formulas](#formulas-altu)) |
 | `Alt+h` | Help |
 | `Alt+.` | In the wizard: show or hide dot-directories |
 | `Alt+q` | Quit the UI (sessions keep running) |
@@ -267,12 +276,15 @@ check = true                    # check for new claudio releases
 allow_skip_permissions = true   # start claude with --allow-dangerously-skip-permissions
 update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
 remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
+latex = false                   # ask claude to write math in <latex> tags, rendered in the pane
+                                # (this host's sessions; `claudio daemon restart` after a change)
 
 [keys]                          # rebind any manager key
 new_session = "alt+n"
 terminal    = "alt+c"
 git_log     = "alt+l"
 reset       = "alt+e"
+formulas    = "alt+u"
 ```
 
 `CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.
