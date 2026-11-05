@@ -22,8 +22,6 @@ mod selection;
 mod sessions;
 mod state;
 mod stats_view;
-// Nothing calls the engine until `latex::render` does (the next task).
-#[allow(dead_code)]
 mod typeset;
 
 /// `recent` without the local directories that no longer exist, so the
@@ -1375,7 +1373,8 @@ mod tests {
             let took = started.elapsed();
             let head: String = src.chars().take(16).collect();
             assert!(took < 2 * RENDER_BUDGET, "{took:?} for {head:?}…");
-            for text in formula.inline.iter().chain(formula.block.iter().flatten()) {
+            let laid = formula.block.iter().chain(&formula.text);
+            for text in formula.inline.iter().chain(laid.flat_map(|l| &l.rows)) {
                 assert_eq!(*text, crate::claude::latex::sanitize(text), "{head:?}");
                 assert!(!text.contains(['\u{1b}', '\u{9b}', '\u{202e}', '\u{200b}']));
             }

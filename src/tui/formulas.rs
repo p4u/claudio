@@ -109,7 +109,7 @@ pub fn lines(v: &SessionView) -> Vec<Line> {
         let shown = v.latex.iter().find(|f| f.src == *src);
         match shown.map(|f| (&f.block, &f.inline)) {
             Some((Some(block), _)) => {
-                lines.extend(block.iter().cloned().map(Line::Formula));
+                lines.extend(block.rows.iter().cloned().map(Line::Formula));
             }
             Some((None, Some(inline))) => lines.push(Line::Formula(inline.clone())),
             _ => lines.push(Line::Formula(source.clone())),
@@ -123,7 +123,8 @@ pub fn lines(v: &SessionView) -> Vec<Line> {
 mod tests {
     use super::*;
     use crate::proto::SessionKind;
-    use crate::tui::latex::Formula;
+    use crate::tui::latex::{Formula, Rendered};
+    use crate::tui::typeset::Laid;
     use crossterm::event::KeyEvent;
 
     fn view_with(srcs: &[&str], rendered: Vec<Formula>) -> SessionView {
@@ -141,11 +142,22 @@ mod tests {
 
     #[test]
     fn each_formula_shows_its_rendering_then_its_source() {
+        let block = Laid {
+            rows: vec![" a".into(), "───".into(), " b".into()],
+            baseline: 1,
+        };
         let frac = Formula::new(
             "\\frac{a}{b}",
-            (None, Some(vec![" a".into(), "───".into(), " b".into()])),
+            Rendered {
+                block: Some(block),
+                ..Rendered::default()
+            },
         );
-        let one = Formula::new("x^2", (Some("x²".into()), None));
+        let inline = Rendered {
+            inline: Some("x²".into()),
+            ..Rendered::default()
+        };
+        let one = Formula::new("x^2", inline);
         let v = view_with(&["\\frac{a}{b}", "x^2", "y\n+ 1"], vec![frac, one]);
         assert_eq!(
             lines(&v),

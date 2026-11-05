@@ -60,8 +60,9 @@ pub fn draw_formulas(frame: &mut Frame, app: &App, view: &FormulasView) {
 #[cfg(test)]
 mod tests {
     use crate::tui::app::{App, Modal};
-    use crate::tui::latex::Formula;
+    use crate::tui::latex::{Formula, Rendered};
     use crate::tui::test_support::{alt, app_with, info};
+    use crate::tui::typeset::Laid;
     use ratatui::{backend::TestBackend, Terminal};
 
     /// The screen's rows after drawing `app`.
@@ -79,10 +80,15 @@ mod tests {
         let mut app = app_with(&[info(Some(1), None)]);
         let v = &mut app.sessions[0];
         v.latex_srcs = (0..20).map(|i| format!("x_{i}")).collect();
-        v.latex = vec![Formula::new(
-            "x_19",
-            (Some("x₁₉".into()), Some(vec!["x₁₉".into()])),
-        )];
+        let rendered = Rendered {
+            inline: Some("x₁₉".into()),
+            block: Some(Laid {
+                rows: vec!["x₁₉".into()],
+                baseline: 0,
+            }),
+            text: None,
+        };
+        v.latex = vec![Formula::new("x_19", rendered)];
         app.on_terminal(alt('u'));
         assert!(matches!(app.modal, Some(Modal::Formulas(_))));
         let text = screen(&app).join("\n");

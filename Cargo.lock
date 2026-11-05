@@ -263,7 +263,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "term-maths",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2380,17 +2379,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "term-maths"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ccccf7b1e429ef47ef4a82726346feefdb67169e6a9d8d97fc6d3707640a05"
-dependencies = [
- "rust-latex-parser",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]

@@ -880,7 +880,10 @@ mod tests {
         )]);
         let v = &mut app.sessions[0];
         v.mirror.feed(b"energy: <latex>E = mc^2</latex>.");
-        let rendered = (Some("E = mc\u{b2}".to_owned()), None);
+        let rendered = crate::tui::latex::Rendered {
+            inline: Some("E = mc\u{b2}".to_owned()),
+            ..Default::default()
+        };
         v.latex = vec![crate::tui::latex::Formula::new("E = mc^2", rendered)];
         let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
         term.draw(|f| draw(f, &app)).unwrap();

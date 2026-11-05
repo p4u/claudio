@@ -51,10 +51,9 @@ libc = "0.2"
 toml = "0.9"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-# `<latex>` formulas in the session pane, rendered as Unicode text. Pure Rust;
-# term-maths' ratatui and crossterm features stay off. Pinned exactly: the
-# render guard's limits (tui/latex.rs) were measured against these versions.
-term-maths = { version = "=1.0.0", default-features = false }
+# `<latex>` formulas, parsed for our own layout engine (tui/typeset). Pure
+# Rust. Pinned exactly: the render guard's limits (tui/latex.rs) were
+# measured against this version.
 rust-latex-parser = "=0.1.1"
 unicode-segmentation = "1"
 unicode-width = "0.2"

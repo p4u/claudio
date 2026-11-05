@@ -7,7 +7,11 @@
 //!
 //! - [`typeset`] — a parsed formula as rows, in display or text style.
 //! - [`rewrite_roots`] — `\sqrt[n]{x}` as the parser can read it.
+//! - [`environment`] — the rows of an `aligned`-like formula, which the
+//!   parser cannot read.
+//! - [`stacked`] — such rows, typeset one by one, as one block.
 //! - [`Laid`] — the result: rows and the row of the baseline.
+//! - [`walk::one_line`] — the one-line form when text style is taller.
 //!
 //! The rules (spec "Typeset reader view", §3 and Appendix A):
 //! - Display style only at the top of a display formula. Inside a script,
@@ -21,6 +25,7 @@
 //! - A run of spaces is one space (two for `\quad`), never at a box's ends.
 
 mod mathfont;
+pub mod walk;
 
 use rust_latex_parser::{AccentKind, EqNode, MatrixKind};
 use unicode_width::UnicodeWidthStr;
@@ -29,6 +34,24 @@ use unicode_width::UnicodeWidthStr;
 /// formula is not typeset at all (it can only grow from there).
 const MAX_COLS: usize = 512;
 const MAX_ROWS: usize = 40;
+
+/// The environments the parser reads; any other one it shows as source.
+const PARSED: [&str; 9] = [
+    "matrix",
+    "pmatrix",
+    "bmatrix",
+    "vmatrix",
+    "Bmatrix",
+    "Vmatrix",
+    "smallmatrix",
+    "cases",
+    "dcases",
+];
+/// The environments of rows a formula may be made of; the rows are laid
+/// out one by one.
+const ROWS: [&str; 7] = [
+    "aligned", "align", "align*", "gather", "gather*", "gathered", "array",
+];
 
 /// Big operators whose limits go above and below in display style; the
 /// others (integrals) keep them as scripts, as TeX does.
@@ -96,6 +119,160 @@ pub fn rewrite_roots(src: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// What [`environment`] makes of a formula's source.
+#[derive(Debug, PartialEq)]
+pub enum Environment {
+    /// No environment the parser cannot read.
+    None,
+    /// The whole formula is one environment of rows (`aligned`, `gather`,
+    /// `array`, …): its rows, `&` dropped, to be laid out one by one.
+    Rows(Vec<String>),
+    /// An environment the parser does not know, or one of rows inside a
+    /// larger formula: shown as its source.
+    Unknown,
+}
+
+/// Whether `src` holds an environment the parser cannot read, and the rows
+/// of one it can be laid out from (see [`Environment`]). Rows are split on
+/// `\\` outside braces and nested environments; an `array`'s column spec
+/// and a row's `[2pt]` spacing are dropped.
+pub fn environment(src: &str) -> Environment {
+    let src = src.trim();
+    let begins = |s: &str| -> Option<(String, usize)> {
+        let name = s.strip_prefix("\\begin{")?;
+        let end = name.find('}')?;
+        Some((name[..end].to_owned(), "\\begin{".len() + end + 1))
+    };
+    if let Some((name, open)) = begins(src).filter(|(n, _)| ROWS.contains(&n.as_str())) {
+        let close = format!("\\end{{{name}}}");
+        if let Some(body) = src.strip_suffix(close.as_str()).map(|s| &s[open..]) {
+            if !body.contains(&close) {
+                let body = match name.as_str() {
+                    "array" => skip_group(body),
+                    _ => body,
+                };
+                if body.contains("\\begin{") && unknown_inside(body) {
+                    return Environment::Unknown;
+                }
+                return Environment::Rows(split_rows(body));
+            }
+        }
+    }
+    if unknown_inside(src) {
+        Environment::Unknown
+    } else {
+        Environment::None
+    }
+}
+
+/// Whether `src` has a `\begin{…}` the parser does not read.
+fn unknown_inside(src: &str) -> bool {
+    src.match_indices("\\begin{").any(|(at, tag)| {
+        let name = &src[at + tag.len()..];
+        let name = &name[..name.find('}').unwrap_or(name.len())];
+        !PARSED.contains(&name)
+    })
+}
+
+/// `s` without its leading `{…}` group (an `array`'s column spec).
+fn skip_group(s: &str) -> &str {
+    let t = s.trim_start();
+    if !t.starts_with('{') {
+        return s;
+    }
+    let mut depth = 0usize;
+    for (i, c) in t.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &t[i + 1..];
+                }
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+/// The rows of an environment's body: split on `\\` outside braces and
+/// nested environments, each without its `&` there, trimmed; empty rows
+/// dropped.
+fn split_rows(body: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let (mut depth, mut nested) = (0usize, 0usize);
+    let mut rest = body;
+    while let Some(c) = rest.chars().next() {
+        if rest.starts_with("\\begin{") {
+            nested += 1;
+        } else if rest.starts_with("\\end{") {
+            nested = nested.saturating_sub(1);
+        }
+        let outside = depth == 0 && nested == 0;
+        if outside && rest.starts_with("\\\\") {
+            rows.push(std::mem::take(&mut row));
+            rest = &rest[2..];
+            // `\\[2pt]`: extra space after the row.
+            if let Some(end) = rest
+                .trim_start()
+                .strip_prefix('[')
+                .and_then(|t| t.find(']'))
+            {
+                let skipped = rest.len() - rest.trim_start().len();
+                rest = &rest[skipped + 1 + end + 1..];
+            }
+            continue;
+        }
+        if c == '\\' {
+            // A command (or an escaped character) is copied whole.
+            let len = rest[1..].chars().next().map_or(1, |next| {
+                1 + if next.is_ascii_alphabetic() {
+                    rest[1..]
+                        .chars()
+                        .take_while(char::is_ascii_alphabetic)
+                        .count()
+                } else {
+                    next.len_utf8()
+                }
+            });
+            row.push_str(&rest[..len]);
+            rest = &rest[len..];
+            continue;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if !(outside && c == '&') {
+            row.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    rows.push(row);
+    rows.into_iter()
+        .map(|r| r.trim().to_owned())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// `rows`, typeset one by one, as one block: one above the other,
+/// left-aligned, with the baseline at the middle row (the upper one of
+/// two). `None` when one of them is.
+pub fn stacked(rows: Vec<Option<Laid>>) -> Option<Laid> {
+    let rows: Vec<Laid> = rows.into_iter().collect::<Option<_>>()?;
+    if let [one] = rows.as_slice() {
+        return Some(one.clone());
+    }
+    let rows: Vec<String> = rows.into_iter().flat_map(|l| l.rows).collect();
+    (!rows.is_empty() && rows.len() <= MAX_ROWS).then(|| Laid {
+        baseline: (rows.len() - 1) / 2,
+        rows,
+    })
 }
 
 /// Where the `]` that closes a bracket ends `s` (the text after `[`): the
@@ -636,12 +813,12 @@ fn top_level(s: &str, pick: impl Fn(char) -> bool) -> bool {
     false
 }
 
-pub(super) fn superscript_char(c: char) -> Option<char> {
+fn superscript_char(c: char) -> Option<char> {
     let i = "0123456789+-=()abcdefghijklmnoprstuvwxyz".find(c)?;
     "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ".chars().nth(i)
 }
 
-pub(super) fn subscript_char(c: char) -> Option<char> {
+fn subscript_char(c: char) -> Option<char> {
     let i = "0123456789+-=()aehijklmnoprstuvx".find(c)?;
     "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ".chars().nth(i)
 }
@@ -1060,6 +1237,51 @@ mod tests {
     fn math_fonts_map_letters() {
         assert_eq!(display("\\mathbb{R}^n"), ["ℝⁿ"]);
         assert_eq!(display("\\mathbf{v} + \\mathcal{L}"), ["𝐯 + ℒ"]);
+    }
+
+    #[test]
+    fn environments_of_rows_are_split_and_unknown_ones_refused() {
+        let rows = |v: &[&str]| Environment::Rows(v.iter().map(|r| r.to_string()).collect());
+        assert_eq!(
+            environment("\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}"),
+            rows(&["a = b", "c = d"])
+        );
+        assert_eq!(
+            environment(" \\begin{array}{l|r} x & 1 \\\\[2pt] y & 2 \\\\ \\end{array} "),
+            rows(&["x  1", "y  2"])
+        );
+        // `&` and `\\` of a nested matrix stay with it.
+        assert_eq!(
+            environment("\\begin{gather} \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} \\\\ e \\end{gather}"),
+            rows(&["\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", "e"])
+        );
+        assert_eq!(environment("\\{a\\} \\\\ b"), Environment::None);
+        assert_eq!(
+            environment("\\begin{pmatrix} a \\end{pmatrix}"),
+            Environment::None
+        );
+        for unknown in [
+            "\\begin{tabular}{c} a \\end{tabular}",
+            "x = \\begin{aligned} a \\end{aligned}",
+            "\\begin{aligned} \\begin{CD} a \\end{CD} \\end{aligned}",
+        ] {
+            assert_eq!(environment(unknown), Environment::Unknown, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn rows_are_stacked_left_aligned() {
+        let laid = |rows: &[&str], baseline| Laid {
+            rows: rows.iter().map(|r| r.to_string()).collect(),
+            baseline,
+        };
+        let one = laid(&["a", "─", "b"], 1);
+        assert_eq!(stacked(vec![Some(one.clone())]), Some(one.clone()));
+        assert_eq!(
+            stacked(vec![Some(laid(&["x = 1"], 0)), Some(one.clone())]),
+            Some(laid(&["x = 1", "a", "─", "b"], 1))
+        );
+        assert_eq!(stacked(vec![Some(one), None]), None);
     }
 
     #[test]
