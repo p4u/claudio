@@ -120,9 +120,10 @@ daemons coexist.
   transcript is read incrementally (`claude::projects::TranscriptCursor`).
   The refresh also sends the conversation's `<latex>` formulas as
   `SessionEvent::Latex { seq, formulas }`: the whole list, only when it
-  changed (`seq` + 1, for the session's whole life; a new conversation sends an empty list under the next `seq`). The last list is
-  replayed to a client right after its `Attached` + snapshot. `command()`
-  adds the `__context latex` SessionStart hook unless `[claude] latex = false`.
+  changed (`seq` + 1, for the session's whole life; a new conversation
+  sends an empty list under the next `seq`). The last list is replayed to a
+  client right after its `Attached` + snapshot. `command()` adds the
+  `__context latex` SessionStart hook unless `[claude] latex = false`.
 - `git_status.rs` — `git status --porcelain=v2 --branch` for the status
   bar's `⎇` segment: 1 s deadline, capped output, same scrubbed env as
   `git.rs`.
@@ -300,7 +301,8 @@ is idle (checked every 2 min).
   the 2048-byte cap, rust-latex-parser can take a minute or overflow a
   2 MiB stack. Call `latex::render` only through `render_formula` in
   `tui/mod.rs` (pre-check, scratch thread, budget, abandon cap), never from
-  `App`, a draw or a test thread.
+  `App`, a draw, or a test with hostile input (unit tests may call it on
+  benign formulas only).
 
 ### Print-mode pipeline (`-p`)
 

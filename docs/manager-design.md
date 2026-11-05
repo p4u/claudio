@@ -387,12 +387,13 @@ Spec: `docs/specs/2026-11-04-latex-render-design.md`.
   Extraction runs whatever the setting says.
 - **Event.** After a refresh that changed the list, `MetaRefresher` sends
   `SessionEvent::Latex { seq, formulas }`, always the whole list. `seq`
-  grows with every change for the session's whole life; a new conversation sends an empty list under the next `seq`. The
-  last list is replayed to a client right after its `Attached` + snapshot,
-  since it is not broadcast again. A client keeps only a list newer than its
-  own, so a replay and a broadcast may cross. It resets on `ClaudeSession`,
-  `ClaudeSessionCleared` and on every `Attached` (a restarted daemon counts
-  `seq` from 1 again). Old clients decode the event as `Unknown`.
+  grows with every change for the session's whole life; a new conversation
+  sends an empty list under the next `seq`. The last list is replayed to a
+  client right after its `Attached` + snapshot, since it is not broadcast
+  again. A client keeps only a list newer than its own, so a replay and a
+  broadcast may cross. It resets on `ClaudeSession`, `ClaudeSessionCleared`
+  and on every `Attached` (a restarted daemon counts `seq` from 1 again).
+  Old clients decode the event as `Unknown`.
 - **Rendering.** `App` never renders: a newer list becomes
   `Effect::RenderLatex`. The `latex-render` thread renders each uncached
   source (LRU cache, 1024 entries) on a scratch thread with a 32 MiB stack.
