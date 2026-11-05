@@ -1800,7 +1800,7 @@ fn test_plain_is_the_bare_session_full_screen() {
     drop(tui);
 }
 
-/// Alt+h lists exactly the six plain keys (and the stats popup's `n`, and
+/// Alt+h lists exactly the seven plain keys (and the stats popup's `n`, and
 /// the leader's line); any key closes it.
 #[test]
 fn test_plain_help_lists_only_the_plain_keys() {
@@ -1810,10 +1810,20 @@ fn test_plain_help_lists_only_the_plain_keys() {
     tui.send_keys(ALT_H);
     tui.wait_for("claudio keys", Region::Screen, WAIT);
     let screen = tui.screen_text(Region::Screen);
-    for key in ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+z then:"] {
+    for key in [
+        "Alt+h",
+        "Alt+s",
+        "Alt+s → n",
+        "Alt+l",
+        "Alt+e",
+        "Alt+u",
+        "Alt+z",
+        "Alt+i",
+        "Alt+z then:",
+    ] {
         assert!(screen.contains(key), "{key} missing:\n{screen}");
     }
-    assert_eq!(screen.matches("Alt+").count(), 8, "exactly the plain keys:\n{screen}");
+    assert_eq!(screen.matches("Alt+").count(), 9, "exactly the plain keys:\n{screen}");
 
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("claudio keys", Region::Screen), WAIT);
@@ -2664,6 +2674,78 @@ fn test_snippets_paste_and_save_the_last_prompt() {
         .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
         .collect();
     assert!(saved.iter().any(|t| t.contains("Say hello to the world")), "{saved:?}");
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+// ── Extensions screen ────────────────────────────────────────────────────────
+
+const ALT_I: &[u8] = b"\x1bi";
+
+/// The extensions screen (Alt+i) lists the built-ins and a loaded external
+/// extension with their keys and lenses; Space turns the selected one off
+/// at once (`[ ]`) and saves it in config.toml, the file's comment kept;
+/// Esc closes it; the leader no longer offers a turned-off extension's
+/// actions.
+#[test]
+fn test_extensions_screen_turns_extensions_off_and_saves_it() {
+    let h = ManagerHarness::new();
+    install_fake_extension(&h);
+    let config = h.config_home.join("claudio/config.toml");
+    let prior = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("# my settings, keep me\n{prior}")).unwrap();
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    tui.send_keys(ALT_I);
+    tui.wait_for("Extensions (Space toggle · Esc close)", Region::Screen, WAIT);
+    let shown = tui.screen_text(Region::Screen);
+    for row in [
+        "[x] latex     built-in  —              <latex>",
+        "[x] diagram   built-in  —              ```mermaid",
+        "[x] search    built-in  Alt+z s",
+        "[x] snippets  built-in  Alt+z p/P",
+        "[x] fake      external  Alt+z k/l/d/h  <keys>",
+        "math typeset from <latex> tags",
+        "changes apply now",
+    ] {
+        assert!(shown.contains(row), "missing {row:?} in:\n{shown}");
+    }
+
+    // Space on diagram: off now, and saved.
+    tui.send_keys(DOWN_ARROW);
+    tui.wait_for("Mermaid diagrams drawn in the reader", Region::Screen, WAIT);
+    tui.send_keys(b" ");
+    tui.wait_for("[ ] diagram", Region::Screen, WAIT);
+    tui.wait_for("extension diagram off (saved)", Region::StatusBar, WAIT);
+    let saved = fs::read_to_string(&config).unwrap();
+    assert!(saved.starts_with("# my settings, keep me\n"), "{saved}");
+    assert!(saved.contains(&prior), "the rest is kept:\n{saved}");
+    assert!(saved.ends_with("[extensions]\ndiagram = false\n"), "{saved}");
+
+    // Snippets off: its keys leave the leader.
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(DOWN_ARROW);
+    tui.wait_for("saved prompts", Region::Screen, WAIT);
+    tui.send_keys(b" ");
+    tui.wait_for("[ ] snippets", Region::Screen, WAIT);
+    tui.wait_for("extension snippets off (saved)", Region::StatusBar, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_Z);
+    tui.wait_for("search conversations", Region::Screen, WAIT);
+    let leader = tui.screen_text(Region::Screen);
+    assert!(leader.contains("paste a stamp"), "{leader}");
+    assert!(leader.contains("e  manage extensions"), "{leader}");
+    assert!(!leader.contains("insert snippet"), "snippets is off:\n{leader}");
+    let saved = fs::read_to_string(&config).unwrap();
+    assert!(saved.ends_with("[extensions]\ndiagram = false\nsnippets = false\n"), "{saved}");
+
+    // `e` opens the screen too.
+    tui.send_keys(b"e");
+    tui.wait_for("Extensions (Space toggle · Esc close)", Region::Screen, WAIT);
+    tui.send_keys(ALT_I);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
