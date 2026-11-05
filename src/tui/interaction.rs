@@ -648,6 +648,11 @@ impl App {
                         self.selection = None;
                     }
                     self.sessions[i].mirror = Screen::new(rows, cols);
+                    // The daemon replays its newest formula list right after
+                    // this. A daemon restarted since (upgrade, `daemon
+                    // restart`) counts `seq` from 1 again, so the list held
+                    // must not outrank it.
+                    self.sessions[i].latex_seq = 0;
                     self.redraw = true;
                 }
             }
@@ -1159,6 +1164,35 @@ mod tests {
         let cleared = SessionEvent::ClaudeSessionCleared;
         app.on_incoming_from(&host, Incoming::Event { id, event: cleared });
         assert_eq!(app.sessions[0].latex_seq, 0);
+    }
+
+    #[test]
+    fn an_attach_restarts_the_formula_seq_but_keeps_the_list_until_the_replay() {
+        use crate::tui::latex::Formula;
+        let mut app = app_with(&[info(Some(1), None)]);
+        let (id, host) = (app.sessions[0].id, app.sessions[0].host.clone());
+        let latex = |seq, list: &[&str]| Incoming::Event {
+            id,
+            event: SessionEvent::Latex {
+                seq,
+                formulas: list.iter().map(|f| f.to_string()).collect(),
+            },
+        };
+        app.on_incoming_from(&host, latex(9, &["old"]));
+        app.on_latex_rendered(&host, id, 9, vec![Formula::raw("old")]);
+        app.take_effects();
+        // The daemon was restarted: the client re-attaches and the new
+        // daemon replays its list under seq 1.
+        app.on_incoming_from(&host, Incoming::Attached { id, rows: 24, cols: 80 });
+        assert_eq!(app.sessions[0].latex_seq, 0);
+        assert_eq!(app.sessions[0].latex, [Formula::raw("old")], "kept until the replay");
+        app.on_incoming_from(&host, latex(1, &["new"]));
+        assert_eq!(app.sessions[0].latex_seq, 1);
+        assert_eq!(app.sessions[0].latex_srcs, ["new"]);
+        assert!(app
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::RenderLatex { seq: 1, .. })));
     }
 
     #[test]
