@@ -36,9 +36,12 @@ pub fn projects_root() -> PathBuf {
 ///
 /// Claude encodes the path by replacing every non-alphanumeric character with
 /// `-`. The mapping is lossy, so the `cwd` field inside each transcript is the
-/// canonical source of truth.
+/// canonical source of truth. The `cwd` is resolved first (blocking I/O):
+/// claude files transcripts under its resolved working directory, so a
+/// symlinked path would miss them.
 pub fn project_dir(cwd: &Path) -> PathBuf {
-    let encoded = encode_cwd(cwd);
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let encoded = encode_cwd(&cwd);
     projects_root().join(encoded)
 }
 
@@ -812,6 +815,26 @@ mod tests {
         let via_link = list_sessions_in(&root, &base.join("home/repo"));
         assert_eq!(via_link.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["conv-1"]);
         assert_eq!(list_sessions_in(&root, &real).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn transcript_path_follows_symlinks_like_claude() {
+        let base = std::env::temp_dir().join(format!("claudio-proj-{}", uuid::Uuid::new_v4()));
+        let real = base.join("volumes/repo");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(base.join("volumes"), base.join("home")).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+
+        // Compare the project-dir/file tail only: another test briefly sets
+        // `$CLAUDE_CONFIG_DIR`, which moves the root under parallel runs.
+        let via_link = transcript_path(&base.join("home/repo"), "sid");
+        assert!(via_link.ends_with(format!("{}/sid.jsonl", encode_cwd(&real))));
+        assert!(transcript_path(&real, "sid").ends_with(format!("{}/sid.jsonl", encode_cwd(&real))));
+
+        // A path that does not exist cannot be resolved: it is encoded as given.
+        let missing = base.join("home/missing");
+        assert!(transcript_path(&missing, "sid").ends_with(format!("{}/sid.jsonl", encode_cwd(&missing))));
         let _ = std::fs::remove_dir_all(&base);
     }
 
