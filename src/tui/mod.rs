@@ -22,6 +22,9 @@ mod selection;
 mod sessions;
 mod state;
 mod stats_view;
+// Nothing calls the engine until `latex::render` does (the next task).
+#[allow(dead_code)]
+mod typeset;
 
 /// `recent` without the local directories that no longer exist, so the
 /// wizard never offers a deleted directory (the check is I/O, so it happens
