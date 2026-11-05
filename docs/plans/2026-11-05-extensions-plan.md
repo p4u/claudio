@@ -46,6 +46,26 @@ Line numbers are as the tree stands after Task 12 (on f51437b).
 - Manifests: `src/tui/extensions/manifest.rs:255` (`parse`: HTML tag rule, names, caps) and `:333` (`admit`: clashes, 16 max); registry context caps: `src/tui/extensions/mod.rs:230`.
 - Resume from search: `src/tui/builtins.rs:114` (switch to the open tab, else spawn with the wizard's proxy).
 
+Line numbers are those of the scratch merge of Tasks 8–10 on base + the Task 1 stand-in (`~/.cache/claudio/scratch/plan-ext-b`, branch `merge-check2`); Task 1's real hunks shift them.
+- `src/tui/diagram/flowchart.rs:194`, `:223`, `:1009`; `src/tui/diagram/sequence.rs:68`, `:194`, `:280`: each cap (nodes, edges, nesting, 200×150 including the listed-edge rows) is checked before the allocation it bounds; the canvas (`src/tui/diagram/canvas.rs:74`) is built only after the size check. Dummy nodes are bounded by 128 edges × 63 layers.
+- `src/tui/diagram/flowchart.rs:1141` (`break_cycles`, explicit stack), `:1181` (`assign_layers`, Kahn), `:1238` (`isotonic`), `:586` (`order`, O(E²) crossing count per sweep over ≤ ~8k segments): nothing recursive on input depth; `dense_graphs_within_the_caps_are_quick` is the timing guard.
+- `src/tui/diagram/flowchart.rs:308` (`shape`), `:424` (`closer`): index arithmetic over the chars of hostile text; a quote or delimiter at the very end must not panic.
+- `src/tui/diagram/text.rs:14` (`clean`): the only way text reaches the canvas; it must drop controls and zero-width characters so widths stay exact (`canvas.rs:123` writes a wide char as two cells).
+- `src/tui/mod.rs`: the `#[allow(dead_code)]` above `mod diagram;` and `mod snippets;` must go in Task 11 (AC13: 0 warnings without them).
+- `src/claude/search.rs:283` (`read_line`): a line over `Budget::line` is consumed without being kept. `:218` (`scan`): the tail seek and partial-first-line skip; the budget check before each line and the EOF peek that keeps a fully read file counted in `scanned`. `:235`: the raw-line prefilter for ASCII words assumes JSON leaves printable ASCII other than `"` and `\` unescaped; a non-ASCII character whose Unicode lowercase is ASCII (U+212A KELVIN SIGN) can be missed for an ASCII word: accepted. Until a file's title and cwd are found every user/assistant line is parsed (bounded by the budget).
+- `src/claude/search.rs:154` (`transcripts`): regular files and real dirs only (`DirEntry::file_type`, no symlink following); ids `[A-Za-z0-9_-]+` (the id becomes a `--resume` argument).
+- `src/daemon/server.rs:623` (`spawn_search`): the permit moves into the blocking closure, so a search holds the slot until its scan ends even after the client left; the bad-query check runs before the slot is taken. `:842` (`SearchSlot`, test-only `set_root`/`hold`).
+- `src/daemon/server.rs:780`, `:801`: `last_prompt` and the shared `transcript` helper (the sid filter that was inline in `answers`); `answers`' behaviour must be unchanged.
+- `src/claude/projects.rs:559` (`read_tail`, split out of `read_answers`), `:717` (`last_prompt`: reverse scan, sidechains skipped, cut without a mark).
+- `src/proto.rs:770` (`search_reply` cap; sets `truncated` when it drops hits). `LastPromptReply` has no cap fn: 64 KiB of sanitized text is ≤ 128 KiB encoded (the proto test checks the frame).
+- `src/tui/snippets.rs:98` (`save`): check-then-write is not atomic against a concurrent writer choosing the same name (`write_atomic` replaces): one client, accepted. `:77` (`read`): the size is checked on the metadata and again on the bytes read (`take(MAX_BYTES + 1)`); `is_file` refuses FIFOs and devices.
+
+Notes for the controller (no ruling needed unless you disagree):
+- Task 9 adds a `search: server::SearchSlot` field to `Daemon` (`src/daemon/mod.rs`) rather than a `Config` field, so the test root can be injected without touching the 7 `Config` literals part A may also edit.
+- `> 8 words` is refused (`bad query: too many words (max 8)`) rather than truncated to 8; `limit: 0` means the default 50.
+- Snippet slugs keep ASCII letters and digits only (`Résumé ok` → `r-sum-ok`); a `-N` suffix may take a name past 40 characters.
+- Sequence diagrams wrap message text at the same 24 columns as flowchart labels; `title`, `box … end` and other unlisted sequence statements are `Unsupported` (the reader keeps the code block).
+
 ## Task order and parallelism
 | Task | Depends on | Repo/files | May run in parallel with |
 |---|---|---|---|
@@ -7476,7 +7496,4569 @@ Step 3: commit
 
 Interfaces this task provides to later tasks: `tests/manager.rs` helpers `ALT_Z`, `FAKE_EXTENSION`, `FAKE_EXTENSION_PROGRAM`, `install_fake_extension`, `write_keys_fake_claude`.
 
-<!-- PART B: Tasks 8–10 are inserted here by the controller -->
+> Tasks 8–10 were executed before the rest of the plan (controller decision, ledger 17:30–17:45): they are on feat/extensions as 1ddd880 (T8), d323c1c (T10), f51437b (T9). Kept here for the record and the gate audit; Tasks 1–7, 11, 12 run on top of f51437b. Ruling R9 replaced their DAEMON_FEATURES steps.
+
+### Task 8: diagram engine (`src/tui/diagram/`)
+Model: opus   Repo: /volumes/repos/claudio (feat/extensions, or the worktree the controller gives)
+Files: create `src/tui/diagram/mod.rs`, `src/tui/diagram/text.rs`, `src/tui/diagram/canvas.rs`, `src/tui/diagram/flowchart.rs`, `src/tui/diagram/sequence.rs`, `src/tui/diagram/tests.rs`; modify `src/tui/mod.rs` (two lines after `mod connections;`).
+Parallel: independent of every other task (Task 1 included). In `src/tui/mod.rs` Task 10 adds its two lines after `mod sessions;` and part A may add `mod extensions;`: different lines of the `mod` list.
+Goal: the pure Mermaid engine of spec §7 (AC8, unit part): `too_complex`, `render`, `Unsupported`, for flowcharts (`graph`/`flowchart`, TD/TB/BT/LR/RL) and `sequenceDiagram`; the v1-distinct set drawn distinctly and the rest mapped to it; every cap checked before allocating; nothing recursive on the input.
+
+How it works (for the implementer and the reviewer):
+- `mod.rs`: caps (`MAX_SOURCE_BYTES` 4096, `MAX_SOURCE_LINES` 200, `MAX_NODES` 64, `MAX_EDGES` 128, `MAX_COLS` 200, `MAX_ROWS` 150), `too_complex`, `render` (header → flowchart or sequence; anything else `Unsupported("unsupported diagram: <word>")`); `%%` comments/directives and a leading `---` front-matter block are skipped.
+- `text.rs`: `clean` (`sanitize`, `<br>` → line break, tab → space, only width-1/2 characters kept so the canvas never miscounts), `wrap` (24 columns, ≤ 3 lines, the last ending `…` when cut), `fit`.
+- `canvas.rs`: a cell grid. Lines are recorded as up/down/left/right links per cell and become `│ ─ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼` at the end, so lines that meet merge into junctions; dotted `┆ ┄` only where no solid line shares the cell; text and box borders override lines; a wide character takes two cells.
+- `flowchart.rs`: hand-written parser: ids (letters, digits, `_`, inner `-`), 12 shape delimiters with optional quoted text, links `-->`, `---`, `-.->`, `-.-`, `==>`, `===`, `--o`, `--x`, `<-->`/`<-.->` (two edges), `~~~` (nodes only), labels `|t|` and `-- t -->`/`-. t .->`/`== t ==>`, chains, `&`, `;`, `:::class`; `subgraph`/`end`/`direction`/`style`/`classDef`/`class`/`click`/`linkStyle` lines ignored; node and edge caps checked as each is added. Shapes: `{}` decision (`╱──╲`/`╲──╱` corners), `()`/`([])`/`(())` rounded (`╭╮╰╯`), every other shape a rect (`┌┐└┘`); `==>`/`===` solid, `--o`/`--x` plain arrows. Layout: self-loops and repeated edges are listed under the drawing; cycles broken by an iterative DFS (back edges reversed); longest-path layers, then each source moved down next to its nearest successor; dummy nodes on long edges; 8 barycenter sweeps, keeping the order with the fewest crossings; cross positions by weighted isotonic regression (pool adjacent violators; dummies weigh 0.1 so boxes line up and long edges bend around them). Edges: one shared center port per side for forward edges (fan-out and fan-in merge into `┬`/`┴`), an own port slot (±2 columns; ±1 row in LR) for each reversed edge, on the side that crosses fewest other lines, with `▲` (`◀`…) at the original target. Per gap between layers: source-label band, tracks (greedy interval packing, reversed edges first so they take the top track), target-label band, arrow row. A label sits beside a port that only its edge uses (target side first, else source side); otherwise the edge is drawn and also listed as `a ──label──▶ b`. Everything is laid out in abstract (cross, main) coordinates and mapped to TD/BT/LR/RL only when drawn (BT/RL mirror the main axis; text is never mirrored). The total size, listed rows included, is checked against 200×150 before the canvas is allocated.
+- `sequence.rs`: participants (`participant`/`actor`, `as` alias, implicit ones in order of appearance), arrows `->>`/`-->>` (head), `->`/`-->` (no head), `-x`/`--x`/`-)`/`--)` (plain head), `+`/`-` suffixes stripped, self-messages, `Note left of|right of|over a[,b]` (dashed box), `loop|alt|opt|par|critical|break|rect … else|and|option … end` as labeled frames (≤ 8 deep; unclosed ones closed at the end), `autonumber`/`activate`/`deactivate` ignored, anything else `cannot parse`. Lifeline columns are a longest-path solution of spacing constraints (box widths, message texts, notes, self-loops); the size is checked before the canvas.
+
+What four of the goldens draw (each is its own test in `tests.rs`; side by side here only for reading):
+```text
+            ┌───────┐                    ┌───────┐  ┌──────┐  ┌───────┐  ╭──────╮
+            │ Start │                    │ Parse ├─▶│ Plan ├─▶│ Build ├─▶│ Done │
+            └───┬───┘                    └───────┘  └──────┘  └───────┘  ╰──────╯
+                │
+                ▼                          ┌─────┐       ┌───────┐      ┌─────┐
+        ╱──────────────╲                   │  A  │       │ Alice │      │ Bob │
+        │ Is it ready? │                   └──┬──┘       └───┬───┘      └──┬──┘
+        ╲───────┬──────╱                      │ ▲            │  Hello Bob  │
+                │ ▲                           │ └─┐          ├────────────▶│
+                │ └────┐                      ▼   │          │             │ ┌┄┄┄┄┄┄┄┄┐
+     ┌──────────┴────┐ │                    ┌───┐ │          │             │ ┆ thinks ┆
+     │               │ │                    │ B │ │          │             │ └┄┄┄┄┄┄┄┄┘
+    yes             no │                    └─┬─┘ │    ┌─ loop: every minute ─────────────┐
+     ▼               ▼ │                      │ ┌─┘    │     │ still here  │              │
+┌─────────┐  ╭─────────┴─────╮                ▼ │      │     │◀┄┄┄┄┄┄┄┄┄┄┄┄┤              │
+│ Ship it │  │ Fix the build │             ┌────┴┐     └─────┼─────────────┼──────────────┘
+└─────────┘  ╰───────────────╯             │  C  │           │     bye     │
+                                           └─────┘           ├────────────▶│
+                                                             │             │
+```
+
+Step 1: write the failing tests
+
+In `src/tui/mod.rs`, after the line `mod connections;` add:
+```rust
+#[allow(dead_code)] // Wired into the reader by Task 11, which removes this.
+mod diagram;
+```
+Create `src/tui/diagram/mod.rs` with only this (Step 2 replaces it):
+```rust
+//! Mermaid diagrams (Task 8, step 1).
+
+#[cfg(test)]
+mod tests;
+```
+Create `src/tui/diagram/tests.rs`:
+
+```rust
+use std::time::{Duration, Instant};
+
+use super::*;
+
+/// `src` drawn, and every row within the caps and free of controls.
+fn draw(src: &str) -> Vec<String> {
+    let rows = render(src).unwrap_or_else(|e| panic!("{src}: {}", e.reason));
+    assert!(rows.len() <= MAX_ROWS);
+    for row in &rows {
+        assert!(text::width(row) <= MAX_COLS, "{row}");
+        assert!(!row.chars().any(char::is_control), "{row:?}");
+        assert_eq!(row.trim_end(), row);
+    }
+    rows
+}
+
+/// The reason `src` is not drawn, found within a second.
+fn refused(src: &str) -> String {
+    let start = Instant::now();
+    let reason = render(src).expect_err("unsupported").reason;
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{reason}: {:?}",
+        start.elapsed()
+    );
+    reason
+}
+
+/// AC8: a TD flowchart with a decision, labels, and a loop back up.
+#[test]
+fn td_flowchart_with_a_decision_and_labels() {
+    let src = "flowchart TD
+    A[Start] --> B{Is it ready?}
+    B -->|yes| C[Ship it]
+    B -->|no| D(Fix the build)
+    D --> B";
+    let expected = [
+        "            ┌───────┐",
+        "            │ Start │",
+        "            └───┬───┘",
+        "                │",
+        "                ▼",
+        "        ╱──────────────╲",
+        "        │ Is it ready? │",
+        "        ╲───────┬──────╱",
+        "                │ ▲",
+        "                │ └────┐",
+        "     ┌──────────┴────┐ │",
+        "     │               │ │",
+        "    yes             no │",
+        "     ▼               ▼ │",
+        "┌─────────┐  ╭─────────┴─────╮",
+        "│ Ship it │  │ Fix the build │",
+        "└─────────┘  ╰───────────────╯",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// AC8: an LR chain (`a --> b --> c`), with a rounded end.
+#[test]
+fn lr_chain() {
+    let src = "graph LR
+    a[Parse] --> b[Plan] --> c[Build] --> d([Done])";
+    let expected = [
+        "┌───────┐  ┌──────┐  ┌───────┐  ╭──────╮",
+        "│ Parse ├─▶│ Plan ├─▶│ Build ├─▶│ Done │",
+        "└───────┘  └──────┘  └───────┘  ╰──────╯",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// AC8: a cycle: the back edge leaves its own port with `▲`.
+#[test]
+fn cycle() {
+    let src = "graph TD
+    A --> B
+    B --> C
+    C --> A";
+    let expected = [
+        "┌─────┐",
+        "│  A  │",
+        "└──┬──┘",
+        "   │ ▲",
+        "   │ └─┐",
+        "   ▼   │",
+        " ┌───┐ │",
+        " │ B │ │",
+        " └─┬─┘ │",
+        "   │ ┌─┘",
+        "   ▼ │",
+        "┌────┴┐",
+        "│  C  │",
+        "└─────┘",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// AC8: a sequence diagram with a note and a loop.
+#[test]
+fn sequence_with_a_note_and_a_loop() {
+    let src = "sequenceDiagram
+    participant A as Alice
+    participant B as Bob
+    A->>B: Hello Bob
+    Note right of B: thinks
+    loop every minute
+        B-->>A: still here
+    end
+    A-)B: bye";
+    let expected = [
+        "  ┌───────┐      ┌─────┐",
+        "  │ Alice │      │ Bob │",
+        "  └───┬───┘      └──┬──┘",
+        "      │  Hello Bob  │",
+        "      ├────────────▶│",
+        "      │             │ ┌┄┄┄┄┄┄┄┄┐",
+        "      │             │ ┆ thinks ┆",
+        "      │             │ └┄┄┄┄┄┄┄┄┘",
+        "┌─ loop: every minute ─────────────┐",
+        "│     │ still here  │              │",
+        "│     │◀┄┄┄┄┄┄┄┄┄┄┄┄┤              │",
+        "└─────┼─────────────┼──────────────┘",
+        "      │     bye     │",
+        "      ├────────────▶│",
+        "      │             │",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// Fan-out and merges share junctions; dotted edges stay dotted.
+#[test]
+fn merged_junctions_and_dotted_edges() {
+    let src = "graph TD
+  A[Client] --> B[API gateway]
+  B --> C[Auth service]
+  B --> D[Orders]
+  D --> E[(Database)]
+  C --> E
+  D -.-> F[Queue]
+  F -.-> G[Worker]
+  G --> E";
+    let expected = [
+        "          ┌────────┐",
+        "          │ Client │",
+        "          └────┬───┘",
+        "               │",
+        "               ▼",
+        "        ┌─────────────┐",
+        "        │ API gateway │",
+        "        └──────┬──────┘",
+        "        ┌──────┴───────┐",
+        "        ▼              ▼",
+        "┌──────────────┐  ┌────────┐",
+        "│ Auth service │  │ Orders │",
+        "└───────┬──────┘  └────┬───┘",
+        "        └───┐      ┌┄┄┄┴─┐",
+        "            │      ▼     │",
+        "            │  ┌───────┐ │",
+        "            │  │ Queue │ │",
+        "            │  └───┬───┘ │",
+        "            │      ┆     │",
+        "            │      ▼     │",
+        "            │ ┌────────┐ │",
+        "            │ │ Worker │ │",
+        "            │ └────┬───┘ │",
+        "            └──────┤     │",
+        "                   ├─────┘",
+        "                   ▼",
+        "             ┌──────────┐",
+        "             │ Database │",
+        "             └──────────┘",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// `%%`, `;`, `&`, `-- text -->`, `---`, `subgraph`/`style` lines, BT;
+/// a self-loop cannot be drawn and is listed under the drawing.
+#[test]
+fn syntax_variants_and_an_unplaceable_edge() {
+    let src = "%% a comment
+graph BT;
+  subgraph s [Group]
+  a & b -- uses --> c;
+  end
+  c --- d
+  style a fill:#f9f
+  a --> a";
+    let expected = [
+        "     ┌───┐",
+        "     │ d │",
+        "     └─┬─┘",
+        "       │",
+        "       │",
+        "     ┌─┴─┐",
+        "     │ c │",
+        "     └───┘",
+        "       ▲",
+        "       ├───┐",
+        "   ┌───┘   │",
+        " uses    uses",
+        "   │       │",
+        " ┌─┴─┐   ┌─┴─┐",
+        " │ a │   │ b │",
+        " └───┘   └───┘",
+        "",
+        "a ──▶ a",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// RL, `<-.->` as two dotted edges, a stadium as rounded.
+#[test]
+fn right_to_left_and_both_ways() {
+    let src = "flowchart RL
+  x([Out]) <-.-> y[In]";
+    let expected = [
+        "┌────┐   ╭─────╮",
+        "│    │   │     │",
+        "│ In │◀┄┄┤ Out │",
+        "│    ├┄┄▶│     │",
+        "└────┘   ╰─────╯",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// Self-messages, solid and dotted lines without heads, `alt`/`else`,
+/// a note over two participants.
+#[test]
+fn sequence_blocks_and_self_messages() {
+    let src = "sequenceDiagram
+  Alice->>Bob: Hi
+  Bob->>Bob: think
+  alt is sick
+    Bob-->Alice: Not so good
+  else is well
+    Bob->Alice: Feeling fresh
+  end
+  Note over Alice,Bob: done";
+    let expected = [
+        "  ┌───────┐         ┌─────┐",
+        "  │ Alice │         │ Bob │",
+        "  └───┬───┘         └──┬──┘",
+        "      │      Hi        │",
+        "      ├───────────────▶│",
+        "      │                ├──┐ think",
+        "      │                │  │",
+        "      │                │◀─┘",
+        "┌─ alt: is sick ───────┼────────────┐",
+        "│     │  Not so good   │            │",
+        "│     ├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤            │",
+        "├┄ else: is well ┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┄┄┄┄┤",
+        "│     │ Feeling fresh  │            │",
+        "│     ├────────────────┤            │",
+        "└─────┼────────────────┼────────────┘",
+        "    ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐",
+        "    ┆ done               ┆",
+        "    └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘",
+        "      │                │",
+    ];
+    assert_eq!(draw(src), expected);
+}
+
+/// AC8: other diagram types and unknown syntax are not drawn.
+#[test]
+fn unsupported_types_and_syntax() {
+    assert_eq!(
+        refused("classDiagram\n  Animal <|-- Duck"),
+        "unsupported diagram: classDiagram"
+    );
+    assert_eq!(
+        refused("stateDiagram-v2\n  [*] --> A"),
+        "unsupported diagram: stateDiagram-v2"
+    );
+    assert_eq!(refused("pie\n  \"a\": 1"), "unsupported diagram: pie");
+    assert_eq!(refused(""), "empty diagram");
+    assert_eq!(refused("%% only a comment"), "empty diagram");
+    assert_eq!(refused("graph XY\n  a --> b"), "unsupported direction: XY");
+    assert_eq!(
+        refused("graph TD\n  a --> b[unclosed"),
+        "unclosed node shape"
+    );
+    assert_eq!(refused("graph TD\n  a b"), "cannot parse: a b");
+    assert_eq!(refused("sequenceDiagram\n  end"), "end without a block");
+    assert_eq!(
+        refused("sequenceDiagram\n  Alice says hi"),
+        "cannot parse: Alice says hi"
+    );
+}
+
+/// AC8: hostile input hits each cap and is refused fast.
+#[test]
+fn hostile_input_hits_each_cap() {
+    // Source size, checked before parsing.
+    let long = format!("graph TD\n  a[{}] --> b", "x".repeat(MAX_SOURCE_BYTES));
+    assert!(too_complex(&long));
+    assert_eq!(refused(&long), "diagram source too large");
+    let many = format!("graph TD\n{}", "  a --> b\n".repeat(MAX_SOURCE_LINES));
+    assert!(too_complex(&many));
+    assert_eq!(refused(&many), "diagram source too large");
+    assert!(!too_complex("graph TD\n  a --> b"));
+    // Nodes and edges, counted as they are parsed.
+    let chain: Vec<String> = (0..MAX_NODES)
+        .map(|i| format!("  n{i} --> n{}", i + 1))
+        .collect();
+    let nodes = format!("graph TD\n{}", chain.join("\n"));
+    assert_eq!(refused(&nodes), "more than 64 nodes");
+    let fan = "graph LR\n  a & b & c & d & e & f & g & h & i & j & k & l --> \
+               m & n & o & p & q & r & s & t & u & v & w";
+    assert_eq!(refused(fan), "more than 128 edges");
+    // Drawing size, computed before the canvas is allocated.
+    let wide: Vec<String> = (0..12)
+        .map(|i| format!("  r --> c{i}[abcdefghijklmnopqrst]"))
+        .collect();
+    assert_eq!(
+        refused(&format!("graph TD\n{}", wide.join("\n"))),
+        "diagram too large"
+    );
+    let tall: Vec<String> = (0..40).map(|i| format!("  n{i} --> n{}", i + 1)).collect();
+    assert_eq!(
+        refused(&format!("graph TD\n{}", tall.join("\n"))),
+        "diagram too large"
+    );
+    // Sequence diagrams: participants, messages, rows, nesting.
+    let people: Vec<String> = (0..=MAX_NODES)
+        .map(|i| format!("  participant p{i}"))
+        .collect();
+    let people = format!("sequenceDiagram\n{}", people.join("\n"));
+    assert_eq!(refused(&people), "more than 64 participants");
+    let chatty = format!("sequenceDiagram\n{}", "  a->>b: hi\n".repeat(MAX_EDGES + 1));
+    assert_eq!(refused(&chatty), "more than 128 messages");
+    let rows = format!("sequenceDiagram\n{}", "  a->>b: hi\n".repeat(80));
+    assert_eq!(refused(&rows), "diagram too large");
+    let deep = format!("sequenceDiagram\n{}  a->>b: hi\n", "  loop x\n".repeat(9));
+    assert_eq!(refused(&deep), "blocks nested too deep");
+}
+
+/// The largest graphs the caps allow lay out quickly, with or without a
+/// drawing at the end.
+#[test]
+fn dense_graphs_within_the_caps_are_quick() {
+    let mut src = String::from("graph TD\n");
+    for i in 0..MAX_NODES {
+        src.push_str(&format!("  n{i} --> n{}\n", (i * 7 + 3) % MAX_NODES));
+        src.push_str(&format!("  n{i} -.-> n{}\n", (i * 13 + 5) % MAX_NODES));
+    }
+    assert!(!too_complex(&src));
+    let start = Instant::now();
+    let _ = render(&src);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Labels wrap at 24 columns, at most 3 lines, and lose what cannot be
+/// drawn.
+#[test]
+fn labels_wrap_and_are_cleaned() {
+    assert_eq!(text::wrap("short"), ["short"]);
+    assert_eq!(
+        text::wrap("one two three four five six seven eight"),
+        ["one two three four five", "six seven eight"]
+    );
+    let long = "word ".repeat(30);
+    let lines = text::wrap(&long);
+    assert_eq!(lines.len(), text::MAX_LINES);
+    assert!(lines[2].ends_with('…'), "{lines:?}");
+    assert!(lines.iter().all(|l| text::width(l) <= text::WRAP));
+    assert_eq!(text::wrap(&"x".repeat(30)), ["x".repeat(24), "x".repeat(6)]);
+    assert_eq!(
+        text::clean("a<br>b\u{1b}[31m\u{200b}\u{301}\tc"),
+        "a\nb[31m c"
+    );
+}
+```
+
+Run: `umask 022; cargo test --locked --bin claudio diagram`
+Expected (compile failure), among others:
+```
+error[E0425]: cannot find function `render` in this scope
+error[E0425]: cannot find function `too_complex` in this scope
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `text`
+error: could not compile `claudio` (bin "claudio" test) due to 27 previous errors; 1 warning emitted
+```
+
+Step 2: implement
+
+Replace `src/tui/diagram/mod.rs` with:
+
+```rust
+//! Mermaid diagrams drawn with box-drawing characters, for the reader view's
+//! ` ```mermaid ` fence lens.
+//!
+//! Pure functions only. The input is claude's text, so it is hostile: every
+//! size is capped before anything is allocated for it, nothing recurses on
+//! the input's depth, and [`render`] still runs only on the render worker
+//! behind its guard (pre-check, scratch thread, budget), never on the UI
+//! thread. Two kinds are drawn: flowcharts ([`flowchart`]) and sequence
+//! diagrams ([`sequence`]); anything else is [`Unsupported`] and the reader
+//! keeps the code block.
+
+mod canvas;
+mod flowchart;
+mod sequence;
+mod text;
+
+/// The most bytes a diagram's source may have ([`too_complex`]).
+pub const MAX_SOURCE_BYTES: usize = 4096;
+/// The most lines a diagram's source may have ([`too_complex`]).
+pub const MAX_SOURCE_LINES: usize = 200;
+/// The most nodes of a flowchart, or participants of a sequence diagram.
+pub const MAX_NODES: usize = 64;
+/// The most edges of a flowchart, or messages of a sequence diagram.
+pub const MAX_EDGES: usize = 128;
+/// The widest drawing, in terminal columns.
+pub const MAX_COLS: usize = 200;
+/// The tallest drawing, in rows.
+pub const MAX_ROWS: usize = 150;
+
+/// Why a diagram is not drawn; the reader shows its code block instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unsupported {
+    pub reason: String,
+}
+
+impl Unsupported {
+    fn new(reason: impl Into<String>) -> Unsupported {
+        Unsupported {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Whether `src` is too big to try: more than [`MAX_SOURCE_BYTES`] bytes or
+/// [`MAX_SOURCE_LINES`] lines. Cheap; no parsing.
+pub fn too_complex(src: &str) -> bool {
+    src.len() > MAX_SOURCE_BYTES || src.lines().nth(MAX_SOURCE_LINES).is_some()
+}
+
+/// The rows of the drawing of `src`, a ` ```mermaid ` fence's content
+/// (without the fence lines). Every row is at most [`MAX_COLS`] columns,
+/// free of control characters and trimmed at the end; there are at most
+/// [`MAX_ROWS`] rows. Edges that cannot be drawn are listed under the
+/// drawing as `a ──label──▶ b`.
+pub fn render(src: &str) -> Result<Vec<String>, Unsupported> {
+    if too_complex(src) {
+        return Err(Unsupported::new("diagram source too large"));
+    }
+    let mut lines = statements(src);
+    let Some(header) = lines.next() else {
+        return Err(Unsupported::new("empty diagram"));
+    };
+    let (kind, rest) = match header.split_once(char::is_whitespace) {
+        Some((kind, rest)) => (kind, rest.trim()),
+        None => (header, ""),
+    };
+    let rows = match kind.trim_end_matches(';') {
+        "graph" | "flowchart" => flowchart::render(rest, lines)?,
+        "sequenceDiagram" if rest.is_empty() => sequence::render(lines)?,
+        other => {
+            let other: String = other.chars().take(24).collect();
+            return Err(Unsupported::new(format!("unsupported diagram: {other}")));
+        }
+    };
+    debug_assert!(rows.len() <= MAX_ROWS);
+    Ok(rows)
+}
+
+/// The meaningful lines of `src`, trimmed: no blank lines, no `%%`
+/// comments or directives, and no `---` front matter block at the start.
+fn statements(src: &str) -> impl Iterator<Item = &str> {
+    let mut front_matter = false;
+    let mut first = true;
+    src.lines().map(str::trim).filter(move |line| {
+        if first && *line == "---" {
+            front_matter = true;
+            first = false;
+            return false;
+        }
+        if front_matter {
+            front_matter = *line != "---";
+            return false;
+        }
+        if line.is_empty() || line.starts_with("%%") {
+            return false;
+        }
+        first = false;
+        true
+    })
+}
+
+#[cfg(test)]
+mod tests;
+```
+
+Create `src/tui/diagram/text.rs`:
+
+```rust
+//! Labels: cleaning, measuring and wrapping.
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Labels wrap at this many columns.
+pub const WRAP: usize = 24;
+/// A label has at most this many lines; the last one ends in `…` if cut.
+pub const MAX_LINES: usize = 3;
+
+/// `raw` made safe to draw: [`sanitize`](crate::claude::latex::sanitize)d,
+/// `<br>` and `\n` as line breaks, tabs as spaces, and characters without a
+/// width of 1 or 2 (combining marks, zero-width) dropped, so that a
+/// character always takes the columns it is counted for.
+pub fn clean(raw: &str) -> String {
+    let raw = raw
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("<br>", "\n");
+    crate::claude::latex::sanitize(&raw)
+        .chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|&c| c == '\n' || matches!(c.width(), Some(1 | 2)))
+        .collect()
+}
+
+/// Display columns of `s` (already [`clean`]).
+pub fn width(s: &str) -> usize {
+    s.width()
+}
+
+/// `label` ([`clean`]ed) in lines of at most [`WRAP`] columns, at most
+/// [`MAX_LINES`] of them. Words longer than a line are split.
+pub fn wrap(label: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in label.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            for piece in split_word(word) {
+                let sep = usize::from(!line.is_empty());
+                if !line.is_empty() && width(&line) + sep + width(&piece) > WRAP {
+                    lines.push(std::mem::take(&mut line));
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&piece);
+            }
+            if lines.len() > MAX_LINES {
+                break;
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        if lines.len() > MAX_LINES {
+            break;
+        }
+    }
+    if lines.len() > MAX_LINES {
+        lines.truncate(MAX_LINES);
+        let last = &mut lines[MAX_LINES - 1];
+        *last = fit(&format!("{last} …"), WRAP);
+    }
+    lines
+}
+
+/// `word` in pieces of at most [`WRAP`] columns.
+fn split_word(word: &str) -> Vec<String> {
+    let mut pieces = vec![String::new()];
+    for c in word.chars() {
+        let piece = pieces.last_mut().expect("never empty");
+        if width(piece) + c.width().unwrap_or(0) > WRAP {
+            pieces.push(String::new());
+        }
+        pieces.last_mut().expect("never empty").push(c);
+    }
+    pieces
+}
+
+/// `s` cut to at most `max` columns, ending in `…` when cut.
+pub fn fit(s: &str, max: usize) -> String {
+    if width(s) <= max {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if width(&out) + c.width().unwrap_or(0) + 1 > max {
+            break;
+        }
+        out.push(c);
+    }
+    let mut out = out.trim_end().to_owned();
+    out.push('…');
+    out
+}
+
+/// The widest line of `lines`.
+pub fn widest(lines: &[String]) -> usize {
+    lines.iter().map(|l| width(l)).max().unwrap_or(0)
+}
+```
+
+Create `src/tui/diagram/canvas.rs`:
+
+```rust
+//! A grid of terminal cells that lines, boxes and text are drawn on.
+//!
+//! Lines are recorded as connections (up, down, left, right) per cell and
+//! turned into box-drawing characters at the end, so two lines that meet
+//! merge into one junction (`┬`, `┴`, `├`, `┼`…). Text and box borders are
+//! written as characters and win over lines.
+
+use unicode_width::UnicodeWidthChar;
+
+pub const UP: u8 = 1;
+pub const DOWN: u8 = 2;
+pub const LEFT: u8 = 4;
+pub const RIGHT: u8 = 8;
+
+/// Marks the second column of a wide character.
+const WIDE_TAIL: char = '\0';
+
+pub struct Canvas {
+    width: usize,
+    height: usize,
+    chars: Vec<Option<char>>,
+    links: Vec<u8>,
+    /// Per cell: some solid line passes (else, with links, only dotted ones).
+    solid: Vec<bool>,
+}
+
+/// The four corners and the two sides of a box.
+pub struct BoxStyle {
+    pub top_left: char,
+    pub top_right: char,
+    pub bottom_left: char,
+    pub bottom_right: char,
+    pub horizontal: char,
+    pub vertical: char,
+}
+
+pub const RECT: BoxStyle = BoxStyle {
+    top_left: '┌',
+    top_right: '┐',
+    bottom_left: '└',
+    bottom_right: '┘',
+    horizontal: '─',
+    vertical: '│',
+};
+pub const ROUNDED: BoxStyle = BoxStyle {
+    top_left: '╭',
+    top_right: '╮',
+    bottom_left: '╰',
+    bottom_right: '╯',
+    horizontal: '─',
+    vertical: '│',
+};
+/// A decision: slanted corners.
+pub const DECISION: BoxStyle = BoxStyle {
+    top_left: '╱',
+    top_right: '╲',
+    bottom_left: '╲',
+    bottom_right: '╱',
+    horizontal: '─',
+    vertical: '│',
+};
+/// A sequence diagram's note: dashed sides.
+pub const NOTE: BoxStyle = BoxStyle {
+    top_left: '┌',
+    top_right: '┐',
+    bottom_left: '└',
+    bottom_right: '┘',
+    horizontal: '┄',
+    vertical: '┆',
+};
+
+impl Canvas {
+    /// A blank canvas. The caller has checked the size against the caps.
+    pub fn new(width: usize, height: usize) -> Canvas {
+        let cells = width * height;
+        Canvas {
+            width,
+            height,
+            chars: vec![None; cells],
+            links: vec![0; cells],
+            solid: vec![false; cells],
+        }
+    }
+
+    fn index(&self, x: usize, y: usize) -> Option<usize> {
+        (x < self.width && y < self.height).then(|| y * self.width + x)
+    }
+
+    /// Add `links` to cell (x, y); `dotted` lines draw dashed when no solid
+    /// line shares the cell.
+    pub fn link(&mut self, x: usize, y: usize, links: u8, dotted: bool) {
+        if let Some(i) = self.index(x, y) {
+            self.links[i] |= links;
+            self.solid[i] |= !dotted;
+        }
+    }
+
+    /// A vertical line from row `y0` to `y1` (inclusive) at column `x`. Its
+    /// end cells link only inwards, unless `open` asks them to link onwards
+    /// too (`(top, bottom)`).
+    pub fn vline(&mut self, x: usize, y0: usize, y1: usize, open: (bool, bool), dotted: bool) {
+        let (top, bottom) = (y0.min(y1), y0.max(y1));
+        for y in top..=bottom {
+            let mut l = 0;
+            if y > top || open.0 {
+                l |= UP;
+            }
+            if y < bottom || open.1 {
+                l |= DOWN;
+            }
+            self.link(x, y, l, dotted);
+        }
+    }
+
+    /// Write `c` at (x, y), over any line.
+    pub fn put(&mut self, x: usize, y: usize, c: char) {
+        if let Some(i) = self.index(x, y) {
+            self.chars[i] = Some(c);
+        }
+    }
+
+    /// Write `s` from (x, y) rightwards; a wide character takes two cells.
+    pub fn text(&mut self, x: usize, y: usize, s: &str) {
+        let mut x = x;
+        for c in s.chars() {
+            let w = c.width().unwrap_or(0);
+            if w == 0 {
+                continue;
+            }
+            self.put(x, y, c);
+            if w == 2 {
+                self.put(x + 1, y, WIDE_TAIL);
+            }
+            x += w;
+        }
+    }
+
+    /// A box with its top-left corner at (x, y), `w`×`h` cells, its inside
+    /// cleared of lines.
+    pub fn frame(&mut self, x: usize, y: usize, w: usize, h: usize, style: &BoxStyle) {
+        for dy in 0..h {
+            for dx in 0..w {
+                let c = match (dx, dy) {
+                    (0, 0) => style.top_left,
+                    (dx, 0) if dx == w - 1 => style.top_right,
+                    (0, dy) if dy == h - 1 => style.bottom_left,
+                    (dx, dy) if dx == w - 1 && dy == h - 1 => style.bottom_right,
+                    (_, 0) => style.horizontal,
+                    (_, dy) if dy == h - 1 => style.horizontal,
+                    (0, _) => style.vertical,
+                    (dx, _) if dx == w - 1 => style.vertical,
+                    _ => ' ',
+                };
+                self.put(x + dx, y + dy, c);
+            }
+        }
+    }
+
+    /// The character at (x, y), if one was written.
+    pub fn get(&self, x: usize, y: usize) -> Option<char> {
+        self.index(x, y).and_then(|i| self.chars[i])
+    }
+
+    /// The finished rows, trailing spaces trimmed.
+    pub fn rows(&self) -> Vec<String> {
+        (0..self.height)
+            .map(|y| {
+                let mut row = String::with_capacity(self.width);
+                for x in 0..self.width {
+                    let i = y * self.width + x;
+                    match self.chars[i] {
+                        Some(WIDE_TAIL) => {}
+                        Some(c) => row.push(c),
+                        None => row.push(glyph(self.links[i], self.solid[i])),
+                    }
+                }
+                row.trim_end().to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The box-drawing character for a cell's links.
+fn glyph(links: u8, solid: bool) -> char {
+    match links {
+        0 => ' ',
+        l if l & (LEFT | RIGHT) == 0 => {
+            if solid {
+                '│'
+            } else {
+                '┆'
+            }
+        }
+        l if l & (UP | DOWN) == 0 => {
+            if solid {
+                '─'
+            } else {
+                '┄'
+            }
+        }
+        l if l == DOWN | RIGHT => '┌',
+        l if l == DOWN | LEFT => '┐',
+        l if l == UP | RIGHT => '└',
+        l if l == UP | LEFT => '┘',
+        l if l == UP | DOWN | RIGHT => '├',
+        l if l == UP | DOWN | LEFT => '┤',
+        l if l == DOWN | LEFT | RIGHT => '┬',
+        l if l == UP | LEFT | RIGHT => '┴',
+        _ => '┼',
+    }
+}
+```
+
+Create `src/tui/diagram/flowchart.rs`:
+
+```rust
+//! Flowcharts (`graph`/`flowchart`): parsing, a layered layout and drawing.
+//!
+//! The layout is the classic layered one: cycles are broken by reversing
+//! back edges, nodes go to layers by longest path, long edges get dummy
+//! nodes, barycenter sweeps order each layer, and an isotonic fit places
+//! nodes as close to their neighbours as their widths allow. Edges are
+//! orthogonal: down from the source, along a track between the layers,
+//! down into the target. Everything is laid out on an abstract (cross,
+//! main) grid and mapped to TD, BT, LR or RL only when drawn.
+
+use std::collections::HashMap;
+
+use super::canvas::{self, Canvas, DOWN, LEFT, RIGHT, UP};
+use super::text;
+use super::{Unsupported, MAX_COLS, MAX_EDGES, MAX_NODES, MAX_ROWS};
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Dir {
+    Td,
+    Bt,
+    Lr,
+    Rl,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shape {
+    Rect,
+    Rounded,
+    Decision,
+}
+
+struct Node {
+    label: Vec<String>,
+    shape: Shape,
+}
+
+#[derive(Clone)]
+struct Edge {
+    from: usize,
+    to: usize,
+    label: Vec<String>,
+    dotted: bool,
+    head: bool,
+}
+
+#[derive(Default)]
+struct Graph {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    index: HashMap<String, usize>,
+}
+
+/// The drawing of a flowchart whose header was `graph <rest>` (or
+/// `flowchart <rest>`), with `lines` its statements.
+pub fn render<'a>(
+    rest: &'a str,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>, Unsupported> {
+    let (dir, first) = match rest.split_once(';') {
+        Some((dir, first)) => (dir.trim(), first),
+        None => (rest.trim(), ""),
+    };
+    let dir = match dir {
+        "" | "TD" | "TB" => Dir::Td,
+        "BT" => Dir::Bt,
+        "LR" => Dir::Lr,
+        "RL" => Dir::Rl,
+        other => {
+            let other: String = other.chars().take(24).collect();
+            return Err(Unsupported::new(format!("unsupported direction: {other}")));
+        }
+    };
+    let mut graph = Graph::default();
+    for line in std::iter::once(first).chain(lines) {
+        for statement in split_statements(line) {
+            graph.statement(statement)?;
+        }
+    }
+    if graph.nodes.is_empty() {
+        return Err(Unsupported::new("empty flowchart"));
+    }
+    Layout::new(&graph, dir).draw(&graph)
+}
+
+/// `line` split on the `;` that are not inside quotes, brackets or `|…|`.
+fn split_statements(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut quote, mut pipe, mut start) = (0usize, false, false, 0);
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quote = !quote,
+            '[' | '(' | '{' if !quote => depth += 1,
+            ']' | ')' | '}' if !quote => depth = depth.saturating_sub(1),
+            '|' if !quote && depth == 0 => pipe = !pipe,
+            ';' if !quote && !pipe && depth == 0 => {
+                out.push(&line[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&line[start..]);
+    out
+}
+
+// ── Parsing ──────────────────────────────────────────────────────────────
+
+/// A link between two node groups.
+struct Link {
+    dotted: bool,
+    head: bool,
+    both: bool,
+    invisible: bool,
+    label: Option<String>,
+}
+
+/// Words that start a statement that draws nothing.
+const IGNORED: [&str; 8] = [
+    "subgraph",
+    "end",
+    "direction",
+    "style",
+    "classDef",
+    "class",
+    "click",
+    "linkStyle",
+];
+
+impl Graph {
+    fn statement(&mut self, s: &str) -> Result<(), Unsupported> {
+        let s = s.trim();
+        let word = s.split(|c: char| c.is_whitespace()).next().unwrap_or("");
+        if s.is_empty() || IGNORED.contains(&word) {
+            return Ok(());
+        }
+        let chars: Vec<char> = s.chars().collect();
+        let mut p = Parser { s: &chars, i: 0 };
+        let mut left = self.group(&mut p)?;
+        loop {
+            p.skip_ws();
+            if p.done() {
+                return Ok(());
+            }
+            let Some(mut link) = p.link() else {
+                return Err(Unsupported::new(format!("cannot parse: {}", fit_reason(s))));
+            };
+            p.skip_ws();
+            if p.peek() == Some('|') {
+                link.label = Some(p.pipe_label()?);
+                p.skip_ws();
+            }
+            let right = self.group(&mut p)?;
+            let label = text::wrap(&text::clean(link.label.as_deref().unwrap_or("")));
+            for &a in &left {
+                for &b in &right {
+                    if link.invisible {
+                        continue;
+                    }
+                    self.edge(a, b, label.clone(), &link)?;
+                    if link.both {
+                        self.edge(b, a, Vec::new(), &link)?;
+                    }
+                }
+            }
+            left = right;
+        }
+    }
+
+    /// Nodes joined by `&`.
+    fn group(&mut self, p: &mut Parser) -> Result<Vec<usize>, Unsupported> {
+        let mut ids = Vec::new();
+        loop {
+            p.skip_ws();
+            ids.push(self.node(p)?);
+            p.skip_ws();
+            if p.peek() != Some('&') {
+                return Ok(ids);
+            }
+            p.i += 1;
+        }
+    }
+
+    /// A node reference, with or without its shape and text.
+    fn node(&mut self, p: &mut Parser) -> Result<usize, Unsupported> {
+        let id = p.ident();
+        if id.is_empty() {
+            return Err(Unsupported::new("expected a node"));
+        }
+        let shape = p.shape()?;
+        p.class_suffix();
+        let index = match self.index.get(&id) {
+            Some(&i) => i,
+            None => {
+                if self.nodes.len() == MAX_NODES {
+                    return Err(Unsupported::new(format!("more than {MAX_NODES} nodes")));
+                }
+                self.nodes.push(Node {
+                    label: text::wrap(&text::clean(&id)),
+                    shape: Shape::Rect,
+                });
+                self.index.insert(id, self.nodes.len() - 1);
+                self.nodes.len() - 1
+            }
+        };
+        if let Some((shape, label)) = shape {
+            let node = &mut self.nodes[index];
+            node.shape = shape;
+            node.label = text::wrap(&text::clean(&label));
+            if node.label.is_empty() {
+                node.label = vec![String::new()];
+            }
+        }
+        Ok(index)
+    }
+
+    fn edge(
+        &mut self,
+        from: usize,
+        to: usize,
+        label: Vec<String>,
+        link: &Link,
+    ) -> Result<(), Unsupported> {
+        if self.edges.len() == MAX_EDGES {
+            return Err(Unsupported::new(format!("more than {MAX_EDGES} edges")));
+        }
+        self.edges.push(Edge {
+            from,
+            to,
+            label,
+            dotted: link.dotted,
+            head: link.head,
+        });
+        Ok(())
+    }
+}
+
+/// A statement, shortened for an error message.
+fn fit_reason(s: &str) -> String {
+    text::fit(&text::clean(s).replace('\n', " "), 40)
+}
+
+struct Parser<'a> {
+    s: &'a [char],
+    i: usize,
+}
+
+/// Node shapes: opening and closing delimiters. Longer openings first.
+const SHAPES: [(&str, &str, Shape); 12] = [
+    ("([", "])", Shape::Rounded),
+    ("((", "))", Shape::Rounded),
+    ("[[", "]]", Shape::Rect),
+    ("[(", ")]", Shape::Rect),
+    ("{{", "}}", Shape::Rect),
+    ("[/", "/]", Shape::Rect),
+    ("[\\", "\\]", Shape::Rect),
+    ("[/", "\\]", Shape::Rect),
+    ("[", "]", Shape::Rect),
+    ("(", ")", Shape::Rounded),
+    ("{", "}", Shape::Decision),
+    (">", "]", Shape::Rect),
+];
+
+impl Parser<'_> {
+    fn done(&self) -> bool {
+        self.i >= self.s.len()
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.s.get(self.i).copied()
+    }
+
+    fn at(&self, i: usize) -> Option<char> {
+        self.s.get(i).copied()
+    }
+
+    fn starts_with(&self, i: usize, pat: &str) -> bool {
+        let mut j = i;
+        for c in pat.chars() {
+            if self.at(j) != Some(c) {
+                return false;
+            }
+            j += 1;
+        }
+        true
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.i += 1;
+        }
+    }
+
+    /// A node id: letters, digits, `_`, and `-` between two of those.
+    fn ident(&mut self) -> String {
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if word(Some(c)) || (c == '-' && self.i > start && word(self.at(self.i + 1))) {
+                self.i += 1;
+            } else {
+                break;
+            }
+        }
+        self.s[start..self.i].iter().collect()
+    }
+
+    /// A shape and its text, if one follows.
+    fn shape(&mut self) -> Result<Option<(Shape, String)>, Unsupported> {
+        let Some(&(open, _, shape)) = SHAPES.iter().find(|(o, _, _)| self.starts_with(self.i, o))
+        else {
+            return Ok(None);
+        };
+        let start = self.i + open.chars().count();
+        let closers: Vec<&str> = SHAPES
+            .iter()
+            .filter(|(o, _, _)| *o == open)
+            .map(|(_, c, _)| *c)
+            .collect();
+        let mut j = start;
+        // A quoted text may contain the closing delimiter.
+        if self.at(j) == Some('"') {
+            j += 1;
+            while self.at(j).is_some_and(|c| c != '"') {
+                j += 1;
+            }
+            j += 1;
+        }
+        while j < self.s.len() {
+            if let Some(close) = closers.iter().find(|c| self.starts_with(j, c)) {
+                let raw: String = self.s[start..j].iter().collect();
+                let raw = raw.trim();
+                let label = raw
+                    .strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .unwrap_or(raw);
+                self.i = j + close.chars().count();
+                return Ok(Some((shape, label.to_owned())));
+            }
+            j += 1;
+        }
+        Err(Unsupported::new("unclosed node shape"))
+    }
+
+    /// Skip a `:::class` suffix.
+    fn class_suffix(&mut self) {
+        if self.starts_with(self.i, ":::") {
+            self.i += 3;
+            self.ident();
+        }
+    }
+
+    /// A link (`-->`, `-.->`, `== t ==>`, …), if one starts here.
+    fn link(&mut self) -> Option<Link> {
+        let start = self.i;
+        let both = self.peek() == Some('<');
+        if both {
+            self.i += 1;
+        }
+        let run = self.run();
+        if run.chars().count() < 2 {
+            self.i = start;
+            return None;
+        }
+        let tip = self.head();
+        let mut head = both || tip;
+        let mut dotted = run.contains('.');
+        let mut label = None;
+        if !head && matches!(run.as_str(), "--" | "==" | "-.") && self.peek() == Some(' ') {
+            // `-- text -->`: the text runs to the closing link.
+            let close = self.closer(&run)?;
+            label = Some(
+                self.s[self.i..close]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_owned(),
+            );
+            self.i = close;
+            let end = self.run();
+            dotted |= end.contains('.');
+            head = self.head();
+        }
+        Some(Link {
+            dotted,
+            head,
+            both,
+            invisible: run.contains('~'),
+            label,
+        })
+    }
+
+    /// A run of link characters.
+    fn run(&mut self) -> String {
+        let start = self.i;
+        while self
+            .peek()
+            .is_some_and(|c| matches!(c, '-' | '.' | '=' | '~'))
+        {
+            self.i += 1;
+        }
+        self.s[start..self.i].iter().collect()
+    }
+
+    /// An arrowhead: `>`, or `o`/`x` before a space, `|` or the end.
+    fn head(&mut self) -> bool {
+        match self.peek() {
+            Some('>') => {
+                self.i += 1;
+                true
+            }
+            Some('o' | 'x')
+                if self
+                    .at(self.i + 1)
+                    .is_none_or(|c| c.is_whitespace() || c == '|') =>
+            {
+                self.i += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Where the link that closes a `-- text` opening starts.
+    fn closer(&self, open: &str) -> Option<usize> {
+        let ends: &[&str] = match open {
+            "--" => &["-->", "---", "--o ", "--x "],
+            "==" => &["==>", "==="],
+            _ => &[".->", ".-"],
+        };
+        (self.i..self.s.len()).find(|&j| ends.iter().any(|e| self.starts_with(j, e)))
+    }
+
+    /// `|text|`.
+    fn pipe_label(&mut self) -> Result<String, Unsupported> {
+        let start = self.i + 1;
+        let Some(len) = self.s[start..].iter().position(|&c| c == '|') else {
+            return Err(Unsupported::new("unclosed edge label"));
+        };
+        self.i = start + len + 1;
+        let raw: String = self.s[start..start + len].iter().collect();
+        let raw = raw.trim();
+        Ok(raw
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(raw)
+            .to_owned())
+    }
+}
+
+// ── Layout ───────────────────────────────────────────────────────────────
+
+/// A node of the layered graph: a real node or a dummy on a long edge.
+#[derive(Clone, Copy, PartialEq)]
+enum LNode {
+    Real(usize),
+    Dummy,
+}
+
+/// One layer-to-next-layer piece of an edge.
+struct Seg {
+    from: usize,
+    to: usize,
+    edge: usize,
+    first: bool,
+    last: bool,
+}
+
+/// Where an edge's label is drawn.
+#[derive(Clone, Copy, PartialEq)]
+enum Place {
+    /// Beside the segment's end, above its target.
+    Target(usize),
+    /// Beside the segment's start, below its source.
+    Source(usize),
+}
+
+struct Layout {
+    dir: Dir,
+    edges: Vec<Edge>,
+    /// Kept edges drawn upwards (cycles broken).
+    reversed: Vec<bool>,
+    lnodes: Vec<LNode>,
+    layer_of: Vec<usize>,
+    layers: Vec<Vec<usize>>,
+    segs: Vec<Seg>,
+    /// Per lnode: the slot offset of each segment's port, out (main+) side
+    /// and in (main−) side, by segment index.
+    out_slot: HashMap<usize, i64>,
+    in_slot: HashMap<usize, i64>,
+    /// Per lnode: cross size, main size, and the cross extent used for
+    /// spacing (labels included).
+    cross: Vec<i64>,
+    main: Vec<i64>,
+    extent: Vec<i64>,
+    labels: HashMap<usize, Place>,
+    /// Edges listed under the drawing instead (index into `edges`), and
+    /// whether only their label is missing from the drawing.
+    unplaced: Vec<usize>,
+}
+
+impl Layout {
+    fn new(graph: &Graph, dir: Dir) -> Layout {
+        let n = graph.nodes.len();
+        // Self-loops and repeats cannot be drawn: they are listed.
+        let mut edges = Vec::new();
+        let mut unplaced_edges = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for e in &graph.edges {
+            if e.from == e.to || !seen.insert((e.from, e.to)) {
+                unplaced_edges.push(e.clone());
+            } else {
+                edges.push(e.clone());
+            }
+        }
+        let reversed = break_cycles(n, &edges);
+        let layer_of_real = assign_layers(n, &edges, &reversed);
+        let mut layout = Layout {
+            dir,
+            edges,
+            reversed,
+            lnodes: (0..n).map(LNode::Real).collect(),
+            layer_of: layer_of_real,
+            layers: Vec::new(),
+            segs: Vec::new(),
+            out_slot: HashMap::new(),
+            in_slot: HashMap::new(),
+            cross: Vec::new(),
+            main: Vec::new(),
+            extent: Vec::new(),
+            labels: HashMap::new(),
+            unplaced: Vec::new(),
+        };
+        // Listed edges go after the kept ones, so their indices stay apart.
+        for e in unplaced_edges {
+            layout.unplaced.push(layout.edges.len());
+            layout.reversed.push(false);
+            layout.edges.push(e);
+        }
+        layout.split_long_edges();
+        layout.order();
+        layout.ports(graph);
+        layout
+    }
+
+    /// The number of edges that are drawn (the rest are listed).
+    fn drawn_edges(&self) -> usize {
+        self.edges.len() - self.unplaced.len()
+    }
+
+    /// Segments for every drawn edge, with dummy nodes on long ones.
+    fn split_long_edges(&mut self) {
+        for e in 0..self.drawn_edges() {
+            let (mut a, b) = if self.reversed[e] {
+                (self.edges[e].to, self.edges[e].from)
+            } else {
+                (self.edges[e].from, self.edges[e].to)
+            };
+            let (la, lb) = (self.layer_of[a], self.layer_of[b]);
+            for layer in la + 1..=lb {
+                let next = if layer == lb {
+                    b
+                } else {
+                    self.lnodes.push(LNode::Dummy);
+                    self.layer_of.push(layer);
+                    self.lnodes.len() - 1
+                };
+                self.segs.push(Seg {
+                    from: a,
+                    to: next,
+                    edge: e,
+                    first: layer == la + 1,
+                    last: layer == lb,
+                });
+                a = next;
+            }
+        }
+        let count = self.layer_of.iter().max().map_or(0, |&l| l + 1);
+        self.layers = vec![Vec::new(); count];
+        for (v, &l) in self.layer_of.iter().enumerate() {
+            self.layers[l].push(v);
+        }
+    }
+
+    /// Order each layer by barycenter sweeps, keeping the order with the
+    /// fewest crossings.
+    fn order(&mut self) {
+        let mut preds = vec![Vec::new(); self.lnodes.len()];
+        let mut succs = vec![Vec::new(); self.lnodes.len()];
+        for s in &self.segs {
+            preds[s.to].push(s.from);
+            succs[s.from].push(s.to);
+        }
+        let mut best = self.layers.clone();
+        let mut best_crossings = self.crossings(&best);
+        let mut layers = self.layers.clone();
+        for sweep in 0..8 {
+            let down = sweep % 2 == 0;
+            let range: Vec<usize> = if down {
+                (1..layers.len()).collect()
+            } else {
+                (0..layers.len().saturating_sub(1)).rev().collect()
+            };
+            for l in range {
+                let reference = if down { l - 1 } else { l + 1 };
+                let pos = positions(&layers[reference]);
+                let neighbours = if down { &preds } else { &succs };
+                let mut keyed: Vec<(f64, usize, usize)> = layers[l]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        let ps: Vec<f64> = neighbours[v]
+                            .iter()
+                            .filter_map(|u| pos.get(u).map(|&p| p as f64))
+                            .collect();
+                        let key = if ps.is_empty() {
+                            i as f64
+                        } else {
+                            ps.iter().sum::<f64>() / ps.len() as f64
+                        };
+                        (key, i, v)
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                layers[l] = keyed.into_iter().map(|(_, _, v)| v).collect();
+            }
+            let crossings = self.crossings(&layers);
+            if crossings < best_crossings {
+                best_crossings = crossings;
+                best = layers.clone();
+            }
+        }
+        self.layers = best;
+    }
+
+    /// Edge crossings between adjacent layers in `layers`.
+    fn crossings(&self, layers: &[Vec<usize>]) -> usize {
+        let mut pos = vec![0usize; self.lnodes.len()];
+        for layer in layers {
+            for (i, &v) in layer.iter().enumerate() {
+                pos[v] = i;
+            }
+        }
+        let mut by_gap: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layers.len()];
+        for s in &self.segs {
+            by_gap[self.layer_of[s.from]].push((pos[s.from], pos[s.to]));
+        }
+        let mut count = 0;
+        for pairs in &by_gap {
+            for (i, a) in pairs.iter().enumerate() {
+                for b in &pairs[i + 1..] {
+                    if (a.0 < b.0 && a.1 > b.1) || (a.0 > b.0 && a.1 < b.1) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Port slots, node sizes and label places.
+    fn ports(&mut self, graph: &Graph) {
+        let lr = matches!(self.dir, Dir::Lr | Dir::Rl);
+        let count = self.lnodes.len();
+        // Per lnode and side: the slots in use. Slot 0 is shared by the
+        // forward edges; each reversed edge gets its own.
+        let mut out_groups: Vec<usize> = vec![0; count];
+        let mut in_groups: Vec<usize> = vec![0; count];
+        let mut out_shared = vec![false; count];
+        let mut in_shared = vec![false; count];
+        for s in &self.segs {
+            let reversed = self.reversed[s.edge];
+            let real_from = matches!(self.lnodes[s.from], LNode::Real(_));
+            let real_to = matches!(self.lnodes[s.to], LNode::Real(_));
+            if !reversed || !real_from {
+                out_shared[s.from] = true;
+            }
+            if !reversed || !real_to {
+                in_shared[s.to] = true;
+            }
+        }
+        for (i, s) in self.segs.iter().enumerate() {
+            let reversed = self.reversed[s.edge];
+            let real_from = matches!(self.lnodes[s.from], LNode::Real(_));
+            let real_to = matches!(self.lnodes[s.to], LNode::Real(_));
+            let out = if reversed && real_from {
+                let k = out_groups[s.from] + usize::from(out_shared[s.from]);
+                out_groups[s.from] += 1;
+                slot_offset(k, lr)
+            } else {
+                0
+            };
+            let inn = if reversed && real_to {
+                let k = in_groups[s.to] + usize::from(in_shared[s.to]);
+                in_groups[s.to] += 1;
+                slot_offset(k, lr)
+            } else {
+                0
+            };
+            self.out_slot.insert(i, out);
+            self.in_slot.insert(i, inn);
+        }
+        // Sizes. Cross is along the layer, main across layers.
+        for (v, lnode) in self.lnodes.iter().enumerate() {
+            let (cross, main) = match *lnode {
+                LNode::Dummy => (1, 0),
+                LNode::Real(n) => {
+                    let label = &graph.nodes[n].label;
+                    let slots = out_groups[v] + usize::from(out_shared[v]);
+                    let slots = slots.max(in_groups[v] + usize::from(in_shared[v]));
+                    let need = 2 * slot_offset(slots.saturating_sub(1), lr) + 3;
+                    let w = (text::widest(label) as i64 + 4).max(5);
+                    let h = label.len() as i64 + 2;
+                    if lr {
+                        (h.max(need), w)
+                    } else {
+                        (w.max(need), h)
+                    }
+                }
+            };
+            self.cross.push(cross);
+            self.main.push(main);
+        }
+        self.extent = self.cross.clone();
+        // Labels: beside a port only that edge uses, else listed.
+        let mut ins: HashMap<(usize, i64), usize> = HashMap::new();
+        let mut outs: HashMap<(usize, i64), usize> = HashMap::new();
+        for (i, s) in self.segs.iter().enumerate() {
+            *ins.entry((s.to, self.in_slot[&i])).or_default() += 1;
+            *outs.entry((s.from, self.out_slot[&i])).or_default() += 1;
+        }
+        for (i, s) in self.segs.iter().enumerate() {
+            let edge = &self.edges[s.edge];
+            if edge.label.is_empty() {
+                continue;
+            }
+            let place = if s.last && ins[&(s.to, self.in_slot[&i])] == 1 {
+                Place::Target(i)
+            } else if s.first && outs[&(s.from, self.out_slot[&i])] == 1 {
+                Place::Source(i)
+            } else {
+                continue;
+            };
+            if self.labels.contains_key(&s.edge) {
+                continue;
+            }
+            let (node, _) = match place {
+                Place::Target(_) => (s.to, ()),
+                Place::Source(_) => (s.from, ()),
+            };
+            let (cross, _) = self.label_size(&edge.label);
+            self.extent[node] = self.extent[node].max(cross + 2);
+            self.labels.insert(s.edge, place);
+        }
+        for e in 0..self.drawn_edges() {
+            if !self.edges[e].label.is_empty() && !self.labels.contains_key(&e) {
+                self.unplaced.push(e);
+            }
+        }
+    }
+
+    /// A label's (cross, main) size beside a line.
+    fn label_size(&self, label: &[String]) -> (i64, i64) {
+        let w = text::widest(label) as i64;
+        let n = label.len() as i64;
+        match self.dir {
+            Dir::Td | Dir::Bt => (w, n + 1),
+            Dir::Lr | Dir::Rl => (2 * n - 1, w + 4),
+        }
+    }
+
+    /// Cross positions (centers) of every lnode.
+    fn place_cross(&self) -> Vec<i64> {
+        let mut preds = vec![Vec::new(); self.lnodes.len()];
+        let mut succs = vec![Vec::new(); self.lnodes.len()];
+        for s in &self.segs {
+            preds[s.to].push(s.from);
+            succs[s.from].push(s.to);
+        }
+        let seps: Vec<Vec<f64>> = self
+            .layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .windows(2)
+                    .map(|w| self.sep(w[0], w[1]) as f64)
+                    .collect()
+            })
+            .collect();
+        let mut x = vec![0f64; self.lnodes.len()];
+        for (layer, seps) in self.layers.iter().zip(&seps) {
+            let mut at = 0.0;
+            for (i, &v) in layer.iter().enumerate() {
+                if i > 0 {
+                    at += seps[i - 1];
+                }
+                x[v] = at;
+            }
+        }
+        for pass in 0..8 {
+            let down = pass % 2 == 0;
+            let order: Vec<usize> = if down {
+                (1..self.layers.len()).collect()
+            } else {
+                (0..self.layers.len().saturating_sub(1)).rev().collect()
+            };
+            for l in order {
+                let layer = &self.layers[l];
+                let neighbours = if down { &preds } else { &succs };
+                // Real nodes pull harder than dummies, so boxes line up
+                // and long edges bend around them.
+                let desired: Vec<f64> = layer
+                    .iter()
+                    .map(|&v| {
+                        let ns = &neighbours[v];
+                        let total: f64 = ns.iter().map(|&u| self.weight(u)).sum();
+                        if ns.is_empty() {
+                            x[v]
+                        } else {
+                            ns.iter().map(|&u| self.weight(u) * x[u]).sum::<f64>() / total
+                        }
+                    })
+                    .collect();
+                let weights: Vec<f64> = layer.iter().map(|&v| self.weight(v)).collect();
+                let placed = isotonic(&desired, &weights, &seps[l]);
+                for (&v, p) in layer.iter().zip(placed) {
+                    x[v] = p;
+                }
+            }
+        }
+        // Whole cells, still apart, and nothing left of column 0.
+        let mut out = vec![0i64; self.lnodes.len()];
+        for (layer, seps) in self.layers.iter().zip(&seps) {
+            for (i, &v) in layer.iter().enumerate() {
+                let mut p = x[v].round() as i64;
+                if i > 0 {
+                    p = p.max(out[layer[i - 1]] + seps[i - 1] as i64);
+                }
+                out[v] = p;
+            }
+        }
+        let min = (0..self.lnodes.len())
+            .map(|v| out[v] - self.extent[v] / 2)
+            .min()
+            .unwrap_or(0);
+        out.iter().map(|p| p - min).collect()
+    }
+
+    /// How hard `v` pulls in placement: dummies give way to real nodes.
+    fn weight(&self, v: usize) -> f64 {
+        match self.lnodes[v] {
+            LNode::Real(_) => 1.0,
+            LNode::Dummy => 0.1,
+        }
+    }
+
+    /// The least distance between the centers of neighbours `a` and `b`.
+    fn sep(&self, a: usize, b: usize) -> i64 {
+        let real = |v: usize| matches!(self.lnodes[v], LNode::Real(_));
+        let lr = matches!(self.dir, Dir::Lr | Dir::Rl);
+        let gap = if real(a) && real(b) && !lr { 3 } else { 2 };
+        let hi = self.extent[a] - 1 - self.extent[a] / 2;
+        let lo = self.extent[b] / 2;
+        hi + gap + lo
+    }
+
+    // ── Drawing ──────────────────────────────────────────────────────────
+
+    fn draw(&self, graph: &Graph) -> Result<Vec<String>, Unsupported> {
+        let cx = self.place_cross();
+        // A reversed edge's slots lie on the side towards its other end at
+        // its start, and away from it at its end: then, on the top track,
+        // it crosses neither the shared stub nor the shared drop.
+        let mut ports: Vec<(i64, i64)> = (self.segs.iter().enumerate())
+            .map(|(i, s)| {
+                let sign = if cx[s.to] >= cx[s.from] { 1 } else { -1 };
+                (sign * self.out_slot[&i], sign * self.in_slot[&i])
+            })
+            .collect();
+        // Unless the other side crosses fewer of the gap's other lines. A
+        // reversed edge has the top track: its horizontal crosses the other
+        // stubs below its span, and its drop crosses the other horizontals.
+        for (i, s) in self.segs.iter().enumerate() {
+            if self.out_slot[&i] == 0 && self.in_slot[&i] == 0 {
+                continue;
+            }
+            let g = self.layer_of[s.from];
+            let others: Vec<(i64, i64)> = (self.segs.iter().enumerate())
+                .filter(|&(j, o)| j != i && self.layer_of[o.from] == g)
+                .map(|(j, o)| (cx[o.from] + ports[j].0, cx[o.to] + ports[j].1))
+                .collect();
+            let crossed = |(a, b): (i64, i64)| {
+                let (sx, tx) = (cx[s.from] + a, cx[s.to] + b);
+                let (lo, hi) = (sx.min(tx), sx.max(tx));
+                let stubs = others.iter().filter(|o| lo <= o.0 && o.0 <= hi).count();
+                let drops = (others.iter())
+                    .filter(|o| o.0.min(o.1) <= tx && tx <= o.0.max(o.1))
+                    .count();
+                stubs + drops
+            };
+            let (a, b) = (self.out_slot[&i], self.in_slot[&i]);
+            let best = [ports[i], (a, b), (-a, b), (a, -b), (-a, -b)]
+                .into_iter()
+                .min_by_key(|&p| crossed(p))
+                .expect("candidates");
+            ports[i] = best;
+        }
+        let gaps = self.layers.len().saturating_sub(1);
+        // Per gap: the track of each segment, and the band sizes.
+        let mut track = vec![0i64; self.segs.len()];
+        let mut tracks = vec![1i64; gaps];
+        let mut src_band = vec![0i64; gaps];
+        let mut dst_band = vec![0i64; gaps];
+        for g in 0..gaps {
+            // Nets: segments that leave the same port share a track.
+            let mut nets: Vec<((usize, i64), i64, i64, Vec<usize>)> = Vec::new();
+            for (i, s) in self.segs.iter().enumerate() {
+                if self.layer_of[s.from] != g {
+                    continue;
+                }
+                let port = (s.from, ports[i].0);
+                let sx = cx[s.from] + ports[i].0;
+                let tx = cx[s.to] + ports[i].1;
+                match nets.iter_mut().find(|n| n.0 == port) {
+                    Some(net) => {
+                        net.1 = net.1.min(tx);
+                        net.2 = net.2.max(tx);
+                        net.3.push(i);
+                    }
+                    None => nets.push((port, sx.min(tx), sx.max(tx), vec![i])),
+                }
+            }
+            // Reversed edges first, so they get the top tracks.
+            let reversed =
+                |n: &(_, _, _, Vec<usize>)| n.3.iter().any(|&i| self.reversed[self.segs[i].edge]);
+            nets.sort_by_key(|n| (!reversed(n), n.1, n.2));
+            let mut ends: Vec<i64> = Vec::new();
+            for (_, lo, hi, members) in &nets {
+                if lo == hi {
+                    continue;
+                }
+                let t = match ends.iter().position(|&end| end + 2 <= *lo) {
+                    Some(t) => t,
+                    None => {
+                        ends.push(i64::MIN);
+                        ends.len() - 1
+                    }
+                };
+                ends[t] = *hi;
+                for &i in members {
+                    track[i] = t as i64;
+                }
+            }
+            tracks[g] = (ends.len() as i64).max(1);
+        }
+        for (&e, place) in &self.labels {
+            let (_, main) = self.label_size(&self.edges[e].label);
+            match *place {
+                Place::Target(i) => {
+                    let g = self.layer_of[self.segs[i].from];
+                    dst_band[g] = dst_band[g].max(main);
+                }
+                Place::Source(i) => {
+                    let g = self.layer_of[self.segs[i].from];
+                    src_band[g] = src_band[g].max(main);
+                }
+            }
+        }
+        // A `▲` under a box needs a row of line below it before a turn.
+        for s in &self.segs {
+            if self.reversed[s.edge] && self.edges[s.edge].head && s.first {
+                let g = self.layer_of[s.from];
+                src_band[g] = src_band[g].max(1);
+            }
+        }
+        // Main positions: layer starts and the rows of each gap.
+        let mut layer_start = Vec::with_capacity(self.layers.len());
+        let mut layer_size = Vec::with_capacity(self.layers.len());
+        let mut m = 0i64;
+        for (l, layer) in self.layers.iter().enumerate() {
+            layer_start.push(m);
+            let size = layer
+                .iter()
+                .map(|&v| self.main[v])
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            layer_size.push(size);
+            m += size;
+            if l < gaps {
+                m += src_band[l] + tracks[l] + dst_band[l] + 1;
+            }
+        }
+        let total_main = m;
+        let total_cross = (0..self.lnodes.len())
+            .map(|v| cx[v] - self.extent[v] / 2 + self.extent[v])
+            .max()
+            .unwrap_or(1);
+        let listed = self.listing(graph);
+        let (w, h) = match self.dir {
+            Dir::Td | Dir::Bt => (total_cross, total_main),
+            Dir::Lr | Dir::Rl => (total_main, total_cross),
+        };
+        let listed_rows = if listed.is_empty() {
+            0
+        } else {
+            listed.len() + 1
+        };
+        if w as usize > MAX_COLS || h as usize + listed_rows > MAX_ROWS {
+            return Err(Unsupported::new("diagram too large"));
+        }
+        let mut pen = Pen {
+            dir: self.dir,
+            total_main,
+            canvas: Canvas::new(w as usize, h as usize),
+        };
+        // Lines first, so boxes and text are drawn over them.
+        for (i, s) in self.segs.iter().enumerate() {
+            let g = self.layer_of[s.from];
+            let edge = &self.edges[s.edge];
+            let sx = cx[s.from] + ports[i].0;
+            let tx = cx[s.to] + ports[i].1;
+            let start = match self.lnodes[s.from] {
+                LNode::Real(_) => layer_start[g] + self.main[s.from],
+                LNode::Dummy => layer_start[g],
+            };
+            let gap = layer_start[g] + layer_size[g];
+            let mt = gap + src_band[g] + track[i];
+            let arrow = layer_start[g + 1] - 1;
+            pen.vline(sx, start, mt, (true, false), edge.dotted);
+            if sx != tx {
+                pen.hline(mt, sx, tx, edge.dotted);
+            }
+            pen.vline(tx, mt, arrow, (false, true), edge.dotted);
+            if let LNode::Dummy = self.lnodes[s.to] {
+                let l = g + 1;
+                let end = layer_start[l] + layer_size[l] - 1;
+                pen.vline(tx, layer_start[l], end, (true, true), edge.dotted);
+            }
+        }
+        // Boxes.
+        for (v, lnode) in self.lnodes.iter().enumerate() {
+            let LNode::Real(n) = *lnode else { continue };
+            let node = &graph.nodes[n];
+            let l = self.layer_of[v];
+            let c0 = cx[v] - self.cross[v] / 2;
+            let (x, y, w, h) = pen.rect(c0, layer_start[l], self.cross[v], self.main[v]);
+            let style = match node.shape {
+                Shape::Rect => &canvas::RECT,
+                Shape::Rounded => &canvas::ROUNDED,
+                Shape::Decision => &canvas::DECISION,
+            };
+            pen.canvas.frame(x, y, w, h, style);
+            let top = y + (h - node.label.len()) / 2;
+            for (i, line) in node.label.iter().enumerate() {
+                let lw = text::width(line);
+                pen.canvas.text(x + (w - lw) / 2, top + i, line);
+            }
+        }
+        // Ports and arrowheads.
+        for (i, s) in self.segs.iter().enumerate() {
+            let g = self.layer_of[s.from];
+            let edge = &self.edges[s.edge];
+            let reversed = self.reversed[s.edge];
+            let sx = cx[s.from] + ports[i].0;
+            let tx = cx[s.to] + ports[i].1;
+            if let LNode::Real(_) = self.lnodes[s.from] {
+                let border = layer_start[g] + self.main[s.from] - 1;
+                if reversed && edge.head {
+                    pen.arrow(sx, border + 1, false);
+                } else {
+                    pen.tee(sx, border, true);
+                }
+            }
+            if let LNode::Real(_) = self.lnodes[s.to] {
+                let top = layer_start[g + 1];
+                if !reversed && edge.head {
+                    pen.arrow(tx, top - 1, true);
+                } else if !pen.is_arrow(tx, top - 1) {
+                    pen.tee(tx, top, false);
+                }
+            }
+        }
+        // Labels, over the lines they sit on.
+        for (&e, place) in &self.labels {
+            let label = &self.edges[e].label;
+            let (_, size) = self.label_size(label);
+            let (at, main0) = match *place {
+                Place::Target(i) => {
+                    let s = &self.segs[i];
+                    let arrow = layer_start[self.layer_of[s.to]] - 1;
+                    (cx[s.to] + ports[i].1, arrow - size)
+                }
+                Place::Source(i) => {
+                    let s = &self.segs[i];
+                    let g = self.layer_of[s.from];
+                    let start = match self.lnodes[s.from] {
+                        LNode::Real(_) => layer_start[g] + self.main[s.from],
+                        LNode::Dummy => layer_start[g],
+                    };
+                    (cx[s.from] + ports[i].0, start)
+                }
+            };
+            pen.label(label, at, main0, size);
+        }
+        let mut rows = pen.canvas.rows();
+        if !listed.is_empty() {
+            rows.push(String::new());
+            rows.extend(listed);
+        }
+        Ok(rows)
+    }
+
+    /// The `a ──label──▶ b` lines for the edges not drawn.
+    fn listing(&self, graph: &Graph) -> Vec<String> {
+        let name = |n: usize| text::fit(&graph.nodes[n].label.join(" "), text::WRAP);
+        let mut seen = std::collections::HashSet::new();
+        self.unplaced
+            .iter()
+            .filter(|&&e| seen.insert(e))
+            .map(|&e| {
+                let edge = &self.edges[e];
+                let line = if edge.dotted { "┄┄" } else { "──" };
+                let head = if edge.head { "▶" } else { "" };
+                let label = edge.label.join(" ");
+                let mid = if label.is_empty() {
+                    format!("{line}{head}")
+                } else {
+                    format!("{line}{label}{line}{head}")
+                };
+                text::fit(
+                    &format!("{} {mid} {}", name(edge.from), name(edge.to)),
+                    MAX_COLS,
+                )
+            })
+            .collect()
+    }
+}
+
+/// Which edges to reverse so that the graph has no cycle: the back edges
+/// of a depth-first search, run with an explicit stack.
+fn break_cycles(n: usize, edges: &[Edge]) -> Vec<bool> {
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, e) in edges.iter().enumerate() {
+        out[e.from].push(i);
+    }
+    // 0: not seen, 1: on the stack, 2: done.
+    let mut state = vec![0u8; n];
+    let mut reversed = vec![false; edges.len()];
+    for root in 0..n {
+        if state[root] != 0 {
+            continue;
+        }
+        state[root] = 1;
+        let mut stack = vec![(root, 0usize)];
+        while let Some(top) = stack.last_mut() {
+            let (v, k) = *top;
+            if k < out[v].len() {
+                top.1 += 1;
+                let e = out[v][k];
+                let w = edges[e].to;
+                match state[w] {
+                    0 => {
+                        state[w] = 1;
+                        stack.push((w, 0));
+                    }
+                    1 => reversed[e] = true,
+                    _ => {}
+                }
+            } else {
+                state[v] = 2;
+                stack.pop();
+            }
+        }
+    }
+    reversed
+}
+
+/// Each node's layer: the longest path to it from a source, with the
+/// edges in `reversed` turned around; then a source moves down to just
+/// above its nearest successor, so it does not dangle far above it.
+fn assign_layers(n: usize, edges: &[Edge], reversed: &[bool]) -> Vec<usize> {
+    let ends = |i: usize| {
+        let e = &edges[i];
+        if reversed[i] {
+            (e.to, e.from)
+        } else {
+            (e.from, e.to)
+        }
+    };
+    let mut indegree = vec![0usize; n];
+    let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for i in 0..edges.len() {
+        let (a, b) = ends(i);
+        indegree[b] += 1;
+        out[a].push(b);
+    }
+    let mut layer = vec![0usize; n];
+    let mut ready: std::collections::VecDeque<usize> =
+        (0..n).filter(|&v| indegree[v] == 0).collect();
+    while let Some(v) = ready.pop_front() {
+        for &w in &out[v] {
+            layer[w] = layer[w].max(layer[v] + 1);
+            indegree[w] -= 1;
+            if indegree[w] == 0 {
+                ready.push_back(w);
+            }
+        }
+    }
+    let sources: Vec<usize> = (0..n)
+        .filter(|&v| !out[v].is_empty() && (0..edges.len()).all(|i| ends(i).1 != v))
+        .collect();
+    for v in sources {
+        if let Some(nearest) = out[v].iter().map(|&w| layer[w]).min() {
+            layer[v] = nearest - 1;
+        }
+    }
+    layer
+}
+
+/// How far the k-th port slot of a side is from its center (the side it
+/// lies on is chosen when drawing): two columns apart, or one row.
+fn slot_offset(k: usize, lr: bool) -> i64 {
+    if lr {
+        k as i64
+    } else {
+        2 * k as i64
+    }
+}
+
+/// Each lnode's index in `layer`.
+fn positions(layer: &[usize]) -> HashMap<usize, usize> {
+    layer.iter().enumerate().map(|(i, &v)| (v, i)).collect()
+}
+
+/// Positions as close as possible (weighted least squares) to `desired`,
+/// in order, with at least `seps[i]` between the i-th and the next. Pool
+/// adjacent violators: iterative, linear.
+fn isotonic(desired: &[f64], weights: &[f64], seps: &[f64]) -> Vec<f64> {
+    // Shift out the separations: then the positions only need to grow.
+    let mut offset = vec![0.0; desired.len()];
+    for i in 1..desired.len() {
+        offset[i] = offset[i - 1] + seps[i - 1];
+    }
+    // Blocks of (weighted sum, total weight, members).
+    let mut blocks: Vec<(f64, f64, usize)> = Vec::new();
+    for (i, d) in desired.iter().enumerate() {
+        blocks.push((weights[i] * (d - offset[i]), weights[i], 1));
+        while blocks.len() > 1 {
+            let (s1, c1, n1) = blocks[blocks.len() - 1];
+            let (s0, c0, n0) = blocks[blocks.len() - 2];
+            if s0 / c0 <= s1 / c1 {
+                break;
+            }
+            blocks.pop();
+            *blocks.last_mut().expect("two blocks") = (s0 + s1, c0 + c1, n0 + n1);
+        }
+    }
+    let mut out = Vec::with_capacity(desired.len());
+    for (sum, count, n) in blocks {
+        for _ in 0..n {
+            out.push(sum / count + offset[out.len()]);
+        }
+    }
+    out
+}
+
+/// Draws on the canvas in abstract (cross, main) coordinates.
+struct Pen {
+    dir: Dir,
+    total_main: i64,
+    canvas: Canvas,
+}
+
+impl Pen {
+    /// The canvas cell of (cross, main).
+    fn at(&self, c: i64, m: i64) -> (usize, usize) {
+        let flip = self.total_main - 1 - m;
+        let (x, y) = match self.dir {
+            Dir::Td => (c, m),
+            Dir::Bt => (c, flip),
+            Dir::Lr => (m, c),
+            Dir::Rl => (flip, c),
+        };
+        (x.max(0) as usize, y.max(0) as usize)
+    }
+
+    /// The canvas rectangle (x, y, w, h) of a cross × main rectangle.
+    fn rect(&self, c0: i64, m0: i64, cross: i64, main: i64) -> (usize, usize, usize, usize) {
+        let (x0, y0) = self.at(c0, m0);
+        let (x1, y1) = self.at(c0 + cross - 1, m0 + main - 1);
+        (
+            x0.min(x1),
+            y0.min(y1),
+            x0.abs_diff(x1) + 1,
+            y0.abs_diff(y1) + 1,
+        )
+    }
+
+    /// Canvas links for main+ and main−.
+    fn main_links(&self) -> (u8, u8) {
+        match self.dir {
+            Dir::Td => (DOWN, UP),
+            Dir::Bt => (UP, DOWN),
+            Dir::Lr => (RIGHT, LEFT),
+            Dir::Rl => (LEFT, RIGHT),
+        }
+    }
+
+    fn cross_links(&self) -> (u8, u8) {
+        match self.dir {
+            Dir::Td | Dir::Bt => (RIGHT, LEFT),
+            Dir::Lr | Dir::Rl => (DOWN, UP),
+        }
+    }
+
+    fn vline(&mut self, c: i64, m0: i64, m1: i64, open: (bool, bool), dotted: bool) {
+        let (plus, minus) = self.main_links();
+        for m in m0..=m1 {
+            let mut l = 0;
+            if m > m0 || open.0 {
+                l |= minus;
+            }
+            if m < m1 || open.1 {
+                l |= plus;
+            }
+            let (x, y) = self.at(c, m);
+            self.canvas.link(x, y, l, dotted);
+        }
+    }
+
+    fn hline(&mut self, m: i64, c0: i64, c1: i64, dotted: bool) {
+        let (plus, minus) = self.cross_links();
+        let (lo, hi) = (c0.min(c1), c0.max(c1));
+        for c in lo..=hi {
+            let mut l = 0;
+            if c > lo {
+                l |= minus;
+            }
+            if c < hi {
+                l |= plus;
+            }
+            let (x, y) = self.at(c, m);
+            self.canvas.link(x, y, l, dotted);
+        }
+    }
+
+    /// An arrowhead at (c, m) pointing main+ (`forward`) or main−.
+    fn arrow(&mut self, c: i64, m: i64, forward: bool) {
+        let heads = match self.dir {
+            Dir::Td => ('▼', '▲'),
+            Dir::Bt => ('▲', '▼'),
+            Dir::Lr => ('▶', '◀'),
+            Dir::Rl => ('◀', '▶'),
+        };
+        let (x, y) = self.at(c, m);
+        self.canvas
+            .put(x, y, if forward { heads.0 } else { heads.1 });
+    }
+
+    fn is_arrow(&self, c: i64, m: i64) -> bool {
+        let (x, y) = self.at(c, m);
+        matches!(self.canvas.get(x, y), Some('▼' | '▲' | '▶' | '◀'))
+    }
+
+    /// A box border cell where a line leaves (`out`, main+) or enters.
+    fn tee(&mut self, c: i64, m: i64, out: bool) {
+        let (x, y) = self.at(c, m);
+        let tee = match (self.dir, out) {
+            (Dir::Td, true) | (Dir::Bt, false) => '┬',
+            (Dir::Td, false) | (Dir::Bt, true) => '┴',
+            (Dir::Lr, true) | (Dir::Rl, false) => '├',
+            (Dir::Lr, false) | (Dir::Rl, true) => '┤',
+        };
+        if matches!(self.canvas.get(x, y), Some('─' | '│')) {
+            self.canvas.put(x, y, tee);
+        }
+    }
+
+    /// An edge label centered on the line at cross `c`, filling the main
+    /// range from `m0` over `size` cells.
+    fn label(&mut self, label: &[String], c: i64, m0: i64, size: i64) {
+        let n = label.len() as i64;
+        match self.dir {
+            Dir::Td | Dir::Bt => {
+                let w = text::widest(label) as i64;
+                // The last `n` rows of the band; the first stays a line.
+                let (x, y, _, _) = self.rect(c - w / 2, m0 + size - n, w, n);
+                for (i, line) in label.iter().enumerate() {
+                    let lw = text::width(line) as i64;
+                    self.canvas.text(x + ((w - lw) / 2) as usize, y + i, line);
+                }
+            }
+            Dir::Lr | Dir::Rl => {
+                let w = text::widest(label) as i64;
+                // " text " after one cell of line.
+                let (x, y, _, _) = self.rect(c - (n - 1) / 2, m0 + 1, n, w + 2);
+                for (i, line) in label.iter().enumerate() {
+                    let lw = text::width(line) as i64;
+                    let pad = ((w - lw) / 2) as usize;
+                    let row = format!(
+                        "{}{line}{}",
+                        " ".repeat(pad + 1),
+                        " ".repeat((w - lw) as usize - pad + 1)
+                    );
+                    self.canvas.text(x, y + i, &row);
+                }
+            }
+        }
+    }
+}
+```
+
+Create `src/tui/diagram/sequence.rs`:
+
+```rust
+//! Sequence diagrams (`sequenceDiagram`): participants side by side,
+//! lifelines down, one row band per message, note or block line.
+
+use super::canvas::{self, Canvas};
+use super::text;
+use super::{Unsupported, MAX_COLS, MAX_EDGES, MAX_NODES, MAX_ROWS};
+
+/// The deepest nesting of `loop`/`alt`/… blocks.
+const MAX_DEPTH: usize = 8;
+
+/// Message arrows, longest first so that `-->>` is not read as `-->`.
+/// (pattern, dotted, head)
+const ARROWS: [(&str, bool, bool); 8] = [
+    ("-->>", true, true),
+    ("->>", false, true),
+    ("--x", true, true),
+    ("--)", true, true),
+    ("-->", true, false),
+    ("-x", false, true),
+    ("-)", false, true),
+    ("->", false, false),
+];
+
+enum Side {
+    Left,
+    Right,
+    Over,
+}
+
+enum Item {
+    Message {
+        from: usize,
+        to: usize,
+        text: Vec<String>,
+        dotted: bool,
+        head: bool,
+    },
+    Note {
+        side: Side,
+        a: usize,
+        b: usize,
+        text: Vec<String>,
+    },
+    /// `loop`, `alt`, `opt`, …: a frame opens.
+    Open(String),
+    /// `else`, `and`, `option`: a frame's next part.
+    Split(String),
+    End,
+}
+
+#[derive(Default)]
+struct Diagram {
+    ids: Vec<String>,
+    labels: Vec<Vec<String>>,
+    items: Vec<Item>,
+    messages: usize,
+}
+
+/// The drawing of a sequence diagram with statements `lines`.
+pub fn render<'a>(lines: impl Iterator<Item = &'a str>) -> Result<Vec<String>, Unsupported> {
+    let mut d = Diagram::default();
+    let mut depth = 0usize;
+    for line in lines {
+        let item = d.statement(line)?;
+        match &item {
+            Some(Item::Open(_)) => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(Unsupported::new("blocks nested too deep"));
+                }
+            }
+            Some(Item::Split(_)) if depth == 0 => {
+                return Err(Unsupported::new("else outside a block"));
+            }
+            Some(Item::End) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| Unsupported::new("end without a block"))?;
+            }
+            _ => {}
+        }
+        d.items.extend(item);
+    }
+    d.items.extend((0..depth).map(|_| Item::End));
+    if d.ids.is_empty() {
+        return Err(Unsupported::new("empty sequence diagram"));
+    }
+    d.draw()
+}
+
+impl Diagram {
+    /// The participant `id`, added if new.
+    fn participant(&mut self, id: &str) -> Result<usize, Unsupported> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(Unsupported::new("expected a participant"));
+        }
+        if let Some(i) = self.ids.iter().position(|p| p == id) {
+            return Ok(i);
+        }
+        if self.ids.len() == MAX_NODES {
+            return Err(Unsupported::new(format!(
+                "more than {MAX_NODES} participants"
+            )));
+        }
+        self.ids.push(id.to_owned());
+        self.labels.push(text::wrap(&text::clean(id)));
+        Ok(self.ids.len() - 1)
+    }
+
+    fn statement(&mut self, line: &str) -> Result<Option<Item>, Unsupported> {
+        let (word, rest) = match line.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim()),
+            None => (line, ""),
+        };
+        let label = |s: &str| text::fit(&text::clean(s).replace('\n', " "), 60);
+        match word {
+            "participant" | "actor" => {
+                let (id, alias) = match rest.split_once(" as ") {
+                    Some((id, alias)) => (id.trim(), Some(alias.trim())),
+                    None => (rest, None),
+                };
+                let i = self.participant(id)?;
+                if let Some(alias) = alias {
+                    self.labels[i] = text::wrap(&text::clean(alias));
+                }
+                Ok(None)
+            }
+            "autonumber" | "activate" | "deactivate" => Ok(None),
+            "loop" | "alt" | "opt" | "par" | "critical" | "break" => {
+                Ok(Some(Item::Open(format!("{word}: {}", label(rest)))))
+            }
+            "rect" => Ok(Some(Item::Open(String::new()))),
+            "else" | "and" | "option" => Ok(Some(Item::Split(format!("{word}: {}", label(rest))))),
+            "end" if rest.is_empty() => Ok(Some(Item::End)),
+            _ if word.eq_ignore_ascii_case("note") => self.note(rest).map(Some),
+            _ => self.message(line).map(Some),
+        }
+    }
+
+    /// `left of a: t`, `right of a: t`, `over a: t`, `over a,b: t`.
+    fn note(&mut self, rest: &str) -> Result<Item, Unsupported> {
+        let Some((place, body)) = rest.split_once(':') else {
+            return Err(Unsupported::new("note without text"));
+        };
+        let place = place.trim();
+        let (side, who) = if let Some(who) = place.strip_prefix("left of ") {
+            (Side::Left, who)
+        } else if let Some(who) = place.strip_prefix("right of ") {
+            (Side::Right, who)
+        } else if let Some(who) = place.strip_prefix("over ") {
+            (Side::Over, who)
+        } else {
+            return Err(Unsupported::new("note needs left of, right of or over"));
+        };
+        let (a, b) = match who.split_once(',') {
+            Some((a, b)) if matches!(side, Side::Over) => {
+                (self.participant(a)?, self.participant(b)?)
+            }
+            Some(_) => return Err(Unsupported::new("only a note over may span")),
+            None => {
+                let a = self.participant(who)?;
+                (a, a)
+            }
+        };
+        Ok(Item::Note {
+            side,
+            a: a.min(b),
+            b: a.max(b),
+            text: text::wrap(&text::clean(body.trim())),
+        })
+    }
+
+    /// `a->>b: text` and the other arrows.
+    fn message(&mut self, line: &str) -> Result<Item, Unsupported> {
+        let (head, body) = line.split_once(':').unwrap_or((line, ""));
+        let found = (0..head.len())
+            .filter(|&i| head.is_char_boundary(i))
+            .find_map(|i| {
+                ARROWS
+                    .iter()
+                    .find(|(p, _, _)| head[i..].starts_with(p))
+                    .map(|a| (i, a))
+            });
+        let Some((at, &(pattern, dotted, arrowhead))) = found else {
+            let shown = text::fit(&text::clean(line).replace('\n', " "), 40);
+            return Err(Unsupported::new(format!("cannot parse: {shown}")));
+        };
+        let from = self.participant(&head[..at])?;
+        let to = head[at + pattern.len()..]
+            .trim()
+            .trim_start_matches(['+', '-']);
+        let to = self.participant(to)?;
+        if self.messages == MAX_EDGES {
+            return Err(Unsupported::new(format!("more than {MAX_EDGES} messages")));
+        }
+        self.messages += 1;
+        Ok(Item::Message {
+            from,
+            to,
+            text: text::wrap(&text::clean(body.trim())),
+            dotted,
+            head: arrowhead,
+        })
+    }
+
+    fn draw(&self) -> Result<Vec<String>, Unsupported> {
+        let n = self.ids.len();
+        let widths: Vec<i64> = self
+            .labels
+            .iter()
+            .map(|l| text::widest(l) as i64 + 4)
+            .collect();
+        let heights: Vec<i64> = self.labels.iter().map(|l| l.len() as i64 + 2).collect();
+        // Positions 0 (left edge), 1..=n (lifelines), n + 1 (right edge);
+        // constraints (a, b, d): position b is at least d right of a.
+        let mut rules: Vec<(usize, usize, i64)> = Vec::new();
+        rules.push((0, 1, widths[0] / 2));
+        rules.push((n, n + 1, widths[n - 1] - widths[n - 1] / 2));
+        for i in 1..n {
+            let (wa, wb) = (widths[i - 1], widths[i]);
+            rules.push((i, i + 1, wa - wa / 2 + 2 + wb / 2));
+        }
+        let mut depth = 0usize;
+        let mut max_depth = 0usize;
+        for item in &self.items {
+            match item {
+                Item::Message { from, to, text, .. } if from == to => {
+                    rules.push((from + 1, from + 2, text::widest(text) as i64 + 6));
+                }
+                Item::Message { from, to, text, .. } => {
+                    let (a, b) = (from.min(to) + 1, from.max(to) + 1);
+                    rules.push((a, b, (text::widest(text) as i64 + 4).max(6)));
+                }
+                Item::Note { side, a, b, text } => {
+                    let w = text::widest(text) as i64 + 4;
+                    let (a, b) = (a + 1, b + 1);
+                    match side {
+                        Side::Right => rules.push((a, a + 1, w + 3)),
+                        Side::Left => rules.push((a - 1, a, w + 3)),
+                        Side::Over if a == b => {
+                            rules.push((a - 1, a, w / 2 + 2));
+                            rules.push((a, a + 1, w - w / 2 + 2));
+                        }
+                        Side::Over => {
+                            rules.push((a - 1, a, 3));
+                            rules.push((a, b, w - 5));
+                            rules.push((b, b + 1, 3));
+                        }
+                    }
+                }
+                Item::Open(_) => {
+                    depth += 1;
+                    max_depth = max_depth.max(depth);
+                }
+                Item::End => depth -= 1,
+                Item::Split(_) => {}
+            }
+        }
+        let mut xs = vec![0i64; n + 2];
+        for b in 1..n + 2 {
+            xs[b] = xs[b - 1] + 1;
+            for &(a, rb, d) in &rules {
+                if rb == b {
+                    xs[b] = xs[b].max(xs[a] + d);
+                }
+            }
+        }
+        // Frames take two columns each side per nesting level.
+        let margin = 2 * max_depth as i64;
+        let xs: Vec<i64> = xs.iter().map(|x| x + margin).collect();
+        let width = xs[n + 1] + margin + 1;
+        let head = heights.iter().copied().max().unwrap_or(3);
+        let mut height = head;
+        for item in &self.items {
+            height += rows_of(item);
+        }
+        height += 1;
+        if width as usize > MAX_COLS || height as usize > MAX_ROWS {
+            return Err(Unsupported::new("diagram too large"));
+        }
+        let mut c = Canvas::new(width as usize, height as usize);
+        let at = |i: usize| xs[i + 1] as usize;
+        for i in 0..n {
+            let x = at(i) - (widths[i] / 2) as usize;
+            let (w, h) = (widths[i] as usize, heights[i] as usize);
+            c.vline(at(i), h, height as usize - 1, (true, false), false);
+            c.frame(x, 0, w, h, &canvas::RECT);
+            for (k, line) in self.labels[i].iter().enumerate() {
+                c.text(x + (w - text::width(line)) / 2, 1 + k, line);
+            }
+            c.put(at(i), h - 1, '┬');
+        }
+        let mut y = head as usize;
+        let mut open: Vec<(usize, usize)> = Vec::new();
+        for item in &self.items {
+            match item {
+                Item::Message {
+                    from,
+                    to,
+                    text,
+                    dotted,
+                    head,
+                } if from == to => {
+                    let x = at(*from);
+                    let rows = rows_of(item) as usize;
+                    let (h, v) = if *dotted {
+                        ('┄', '┆')
+                    } else {
+                        ('─', '│')
+                    };
+                    c.text(x, y, &format!("├{h}{h}┐"));
+                    for k in 1..rows - 1 {
+                        c.put(x + 3, y + k, v);
+                    }
+                    let back = if *head { '◀' } else { h };
+                    c.text(x + 1, y + rows - 1, &format!("{back}{h}┘"));
+                    for (k, line) in text.iter().enumerate() {
+                        c.text(x + 5, y + k, line);
+                    }
+                    y += rows;
+                }
+                Item::Message {
+                    from,
+                    to,
+                    text,
+                    dotted,
+                    head,
+                } => {
+                    let (xf, xt) = (at(*from), at(*to));
+                    let (a, b) = (xf.min(xt), xf.max(xt));
+                    for line in text {
+                        let lw = text::width(line);
+                        let x = ((a + b) / 2).saturating_sub(lw / 2).max(a + 2);
+                        c.text(x, y, line);
+                        y += 1;
+                    }
+                    let line = if *dotted { '┄' } else { '─' };
+                    for x in a + 1..b {
+                        c.put(x, y, line);
+                    }
+                    let right = xt > xf;
+                    c.put(xf, y, if right { '├' } else { '┤' });
+                    if *head {
+                        let tip = if right {
+                            (xt - 1, '▶')
+                        } else {
+                            (xt + 1, '◀')
+                        };
+                        c.put(tip.0, y, tip.1);
+                    } else {
+                        c.put(xt, y, if right { '┤' } else { '├' });
+                    }
+                    y += 1;
+                }
+                Item::Note { side, a, b, text } => {
+                    let w = text::widest(text) + 4;
+                    let x = match side {
+                        Side::Right => at(*a) + 2,
+                        Side::Left => at(*a) - 1 - w,
+                        Side::Over if a == b => at(*a) - w / 2,
+                        Side::Over => at(*a) - 2,
+                    };
+                    let w = match side {
+                        Side::Over if a != b => w.max(at(*b) + 3 - x),
+                        _ => w,
+                    };
+                    let h = text.len() + 2;
+                    c.frame(x, y, w, h, &canvas::NOTE);
+                    for (k, line) in text.iter().enumerate() {
+                        c.text(x + 2, y + 1 + k, line);
+                    }
+                    y += h;
+                }
+                Item::Open(label) => {
+                    let level = open.len();
+                    let (l, r) = frame_columns(level, max_depth, width as usize);
+                    self.rule(&mut c, y, l, r, ('┌', '─', '┐'), label, &xs);
+                    open.push((level, y));
+                    y += 1;
+                }
+                Item::Split(label) => {
+                    let level = open.len() - 1;
+                    let (l, r) = frame_columns(level, max_depth, width as usize);
+                    self.rule(&mut c, y, l, r, ('├', '┄', '┤'), label, &xs);
+                    y += 1;
+                }
+                Item::End => {
+                    let (level, top) = open.pop().expect("blocks are balanced");
+                    let (l, r) = frame_columns(level, max_depth, width as usize);
+                    self.rule(&mut c, y, l, r, ('└', '─', '┘'), "", &xs);
+                    for row in top + 1..y {
+                        for x in [l, r] {
+                            if c.get(x, row).is_none() {
+                                c.put(x, row, '│');
+                            }
+                        }
+                    }
+                    y += 1;
+                }
+            }
+        }
+        Ok(c.rows())
+    }
+
+    /// A frame's top, split or bottom row from column `l` to `r`, with
+    /// `label` near its left end; lifelines cross it.
+    #[allow(clippy::too_many_arguments)]
+    fn rule(
+        &self,
+        c: &mut Canvas,
+        y: usize,
+        l: usize,
+        r: usize,
+        (left, line, right): (char, char, char),
+        label: &str,
+        xs: &[i64],
+    ) {
+        c.put(l, y, left);
+        for x in l + 1..r {
+            c.put(x, y, line);
+        }
+        c.put(r, y, right);
+        for &x in &xs[1..xs.len() - 1] {
+            c.put(x as usize, y, '┼');
+        }
+        if !label.is_empty() {
+            let room = r.saturating_sub(l + 4);
+            c.text(
+                l + 2,
+                y,
+                &format!(" {} ", text::fit(label, room.saturating_sub(2))),
+            );
+        }
+    }
+}
+
+/// The rows `item` takes.
+fn rows_of(item: &Item) -> i64 {
+    match item {
+        Item::Message { from, to, text, .. } if from == to => text.len().max(1) as i64 + 2,
+        Item::Message { text, .. } => text.len() as i64 + 1,
+        Item::Note { text, .. } => text.len() as i64 + 2,
+        Item::Open(_) | Item::Split(_) | Item::End => 1,
+    }
+}
+
+/// The left and right columns of a frame at nesting `level` (0 = outer).
+fn frame_columns(level: usize, max_depth: usize, width: usize) -> (usize, usize) {
+    let inset = 2 * level;
+    debug_assert!(level < max_depth);
+    (inset, width - 1 - inset)
+}
+```
+
+Run: `umask 022; cargo test --locked --bin claudio diagram`
+Expected:
+```
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 888 filtered out; finished in 0.02s
+```
+Run: `umask 022; cargo test --locked --bin claudio`
+Expected: the previous total + 12 (scratch, on base: `test result: ok. 900 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`).
+Run: `rustfmt --edition 2021 --check src/tui/diagram/mod.rs` (checks the new module tree) → no output; `cargo build --locked` → 0 warnings.
+`dense_graphs_within_the_caps_are_quick` (64 nodes, 128 edges with cycles) asserts < 2 s in a debug build; it takes a few ms.
+
+Step 3: commit
+`/usr/bin/git add src/tui/diagram && /usr/bin/git commit -m "feat(tui): mermaid diagram engine for the reader" -- src/tui/diagram src/tui/mod.rs`
+
+Interfaces this task provides to later tasks:
+- `crate::tui::diagram::{too_complex, render, Unsupported}` exactly as interfaces.md: `pub fn too_complex(src: &str) -> bool` (> 4096 bytes or > 200 lines), `pub fn render(src: &str) -> Result<Vec<String>, Unsupported>` (rows ≤ 200 columns, ≤ 150 rows, no controls, trailing spaces trimmed; `src` is the fence content without the fence lines), `#[derive(Debug, Clone, PartialEq)] pub struct Unsupported { pub reason: String }`. Also `MAX_COLS`, `MAX_ROWS` (for the reader's "diagram is N columns wide" rule).
+- Task 11 removes the `#[allow(dead_code)]` above `mod diagram;` and calls `render` only on the render worker through the guard (`too_complex` first; `render` re-checks it).
+
+
+### Task 9: search (`src/claude/search.rs`, `Msg::Search`, daemon arm)
+Model: sonnet   Repo: /volumes/repos/claudio (feat/extensions after Task 1, or the controller's worktree)
+Files: create `src/claude/search.rs`; modify `src/claude/mod.rs` (one line), `src/claude/projects.rs` (`flag`, `answer_prompt`, `push_texts` become `pub(crate)`), `src/proto.rs` (`Msg::Search` after `GitDiff`, `Msg::SearchReply` after `GitPatch`, `SEARCH_REPLY_MAX`/`SearchHit`/`search_reply` after `answers_reply`, two tests after `an_answers_reply_always_fits_a_frame`, `"search"` in `DAEMON_FEATURES`), `src/daemon/mod.rs` (one `Daemon` field), `src/daemon/server.rs` (one `request` arm before `other =>`, `spawn_search` after `spawn_git`, `SearchSlot` after `recent_projects`), `src/daemon/tests.rs` (one test before `list_dir_sorts_dirs_first`).
+Depends on: Task 1 (`DAEMON_FEATURES`, `Welcome.features`). Parallel with Tasks 8 and 10. Task 10 edits `proto.rs`, `server.rs`, `projects.rs` and `daemon/tests.rs` in other places (after `Msg::Answers`/`AnswersReply`; after the `Answers` arm and the `answers` fn; `read_answers` and new fns after `cut`; before `kill_removes_session_everywhere`). A scratch merge of both branches conflicts only on the `DAEMON_FEATURES` line → resolve to `&["lens", "search", "last_prompt"]`. Neither task edits a `use` line of `server.rs` (both write `std::path::PathBuf`/`std::sync::Mutex` in full): keep it so.
+Goal: spec §8 daemon side and the AC9 unit tests: query rules (trimmed, sanitized, 2..=200 bytes, ≤ 8 words, every word must appear, Unicode lowercase); scope `<projects>/*/*.jsonl` (real dirs and regular files only, no deeper levels, ids `[A-Za-z0-9_-]+`), newest first; messages are real prompts (`answer_prompt`) and assistant `text` blocks (never tool results, thinking, tool input, Claude Code's own records, sidechains or API errors); one hit per conversation (`matches`; `snippet` = ≤ 160 chars of the newest match around its first word, one line; `title` = the first real prompt read, ≤ 80 chars; `cwd` from the records; all sanitized); streaming `BufReader` 64 KiB, lines > 1 MiB skipped without being kept, last 64 MiB per file (partial first line skipped), stop at 3 s / 1 GiB / `limit` (0 → 50, ≤ 100) with `truncated`, `scanned`/`total` count files; reply ≤ 512 KiB; one search per daemon (`Error "search busy"` at once); `Error "bad query: <why>"`.
+
+`search.rs` API (names left to the drafter by interfaces.md):
+```rust
+pub struct Budget { pub time: Duration, pub bytes: u64, pub tail: u64, pub line: usize } // Default: 3 s, 1 GiB, 64 MiB, 1 MiB
+pub struct Outcome { pub hits: Vec<SearchHit>, pub scanned: u32, pub total: u32, pub truncated: bool }
+pub struct BadQuery(pub String);
+pub fn terms(query: &str) -> Result<Vec<String>, BadQuery>;
+pub fn search(projects: &Path, query: &str, limit: usize, budget: Budget) -> Result<Outcome, BadQuery>;
+```
+
+Step 1: write the failing tests
+
+In `src/claude/mod.rs`, after `pub mod projects;` add `pub mod search;`.
+Create `src/claude/search.rs` with a module doc and the tests (Step 2 puts the implementation between them):
+
+```rust
+//! Substring search over this host's claude conversations, for the
+//! `search` extension (`Msg::Search`).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A fresh projects root with one project dir.
+    fn root() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("claudio-search-{}", uuid::Uuid::new_v4()));
+        let project = root.join("-home-u-p");
+        std::fs::create_dir_all(&project).unwrap();
+        (root, project)
+    }
+
+    fn prompt(text: &str) -> serde_json::Value {
+        json!({"type": "user", "cwd": "/home/u/p", "message": {"role": "user", "content": text}})
+    }
+
+    fn answer(text: &str) -> serde_json::Value {
+        json!({"type": "assistant", "message": {"role": "assistant",
+            "content": [{"type": "text", "text": text}]}})
+    }
+
+    /// Write transcript `<id>.jsonl` with `records`, modified `age` seconds
+    /// before a fixed time.
+    fn transcript(dir: &Path, id: &str, age: u64, records: &[serde_json::Value]) -> PathBuf {
+        let path = dir.join(format!("{id}.jsonl"));
+        let mut bytes = Vec::new();
+        for r in records {
+            bytes.extend_from_slice(r.to_string().as_bytes());
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let when = UNIX_EPOCH + Duration::from_secs(2_000_000_000 - age);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        path
+    }
+
+    fn find(root: &Path, query: &str) -> Outcome {
+        search(root, query, 0, Budget::default()).unwrap()
+    }
+
+    #[test]
+    fn queries_are_trimmed_sanitized_and_bounded() {
+        assert_eq!(terms("  Foo BAR "), Ok(vec!["foo".into(), "bar".into()]));
+        assert_eq!(terms("a\u{1b}"), Err(BadQuery("too short".into())));
+        assert_eq!(terms(" x "), Err(BadQuery("too short".into())));
+        assert!(terms(&"x".repeat(MAX_QUERY)).is_ok());
+        assert_eq!(
+            terms(&"x".repeat(MAX_QUERY + 1)),
+            Err(BadQuery("too long (max 200 bytes)".into()))
+        );
+        assert_eq!(
+            terms("a b c d e f g h i"),
+            Err(BadQuery("too many words (max 8)".into()))
+        );
+        assert_eq!(terms("\u{1b}[2Jab"), Ok(vec!["[2jab".into()]));
+    }
+
+    #[test]
+    fn every_word_matches_in_any_case_and_one_hit_per_conversation() {
+        let (root, dir) = root();
+        transcript(
+            &dir,
+            "c1",
+            10,
+            &[
+                prompt("How do I parse TOML in Rust?"),
+                answer("Use the toml crate."),
+                prompt("and write toml?"),
+                answer("Rust's toml crate writes it too: `toml::to_string`."),
+            ],
+        );
+        transcript(
+            &dir,
+            "c2",
+            5,
+            &[prompt("only rust here"), answer("Ünïcode ÉCOLE")],
+        );
+        let out = find(&root, "rust TOML");
+        assert_eq!((out.scanned, out.total, out.truncated), (2, 2, false));
+        assert_eq!(out.hits.len(), 1);
+        let hit = &out.hits[0];
+        assert_eq!(hit.conversation, "c1");
+        assert_eq!(hit.matches, 2);
+        assert_eq!(hit.title, "How do I parse TOML in Rust?");
+        assert_eq!(hit.cwd, "/home/u/p");
+        assert_eq!(
+            hit.snippet,
+            "Rust's toml crate writes it too: `toml::to_string`."
+        );
+        assert_eq!(hit.modified, 2_000_000_000 - 10);
+        // Unicode lowercase on both sides.
+        assert_eq!(find(&root, "école").hits[0].conversation, "c2");
+        assert!(find(&root, "rust python").hits.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tool_output_thinking_and_claude_codes_own_records_are_not_searched() {
+        let (root, dir) = root();
+        let mut meta = prompt("secret in meta");
+        meta["isMeta"] = json!(true);
+        let mut side = answer("secret in a subagent");
+        side["isSidechain"] = json!(true);
+        let mut api = answer("secret in an api error");
+        api["isApiErrorMessage"] = json!(true);
+        transcript(
+            &dir,
+            "c1",
+            1,
+            &[
+                prompt("the question"),
+                json!({"type": "assistant", "message": {"content": [
+                    {"type": "thinking", "thinking": "secret in thinking"},
+                    {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "secret"}},
+                ]}}),
+                json!({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t", "content": "secret in a tool result"},
+                ]}}),
+                prompt("<command-name>/secret</command-name>"),
+                meta,
+                side,
+                api,
+                json!({"type": "summary", "summary": "secret summary"}),
+            ],
+        );
+        assert!(find(&root, "secret").hits.is_empty());
+        assert_eq!(find(&root, "question").hits.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn newest_first_and_only_plain_transcripts() {
+        let (root, dir) = root();
+        transcript(&dir, "old", 100, &[prompt("needle old")]);
+        transcript(&dir, "new", 1, &[prompt("needle new")]);
+        let other = root.join("-home-u-q");
+        std::fs::create_dir_all(other.join("sub")).unwrap();
+        transcript(&other, "mid", 50, &[prompt("needle mid")]);
+        // Deeper levels, odd names, other extensions and symlinks are not read.
+        transcript(&other.join("sub"), "deep", 0, &[prompt("needle deep")]);
+        transcript(&other, "bad name", 0, &[prompt("needle bad")]);
+        std::fs::write(other.join("notes.txt"), "needle").unwrap();
+        std::os::unix::fs::symlink(dir.join("new.jsonl"), other.join("link.jsonl")).unwrap();
+        let out = find(&root, "needle");
+        let ids: Vec<&str> = out.hits.iter().map(|h| h.conversation.as_str()).collect();
+        assert_eq!(ids, ["new", "mid", "old"]);
+        assert_eq!(out.total, 3);
+        assert!(
+            search(&root.join("missing"), "needle", 0, Budget::default())
+                .unwrap()
+                .hits
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_budget_and_the_limit_stop_a_search() {
+        let (root, dir) = root();
+        for i in 0..3 {
+            transcript(
+                &dir,
+                &format!("c{i}"),
+                i,
+                &[prompt(&format!("needle {i} {}", "x".repeat(100)))],
+            );
+        }
+        let limited = search(&root, "needle", 2, Budget::default()).unwrap();
+        assert_eq!(
+            (limited.hits.len(), limited.scanned, limited.truncated),
+            (2, 2, true)
+        );
+        let exact = search(&root, "needle", 3, Budget::default()).unwrap();
+        assert_eq!((exact.hits.len(), exact.truncated), (3, false));
+        // Bytes: the first file alone uses it up.
+        let bytes = Budget {
+            bytes: 10,
+            ..Budget::default()
+        };
+        let out = search(&root, "needle", 0, bytes).unwrap();
+        assert_eq!((out.scanned, out.total, out.truncated), (1, 3, true));
+        // Time.
+        let time = Budget {
+            time: Duration::ZERO,
+            ..Budget::default()
+        };
+        let out = search(&root, "needle", 0, time).unwrap();
+        assert_eq!((out.hits.len(), out.scanned, out.truncated), (0, 0, true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn long_lines_are_skipped_and_only_the_tail_is_read() {
+        let (root, dir) = root();
+        let budget = Budget {
+            tail: 4096,
+            line: 1024,
+            ..Budget::default()
+        };
+        transcript(
+            &dir,
+            "c1",
+            1,
+            &[
+                prompt("needle early"),
+                answer(&"y".repeat(5000)),
+                answer(&format!("needle in a long line {}", "z".repeat(2000))),
+                prompt("needle late"),
+            ],
+        );
+        let out = search(&root, "needle", 0, budget).unwrap();
+        assert_eq!(out.hits[0].matches, 1);
+        assert_eq!(out.hits[0].snippet, "needle late");
+        // The title is the first prompt that was read.
+        assert_eq!(out.hits[0].title, "needle late");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn snippets_are_sanitized_one_line_and_cut_around_the_word() {
+        let (root, dir) = root();
+        let long = format!(
+            "{} the needle\n\tis \u{1b}[31mhere {}",
+            "a ".repeat(100),
+            "b ".repeat(100)
+        );
+        transcript(&dir, "c1", 1, &[prompt("q\u{202e}?"), answer(&long)]);
+        let hit = &find(&root, "needle").hits[0];
+        assert_eq!(hit.title, "q?");
+        assert_eq!(hit.snippet.chars().count(), SNIPPET_CHARS);
+        assert!(
+            hit.snippet.starts_with('…') && hit.snippet.ends_with('…'),
+            "{}",
+            hit.snippet
+        );
+        assert!(
+            hit.snippet.contains("the needle is [31mhere"),
+            "{}",
+            hit.snippet
+        );
+        assert!(!hit.snippet.chars().any(char::is_control));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+```
+
+In `src/proto.rs` (tests module), before `fn latex_round_trips_and_is_unknown_to_older_clients`:
+
+```diff
+--- a/src/proto.rs
++++ b/src/proto.rs
+@@ -1205,6 +1274,75 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn search_round_trips_and_is_unknown_to_older_daemons() {
++        #[derive(Debug, PartialEq, Deserialize)]
++        #[serde(tag = "op", rename_all = "snake_case")]
++        enum V05 {
++            Ping,
++            #[serde(other)]
++            Unknown,
++        }
++        let ask: Msg = serde_json::from_str(r#"{"op":"search","query":"toml"}"#).unwrap();
++        assert_eq!(
++            ask,
++            Msg::Search {
++                query: "toml".into(),
++                limit: 0
++            }
++        );
++        let json = serde_json::to_string(&Envelope::request(3, ask.clone())).unwrap();
++        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
++        let reply = search_reply(
++            "toml".into(),
++            vec![SearchHit {
++                conversation: "c1".into(),
++                cwd: "/p".into(),
++                modified: 7,
++                title: "t".into(),
++                snippet: "s".into(),
++                matches: 2,
++            }],
++            1,
++            3,
++            false,
++        );
++        let frame = Frame::Control(Envelope::request(3, reply.clone()));
++        assert_eq!(roundtrip(frame.clone()), frame);
++        let json = serde_json::to_string(&reply).unwrap();
++        assert!(json.contains(r#""op":"search_reply""#), "{json}");
++        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
++    }
++
++    #[test]
++    fn a_search_reply_always_fits_a_frame() {
++        // 100 hits with 8 KiB of quotes each: 1.6 MiB once encoded.
++        let hits: Vec<SearchHit> = (0..100)
++            .map(|i| SearchHit {
++                conversation: format!("c{i}"),
++                cwd: "\"".repeat(4096),
++                modified: i,
++                title: "\"".repeat(4096),
++                snippet: String::new(),
++                matches: 1,
++            })
++            .collect();
++        let msg = search_reply("q".into(), hits.clone(), 100, 100, false);
++        assert!(serde_json::to_vec(&msg).unwrap().len() <= SEARCH_REPLY_MAX);
++        let Msg::SearchReply {
++            hits: kept,
++            truncated,
++            ..
++        } = msg
++        else {
++            panic!("{msg:?}")
++        };
++        // The newest stay, in order; the reply says it is cut.
++        assert!(truncated);
++        assert_eq!(kept[..], hits[..kept.len()]);
++        assert_eq!(kept.len(), 31);
++    }
++
+     #[test]
+     fn latex_round_trips_and_is_unknown_to_older_clients() {
+         let event = SessionEvent::Latex {
+```
+
+In `src/daemon/tests.rs`, before `async fn list_dir_sorts_dirs_first`:
+
+```diff
+--- a/src/daemon/tests.rs
++++ b/src/daemon/tests.rs
+@@ -725,6 +725,60 @@ async fn resize_resyncs_other_subscribers() {
+     assert_eq!(size, (30, 100));
+ }
+ 
++/// `Search` runs off the client loop over the daemon's projects root, one
++/// at a time; a bad query and a second search are refused at once.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn search_finds_conversations_one_search_at_a_time() {
++    let d = TestDaemon::start().await;
++    let project = d.dir.join("projects/-w");
++    std::fs::create_dir_all(&project).unwrap();
++    let record = serde_json::json!({"type": "user", "cwd": "/w",
++        "message": {"role": "user", "content": "find the Needle"}});
++    std::fs::write(project.join("c1.jsonl"), format!("{record}\n")).unwrap();
++    d.daemon.search.set_root(d.dir.join("projects"));
++    let mut c = d.client().await;
++    let ask = |query: &str| Msg::Search {
++        query: query.into(),
++        limit: 0,
++    };
++    match c.call(ask("needle")).await {
++        Msg::SearchReply {
++            query,
++            hits,
++            scanned,
++            total,
++            truncated,
++        } => {
++            assert_eq!(
++                (query.as_str(), scanned, total, truncated),
++                ("needle", 1, 1, false)
++            );
++            assert_eq!(hits.len(), 1);
++            assert_eq!(
++                (hits[0].conversation.as_str(), hits[0].cwd.as_str()),
++                ("c1", "/w")
++            );
++            assert_eq!(hits[0].snippet, "find the Needle");
++        }
++        other => panic!("expected a reply, got {other:?}"),
++    }
++    match c.call(ask(" x ")).await {
++        Msg::Error { message } => assert_eq!(message, "bad query: too short"),
++        other => panic!("expected an error, got {other:?}"),
++    }
++    let running = d.daemon.search.hold();
++    match c.call(ask("needle")).await {
++        Msg::Error { message } => assert_eq!(message, "search busy"),
++        other => panic!("expected busy, got {other:?}"),
++    }
++    drop(running);
++    assert!(matches!(
++        c.call(ask("needle")).await,
++        Msg::SearchReply { .. }
++    ));
++    assert!(proto::DAEMON_FEATURES.contains(&"search"));
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn list_dir_sorts_dirs_first() {
+     let d = TestDaemon::start().await;
+```
+
+Run: `umask 022; cargo test --locked --bin claudio search`
+Expected (compile failure), among others:
+```
+error[E0425]: cannot find function `search` in this scope
+error[E0599]: no variant named `SearchReply` found for enum `proto::Msg`
+error[E0609]: no field `search` on type `std::sync::Arc<Daemon>`
+error: could not compile `claudio` (bin "claudio" test) due to 54 previous errors; 1 warning emitted
+```
+
+Step 2: implement
+
+`src/claude/search.rs`: replace the two step-1 doc lines with the following, keeping the tests module after it:
+
+```rust
+//! Substring search over this host's claude conversations, for the
+//! `search` extension (`Msg::Search`).
+//!
+//! Blocking and bounded: transcripts are streamed line by line through a
+//! 64 KiB buffer, a line longer than [`Budget::line`] is skipped without
+//! being kept, only the last [`Budget::tail`] bytes of a file are read, and
+//! the whole search stops at [`Budget::time`], [`Budget::bytes`] or its hit
+//! limit. Only real prompts and claude's answer text are searched (the
+//! rules of [`projects::recent_answers`]); never tool output, thinking,
+//! Claude Code's own records or subagents. The query is plain text: it never
+//! reaches a shell or a regex.
+
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use crate::claude::latex::sanitize;
+use crate::claude::projects::{answer_prompt, flag, push_texts};
+use crate::proto::SearchHit;
+
+/// A query's length after trimming and [`sanitize`], in bytes.
+pub const MIN_QUERY: usize = 2;
+pub const MAX_QUERY: usize = 200;
+/// The most words a query may have; a message must contain all of them.
+pub const MAX_TERMS: usize = 8;
+/// Hits when the request asks for 0, and the most it may ask for.
+pub const DEFAULT_LIMIT: usize = 50;
+pub const MAX_LIMIT: usize = 100;
+/// A hit's title and snippet, in characters.
+const TITLE_CHARS: usize = 80;
+const SNIPPET_CHARS: usize = 160;
+/// Characters of the snippet before the first term.
+const SNIPPET_LEAD: usize = 60;
+/// A longer `cwd` is not a path claude ran in; it is dropped.
+const MAX_CWD: usize = 4096;
+/// The read buffer.
+const BUFFER: usize = 64 * 1024;
+
+/// When a search stops.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    /// Wall time for the whole search.
+    pub time: Duration,
+    /// Bytes read, all files together.
+    pub bytes: u64,
+    /// Bytes read from the end of each file.
+    pub tail: u64,
+    /// The longest line examined; longer ones are skipped.
+    pub line: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Budget {
+        Budget {
+            time: Duration::from_secs(3),
+            bytes: 1 << 30,
+            tail: 64 << 20,
+            line: 1 << 20,
+        }
+    }
+}
+
+/// A search's result: hits newest conversation first, how many transcripts
+/// were read to the end of `total`, and whether it stopped early.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    pub hits: Vec<SearchHit>,
+    pub scanned: u32,
+    pub total: u32,
+    pub truncated: bool,
+}
+
+/// Why a query is refused; the daemon answers `Error "bad query: <why>"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BadQuery(pub String);
+
+/// The words of `query`, lowercase: trimmed and [`sanitize`]d, it must
+/// have [`MIN_QUERY`]..=[`MAX_QUERY`] bytes and at most [`MAX_TERMS`] words.
+pub fn terms(query: &str) -> Result<Vec<String>, BadQuery> {
+    let query = sanitize(query.trim());
+    let query = query.trim();
+    if query.len() < MIN_QUERY {
+        return Err(BadQuery("too short".into()));
+    }
+    if query.len() > MAX_QUERY {
+        return Err(BadQuery(format!("too long (max {MAX_QUERY} bytes)")));
+    }
+    let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if terms.len() > MAX_TERMS {
+        return Err(BadQuery(format!("too many words (max {MAX_TERMS})")));
+    }
+    Ok(terms)
+}
+
+/// Search the transcripts `<projects>/*/*.jsonl`, newest first, for
+/// messages that contain every word of `query` (case-insensitive). One hit
+/// per conversation; at most `limit` hits (0: [`DEFAULT_LIMIT`]; capped at
+/// [`MAX_LIMIT`]).
+pub fn search(
+    projects: &Path,
+    query: &str,
+    limit: usize,
+    budget: Budget,
+) -> Result<Outcome, BadQuery> {
+    let terms = terms(query)?;
+    let limit = match limit {
+        0 => DEFAULT_LIMIT,
+        n => n.min(MAX_LIMIT),
+    };
+    let files = transcripts(projects);
+    let mut spent = Spent {
+        started: Instant::now(),
+        bytes: 0,
+    };
+    let mut out = Outcome {
+        hits: Vec::new(),
+        scanned: 0,
+        total: u32::try_from(files.len()).unwrap_or(u32::MAX),
+        truncated: false,
+    };
+    for (modified, path, conversation) in &files {
+        if out.hits.len() >= limit || spent.over(&budget) {
+            out.truncated = true;
+            break;
+        }
+        let (found, finished) = scan(path, &terms, &budget, &mut spent);
+        if let Some(found) = found {
+            out.hits.push(found.hit(conversation, *modified));
+        }
+        if !finished {
+            out.truncated = true;
+            break;
+        }
+        out.scanned += 1;
+    }
+    Ok(out)
+}
+
+/// What was used of the budget.
+struct Spent {
+    started: Instant,
+    bytes: u64,
+}
+
+impl Spent {
+    fn over(&self, budget: &Budget) -> bool {
+        self.bytes >= budget.bytes || self.started.elapsed() >= budget.time
+    }
+}
+
+/// Every `<root>/<dir>/<id>.jsonl` (no symlinks, no deeper levels) whose
+/// `<id>` is a plain conversation id: (mtime, path, id), newest first.
+fn transcripts(root: &Path) -> Vec<(u64, PathBuf, String)> {
+    let mut files = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(root) else {
+        return files;
+    };
+    for dir in dirs.flatten() {
+        if !dir.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let id = match (path.extension(), path.file_stem()) {
+                (Some(ext), Some(stem)) if ext == "jsonl" => stem.to_string_lossy().into_owned(),
+                _ => continue,
+            };
+            let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+            if id.is_empty() || !id.chars().all(safe) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            files.push((modified, path, id));
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    files
+}
+
+/// What one transcript has for the query.
+#[derive(Default)]
+struct Found {
+    matches: u32,
+    /// The newest matching message, whitespace collapsed.
+    newest: String,
+    title: Option<String>,
+    cwd: Option<String>,
+}
+
+impl Found {
+    fn hit(self, conversation: &str, modified: u64) -> SearchHit {
+        SearchHit {
+            conversation: conversation.to_owned(),
+            cwd: self.cwd.unwrap_or_default(),
+            modified,
+            title: self.title.unwrap_or_default(),
+            snippet: self.newest,
+            matches: self.matches,
+        }
+    }
+}
+
+/// Scan the tail of the transcript at `path`. Returns what matched (if
+/// anything did) and whether the file was read to its end within the
+/// budget. An unreadable file is read to its end, with nothing in it.
+fn scan(
+    path: &Path,
+    terms: &[String],
+    budget: &Budget,
+    spent: &mut Spent,
+) -> (Option<Found>, bool) {
+    let Ok(mut file) = File::open(path) else {
+        return (None, true);
+    };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let start = len.saturating_sub(budget.tail);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return (None, true);
+    }
+    let mut reader = BufReader::with_capacity(BUFFER, file.take(budget.tail));
+    // ASCII words can be looked for in the raw line first: JSON leaves
+    // them as they are. Lines without them are not parsed.
+    let ascii: Vec<&[u8]> = (terms.iter())
+        .filter(|t| {
+            t.bytes()
+                .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+        })
+        .map(|t| t.as_bytes())
+        .collect();
+    let mut found = Found::default();
+    let (mut line, mut lower) = (Vec::new(), Vec::new());
+    // A tail starts inside a line: that line is skipped.
+    let mut partial = start > 0;
+    let mut finished = true;
+    loop {
+        if spent.over(budget) {
+            // Out of budget, unless there was nothing left anyway.
+            finished = reader.fill_buf().map_or(true, |rest| rest.is_empty());
+            break;
+        }
+        let Ok((used, fits)) = read_line(&mut reader, &mut line, budget.line) else {
+            break;
+        };
+        if used == 0 {
+            break;
+        }
+        spent.bytes += used as u64;
+        if std::mem::take(&mut partial) || !fits {
+            continue;
+        }
+        let wanted = contains(&line, b"\"user\"") || contains(&line, b"\"assistant\"");
+        let meta_missing = found.title.is_none() || found.cwd.is_none();
+        if !wanted {
+            continue;
+        }
+        if !meta_missing {
+            lower.clear();
+            lower.extend(line.iter().map(u8::to_ascii_lowercase));
+            if !ascii.iter().all(|t| contains(&lower, t)) {
+                continue;
+            }
+        }
+        examine(&line, terms, &mut found);
+    }
+    ((found.matches > 0).then_some(found), finished)
+}
+
+/// Read the next line into `line` (without its `\n`), unless it is longer
+/// than `max`: then its bytes are read and dropped, never kept. Returns the
+/// bytes read (0 at the end) and whether `line` holds the line.
+fn read_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    max: usize,
+) -> io::Result<(usize, bool)> {
+    line.clear();
+    let (mut used, mut fits) = (0, true);
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok((used, fits));
+        }
+        let newline = buf.iter().position(|&b| b == b'\n');
+        let chunk = &buf[..newline.unwrap_or(buf.len())];
+        if fits && line.len() + chunk.len() > max {
+            fits = false;
+            line.clear();
+        } else if fits {
+            line.extend_from_slice(chunk);
+        }
+        let n = newline.map_or(chunk.len(), |i| i + 1);
+        reader.consume(n);
+        used += n;
+        if newline.is_some() {
+            return Ok((used, fits));
+        }
+    }
+}
+
+/// Whether `haystack` contains `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Fold one transcript record into `found`.
+fn examine(line: &[u8], terms: &[String], found: &mut Found) {
+    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return;
+    };
+    if flag(&record, "isSidechain") {
+        return;
+    }
+    if found.cwd.is_none() {
+        let cwd = record.get("cwd").and_then(|c| c.as_str());
+        found.cwd = cwd
+            .map(sanitize)
+            .filter(|c| c.len() <= MAX_CWD && !c.contains('\n'));
+    }
+    let text = match record.get("type").and_then(|t| t.as_str()) {
+        Some("user") => {
+            let prompt = answer_prompt(&record);
+            if found.title.is_none() {
+                found.title = prompt
+                    .as_deref()
+                    .map(|p| one_line(&sanitize(p), TITLE_CHARS));
+            }
+            prompt
+        }
+        Some("assistant") if !flag(&record, "isApiErrorMessage") => {
+            let mut texts = Vec::new();
+            push_texts(
+                &mut texts,
+                record.get("message").and_then(|m| m.get("content")),
+            );
+            Some(texts.join("\n\n"))
+        }
+        _ => None,
+    };
+    let Some(text) = text else { return };
+    let text = sanitize(&text);
+    let lower = text.to_lowercase();
+    if terms.iter().all(|t| lower.contains(t.as_str())) {
+        found.matches = found.matches.saturating_add(1);
+        found.newest = snippet(&text, &terms[0]);
+    }
+}
+
+/// `text` on one line (whitespace runs as one space), cut to `max`
+/// characters with `…`.
+fn one_line(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// At most [`SNIPPET_CHARS`] characters of `text` on one line, around the
+/// first place `term` (lowercase) appears, `…` where cut.
+fn snippet(text: &str, term: &str) -> String {
+    let flat: Vec<char> = one_line(text, usize::MAX).chars().collect();
+    if flat.len() <= SNIPPET_CHARS {
+        return flat.into_iter().collect();
+    }
+    let lower: String = flat.iter().collect::<String>().to_lowercase();
+    // Lowercasing can change a character's length: the position is a
+    // character count of the lowercase text, close enough for a window.
+    let at = lower.find(term).map_or(0, |i| lower[..i].chars().count());
+    let start = at
+        .saturating_sub(SNIPPET_LEAD)
+        .min(flat.len() - SNIPPET_CHARS);
+    let end = start + SNIPPET_CHARS;
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    let from = start + usize::from(start > 0);
+    let to = end - usize::from(end < flat.len());
+    out.extend(&flat[from..to]);
+    if end < flat.len() {
+        out.push('…');
+    }
+    out
+}
+```
+
+`src/claude/projects.rs` (visibility only):
+
+```diff
+--- a/src/claude/projects.rs
++++ b/src/claude/projects.rs
+@@ -622,14 +622,14 @@ pub fn recent_answers(bytes: &[u8]) -> Vec<Answer> {
+ }
+ 
+ /// Whether `record` has `key: true`.
+-fn flag(record: &serde_json::Value, key: &str) -> bool {
++pub(crate) fn flag(record: &serde_json::Value, key: &str) -> bool {
+     record.get(key).and_then(|f| f.as_bool()) == Some(true)
+ }
+ 
+ /// The prompt of a `type:"user"` record that starts an answer (see
+ /// [`recent_answers`]): its string content, or its text blocks joined by
+ /// newlines.
+-fn answer_prompt(record: &serde_json::Value) -> Option<String> {
++pub(crate) fn answer_prompt(record: &serde_json::Value) -> Option<String> {
+     let own = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
+     if own.iter().any(|key| flag(record, key)) || !is_real_prompt(record) {
+         return None;
+@@ -644,7 +644,7 @@ fn answer_prompt(record: &serde_json::Value) -> Option<String> {
+ 
+ /// Append the text of a message's `content` to `texts`: the string itself,
+ /// or its `text` blocks (not `thinking`, `tool_use` or `tool_result`).
+-fn push_texts(texts: &mut Vec<String>, content: Option<&serde_json::Value>) {
++pub(crate) fn push_texts(texts: &mut Vec<String>, content: Option<&serde_json::Value>) {
+     match content {
+         Some(serde_json::Value::String(text)) => texts.push(text.clone()),
+         Some(serde_json::Value::Array(blocks)) => {
+```
+
+`src/proto.rs` (the other hunks). Also, in `DAEMON_FEATURES` (added by Task 1), append `"search"`: `&["lens", "search"]` (or `&["lens", "search", "last_prompt"]` if Task 10 landed first).
+
+```diff
+--- a/src/proto.rs
++++ b/src/proto.rs
+@@ -190,6 +190,16 @@ pub enum Msg {
+         #[serde(default)]
+         old_path: Option<String>,
+     },
++    /// Search this host's claude conversations (prompts and answers) for
++    /// every word of `query`; at most `limit` hits (0: the default, see
++    /// [`crate::claude::search`]). Answered by `SearchReply`, or `Error
++    /// "search busy"` while another search runs on this daemon, or `Error
++    /// "bad query: …"`. An older daemon answers `Error "unsupported op…"`.
++    Search {
++        query: String,
++        #[serde(default)]
++        limit: u32,
++    },
+ 
+     // ── daemon → client replies ──────────────────────────────────────────
+     Sessions {
+@@ -237,6 +247,16 @@ pub enum Msg {
+     GitLogPage(GitLogPage),
+     GitCommitInfo(GitCommitInfo),
+     GitPatch(GitPatch),
++    /// Reply to `Search`, built by [`search_reply`]: one hit per
++    /// conversation, newest first. `scanned` of `total` transcripts were
++    /// read to their end; `truncated` when the search stopped early.
++    SearchReply {
++        query: String,
++        hits: Vec<SearchHit>,
++        scanned: u32,
++        total: u32,
++        truncated: bool,
++    },
+     Ok,
+     Error {
+         message: String,
+@@ -711,6 +731,55 @@ pub fn answers_reply(id: SessionId, answers: Vec<Answer>) -> Msg {
+     msg
+ }
+ 
++/// The largest encoded `SearchReply` the daemon sends (as for answers).
++pub const SEARCH_REPLY_MAX: usize = 512 * 1024;
++
++/// One conversation that matched a `Search`. Every text is sanitized by
++/// the daemon; `title` is its first prompt and `snippet` the newest match,
++/// each on one line.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct SearchHit {
++    /// The claude session id (the transcript's name), for `--resume`.
++    pub conversation: String,
++    pub cwd: String,
++    /// Unix seconds of the transcript's last modification.
++    pub modified: u64,
++    pub title: String,
++    pub snippet: String,
++    /// How many messages matched.
++    pub matches: u32,
++}
++
++/// The `SearchReply` for `query`, without as many of the last hits as it
++/// takes for its JSON to fit [`SEARCH_REPLY_MAX`] (then `truncated`).
++pub fn search_reply(
++    query: String,
++    hits: Vec<SearchHit>,
++    scanned: u32,
++    total: u32,
++    truncated: bool,
++) -> Msg {
++    let mut msg = Msg::SearchReply {
++        query,
++        hits,
++        scanned,
++        total,
++        truncated,
++    };
++    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > SEARCH_REPLY_MAX) {
++        match &mut msg {
++            Msg::SearchReply {
++                hits, truncated, ..
++            } if !hits.is_empty() => {
++                hits.pop();
++                *truncated = true;
++            }
++            _ => break,
++        }
++    }
++    msg
++}
++
+ /// The most commits one `GitLog` request may ask for.
+ pub const GIT_LOG_MAX: u32 = 500;
+ 
+```
+
+`src/daemon/mod.rs`:
+
+```diff
+--- a/src/daemon/mod.rs
++++ b/src/daemon/mod.rs
+@@ -346,6 +346,8 @@ pub(crate) struct Daemon {
+     pub(crate) shutdown: tokio::sync::Notify,
+     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
+     pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
++    /// `Search`: one at a time, and the transcripts it reads.
++    pub(crate) search: server::SearchSlot,
+ }
+ 
+ /// Journaled sessions, and the live subset with a running process.
+@@ -384,6 +386,7 @@ impl Daemon {
+             skip_permissions_supported: Mutex::new(None),
+             shutdown: tokio::sync::Notify::new(),
+             stats_rx,
++            search: server::SearchSlot::new(),
+         }
+     }
+ 
+```
+
+`src/daemon/server.rs`:
+
+```diff
+--- a/src/daemon/server.rs
++++ b/src/daemon/server.rs
+@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, mpsc, Semaphore};
+ use super::session::{ClientId, Cmd};
+ use super::{git, host, update, Config, Daemon};
+ use crate::claude::projects;
++use crate::claude::search::{self, BadQuery, Budget};
+ use crate::paths;
+ use crate::proto::{
+     self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
+@@ -542,6 +546,10 @@ impl Client {
+                 });
+                 return;
+             }
++            Msg::Search { query, limit } => match self.spawn_search(req, query, limit) {
++                Ok(()) => return,
++                Err(refused) => refused,
++            },
+             other => Msg::Error {
+                 message: format!("unsupported op: {}", op_name(&other)),
+             },
+@@ -599,6 +607,44 @@ impl Client {
+         Ok(())
+     }
+ 
++    /// Run a search off the client loop and queue its reply when done. One
++    /// search runs per daemon: while one does, another is refused at once
++    /// with "search busy". A bad query is refused before anything runs.
++    fn spawn_search(&self, req: Option<u64>, query: String, limit: u32) -> Result<(), Msg> {
++        if let Err(BadQuery(why)) = search::terms(&query) {
++            return Err(Msg::Error {
++                message: format!("bad query: {why}"),
++            });
++        }
++        let permit = Arc::clone(&self.daemon.search.running)
++            .try_acquire_owned()
++            .map_err(|_| Msg::Error {
++                message: "search busy".into(),
++            })?;
++        let root = self.daemon.search.root();
++        let queue = self.queue.clone();
++        tokio::spawn(async move {
++            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
++            let scan = tokio::task::spawn_blocking(move || {
++                // Held until the scan ends, even if the client has left.
++                let _permit = permit;
++                let outcome = search::search(&root, &query, limit, Budget::default());
++                outcome.map(|o| proto::search_reply(query, o.hits, o.scanned, o.total, o.truncated))
++            });
++            let msg = match scan.await {
++                Ok(Ok(reply)) => reply,
++                Ok(Err(BadQuery(why))) => Msg::Error {
++                    message: format!("bad query: {why}"),
++                },
++                Err(e) => Msg::Error {
++                    message: format!("search failed: {e}"),
++                },
++            };
++            let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
++        });
++        Ok(())
++    }
++
+     /// Send `cmd` to a live session; the reply is `Ok` or `Error`.
+     async fn to_session(&self, id: SessionId, cmd: Cmd) -> Msg {
+         match self.daemon.session(id) {
+@@ -760,6 +806,41 @@ async fn recent_projects(limit: u32) -> Msg {
+     }
+ }
+ 
++/// `Search` state shared by a daemon's clients.
++pub(crate) struct SearchSlot {
++    /// One permit: the search that holds it is the one running.
++    running: Arc<Semaphore>,
++    /// Where the transcripts are: [`projects::projects_root`] unless a test
++    /// set its own.
++    root: std::sync::Mutex<Option<std::path::PathBuf>>,
++}
++
++impl SearchSlot {
++    pub(crate) fn new() -> SearchSlot {
++        SearchSlot {
++            running: Arc::new(Semaphore::new(1)),
++            root: std::sync::Mutex::new(None),
++        }
++    }
++
++    fn root(&self) -> std::path::PathBuf {
++        let root = self.root.lock().unwrap_or_else(|e| e.into_inner());
++        root.clone().unwrap_or_else(projects::projects_root)
++    }
++
++    /// Search `root` instead of the user's transcripts.
++    #[cfg(test)]
++    pub(crate) fn set_root(&self, root: std::path::PathBuf) {
++        *self.root.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
++    }
++
++    /// Take the slot as a running search would, until the permit drops.
++    #[cfg(test)]
++    pub(crate) fn hold(&self) -> tokio::sync::OwnedSemaphorePermit {
++        Arc::clone(&self.running).try_acquire_owned().expect("free")
++    }
++}
++
+ /// The wire `op` of a message, for error text.
+ /// The reply to a spawn or respawn of `id`.
+ fn spawned(id: SessionId, result: io::Result<Option<u32>>) -> Msg {
+```
+
+Run: `umask 022; cargo test --locked --bin claudio search`
+Expected (the 10 new tests plus the existing `tui::wizard::tests::non_path_input_is_still_a_fuzzy_seed_search`; the filtered-out count depends on what is merged):
+```
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 899 filtered out; finished in 0.88s
+```
+Run: `umask 022; cargo test --locked --bin claudio`
+Expected: the previous total + 10 (scratch, on base + Task 8 + the Task 1 stand-in: `test result: ok. 910 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`).
+Run: `rustfmt --edition 2021 --check src/claude/search.rs src/daemon/server.rs` → no output. `cargo build --locked` → 0 warnings.
+
+Step 3: commit
+`/usr/bin/git add src/claude/search.rs && /usr/bin/git commit -m "feat(daemon): search claude conversations on the host" -- src/claude/search.rs src/claude/mod.rs src/claude/projects.rs src/proto.rs src/daemon/mod.rs src/daemon/server.rs src/daemon/tests.rs`
+
+Interfaces this task provides to later tasks:
+- `Msg::Search { query: String, #[serde(default)] limit: u32 }`, `Msg::SearchReply { query, hits: Vec<SearchHit>, scanned: u32, total: u32, truncated: bool }`, `proto::SearchHit { conversation, cwd, modified, title, snippet, matches }`, `proto::SEARCH_REPLY_MAX`, `proto::search_reply(query, hits, scanned, total, truncated) -> Msg`: as interfaces.md. `Welcome.features` contains `"search"`.
+- Daemon errors the client maps (Task 11): `"search busy"` → notice `search busy, try again`; `"bad query: <why>"` → a notice with the reason; `"unsupported op: search"` → the restart notice.
+- `hit.conversation` always matches `[A-Za-z0-9_-]+` (other file names are skipped): safe as the `--resume` argument. `hit.cwd` is `""` when no record carried one: Task 11 must not spawn in `""`.
+- `crate::claude::search::{search, terms, Budget, Outcome, BadQuery}`; test hooks `Daemon.search.set_root(path)` and `Daemon.search.hold()` (cfg(test)) for daemon-level tests.
+
+
+### Task 10: last prompt op and snippets store
+Model: sonnet   Repo: /volumes/repos/claudio (feat/extensions after Task 1, or the controller's worktree)
+Files: create `src/tui/snippets.rs`; modify `src/tui/mod.rs` (two lines after `mod sessions;`), `src/claude/projects.rs` (`read_answers` split into `read_tail`; `read_last_prompt`; `MAX_LAST_PROMPT` and `last_prompt` after `cut`; tests at the end), `src/proto.rs` (`Msg::LastPrompt` after `Answers`, `Msg::LastPromptReply` after `AnswersReply`, one test before `an_answers_reply_always_fits_a_frame`, `"last_prompt"` in `DAEMON_FEATURES`), `src/daemon/server.rs` (arm after the `Answers` arm; `answers` uses the new `transcript` helper; `last_prompt` and `transcript` after `answers`), `src/daemon/tests.rs` (one test before `kill_removes_session_everywhere`).
+Depends on: Task 1 (`DAEMON_FEATURES`). Parallel with Tasks 8 and 9 (see Task 9: only the `DAEMON_FEATURES` line conflicts).
+Goal: spec §9 and AC10 (load/save unit parts) plus the F4 op. `LastPrompt` answers the newest real prompt of the transcript tail (`answer_prompt`'s rules, answered or not; sidechains skipped), sanitized and trimmed, ≤ 64 KiB cut on a char boundary with no mark and `cut: true`; `prompt: None` when there is none; an unknown session → `Error "no such session: …"`. Snippets: `load` (`*.md`/`*.txt`, ≤ 64 KiB each, read without trusting the size; the first 500 by name; hidden, non-regular and non-UTF-8 files skipped; name = stem; sanitized; missing dir → empty), `save` (`slug`, then `-2`, `-3`… while a `.md` or `.txt` has the name; dir 0700 via `paths::ensure_private_dir`, file 0600 via `paths::write_atomic`), `slug` (first words, `[a-z0-9-]`, ≤ 40, `snippet` when empty), `dir()`.
+
+Step 1: write the failing tests
+
+In `src/tui/mod.rs`, after the line `mod sessions;` add:
+```rust
+#[allow(dead_code)] // Wired into the snippets actions by Task 11, which removes this.
+mod snippets;
+```
+Create `src/tui/snippets.rs` with a module doc and the tests (Step 2 puts the implementation between them):
+
+```rust
+//! Saved prompts: the files of `~/.config/claudio/snippets/`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("claudio-snippets-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn snippet(name: &str, text: &str) -> Snippet {
+        Snippet {
+            name: name.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn slugs_are_the_first_words_in_lowercase_ascii() {
+        assert_eq!(slug("Review this PR, please!"), "review-this-pr-please");
+        assert_eq!(slug("  --fix   the_tests\n now"), "fix-the-tests-now");
+        assert_eq!(
+            slug("one two three four five six seven eight nine ten"),
+            "one-two-three-four-five-six-seven-eight"
+        );
+        assert_eq!(slug(&"x".repeat(50)), "x".repeat(MAX_SLUG));
+        assert_eq!(slug("Résumé ok"), "r-sum-ok");
+        assert_eq!(slug("¿?"), "snippet");
+        assert_eq!(slug(""), "snippet");
+        assert!(slug("../../etc/passwd")
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn load_reads_md_and_txt_sorted_capped_and_sanitized() {
+        let dir = scratch();
+        assert_eq!(load(&dir).unwrap(), []);
+        fs::create_dir_all(dir.join("sub.md")).unwrap();
+        fs::write(dir.join("b.md"), "bee\n").unwrap();
+        fs::write(dir.join("a.txt"), "ay\u{1b}[2J\tx").unwrap();
+        fs::write(dir.join("c.json"), "{}").unwrap();
+        fs::write(dir.join(".hidden.md"), "no").unwrap();
+        fs::write(dir.join("big.md"), "x".repeat(MAX_BYTES as usize + 1)).unwrap();
+        fs::write(dir.join("max.md"), "y".repeat(MAX_BYTES as usize)).unwrap();
+        fs::write(dir.join("bad.md"), [0xff, 0xfe]).unwrap();
+        let loaded = load(&dir).unwrap();
+        let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "max"]);
+        assert_eq!(loaded[0], snippet("a", "ay[2J\tx"));
+        assert_eq!(loaded[1], snippet("b", "bee\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_keeps_the_first_500_by_name() {
+        let dir = scratch();
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..MAX_FILES + 5 {
+            fs::write(dir.join(format!("s{i:04}.md")), "t").unwrap();
+        }
+        let loaded = load(&dir).unwrap();
+        assert_eq!(loaded.len(), MAX_FILES);
+        assert_eq!(loaded[0].name, "s0000");
+        assert_eq!(loaded[MAX_FILES - 1].name, "s0499");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_names_by_slug_avoids_collisions_and_is_private() {
+        let dir = scratch().join("snippets");
+        assert_eq!(save(&dir, "Fix the tests").unwrap(), "fix-the-tests");
+        assert_eq!(save(&dir, "fix the tests!").unwrap(), "fix-the-tests-2");
+        fs::write(dir.join("fix-the-tests-3.txt"), "taken").unwrap();
+        assert_eq!(save(&dir, "FIX THE TESTS").unwrap(), "fix-the-tests-4");
+        assert_eq!(save(&dir, "¿").unwrap(), "snippet");
+        let text = "line one\n\tline two\n";
+        let name = save(&dir, text).unwrap();
+        let path = dir.join(format!("{name}.md"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        // Saved snippets load back under their names.
+        let loaded = load(&dir).unwrap();
+        assert!(
+            loaded.contains(&snippet("line-one-line-two", text)),
+            "{loaded:?}"
+        );
+        assert!(loaded.contains(&snippet("fix-the-tests-2", "fix the tests!")));
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+}
+```
+
+In `src/claude/projects.rs`, at the end of the tests module:
+
+```diff
+--- a/src/claude/projects.rs
++++ b/src/claude/projects.rs
+@@ -1478,4 +1524,70 @@ mod tests {
+         assert!(read_answers(&dir.join("missing.jsonl")).is_empty());
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    // ── last_prompt ───────────────────────────────────────────────────────
++
++    #[test]
++    fn the_last_prompt_is_the_newest_real_one_answered_or_not() {
++        use serde_json::json;
++        let mut meta = prompt_record(json!("caveat"));
++        meta["isMeta"] = json!(true);
++        let mut side = prompt_record(json!("a subagent's task"));
++        side["isSidechain"] = json!(true);
++        let transcript = jsonl(&[
++            prompt_record(json!("old question")),
++            answer_record(json!("old answer")),
++            prompt_record(json!([{"type": "text", "text": "  the newest\nquestion  "}])),
++            // Still unanswered: tool calls and their results only.
++            answer_record(json!([{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}])),
++            prompt_record(json!([{"type": "tool_result", "tool_use_id": "t", "content": "out"}])),
++            prompt_record(json!("<command-name>/model</command-name>")),
++            meta,
++            side,
++            json!({"type": "system", "subtype": "compact_boundary"}),
++        ]);
++        assert_eq!(
++            last_prompt(&transcript),
++            Some(("the newest\nquestion".into(), false))
++        );
++        assert_eq!(last_prompt(b""), None);
++        assert_eq!(
++            last_prompt(&jsonl(&[answer_record(json!("no prompt"))])),
++            None
++        );
++    }
++
++    #[test]
++    fn the_last_prompt_is_sanitized_and_cut_without_a_mark() {
++        use serde_json::json;
++        let dirty = jsonl(&[prompt_record(json!("why\u{1b}[2J\u{202e}?"))]);
++        assert_eq!(last_prompt(&dirty), Some(("why[2J?".into(), false)));
++        let long = format!("{}é{}", "p".repeat(MAX_LAST_PROMPT - 1), "q".repeat(10));
++        let (text, cut) = last_prompt(&jsonl(&[prompt_record(json!(long))])).unwrap();
++        assert!(cut);
++        assert_eq!(text, "p".repeat(MAX_LAST_PROMPT - 1));
++        let exact = "x".repeat(MAX_LAST_PROMPT);
++        assert_eq!(
++            last_prompt(&jsonl(&[prompt_record(json!(exact.clone()))])),
++            Some((exact, false))
++        );
++    }
++
++    #[test]
++    fn the_last_prompt_is_read_from_the_tail_of_a_transcript() {
++        use serde_json::json;
++        let dir = std::env::temp_dir().join(format!("claudio-last-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let path = dir.join("t.jsonl");
++        let mut transcript = jsonl(&[prompt_record(json!("x".repeat(ANSWERS_TAIL as usize)))]);
++        transcript.extend(jsonl(&[answer_record(json!("a"))]));
++        std::fs::write(&path, &transcript).unwrap();
++        // The only prompt starts before the tail: none is read.
++        assert_eq!(read_last_prompt(&path), None);
++        transcript.extend(jsonl(&[prompt_record(json!("again"))]));
++        std::fs::write(&path, &transcript).unwrap();
++        assert_eq!(read_last_prompt(&path), Some(("again".into(), false)));
++        assert_eq!(read_last_prompt(&dir.join("missing.jsonl")), None);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
+ }
+```
+
+In `src/proto.rs` (tests module), before `fn an_answers_reply_always_fits_a_frame`:
+
+```diff
+--- a/src/proto.rs
++++ b/src/proto.rs
+@@ -1173,6 +1188,44 @@ mod tests {
+         assert_eq!(serde_json::from_str::<V04>(&json).unwrap(), V04::Unknown);
+     }
+ 
++    #[test]
++    fn last_prompt_round_trips_and_is_unknown_to_older_daemons() {
++        #[derive(Debug, PartialEq, Deserialize)]
++        #[serde(tag = "op", rename_all = "snake_case")]
++        enum V05 {
++            Ping,
++            #[serde(other)]
++            Unknown,
++        }
++        let ask = Msg::LastPrompt { id: Uuid::nil() };
++        let json = serde_json::to_string(&Envelope::request(4, ask.clone())).unwrap();
++        assert!(json.contains(r#""op":"last_prompt""#), "{json}");
++        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
++        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, ask);
++        // The largest reply (64 KiB of quotes, escaped) fits a frame.
++        let reply = Msg::LastPromptReply {
++            id: Uuid::nil(),
++            prompt: Some("\"".repeat(64 * 1024)),
++            cut: true,
++        };
++        let frame = Frame::Control(Envelope::request(4, reply.clone()));
++        assert!(frame.encode().len() - 4 <= MAX_FRAME);
++        assert_eq!(roundtrip(frame.clone()), frame);
++        let old: Msg = serde_json::from_str(&format!(
++            r#"{{"op":"last_prompt_reply","id":"{}","prompt":null}}"#,
++            Uuid::nil()
++        ))
++        .unwrap();
++        assert_eq!(
++            old,
++            Msg::LastPromptReply {
++                id: Uuid::nil(),
++                prompt: None,
++                cut: false
++            }
++        );
++    }
++
+     #[test]
+     fn an_answers_reply_always_fits_a_frame() {
+         // Ten answers of 64 KiB made only of backslashes: twice that once
+```
+
+In `src/daemon/tests.rs`, before `async fn kill_removes_session_everywhere`:
+
+```diff
+--- a/src/daemon/tests.rs
++++ b/src/daemon/tests.rs
+@@ -579,6 +579,38 @@ async fn answers_are_empty_without_a_transcript_and_refused_for_unknown_sessions
+     }
+ }
+ 
++/// `LastPrompt` is served like `Answers`: no conversation (or no
++/// transcript) has no prompt, an unknown session is an error.
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn last_prompt_is_none_without_a_transcript_and_refused_for_unknown_sessions() {
++    let d = TestDaemon::start().await;
++    let mut c = d.client().await;
++    let id = Uuid::new_v4();
++    c.spawn(d.spec(id)).await;
++    let none = Msg::LastPromptReply {
++        id,
++        prompt: None,
++        cut: false,
++    };
++    assert_eq!(c.call(Msg::LastPrompt { id }).await, none);
++    let payload = serde_json::json!({
++        "session_id": "0a1b2c3d-0000-4000-8000-000000000001",
++        "source": "startup",
++    });
++    send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
++    c.event(id, |e| {
++        matches!(e, SessionEvent::ClaudeSession { .. }).then_some(())
++    })
++    .await;
++    assert_eq!(c.call(Msg::LastPrompt { id }).await, none);
++    let unknown = Uuid::new_v4();
++    match c.call(Msg::LastPrompt { id: unknown }).await {
++        Msg::Error { message } => assert!(message.contains("no such session"), "{message}"),
++        other => panic!("expected an error, got {other:?}"),
++    }
++    assert!(proto::DAEMON_FEATURES.contains(&"last_prompt"));
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn kill_removes_session_everywhere() {
+     let d = TestDaemon::start().await;
+```
+
+Run: `umask 022; cargo test --locked --bin claudio`
+Expected (compile failure), among others:
+```
+error[E0425]: cannot find function `slug` in this scope
+error[E0425]: cannot find function `last_prompt` in this scope
+error[E0599]: no variant named `LastPrompt` found for enum `proto::Msg`
+error: could not compile `claudio` (bin "claudio" test) due to 63 previous errors; 1 warning emitted
+```
+
+Step 2: implement
+
+`src/tui/snippets.rs`: replace the step-1 doc line with the following, keeping the tests module after it:
+
+```rust
+//! Saved prompts: the files of `~/.config/claudio/snippets/`.
+//!
+//! File I/O, so it is called only from the effect runner in `tui/mod.rs`,
+//! never from `App`. Names on disk are always made by [`slug`], never taken
+//! from claude's text as a path; files are written 0600 in a 0700 dir.
+
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
+use crate::claude::latex::sanitize;
+use crate::paths;
+
+/// The largest snippet file read.
+pub const MAX_BYTES: u64 = 64 * 1024;
+/// The most snippets listed.
+pub const MAX_FILES: usize = 500;
+/// The longest name [`slug`] makes.
+pub const MAX_SLUG: usize = 40;
+
+/// A saved prompt: its file's stem and its text, both sanitized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snippet {
+    pub name: String,
+    pub text: String,
+}
+
+/// The snippets directory (`$XDG_CONFIG_HOME` honoured).
+pub fn dir() -> PathBuf {
+    paths::config_dir().join("snippets")
+}
+
+/// The snippets in `dir`: its `*.md` and `*.txt` files of at most
+/// [`MAX_BYTES`], sorted by name, at most [`MAX_FILES`]. Hidden, larger,
+/// unreadable and non-UTF-8 files are skipped; a missing dir has none.
+pub fn load(dir: &Path) -> io::Result<Vec<Snippet>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some((stem, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !stem.is_empty() && !name.starts_with('.') && matches!(ext, "md" | "txt") {
+            files.push((stem.to_owned(), path));
+        }
+    }
+    files.sort();
+    let mut snippets = Vec::new();
+    for (stem, path) in files {
+        if snippets.len() == MAX_FILES {
+            break;
+        }
+        if let Some(text) = read(&path) {
+            let name: String = sanitize(&stem)
+                .chars()
+                .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
+                .collect();
+            snippets.push(Snippet {
+                name,
+                text: sanitize(&text),
+            });
+        }
+    }
+    Ok(snippets)
+}
+
+/// The text of the snippet file at `path`, if it is a regular file of at
+/// most [`MAX_BYTES`] of UTF-8 (read without trusting its size).
+fn read(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Save `text` as a new snippet in `dir` (created 0700) and return its
+/// name: [`slug`] of the text, with `-2`, `-3`… when the name is taken by
+/// a `.md` or `.txt` file. The file is `<name>.md`, 0600, written whole
+/// (temp file + rename).
+pub fn save(dir: &Path, text: &str) -> io::Result<String> {
+    paths::ensure_private_dir(dir)?;
+    let base = slug(text);
+    for n in 1..=1000 {
+        let name = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        let taken = ["md", "txt"]
+            .iter()
+            .any(|ext| dir.join(format!("{name}.{ext}")).symlink_metadata().is_ok());
+        if !taken {
+            paths::write_atomic(&dir.join(format!("{name}.md")), text.as_bytes())?;
+            return Ok(name);
+        }
+    }
+    Err(io::Error::other(format!("too many snippets named {base}")))
+}
+
+/// A file name for `text`: its first words, lowercase ASCII letters and
+/// digits joined by `-`, at most [`MAX_SLUG`] characters; `snippet` when
+/// nothing is left.
+pub fn slug(text: &str) -> String {
+    let mut out = String::new();
+    let words = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty());
+    for word in words {
+        let word = word.to_ascii_lowercase();
+        let sep = usize::from(!out.is_empty());
+        if out.len() + sep + word.len() > MAX_SLUG {
+            if out.is_empty() {
+                out = word[..MAX_SLUG].to_owned();
+            }
+            break;
+        }
+        if sep == 1 {
+            out.push('-');
+        }
+        out.push_str(&word);
+    }
+    if out.is_empty() {
+        "snippet".into()
+    } else {
+        out
+    }
+}
+```
+
+`src/claude/projects.rs`:
+
+```diff
+--- a/src/claude/projects.rs
++++ b/src/claude/projects.rs
+@@ -541,9 +541,22 @@ const NOT_PROMPTS: [&str; 5] = [
+ ];
+ 
+ /// The [`recent_answers`] of the transcript at `path`, from its last
+-/// [`ANSWERS_TAIL`] bytes; a tail's first (partial) line is skipped. A
+-/// missing or unreadable transcript has none. Blocking I/O.
++/// [`ANSWERS_TAIL`] bytes ([`read_tail`]). A missing or unreadable
++/// transcript has none. Blocking I/O.
+ pub fn read_answers(path: &Path) -> Vec<Answer> {
++    recent_answers(&read_tail(path))
++}
++
++/// The [`last_prompt`] of the transcript at `path`, from its last
++/// [`ANSWERS_TAIL`] bytes ([`read_tail`]). Blocking I/O.
++pub fn read_last_prompt(path: &Path) -> Option<(String, bool)> {
++    last_prompt(&read_tail(path))
++}
++
++/// The whole lines of the last [`ANSWERS_TAIL`] bytes of the transcript at
++/// `path`: a tail's first (partial) line is skipped. Empty when the file is
++/// missing or unreadable.
++fn read_tail(path: &Path) -> Vec<u8> {
+     use std::io::{Read, Seek, SeekFrom};
+     let Ok(mut f) = std::fs::File::open(path) else {
+         return Vec::new();
+@@ -556,12 +569,11 @@ pub fn read_answers(path: &Path) -> Vec<Answer> {
+     {
+         return Vec::new();
+     }
+-    let lines = match buf.iter().position(|&b| b == b'\n') {
+-        Some(nl) if start > 0 => &buf[nl + 1..],
+-        None if start > 0 => &[],
+-        _ => &buf[..],
+-    };
+-    recent_answers(lines)
++    match buf.iter().position(|&b| b == b'\n') {
++        Some(nl) if start > 0 => buf.split_off(nl + 1),
++        None if start > 0 => Vec::new(),
++        _ => buf,
++    }
+ }
+ 
+ /// The answers of a transcript's lines, oldest first: the last
+@@ -694,6 +706,40 @@ fn cut(s: &str, max: usize) -> String {
+     format!("{}{CUT_MARK}", &s[..end])
+ }
+ 
++/// The longest prompt [`last_prompt`] returns whole.
++pub const MAX_LAST_PROMPT: usize = 64 * 1024;
++
++/// The newest real prompt of a transcript's lines, answered or not (the
++/// prompts of [`recent_answers`]; sidechain records are skipped):
++/// [`sanitize`]d and trimmed, and cut to [`MAX_LAST_PROMPT`] bytes on a char
++/// boundary, with no mark, when longer (then `true`). `None` when there is
++/// none.
++pub fn last_prompt(bytes: &[u8]) -> Option<(String, bool)> {
++    bytes.split(|&b| b == b'\n').rev().find_map(|line| {
++        if !line.windows(6).any(|w| w == b"\"user\"") {
++            return None;
++        }
++        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
++        let user = record.get("type").and_then(|t| t.as_str()) == Some("user");
++        if !user || flag(&record, "isSidechain") {
++            return None;
++        }
++        let prompt = sanitize(answer_prompt(&record)?.trim());
++        let prompt = prompt.trim();
++        if prompt.is_empty() {
++            return None;
++        }
++        if prompt.len() <= MAX_LAST_PROMPT {
++            return Some((prompt.to_owned(), false));
++        }
++        let mut end = MAX_LAST_PROMPT;
++        while !prompt.is_char_boundary(end) {
++            end -= 1;
++        }
++        Some((prompt[..end].to_owned(), true))
++    })
++}
++
+ /// Extract `ai-title` (last occurrence) and `last-prompt` from the tail bytes.
+ fn extract_tail_meta(content: &str) -> (Option<String>, Option<String>) {
+     let mut title: Option<String> = None;
+```
+
+`src/proto.rs` (the other hunks). Also, in `DAEMON_FEATURES` (added by Task 1), append `"last_prompt"`.
+
+```diff
+--- a/src/proto.rs
++++ b/src/proto.rs
+@@ -123,6 +123,13 @@ pub enum Msg {
+     Answers {
+         id: SessionId,
+     },
++    /// The newest prompt of the session's conversation, answered or not,
++    /// for saving as a snippet. Answered by `LastPromptReply`; an unknown
++    /// session by `Error "no such session: …"`. An older daemon answers
++    /// `Error "unsupported op…"`.
++    LastPrompt {
++        id: SessionId,
++    },
+     /// Directories with claude history on this host, newest first (seeds the
+     /// new-session directory picker).
+     RecentProjects {
+@@ -223,6 +230,14 @@ pub enum Msg {
+         id: SessionId,
+         answers: Vec<Answer>,
+     },
++    /// Reply to `LastPrompt`: sanitized, at most 64 KiB (`cut` when it was
++    /// longer); `None` when the conversation has no prompt yet.
++    LastPromptReply {
++        id: SessionId,
++        prompt: Option<String>,
++        #[serde(default)]
++        cut: bool,
++    },
+     Projects {
+         dirs: Vec<ProjectDir>,
+     },
+```
+
+`src/daemon/server.rs`:
+
+```diff
+--- a/src/daemon/server.rs
++++ b/src/daemon/server.rs
+@@ -502,6 +505,16 @@ impl Client {
+                 });
+                 return;
+             }
++            Msg::LastPrompt { id } => {
++                // A transcript read, like `Answers`.
++                let conversation = self.daemon.conversation(id);
++                let queue = self.queue.clone();
++                tokio::spawn(async move {
++                    let msg = last_prompt(id, conversation).await;
++                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
++                });
++                return;
++            }
+             Msg::RecentProjects { limit } => recent_projects(limit).await,
+             Msg::SubscribeHostStats => {
+                 // Spawn a task that watches the stats channel and pushes
+@@ -706,17 +719,9 @@ async fn answers(id: SessionId, conversation: Option<(String, Option<String>)>)
+             message: format!("no such session: {id}"),
+         };
+     };
+-    // A claude session id is a UUID; anything else must not become a path.
+-    let sid = sid.filter(|sid| {
+-        let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+-        !sid.is_empty() && sid.chars().all(safe)
+-    });
+     let read = tokio::task::spawn_blocking(move || {
+-        let answers = match sid {
+-            Some(sid) => {
+-                let path = projects::transcript_path(&host::expand_tilde(&cwd), &sid);
+-                projects::read_answers(&path)
+-            }
++        let answers = match transcript(&cwd, sid) {
++            Some(path) => projects::read_answers(&path),
+             None => Vec::new(),
+         };
+         proto::answers_reply(id, answers)
+@@ -726,6 +731,36 @@ async fn answers(id: SessionId, conversation: Option<(String, Option<String>)>)
+     })
+ }
+ 
++/// The `LastPromptReply` for session `id`, whose `conversation` is
++/// [`Daemon::conversation`]'s, read on a blocking thread. No conversation
++/// yet, no prompt.
++async fn last_prompt(id: SessionId, conversation: Option<(String, Option<String>)>) -> Msg {
++    let Some((cwd, sid)) = conversation else {
++        return Msg::Error {
++            message: format!("no such session: {id}"),
++        };
++    };
++    let read = tokio::task::spawn_blocking(move || {
++        let found = transcript(&cwd, sid).and_then(|path| projects::read_last_prompt(&path));
++        let (prompt, cut) = match found {
++            Some((prompt, cut)) => (Some(prompt), cut),
++            None => (None, false),
++        };
++        Msg::LastPromptReply { id, prompt, cut }
++    });
++    read.await.unwrap_or_else(|e| Msg::Error {
++        message: format!("last prompt failed: {e}"),
++    })
++}
++
++/// The transcript of claude session `sid` run in `cwd`. A claude session id
++/// is a UUID; anything else must not become a path.
++fn transcript(cwd: &str, sid: Option<String>) -> Option<std::path::PathBuf> {
++    let safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
++    let sid = sid.filter(|sid| !sid.is_empty() && sid.chars().all(safe))?;
++    Some(projects::transcript_path(&host::expand_tilde(cwd), &sid))
++}
++
+ async fn recent_projects(limit: u32) -> Msg {
+     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+     match tokio::task::spawn_blocking(move || projects::recent_project_dirs(limit)).await {
+```
+
+Run: `umask 022; cargo test --locked --bin claudio last_prompt` → `test result: ok. 5 passed; 0 failed; …`
+Run: `umask 022; cargo test --locked --bin claudio snippets` → `test result: ok. 4 passed; 0 failed; …`
+Run: `umask 022; cargo test --locked --bin claudio`
+Expected: the previous total + 9 (scratch, on base + Task 8 + the Task 1 stand-in: `test result: ok. 909 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`; with Tasks 8, 9 and 10 merged: `919 passed`).
+Run: `rustfmt --edition 2021 --check src/tui/snippets.rs src/daemon/server.rs` → no output. `cargo build --locked` → 0 warnings.
+
+Step 3: commit
+`/usr/bin/git add src/tui/snippets.rs && /usr/bin/git commit -m "feat(tui): last prompt op and snippets store" -- src/tui/snippets.rs src/tui/mod.rs src/claude/projects.rs src/proto.rs src/daemon/server.rs src/daemon/tests.rs`
+
+Interfaces this task provides to later tasks:
+- `Msg::LastPrompt { id: SessionId }`, `Msg::LastPromptReply { id, prompt: Option<String>, #[serde(default)] cut: bool }`; `Welcome.features` contains `"last_prompt"`. Client mapping (Task 11): `prompt: None` → notice `no prompt to save`; `cut` → `saved snippet <name> (cut at 64 KiB)`; `Error "no such session: …"` → a notice; `Error "unsupported op: last_prompt"` → the restart notice.
+- `crate::claude::projects::{last_prompt(&[u8]) -> Option<(String, bool)>, read_last_prompt(&Path) -> Option<(String, bool)>, MAX_LAST_PROMPT}` (the interface's "reader of the tail like `read_answers`" is `read_last_prompt`).
+- `crate::tui::snippets::{Snippet { name, text }, dir() -> PathBuf, load(&Path) -> io::Result<Vec<Snippet>>, save(&Path, &str) -> io::Result<String>, slug(&str) -> String, MAX_BYTES, MAX_FILES, MAX_SLUG}`: blocking file I/O for the effect runner in `tui/mod.rs` only (never `App`). Task 11 removes the `#[allow(dead_code)]` above `mod snippets;`. `load` returns sanitized text; the paste path (§5) sanitizes and caps again.
+
+
+
 
 ### Task 11: wiring diagram, search and snippets into the framework
 Model: sonnet   Repo: /volumes/repos/claudio   Files: src/tui/builtins.rs (new), src/tui/app.rs, src/tui/extensions/mod.rs, src/tui/interaction.rs, src/tui/leader.rs, src/tui/mod.rs, src/tui/sessions.rs, tests/manager.rs
