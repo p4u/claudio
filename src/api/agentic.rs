@@ -520,11 +520,11 @@ mod tests {
     #[test]
     fn detect_opencode_env_block() {
         let sys = "You are opencode, an interactive CLI tool that helps with software.\n\
-                   <env>\n  Working directory: /home/p4u/repo\n  Is directory a git repo: no\n  \
+                   <env>\n  Working directory: /home/u/repo\n  Is directory a git repo: no\n  \
                    Today's date: Mon Jun 01 2026\n</env>";
         let env = ClientEnv::detect(sys);
         assert_eq!(env.client_id, "opencode");
-        assert_eq!(env.workspace.as_deref(), Some("/home/p4u/repo"));
+        assert_eq!(env.workspace.as_deref(), Some("/home/u/repo"));
         assert_eq!(env.date.as_deref(), Some("Mon Jun 01 2026"));
     }
 
@@ -584,10 +584,10 @@ mod tests {
         let sys =
             "You are an expert coding assistant operating inside pi, a coding agent harness.\n\
                    Current date: 2026-06-01\n\
-                   Current working directory: /home/p4u/repo";
+                   Current working directory: /home/u/repo";
         let env = ClientEnv::detect(sys);
         assert_eq!(env.client_id, "pi");
-        assert_eq!(env.workspace.as_deref(), Some("/home/p4u/repo"));
+        assert_eq!(env.workspace.as_deref(), Some("/home/u/repo"));
         assert_eq!(env.date.as_deref(), Some("2026-06-01"));
     }
 
@@ -602,23 +602,23 @@ mod tests {
     fn detect_hermes_and_workspace() {
         let sys = "# Hermes Agent Persona\n\nYou are a CLI AI Agent.\n\
                    Active Hermes profile: default.\n\
-                   User home directory: /home/p4u\n\
-                   Current working directory: /home/p4u/repo";
+                   User home directory: /home/u\n\
+                   Current working directory: /home/u/repo";
         let env = ClientEnv::detect(sys);
         assert_eq!(env.client_id, "hermes");
         // The home-directory line must not be mistaken for the working dir.
-        assert_eq!(env.workspace.as_deref(), Some("/home/p4u/repo"));
+        assert_eq!(env.workspace.as_deref(), Some("/home/u/repo"));
     }
 
     #[test]
     fn preamble_injects_workspace_then_falls_back() {
         let env = ClientEnv {
             client_id: "pi",
-            workspace: Some("/home/p4u/repo".to_string()),
+            workspace: Some("/home/u/repo".to_string()),
             date: None,
         };
         let with_ws = tool_preamble(&[tool("read", "")], None, &env);
-        assert!(with_ws.contains("Workspace (current working directory): /home/p4u/repo"));
+        assert!(with_ws.contains("Workspace (current working directory): /home/u/repo"));
 
         let generic = tool_preamble(&[tool("read", "")], None, &ClientEnv::default());
         assert!(generic.contains("use paths exactly as the user gives them"));

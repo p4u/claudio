@@ -74,7 +74,7 @@ pub fn list_sessions(cwd: &Path) -> Vec<ClaudeSession> {
 /// [`list_sessions`] under an explicit projects root.
 ///
 /// claude files a transcript under its resolved working directory: a session
-/// started in a symlinked path (`~/repos/x` → `/volumes/repos/x`) records and
+/// started in a symlinked path (`~/repos/x` → `/srv/x`) records and
 /// is filed under the target. So `cwd` is resolved the same way first.
 fn list_sessions_in(root: &Path, cwd: &Path) -> Vec<ClaudeSession> {
     let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
