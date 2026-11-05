@@ -13,6 +13,9 @@ mod git_app;
 mod git_view;
 mod interaction;
 mod keymap;
+// Its first user, the render worker, comes with the next change.
+#[allow(dead_code)]
+mod latex;
 mod notifications;
 mod plain;
 mod proxy_state;
