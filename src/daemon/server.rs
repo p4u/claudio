@@ -31,8 +31,8 @@ use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
 use crate::proto::{
-    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
-    PROTO,
+    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome,
+    DAEMON_FEATURES, MAX_FRAME, PROTO,
 };
 
 /// Deadline for a connection's first frame.
@@ -280,6 +280,7 @@ async fn client_loop(
         host: client.daemon.host().await,
         build: build.map(|b| b.build.clone()),
         build_time: build.and_then(|b| b.mtime),
+        features: DAEMON_FEATURES.iter().map(|f| f.to_string()).collect(),
     };
     // Queued directly (no event flush): Welcome is always the first frame.
     let welcome = Envelope {
@@ -436,6 +437,7 @@ impl Client {
                     rows: shell.rows,
                     cols: shell.cols,
                     ephemeral: false,
+                    extensions: None,
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }

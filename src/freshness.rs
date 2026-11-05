@@ -231,6 +231,7 @@ mod tests {
             },
             build: build.map(Into::into),
             build_time,
+            features: vec![],
         }
     }
 

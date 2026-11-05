@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::proto::{SessionId, SessionKind, SpawnSpec};
+use crate::proto::{SessionExtensions, SessionId, SessionKind, SpawnSpec};
 
 /// One journaled session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +52,11 @@ pub struct Entry {
     /// the entry) but never written, so a daemon restart forgets it.
     #[serde(skip)]
     pub ephemeral: bool,
+    /// The extensions the session last launched with (the daemon's
+    /// effective value). Absent in journals from before extensions: such an
+    /// entry gets the legacy value at its next launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<SessionExtensions>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -145,7 +150,8 @@ impl Journal {
 
     /// Update in-memory only (no disk write). A re-spawn of a known id keeps
     /// its `created_at`, last claude session id, `kind` and `ephemeral` (those
-    /// only apply to a new entry); cwd, name and args follow the new spec.
+    /// only apply to a new entry); cwd, name, args and extensions follow the
+    /// new spec.
     /// Returns the (possibly updated) entry.
     pub fn upsert_entry(&mut self, spec: &SpawnSpec, kind: SessionKind) -> Entry {
         match self.sessions.iter_mut().find(|e| e.id == spec.id) {
@@ -153,6 +159,7 @@ impl Journal {
                 e.cwd = spec.cwd.clone();
                 e.name = spec.name.clone();
                 e.args = spec.args.clone();
+                e.extensions = spec.extensions.clone();
                 e.clone()
             }
             None => {
@@ -165,6 +172,7 @@ impl Journal {
                     claude_session_id: None,
                     created_at: crate::paths::unix_now(),
                     ephemeral: spec.ephemeral,
+                    extensions: spec.extensions.clone(),
                 };
                 self.sessions.push(e.clone());
                 e
@@ -284,6 +292,7 @@ mod tests {
             rows: 24,
             cols: 80,
             ephemeral: false,
+            extensions: None,
         }
     }
 
@@ -453,6 +462,54 @@ mod tests {
             // ...but the on-disk file still has the entry.
         }
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn extensions_round_trip_and_old_journals_load_without_them() {
+        use crate::proto::{LensKind, LensSpec, SessionExtensions};
+        let dir = std::env::temp_dir().join(format!("claudio-journal-{}", Uuid::new_v4()));
+        let path = dir.join("j.json");
+        // A v0.5.0 journal: no `extensions`.
+        let id = Uuid::new_v4();
+        let old = format!(
+            r#"{{"sessions":[{{"id":"{id}","cwd":"/w","args":[],"created_at":1}}]}}"#
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, old).unwrap();
+        let mut j = Journal::load(&path);
+        assert_eq!(j.entries()[0].extensions, None);
+
+        // A spawn with extensions records them, and they come back.
+        let ext = SessionExtensions {
+            lenses: vec![LensSpec {
+                name: "keys".into(),
+                kind: LensKind::Tag,
+                instruction: "Write <keys>.".into(),
+            }],
+        };
+        let mut s = spec(id);
+        s.extensions = Some(ext.clone());
+        j.record_spawn(&s, SessionKind::Claude).1.unwrap();
+        let back = Journal::load(&path);
+        assert_eq!(back.entries()[0].extensions, Some(ext));
+
+        // v0.5.0's `Entry` (no such field, no deny_unknown_fields) reads it.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct V050Entry {
+            id: SessionId,
+            cwd: String,
+            #[serde(default)]
+            args: Vec<String>,
+            created_at: u64,
+        }
+        #[derive(serde::Deserialize)]
+        struct V050File {
+            sessions: Vec<V050Entry>,
+        }
+        let file: V050File = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file.sessions[0].id, id);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

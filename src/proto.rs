@@ -323,7 +323,17 @@ pub struct Welcome {
     /// builds of one version.
     #[serde(default)]
     pub build_time: Option<u64>,
+    /// What this daemon can do beyond the base protocol ([`DAEMON_FEATURES`]).
+    /// Old daemons omit it: they have none of them.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
+
+/// The features a daemon of this build reports in [`Welcome::features`]:
+/// `lens` — it takes [`SpawnSpec::extensions`] and sends
+/// [`SessionEvent::Lens`]; `search` — it answers [`Msg::Search`];
+/// `last_prompt` — it answers [`Msg::LastPrompt`].
+pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Colors {
@@ -369,6 +379,12 @@ pub struct SpawnSpec {
     /// An old daemon ignores the field and treats it as any other session.
     #[serde(default)]
     pub ephemeral: bool,
+    /// The session's extension lenses (the client's registry): what claude
+    /// is told through the context hook and which tags the daemon extracts.
+    /// `None` (an old client) keeps the journaled value. Ignored by an old
+    /// daemon, which goes by its own `[claude] latex`.
+    #[serde(default)]
+    pub extensions: Option<SessionExtensions>,
 }
 
 /// How to restart a session. Everything else (cwd, name, claude arguments,
@@ -384,6 +400,103 @@ pub struct RespawnSpec {
     pub env: Vec<(String, String)>,
     pub rows: u16,
     pub cols: u16,
+    /// Replaces the journaled extensions when `Some` (see
+    /// [`SpawnSpec::extensions`]).
+    #[serde(default)]
+    pub extensions: Option<SessionExtensions>,
+}
+
+/// The lenses of a claude session, in the client's registry order. The
+/// daemon checks the caps ([`SessionExtensions::validate`]), writes the
+/// instructions to the session's context file and extracts the tag lenses'
+/// tags from the transcript.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionExtensions {
+    #[serde(default)]
+    pub lenses: Vec<LensSpec>,
+}
+
+/// One lens: its name (the tag, or the fence's info word), its kind, and
+/// the instruction claude gets for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LensSpec {
+    pub name: String,
+    pub kind: LensKind,
+    #[serde(default)]
+    pub instruction: String,
+}
+
+/// A tag lens (`<name>…</name>` in claude's text) or a fence lens (a fenced
+/// code block whose info string starts with the name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LensKind {
+    Tag,
+    Fence,
+    /// A kind from a newer client: the daemon drops the lens.
+    #[serde(other)]
+    Unknown,
+}
+
+/// At most this many lenses per session.
+pub const MAX_LENSES: usize = 16;
+/// One instruction's cap, in bytes after `sanitize`.
+pub const MAX_INSTRUCTION: usize = 2048;
+/// All instructions together, in bytes after `sanitize`.
+pub const MAX_INSTRUCTIONS: usize = 8192;
+
+impl SessionExtensions {
+    /// Why this value breaks the caps: more than [`MAX_LENSES`] lenses, a
+    /// name that is not `^[a-z][a-z0-9-]{0,23}$` or is repeated, or
+    /// instructions over [`MAX_INSTRUCTION`] / [`MAX_INSTRUCTIONS`].
+    pub fn validate(&self) -> Result<(), String> {
+        if self.lenses.len() > MAX_LENSES {
+            return Err(format!("more than {MAX_LENSES} lenses"));
+        }
+        let mut total = 0;
+        for (i, lens) in self.lenses.iter().enumerate() {
+            if !lens_name_ok(&lens.name) {
+                return Err(format!("bad lens name {:?}", lens.name));
+            }
+            if self.lenses[..i].iter().any(|l| l.name == lens.name) {
+                return Err(format!("lens {} given twice", lens.name));
+            }
+            let len = crate::claude::latex::sanitize(&lens.instruction).len();
+            if len > MAX_INSTRUCTION {
+                return Err(format!("lens {} instruction over {MAX_INSTRUCTION} bytes", lens.name));
+            }
+            total += len;
+        }
+        if total > MAX_INSTRUCTIONS {
+            return Err(format!("instructions over {MAX_INSTRUCTIONS} bytes"));
+        }
+        Ok(())
+    }
+
+    /// What claude is told: the non-empty instructions, sanitized, joined
+    /// by a blank line.
+    pub fn context(&self) -> String {
+        let parts: Vec<String> = self
+            .lenses
+            .iter()
+            .map(|l| crate::claude::latex::sanitize(&l.instruction).trim().to_owned())
+            .filter(|i| !i.is_empty())
+            .collect();
+        parts.join("\n\n")
+    }
+
+    /// The lens names, for `Debug` and logs (never the instructions).
+    pub fn names(&self) -> Vec<&str> {
+        self.lenses.iter().map(|l| l.name.as_str()).collect()
+    }
+}
+
+/// `^[a-z][a-z0-9-]{0,23}$`.
+pub fn lens_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 24
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// How to start a terminal tab: the login shell, in `cwd`.
@@ -429,6 +542,7 @@ impl std::fmt::Debug for RespawnSpec {
             .field("env", &env_keys)
             .field("rows", &self.rows)
             .field("cols", &self.cols)
+            .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
             .finish()
     }
 }
@@ -445,6 +559,7 @@ impl std::fmt::Debug for SpawnSpec {
             .field("rows", &self.rows)
             .field("cols", &self.cols)
             .field("ephemeral", &self.ephemeral)
+            .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
             .finish()
     }
 }
@@ -1019,6 +1134,7 @@ mod tests {
             env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "sekrit".into())],
             rows: 24,
             cols: 80,
+            extensions: None,
         });
         let json = serde_json::to_string(&Envelope::request(4, respawn.clone())).unwrap();
         assert!(json.contains(r#""op":"respawn""#) && json.contains(r#""fresh":true"#));
@@ -1034,6 +1150,7 @@ mod tests {
                 env: vec![],
                 rows: 24,
                 cols: 80,
+                extensions: None,
             })
         );
     }
@@ -1117,6 +1234,7 @@ mod tests {
             rows: 24,
             cols: 80,
             ephemeral: false,
+            extensions: None,
         };
         let dbg = format!("{spec:?}");
         assert!(dbg.contains("ANTHROPIC_AUTH_TOKEN"));
@@ -1484,5 +1602,88 @@ mod tests {
         };
         let back: Msg = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
         assert_eq!(back, reply);
+    }
+
+    fn lens(name: &str, instruction: &str) -> LensSpec {
+        LensSpec {
+            name: name.into(),
+            kind: LensKind::Tag,
+            instruction: instruction.into(),
+        }
+    }
+
+    #[test]
+    fn extensions_are_optional_on_the_wire_and_unknown_kinds_survive() {
+        // An old client's Spawn and Respawn: no extensions.
+        let spawn = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/","rows":1,"cols":1}"#;
+        assert_eq!(serde_json::from_str::<SpawnSpec>(spawn).unwrap().extensions, None);
+        let respawn = r#"{"id":"00000000-0000-0000-0000-000000000000","rows":1,"cols":1}"#;
+        assert_eq!(serde_json::from_str::<RespawnSpec>(respawn).unwrap().extensions, None);
+        // A newer client's lens kind still parses (the daemon drops it).
+        let ext = r#"{"lenses":[{"name":"x","kind":"widget","instruction":"i"},{"name":"keys","kind":"tag"}]}"#;
+        let ext: SessionExtensions = serde_json::from_str(ext).unwrap();
+        assert_eq!(ext.lenses[0].kind, LensKind::Unknown);
+        assert_eq!(ext.lenses[1].kind, LensKind::Tag);
+        assert_eq!(ext.lenses[1].instruction, "");
+        // An old daemon's Welcome: no features.
+        let welcome = serde_json::json!({
+            "claudio_version": "0.5.0", "proto": 1,
+            "host": {"hostname": "h", "os": "linux", "arch": "x86_64", "home": "/h"}
+        });
+        let welcome: Welcome = serde_json::from_value(welcome).unwrap();
+        assert!(welcome.features.is_empty());
+        assert_eq!(DAEMON_FEATURES, ["lens", "search", "last_prompt"]);
+    }
+
+    #[test]
+    fn extension_caps() {
+        let ok = |lenses: Vec<LensSpec>| SessionExtensions { lenses }.validate();
+        assert_eq!(ok(vec![lens("latex", "x"), lens("a-1", "")]), Ok(()));
+        assert!(ok((0..17).map(|i| lens(&format!("l{i}"), "")).collect()).is_err());
+        assert!(ok(vec![lens("keys", ""), lens("keys", "")]).is_err());
+        for bad in ["", "Keys", "1x", "a_b", "a b", &"a".repeat(25)] {
+            assert!(ok(vec![lens(bad, "")]).is_err(), "{bad:?}");
+        }
+        assert_eq!(ok(vec![lens(&"a".repeat(24), "")]), Ok(()));
+        // 2048 bytes after sanitize: controls do not count.
+        let at_cap = format!("{}\u{7}", "i".repeat(2048));
+        assert_eq!(ok(vec![lens("a", &at_cap)]), Ok(()));
+        assert!(ok(vec![lens("a", &"i".repeat(2049))]).is_err());
+        // 8192 in total.
+        let full: Vec<LensSpec> = (0..4).map(|i| lens(&format!("l{i}"), &"i".repeat(2048))).collect();
+        assert_eq!(ok(full.clone()), Ok(()));
+        let mut over = full;
+        over.push(lens("one", "i"));
+        assert!(ok(over).is_err());
+    }
+
+    #[test]
+    fn extension_context_and_debug_never_show_instructions() {
+        let ext = SessionExtensions {
+            lenses: vec![lens("latex", " Math.\u{1b} "), lens("abc", ""), lens("keys", "Keys.")],
+        };
+        assert_eq!(ext.context(), "Math.\n\nKeys.");
+        let spec = SpawnSpec {
+            id: Uuid::nil(),
+            cwd: "/".into(),
+            name: None,
+            args: vec![],
+            env: vec![],
+            rows: 1,
+            cols: 1,
+            ephemeral: false,
+            extensions: Some(ext.clone()),
+        };
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("\"latex\"") && !shown.contains("Math"), "{shown}");
+        let respawn = RespawnSpec {
+            id: Uuid::nil(),
+            fresh: false,
+            env: vec![],
+            rows: 1,
+            cols: 1,
+            extensions: Some(ext),
+        };
+        assert!(!format!("{respawn:?}").contains("Keys."));
     }
 }

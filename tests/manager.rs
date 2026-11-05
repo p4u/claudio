@@ -2163,7 +2163,7 @@ exec cat
 /// A formula in claude's answer is rendered in place of its `<latex>` tag
 /// and listed by the reader view's formulas list (Alt+u, Tab); a TUI
 /// started later gets it from the daemon's replay on attach. The default
-/// config gives the session the `__context latex` SessionStart hook.
+/// config gives the session the context-file SessionStart hook.
 #[test]
 fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
     let h = ManagerHarness::new();
@@ -2177,7 +2177,7 @@ fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
         tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
         assert!(!tui.screen_text(Region::Pane).contains("<latex>"));
         let hooks = fs::read_to_string(&settings).unwrap();
-        assert!(hooks.contains("__context latex"), "{hooks}");
+        assert!(hooks.contains("__context file"), "{hooks}");
 
         // The transcript has no prompt, so no answer; Tab lists the formula.
         tui.send_keys(ALT_U);

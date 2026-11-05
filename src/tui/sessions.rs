@@ -423,6 +423,7 @@ impl App {
             cols,
             // `--plain`'s session is not one for a manager to show.
             ephemeral: self.mode == Mode::Plain,
+            extensions: None,
         };
         self.send_with_proxy(
             host,
@@ -545,6 +546,7 @@ impl App {
             env: vec![], // filled by `send_with_proxy`
             rows,
             cols,
+            extensions: None,
         });
         match self.send_with_proxy(
             &host,

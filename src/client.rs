@@ -797,6 +797,7 @@ mod tests {
             },
             build: None,
             build_time: None,
+            features: vec![],
         })
     }
 

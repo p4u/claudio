@@ -175,12 +175,14 @@ pub fn spawn(
     let path = daemon.config.path.as_deref();
     let (cmd, program) = match kind {
         SessionKind::Claude => {
+            let context = write_context(&daemon.config.socket, spec);
             let cmd = command(
                 &daemon.config,
                 spec,
                 &cwd,
                 &token,
                 daemon.skip_permissions(),
+                context.as_deref(),
             );
             let program = PathBuf::from(cmd.get_argv()[0].clone());
             (cmd, program)
@@ -256,8 +258,59 @@ pub fn spawn(
     Ok((Handle { tx, token, pid }, committed_tx))
 }
 
+/// The daemon's context files: `context/` beside its socket (in its 0700
+/// runtime dir).
+fn context_dir(socket: &Path) -> PathBuf {
+    socket.parent().unwrap_or(Path::new(".")).join("context")
+}
+
+/// Session `id`'s context file. Stable for the session's life, so `/clear`
+/// and compaction re-read the same file.
+pub(super) fn context_path(socket: &Path, id: SessionId) -> PathBuf {
+    context_dir(socket).join(format!("{id}.txt"))
+}
+
+/// Write the instructions of `spec`'s lenses to its context file (dir
+/// 0700, file 0600, atomic) and return its path; with no instructions,
+/// remove the file and return `None`. A failed write is logged and the
+/// session starts without context.
+fn write_context(socket: &Path, spec: &SpawnSpec) -> Option<PathBuf> {
+    let path = context_path(socket, spec.id);
+    let context = spec.extensions.as_ref().map(|e| e.context()).unwrap_or_default();
+    if context.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let written = crate::paths::ensure_private_dir(&context_dir(socket))
+        .and_then(|()| crate::paths::write_atomic(&path, context.as_bytes()));
+    match written {
+        Ok(()) => Some(path),
+        Err(e) => {
+            tracing::warn!(id = %spec.id, error = %e, "could not write the context file");
+            None
+        }
+    }
+}
+
+/// Remove session `id`'s context file (it was removed).
+pub(super) fn remove_context(socket: &Path, id: SessionId) {
+    let _ = std::fs::remove_file(context_path(socket, id));
+}
+
+/// Remove every context file: at daemon start, before any launch. A claude
+/// a previous daemon started finds its file gone and gets no context.
+pub(super) fn clear_contexts(socket: &Path) {
+    let Ok(entries) = std::fs::read_dir(context_dir(socket)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
 /// `<claude> --settings <hooks> [--allow-dangerously-skip-permissions]
-/// [args…] [-n <name>]`, in `cwd`, with the session env applied.
+/// [args…] [-n <name>]`, in `cwd`, with the session env applied. With a
+/// `context` file, SessionStart also runs `__context file <context>`.
 ///
 /// The skip-permissions flag is added here, on every launch path (new spawn,
 /// `--resume`, resume-retry), rather than in `spec.args`, so the journal never
@@ -268,8 +321,9 @@ fn command(
     cwd: &Path,
     token: &str,
     skip_permissions: bool,
+    context: Option<&Path>,
 ) -> CommandBuilder {
-    let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, cfg.latex);
+    let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, context);
     let mut cmd = CommandBuilder::new(cfg.claude_bin());
     cmd.arg("--settings");
     cmd.arg(settings.to_string());
@@ -1162,8 +1216,9 @@ mod tests {
             rows: 24,
             cols: 80,
             ephemeral: false,
+            extensions: None,
         };
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, None);
         let argv = argv_of(&cmd);
         assert_eq!(argv[0], "/bin/claude");
         assert_eq!(argv[1], "--settings");
@@ -1176,22 +1231,25 @@ mod tests {
 
         // With skip-permissions on, the flag follows --settings, ahead of
         // the spec args (which are what the journal stores).
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, None);
         assert_eq!(
             &argv_of(&cmd)[3..],
             [ALLOW, "--resume", "abc", "-n", "work"]
         );
         assert_eq!(spec.args, ["--resume", "abc"]);
 
-        // `[claude] latex` adds the context hook to SessionStart.
-        let start = |cfg: &super::super::Config| {
-            let argv = argv_of(&command(cfg, &spec, Path::new("/"), "t", false));
+        // A context file adds its hook to SessionStart: the path, not the text.
+        let start = |context: Option<&Path>| {
+            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", false, context));
             let settings: Value = serde_json::from_str(&argv[2]).unwrap();
             settings["hooks"]["SessionStart"][0]["hooks"].clone()
         };
-        assert_eq!(start(&cfg).as_array().unwrap().len(), 1);
-        let latex = super::super::Config { latex: true, ..cfg.clone() };
-        assert_eq!(start(&latex)[1]["command"], "'/bin/claudio' __context latex");
+        assert_eq!(start(None).as_array().unwrap().len(), 1);
+        let ctx = Path::new("/run/context/x.txt");
+        assert_eq!(
+            start(Some(ctx))[1]["command"],
+            "'/bin/claudio' __context file '/run/context/x.txt'"
+        );
     }
 
     fn formulas(list: &[&str]) -> VecDeque<String> {
@@ -1288,8 +1346,9 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 ephemeral: false,
+                extensions: None,
             };
-            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true));
+            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true, None));
             assert_eq!(&argv[3..], [given]);
         }
     }

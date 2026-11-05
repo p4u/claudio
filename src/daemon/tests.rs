@@ -168,6 +168,7 @@ impl TestDaemon {
             rows: 24,
             cols: 80,
             ephemeral: false,
+            extensions: None,
         }
     }
 
@@ -934,6 +935,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         rows: 24,
         cols: 80,
         ephemeral: false,
+        extensions: None,
     };
 
     // spawner handles the Spawn/Spawned handshake; observer watches events.
@@ -1025,6 +1027,7 @@ async fn immediate_exit_leaves_session_dormant() {
         rows: 24,
         cols: 80,
         ephemeral: false,
+        extensions: None,
     };
     c.spawn(spec).await;
 
@@ -1409,6 +1412,7 @@ impl Client {
             env: vec![("SECRET_ENV".into(), "hunter2".into())],
             rows: 24,
             cols: 80,
+            extensions: None,
         };
         match self.call_seen(Msg::Respawn(spec)).await {
             (Msg::Spawned { id: spawned, pid }, seen) => {
@@ -1533,6 +1537,7 @@ async fn respawn_revives_a_dormant_session_and_rejects_unknown_ones() {
             env: vec![],
             rows: 24,
             cols: 80,
+            extensions: None,
         }))
         .await;
     assert!(matches!(unknown, Msg::Error { message } if message.contains("no such session")));
@@ -1612,6 +1617,7 @@ fn respawn_spec(id: SessionId, fresh: bool) -> proto::RespawnSpec {
         env: vec![],
         rows: 24,
         cols: 80,
+        extensions: None,
     }
 }
 
@@ -1869,4 +1875,156 @@ async fn meta_carries_the_git_status_of_the_session_directory() {
     assert!((1..=2).contains(&git.untracked), "{}", git.untracked);
     assert!(git.is_dirty());
     let _ = std::fs::remove_dir_all(&repo);
+}
+
+// ── Extensions: the context file and the effective value ─────────────────────
+
+fn lens(name: &str, instruction: &str) -> proto::LensSpec {
+    proto::LensSpec {
+        name: name.into(),
+        kind: proto::LensKind::Tag,
+        instruction: instruction.into(),
+    }
+}
+
+fn extensions(lenses: &[(&str, &str)]) -> proto::SessionExtensions {
+    proto::SessionExtensions {
+        lenses: lenses.iter().map(|(n, i)| lens(n, i)).collect(),
+    }
+}
+
+/// The lens names a journal entry holds (`None`: no `extensions` field).
+fn journaled_lenses(entry: &serde_json::Value) -> Option<Vec<String>> {
+    let lenses = entry.get("extensions")?["lenses"].as_array()?.clone();
+    Some(lenses.iter().map(|l| l["name"].as_str().unwrap().to_owned()).collect())
+}
+
+#[test]
+fn effective_extensions_follow_request_then_journal_then_legacy() {
+    use super::effective_extensions;
+    let names = |e: proto::SessionExtensions| -> Vec<String> {
+        e.lenses.into_iter().map(|l| l.name).collect()
+    };
+    let asked = extensions(&[("keys", "k")]);
+    let journaled = extensions(&[("abc", "a")]);
+    // The request wins; without one the journal's; without both the legacy.
+    let e = effective_extensions(Some(asked.clone()), Some(journaled.clone()), true);
+    assert_eq!(names(e), ["keys"]);
+    let e = effective_extensions(None, Some(journaled), true);
+    assert_eq!(names(e), ["abc"]);
+    let legacy = effective_extensions(None, None, true);
+    assert_eq!(legacy.lenses.len(), 1);
+    assert_eq!(legacy.lenses[0].name, "latex");
+    assert_eq!(legacy.lenses[0].kind, proto::LensKind::Tag);
+    assert_eq!(legacy.lenses[0].instruction, crate::claude::hooks::LATEX_CONTEXT);
+    // A host with `[claude] latex = false` drops the latex lens, asked or not.
+    assert!(effective_extensions(None, None, false).lenses.is_empty());
+    let both = extensions(&[("latex", "math"), ("keys", "k")]);
+    assert_eq!(names(effective_extensions(Some(both), None, false)), ["keys"]);
+    // A lens of a kind this daemon does not know is dropped.
+    let mut odd = extensions(&[("keys", "k"), ("new", "n")]);
+    odd.lenses[1].kind = proto::LensKind::Unknown;
+    assert_eq!(names(effective_extensions(Some(odd), None, true)), ["keys"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_writes_a_private_context_file_and_a_kill_removes_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    // This host has `[claude] latex = false`: the latex lens goes.
+    spec.extensions = Some(extensions(&[
+        ("latex", "MATH-INSTRUCTION"),
+        ("keys", "KEYS-INSTRUCTION"),
+        ("abc", ""),
+    ]));
+    c.spawn(spec).await;
+    d.token().await;
+
+    let path = d.dir.join("rt/context").join(format!("{id}.txt"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "KEYS-INSTRUCTION");
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+
+    // The hook has the path; the settings never the text.
+    let settings = std::fs::read_to_string(d.work().join("settings.json")).unwrap();
+    assert!(!settings.contains("INSTRUCTION"), "{settings}");
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    let hooks = settings["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+    let expected = format!("'/bin/true' __context file '{}'", path.display());
+    assert_eq!(hooks[1]["command"], expected.as_str());
+
+    // The journal keeps the effective value.
+    let journal = d.journal();
+    assert_eq!(journaled_lenses(&journal["sessions"][0]).unwrap(), ["keys", "abc"]);
+
+    assert_eq!(c.call(Msg::Kill { id }).await, Msg::Ok);
+    assert!(!path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_instructions_means_no_context_file_and_no_hook() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    // An old client: no extensions, and this host has latex off.
+    c.spawn(d.spec(id)).await;
+    d.token().await;
+    let settings = std::fs::read_to_string(d.work().join("settings.json")).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap().len(), 1);
+    assert!(!d.dir.join("rt/context").join(format!("{id}.txt")).exists());
+    assert_eq!(journaled_lenses(&d.journal()["sessions"][0]).unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawn_with_extensions_replaces_the_journaled_ones() {
+    let d = TestDaemon::start_logging_argv().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    spec.extensions = Some(extensions(&[("keys", "OLD")]));
+    c.spawn(spec).await;
+    d.runs_reach(1).await;
+    let path = d.dir.join("rt/context").join(format!("{id}.txt"));
+
+    // No extensions in the respawn (an old client): the journal's stay.
+    c.respawn(id, false).await;
+    d.runs_reach(2).await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "OLD");
+
+    let mut respawn = respawn_spec(id, false);
+    respawn.extensions = Some(extensions(&[("abc", "NEW")]));
+    assert!(matches!(c.call(Msg::Respawn(respawn)).await, Msg::Spawned { .. }));
+    d.runs_reach(3).await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "NEW");
+    assert_eq!(journaled_lenses(&d.journal()["sessions"][0]).unwrap(), ["abc"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extensions_over_the_caps_are_refused() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    spec.extensions = Some(extensions(&[("keys", "a"), ("keys", "b")]));
+    let reply = c.call(Msg::Spawn(spec)).await;
+    assert!(
+        matches!(&reply, Msg::Error { message } if message.contains("bad extensions")),
+        "{reply:?}"
+    );
+    assert!(c.sessions().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_start_clears_old_context_files() {
+    let dir = TestDaemon::new_dir();
+    let context = dir.join("rt/context");
+    std::fs::create_dir_all(&context).unwrap();
+    std::fs::write(context.join("old.txt"), "stale").unwrap();
+    let _d = TestDaemon::start_in(dir).await;
+    assert!(!context.join("old.txt").exists());
 }

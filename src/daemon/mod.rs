@@ -40,8 +40,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::paths;
 use crate::proto::{
-    Envelope, Frame, HostInfo, Msg, RespawnSpec, SessionEvent, SessionId, SessionInfo,
-    SessionKind, SessionState, SpawnSpec,
+    Envelope, Frame, HostInfo, LensKind, LensSpec, Msg, RespawnSpec, SessionEvent,
+    SessionExtensions, SessionId, SessionInfo, SessionKind, SessionState, SpawnSpec,
 };
 use crate::remote::probe::Probe;
 use journal::{Entry, Journal};
@@ -368,6 +368,8 @@ impl Daemon {
             sessions = journal.entries().len(),
             "journal loaded; all sessions dormant"
         );
+        // Context files of a previous daemon's sessions: none is ours yet.
+        session::clear_contexts(&config.socket);
         let (events, _) = broadcast::channel(EVENTS_CAPACITY);
         let (stats_tx, stats_rx) = tokio::sync::watch::channel(stats::HostSnapshot::default());
         tokio::spawn(stats::sample_loop(stats_tx));
@@ -501,6 +503,9 @@ impl Daemon {
         spec: SpawnSpec,
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
+        if let Some(ext) = &spec.extensions {
+            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+        }
         // Phase 1: idempotency check and reservation (fast, no I/O).
         let kind = {
             let mut reg = self.registry();
@@ -531,6 +536,15 @@ impl Daemon {
         if kind == SessionKind::Shell {
             spec.args.clear();
             spec.env.clear();
+            spec.extensions = None;
+        } else {
+            let journaled = {
+                let reg = self.registry();
+                let entry = reg.journal.entries().iter().find(|e| e.id == spec.id);
+                entry.and_then(|e| e.extensions.clone())
+            };
+            let requested = spec.extensions.take();
+            spec.extensions = Some(effective_extensions(requested, journaled, self.config.latex));
         }
 
         // Phase 2: PTY open + process spawn + thread creation (blocking,
@@ -693,6 +707,7 @@ impl Daemon {
             let _ = handle.tx.send(Cmd::Kill).await;
         }
 
+        session::remove_context(&self.config.socket, id);
         tracing::info!(%id, "session removed");
         self.broadcast(id, SessionEvent::Removed);
         Ok(())
@@ -812,6 +827,7 @@ impl Daemon {
                     rows: 24,
                     cols: 80,
                     ephemeral: e.ephemeral,
+                    extensions: e.extensions.clone(),
                 };
                 (spec, e.kind)
             })
@@ -858,6 +874,9 @@ impl Daemon {
     /// Respawn (or a Spawn) is refused meanwhile, and a Kill is deferred to
     /// `to_kill` and wins, so a killed session is never brought back.
     async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
+        if let Some(ext) = &req.extensions {
+            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+        }
         let id = req.id;
         let (entry, old) = {
             let mut reg = self.registry();
@@ -904,6 +923,7 @@ impl Daemon {
             rows: req.rows,
             cols: req.cols,
             ephemeral: entry.ephemeral,
+            extensions: req.extensions.or(entry.extensions),
         };
         let spawned = self.spawn_reserved(spec, entry.kind).await;
         match (&spawned, self.session(id)) {
@@ -973,6 +993,7 @@ impl Daemon {
             self.registry().journal.reinsert(entry);
             return;
         }
+        session::remove_context(&self.config.socket, id);
         tracing::info!(%id, "session closed after its process exited");
         self.broadcast(id, SessionEvent::Removed);
     }
@@ -995,6 +1016,28 @@ impl Daemon {
         }
         ours
     }
+}
+
+/// The extensions a claude launch runs with: the request's when it has
+/// them, else the journaled ones, else the legacy value (the latex lens
+/// when this host's `[claude] latex` is on). Lenses of a kind this daemon
+/// does not know are dropped, and `[claude] latex = false` drops the latex
+/// lens whatever the client asked: a host that turned math off stays off.
+fn effective_extensions(
+    requested: Option<SessionExtensions>,
+    journaled: Option<SessionExtensions>,
+    latex: bool,
+) -> SessionExtensions {
+    let mut ext = requested.or(journaled).unwrap_or_else(|| SessionExtensions {
+        lenses: vec![LensSpec {
+            name: "latex".to_owned(),
+            kind: LensKind::Tag,
+            instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
+        }],
+    });
+    ext.lenses
+        .retain(|l| l.kind != LensKind::Unknown && (latex || l.name != "latex"));
+    ext
 }
 
 /// The refusal for a spawn or respawn of an id that is mid-(re)spawn; the

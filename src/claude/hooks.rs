@@ -8,11 +8,14 @@
 //! - [`EVENTS`] — the hook events the daemon registers.
 //! - [`settings`] — build the `--settings` JSON blob for a session.
 //! - [`relay`] — the short-lived relay process that ships the payload.
-//! - [`context`] — `claudio __context latex`, the SessionStart hook that asks
-//!   claude to wrap math in `<latex>` tags (`[claude] latex`).
+//! - [`context`] — `claudio __context file <path>`, the SessionStart hook
+//!   that adds the session's extension instructions (the daemon's context
+//!   file) to claude's context; `__context latex` is kept for sessions an
+//!   older daemon started.
 //! - [`new_token`] — generate a per-spawn secret token.
 
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -39,6 +42,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum hook payload size. Hooks should be tiny; 1 MiB is a hard cap.
 const MAX_PAYLOAD: usize = 1 << 20;
 
+/// The most of a context file `__context file` reads.
+const MAX_CONTEXT: u64 = 16 * 1024;
+
 /// What `claudio __context latex` adds to every conversation's context when
 /// `[claude] latex` is on: the manager renders `<latex>` tags in the pane.
 /// Context, not the system prompt, so the session stays a plain interactive
@@ -56,8 +62,14 @@ numbers or code in them. Write relations with spaces around them (a < b, not a<b
 ///
 /// The hook command is `'<claudio_bin>' __hook <Event> '<socket>' <token>`,
 /// with paths shell-quoted so that spaces and special characters are safe.
-/// With `latex`, `SessionStart` runs `'<claudio_bin>' __context latex` too.
-pub fn settings(claudio_bin: &Path, socket: &Path, token: &str, latex: bool) -> serde_json::Value {
+/// With a `context` file, `SessionStart` runs
+/// `'<claudio_bin>' __context file '<context>'` too: the path, never the text.
+pub fn settings(
+    claudio_bin: &Path,
+    socket: &Path,
+    token: &str,
+    context: Option<&Path>,
+) -> serde_json::Value {
     let bin = shell_quote(&claudio_bin.to_string_lossy());
     let sock = shell_quote(&socket.to_string_lossy());
 
@@ -65,8 +77,9 @@ pub fn settings(claudio_bin: &Path, socket: &Path, token: &str, latex: bool) -> 
     for event in EVENTS {
         let command = format!("{bin} __hook {event} {sock} {token}");
         let mut hooks = vec![serde_json::json!({"type": "command", "command": command})];
-        if latex && *event == "SessionStart" {
-            let context = format!("{bin} __context latex");
+        if let Some(path) = context.filter(|_| *event == "SessionStart") {
+            let path = shell_quote(&path.to_string_lossy());
+            let context = format!("{bin} __context file {path}");
             hooks.push(serde_json::json!({"type": "command", "command": context}));
         }
         let entry = serde_json::json!([{
@@ -90,12 +103,18 @@ fn shell_quote(s: &str) -> String {
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
-/// `claudio __context <kind>`: a SessionStart hook that adds to claude's
-/// context. Drains the hook payload (capped like the relay), then prints the
-/// one JSON line that adds [`LATEX_CONTEXT`] for `latex`, and nothing for any
-/// other kind. Always exits 0 and never touches the daemon's socket.
-pub fn context(kind: Option<&str>) -> std::process::ExitCode {
-    context_to(kind, std::io::stdin(), &mut std::io::stdout());
+/// `claudio __context <kind> [<path>]`: a SessionStart hook that adds to
+/// claude's context. Drains the hook payload (capped like the relay), then
+/// prints the one JSON line that adds [`LATEX_CONTEXT`] for `latex`, or the
+/// context file's text for `file <path>` ([`read_context`]), and nothing for
+/// anything else. Always exits 0 and never touches the daemon's socket.
+pub fn context(kind: Option<&str>, path: Option<&str>) -> std::process::ExitCode {
+    match (kind, path) {
+        (Some("file"), Some(path)) => {
+            context_file_to(Path::new(path), std::io::stdin(), &mut std::io::stdout())
+        }
+        _ => context_to(kind, std::io::stdin(), &mut std::io::stdout()),
+    }
     std::process::ExitCode::SUCCESS
 }
 
@@ -104,10 +123,44 @@ fn context_to(kind: Option<&str>, input: impl Read, out: &mut impl Write) {
     if kind != Some("latex") {
         return;
     }
+    print_context(LATEX_CONTEXT, out);
+}
+
+/// `__context file <path>`: the file's text as context, if it is acceptable.
+fn context_file_to(path: &Path, input: impl Read, out: &mut impl Write) {
+    let _ = std::io::copy(&mut input.take(MAX_PAYLOAD as u64), &mut std::io::sink());
+    if let Some(text) = read_context(path) {
+        print_context(&text, out);
+    }
+}
+
+/// A context file's text: opened without following a symlink (and without
+/// blocking on a FIFO), then, by the open descriptor, only a regular file
+/// owned by this uid; at most [`MAX_CONTEXT`] bytes, sanitized and trimmed.
+/// `None` when missing, empty or not acceptable.
+fn read_context(path: &Path) -> Option<String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() || meta.uid() != crate::paths::uid() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CONTEXT).read_to_end(&mut bytes).ok()?;
+    let text = crate::claude::latex::sanitize(&String::from_utf8_lossy(&bytes));
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The one JSON line that adds `text` to claude's context.
+fn print_context(text: &str, out: &mut impl Write) {
     let line = serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": LATEX_CONTEXT,
+            "additionalContext": text,
         }
     });
     let _ = writeln!(out, "{line}");
@@ -201,7 +254,7 @@ mod tests {
             Path::new("/usr/bin/claudio"),
             Path::new("/run/claudio/d.sock"),
             "tok",
-            false,
+            None,
         );
         let hooks = v["hooks"].as_object().unwrap();
         for event in EVENTS {
@@ -215,7 +268,7 @@ mod tests {
             Path::new("/bin/cl"),
             Path::new("/run/s.sock"),
             "mytoken",
-            false,
+            None,
         );
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
@@ -231,7 +284,7 @@ mod tests {
             Path::new("/home/user name/bin/claudio"),
             Path::new("/run/user data/s.sock"),
             "tok",
-            false,
+            None,
         );
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
@@ -242,10 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn latex_adds_one_context_command_to_session_start_only() {
+    fn a_context_file_adds_one_command_to_session_start_only() {
         let (bin, sock) = (Path::new("/usr/bin/claudio"), Path::new("/run/d.sock"));
-        let off = settings(bin, sock, "tok", false);
-        let on = settings(bin, sock, "tok", true);
+        let off = settings(bin, sock, "tok", None);
+        let on = settings(bin, sock, "tok", Some(Path::new("/run/context/s 1.txt")));
         for event in EVENTS.iter().filter(|e| **e != "SessionStart") {
             assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
         }
@@ -256,7 +309,10 @@ mod tests {
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0], off_start["hooks"][0], "the relay stays first");
         assert_eq!(hooks[1]["type"], "command");
-        assert_eq!(hooks[1]["command"], "'/usr/bin/claudio' __context latex");
+        assert_eq!(
+            hooks[1]["command"],
+            "'/usr/bin/claudio' __context file '/run/context/s 1.txt'"
+        );
         assert_eq!(on_start["matcher"], off_start["matcher"]);
         assert_eq!(on_start["timeout"], off_start["timeout"]);
     }
@@ -283,6 +339,75 @@ mod tests {
             context_to(kind, &b"{}"[..], &mut out);
             assert!(out.is_empty(), "{kind:?}");
         }
+    }
+
+    /// A fresh private scratch dir for context files.
+    fn context_dir() -> std::path::PathBuf {
+        let dir = crate::paths::socket_test_dir("cl-ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn context_of(path: &Path) -> String {
+        let mut out = Vec::new();
+        context_file_to(path, &b"{}"[..], &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn context_file_prints_its_sanitized_text() {
+        let dir = context_dir();
+        let path = dir.join("s.txt");
+        std::fs::write(&path, "Use <keys>.\u{1b}[31m\n\nDraw mermaid.\n").unwrap();
+        let text = context_of(&path);
+        assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
+        let v: Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.starts_with("Use <keys>."), "{context:?}");
+        assert!(context.ends_with("Draw mermaid."), "{context:?}");
+        assert!(!context.contains('\u{1b}'), "{context:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn context_file_reads_at_most_16_kib() {
+        let dir = context_dir();
+        let path = dir.join("big.txt");
+        std::fs::write(&path, "a".repeat(20_000)).unwrap();
+        let v: Value = serde_json::from_str(context_of(&path).trim_end()).unwrap();
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert_eq!(context.len(), 16 * 1024);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn context_file_prints_nothing_for_what_it_must_not_read() {
+        let dir = context_dir();
+        let good = dir.join("good.txt");
+        std::fs::write(&good, "secret instructions").unwrap();
+        // Missing, empty, a symlink to a good file, a directory, a FIFO.
+        let empty = dir.join("empty.txt");
+        std::fs::write(&empty, " \n").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        let fifo = dir.join("fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        for path in [dir.join("missing.txt"), empty, link, dir.clone(), fifo] {
+            assert_eq!(context_of(&path), "", "{}", path.display());
+        }
+        // Owned by another user (root's files, when we are not root).
+        if crate::paths::uid() != 0 {
+            assert_eq!(context_of(Path::new("/etc/passwd")), "");
+        }
+        assert!(!context_of(&good).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
