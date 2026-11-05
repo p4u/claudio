@@ -73,6 +73,9 @@ pub struct Config {
     /// `[claude] allow_skip_permissions` from this host's `config.toml`:
     /// launch claude with `--allow-dangerously-skip-permissions`.
     pub skip_permissions: bool,
+    /// `[claude] latex` from this host's `config.toml`: every claude session
+    /// gets the `__context latex` SessionStart hook.
+    pub latex: bool,
     /// The binary this daemon runs, as of its start (reported in `Welcome`
     /// so clients can tell an outdated daemon; see [`crate::freshness`]).
     /// `None` when it could not be read.
@@ -93,13 +96,15 @@ impl Config {
             inherited.as_deref(),
             login_path::TIMEOUT,
         );
+        let claude = crate::config::load().claude;
         Ok(Config {
             socket: paths::daemon_socket(),
             lock: paths::daemon_lock(),
             journal: paths::daemon_journal(),
             claude: claude_setting(std::env::var_os("CLAUDIO_CLAUDE_PATH")),
             claudio: std::env::current_exe()?,
-            skip_permissions: crate::config::load().claude.allow_skip_permissions,
+            skip_permissions: claude.allow_skip_permissions,
+            latex: claude.latex,
             // Hashed now: an upgrade may replace the file while we run.
             build: Probe::current()
                 .inspect_err(|e| tracing::warn!(error = %e, "cannot identify this binary"))
@@ -239,6 +244,7 @@ mod claude_path_tests {
             claude,
             claudio: "/bin/claudio".into(),
             skip_permissions: false,
+            latex: false,
             build: None,
             path,
         }

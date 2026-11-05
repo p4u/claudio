@@ -107,6 +107,7 @@ impl TestDaemon {
             claude: fake_claude().to_path_buf(),
             claudio: PathBuf::from("/bin/true"),
             skip_permissions: true,
+            latex: false,
             build: None,
             path: None,
         }
@@ -763,6 +764,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         claude: fake_claude_resume_fails().to_path_buf(),
         claudio: PathBuf::from("/bin/true"),
         skip_permissions: true,
+        latex: false,
         build: None,
         path: None,
     };
@@ -877,6 +879,7 @@ async fn immediate_exit_leaves_session_dormant() {
         claude: fake_claude_exits_immediately().to_path_buf(),
         claudio: PathBuf::from("/bin/true"),
         skip_permissions: true,
+        latex: false,
         build: None,
         path: None,
     };

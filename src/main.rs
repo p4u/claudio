@@ -116,6 +116,12 @@ fn main() -> std::process::ExitCode {
         return claude::hooks::relay(&argv[2], std::path::Path::new(&argv[3]), &argv[4]);
     }
 
+    // SessionStart context hook: `claudio __context latex` prints the
+    // instruction to wrap math in `<latex>` tags (`[claude] latex`).
+    if argv.get(1).map(String::as_str) == Some("__context") {
+        return claude::hooks::context(argv.get(2).map(String::as_str));
+    }
+
     // Legacy relay mode, invoked as `claudio __hook <Event>`.
     if argv.len() >= 3 && argv[1] == "__hook" {
         print::hooks::run_relay(&argv[2]);

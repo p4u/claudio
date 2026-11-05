@@ -269,7 +269,7 @@ fn command(
     token: &str,
     skip_permissions: bool,
 ) -> CommandBuilder {
-    let settings = hooks::settings(&cfg.claudio, &cfg.socket, token);
+    let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, cfg.latex);
     let mut cmd = CommandBuilder::new(cfg.claude_bin());
     cmd.arg("--settings");
     cmd.arg(settings.to_string());
@@ -1079,6 +1079,7 @@ mod tests {
             claude: "/bin/claude".into(),
             claudio: "/bin/claudio".into(),
             skip_permissions: true,
+            latex: false,
             build: None,
             path: None,
         };
@@ -1111,6 +1112,16 @@ mod tests {
             [ALLOW, "--resume", "abc", "-n", "work"]
         );
         assert_eq!(spec.args, ["--resume", "abc"]);
+
+        // `[claude] latex` adds the context hook to SessionStart.
+        let start = |cfg: &super::super::Config| {
+            let argv = argv_of(&command(cfg, &spec, Path::new("/"), "t", false));
+            let settings: Value = serde_json::from_str(&argv[2]).unwrap();
+            settings["hooks"]["SessionStart"][0]["hooks"].clone()
+        };
+        assert_eq!(start(&cfg).as_array().unwrap().len(), 1);
+        let latex = super::super::Config { latex: true, ..cfg.clone() };
+        assert_eq!(start(&latex)[1]["command"], "'/bin/claudio' __context latex");
     }
 
     const ALLOW: &str = "--allow-dangerously-skip-permissions";
@@ -1131,6 +1142,7 @@ mod tests {
             claude: "/bin/claude".into(),
             claudio: "/bin/claudio".into(),
             skip_permissions: true,
+            latex: false,
             build: None,
             path: None,
         };

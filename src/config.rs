@@ -13,6 +13,8 @@
 //! allow_skip_permissions = true   # pass --allow-dangerously-skip-permissions
 //! update_check = "ask"            # local claude vs its release channel
 //! remote_check = "ask"            # remote claude vs the local version
+//! latex = false                   # ask claude to wrap math in <latex> tags
+//!                                 # (read at daemon start: `claudio daemon restart`)
 //!
 //! [keys]
 //! overview    = "alt+g"
@@ -105,6 +107,11 @@ pub struct ClaudeSection {
     /// Compare a remote host's claude with the local version on connect.
     #[serde(default)]
     pub remote_check: UpdatePolicy,
+    /// Tell every claude session this host's daemon starts to wrap math in
+    /// `<latex>…</latex>`, which the manager renders. Read when the daemon
+    /// starts, from the config of the host that runs the session.
+    #[serde(default)]
+    pub latex: bool,
 }
 
 fn default_true() -> bool {
@@ -117,6 +124,7 @@ impl Default for ClaudeSection {
             allow_skip_permissions: true,
             update_check: UpdatePolicy::Ask,
             remote_check: UpdatePolicy::Ask,
+            latex: false,
         }
     }
 }
@@ -245,6 +253,19 @@ mod tests {
         assert_eq!(cfg.claude.update_check, UpdatePolicy::Auto);
         assert_eq!(cfg.claude.remote_check, UpdatePolicy::Off);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latex_is_off_unless_turned_on() {
+        let file: ConfigFile = toml::from_str("[claude]\nupdate_check = \"off\"\n").unwrap();
+        assert!(!file.claude.unwrap().latex);
+        assert!(!ClaudeSection::default().latex);
+        let file: ConfigFile = toml::from_str("[claude]\nlatex = true\n").unwrap();
+        let claude = file.claude.unwrap();
+        assert!(claude.latex);
+        // The other keys keep their defaults.
+        assert!(claude.allow_skip_permissions);
+        assert_eq!(claude.update_check, UpdatePolicy::Ask);
     }
 
     #[test]

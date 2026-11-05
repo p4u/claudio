@@ -8,6 +8,8 @@
 //! - [`EVENTS`] — the hook events the daemon registers.
 //! - [`settings`] — build the `--settings` JSON blob for a session.
 //! - [`relay`] — the short-lived relay process that ships the payload.
+//! - [`context`] — `claudio __context latex`, the SessionStart hook that asks
+//!   claude to wrap math in `<latex>` tags (`[claude] latex`).
 //! - [`new_token`] — generate a per-spawn secret token.
 
 use std::io::{Read, Write};
@@ -37,23 +39,40 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum hook payload size. Hooks should be tiny; 1 MiB is a hard cap.
 const MAX_PAYLOAD: usize = 1 << 20;
 
+/// What `claudio __context latex` adds to every conversation's context when
+/// `[claude] latex` is on: the manager renders `<latex>` tags in the pane.
+/// Context, not the system prompt, so the session stays a plain interactive
+/// one (see CLAUDE.md on system prompts).
+pub const LATEX_CONTEXT: &str = "This terminal renders math written as LaTeX inside \
+<latex>…</latex> tags. Whenever you write a mathematical formula or expression, wrap its \
+LaTeX in <latex>…</latex> instead of $…$ or $$…$$, for example \
+<latex>x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}</latex>. Put a display formula alone on \
+its own line. Never put the tags inside code blocks or inline code, and do not wrap plain \
+numbers or code in them. Write relations with spaces around them (a < b, not a<b).";
+
 // ── Settings generation ───────────────────────────────────────────────────────
 
 /// Build the `--settings` JSON value that registers all daemon hooks.
 ///
 /// The hook command is `'<claudio_bin>' __hook <Event> '<socket>' <token>`,
 /// with paths shell-quoted so that spaces and special characters are safe.
-pub fn settings(claudio_bin: &Path, socket: &Path, token: &str) -> serde_json::Value {
+/// With `latex`, `SessionStart` runs `'<claudio_bin>' __context latex` too.
+pub fn settings(claudio_bin: &Path, socket: &Path, token: &str, latex: bool) -> serde_json::Value {
     let bin = shell_quote(&claudio_bin.to_string_lossy());
     let sock = shell_quote(&socket.to_string_lossy());
 
     let mut hooks_map = serde_json::Map::new();
     for event in EVENTS {
         let command = format!("{bin} __hook {event} {sock} {token}");
+        let mut hooks = vec![serde_json::json!({"type": "command", "command": command})];
+        if latex && *event == "SessionStart" {
+            let context = format!("{bin} __context latex");
+            hooks.push(serde_json::json!({"type": "command", "command": context}));
+        }
         let entry = serde_json::json!([{
             "matcher": "*",
             "timeout": 5,
-            "hooks": [{"type": "command", "command": command}]
+            "hooks": hooks
         }]);
         hooks_map.insert(event.to_string(), entry);
     }
@@ -67,6 +86,32 @@ pub fn settings(claudio_bin: &Path, socket: &Path, token: &str) -> serde_json::V
 fn shell_quote(s: &str) -> String {
     let escaped = s.replace('\'', r"'\''");
     format!("'{escaped}'")
+}
+
+// ── Context ───────────────────────────────────────────────────────────────────
+
+/// `claudio __context <kind>`: a SessionStart hook that adds to claude's
+/// context. Drains the hook payload (capped like the relay), then prints the
+/// one JSON line that adds [`LATEX_CONTEXT`] for `latex`, and nothing for any
+/// other kind. Always exits 0 and never touches the daemon's socket.
+pub fn context(kind: Option<&str>) -> std::process::ExitCode {
+    context_to(kind, std::io::stdin(), &mut std::io::stdout());
+    std::process::ExitCode::SUCCESS
+}
+
+fn context_to(kind: Option<&str>, input: impl Read, out: &mut impl Write) {
+    let _ = std::io::copy(&mut input.take(MAX_PAYLOAD as u64), &mut std::io::sink());
+    if kind != Some("latex") {
+        return;
+    }
+    let line = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": LATEX_CONTEXT,
+        }
+    });
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 // ── Token generation ─────────────────────────────────────────────────────────
@@ -156,6 +201,7 @@ mod tests {
             Path::new("/usr/bin/claudio"),
             Path::new("/run/claudio/d.sock"),
             "tok",
+            false,
         );
         let hooks = v["hooks"].as_object().unwrap();
         for event in EVENTS {
@@ -165,7 +211,12 @@ mod tests {
 
     #[test]
     fn settings_command_contains_socket_and_token() {
-        let v = settings(Path::new("/bin/cl"), Path::new("/run/s.sock"), "mytoken");
+        let v = settings(
+            Path::new("/bin/cl"),
+            Path::new("/run/s.sock"),
+            "mytoken",
+            false,
+        );
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
@@ -180,6 +231,7 @@ mod tests {
             Path::new("/home/user name/bin/claudio"),
             Path::new("/run/user data/s.sock"),
             "tok",
+            false,
         );
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
@@ -187,6 +239,50 @@ mod tests {
         // Both paths must be single-quoted.
         assert!(cmd.contains("'/home/user name/bin/claudio'"), "cmd: {cmd}");
         assert!(cmd.contains("'/run/user data/s.sock'"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn latex_adds_one_context_command_to_session_start_only() {
+        let (bin, sock) = (Path::new("/usr/bin/claudio"), Path::new("/run/d.sock"));
+        let off = settings(bin, sock, "tok", false);
+        let on = settings(bin, sock, "tok", true);
+        for event in EVENTS.iter().filter(|e| **e != "SessionStart") {
+            assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
+        }
+        let start = |v: &serde_json::Value| v["hooks"]["SessionStart"][0].clone();
+        let (off_start, on_start) = (start(&off), start(&on));
+        assert_eq!(off_start["hooks"].as_array().unwrap().len(), 1);
+        let hooks = on_start["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0], off_start["hooks"][0], "the relay stays first");
+        assert_eq!(hooks[1]["type"], "command");
+        assert_eq!(hooks[1]["command"], "'/usr/bin/claudio' __context latex");
+        assert_eq!(on_start["matcher"], off_start["matcher"]);
+        assert_eq!(on_start["timeout"], off_start["timeout"]);
+    }
+
+    #[test]
+    fn context_latex_prints_one_session_start_line() {
+        let mut out = Vec::new();
+        context_to(Some("latex"), &b"{\"session_id\":\"s\"}"[..], &mut out);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
+        let v: Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let context = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert_eq!(context, LATEX_CONTEXT);
+        assert!(context.contains("<latex>") && context.contains("</latex>"));
+    }
+
+    #[test]
+    fn context_prints_nothing_for_anything_else() {
+        for kind in [None, Some(""), Some("other"), Some("LATEX")] {
+            let mut out = Vec::new();
+            context_to(kind, &b"{}"[..], &mut out);
+            assert!(out.is_empty(), "{kind:?}");
+        }
     }
 
     #[test]
