@@ -319,6 +319,18 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
     if !view.latex.is_empty() {
         super::latex::overlay(frame.buffer_mut(), area, &view.mirror, &view.latex);
     }
+    // The external tag lenses' renderings, each over its own tags.
+    for tag in app.extensions.tag_lenses().into_iter().filter(|t| *t != "latex") {
+        let items: Vec<super::latex::Formula> = view
+            .lens
+            .iter()
+            .filter(|(t, _)| t == tag)
+            .map(|(_, f)| f.clone())
+            .collect();
+        if !items.is_empty() {
+            super::latex::overlay_tag(frame.buffer_mut(), area, &view.mirror, tag, &items);
+        }
+    }
     if let Some(sel) = app.selection.as_ref().filter(|s| s.session == view.id) {
         highlight_selection(frame.buffer_mut(), area, sel);
     }

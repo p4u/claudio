@@ -14,9 +14,9 @@
 //! - Lists and quotes nest at most [`MAX_NEST`] deep; deeper content is
 //!   flattened into the deepest one, so layout recursion is bounded.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::claude::latex::{is_combining, latex_tags, sanitize, MAX_FORMULAS};
+use crate::claude::latex::{is_combining, lens_tags, sanitize, MAX_FORMULAS};
 
 /// The first placeholder: formula `i` of an answer is `PLACEHOLDER + i`.
 const PLACEHOLDER: u32 = 0xE000;
@@ -31,6 +31,11 @@ const TAB: &str = "    ";
 pub struct Prepared {
     pub text: String,
     pub tags: Vec<FormulaTag>,
+    /// The tag lens of each of `tags` (`latex`, …).
+    pub lenses: Vec<String>,
+    /// The fence lenses: a fenced code block whose info string starts with
+    /// one becomes a [`Block::Lens`].
+    pub fences: Vec<String>,
 }
 
 /// One formula tag of an answer.
@@ -64,6 +69,14 @@ pub enum Block {
     Rule,
     /// A display formula: a paragraph or tight item that is only a formula.
     Display(usize),
+    /// A fenced code block of fence lens `lens`: its lines (as `Code`'s),
+    /// and its rendering's rows once the render worker (or the extension
+    /// host) made one.
+    Lens {
+        lens: String,
+        lines: Vec<String>,
+        rows: Option<Vec<String>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,23 +103,37 @@ pub struct Emphasis {
 /// [`MAX_FORMULAS`] formula tags replaced by a placeholder, and a combining
 /// mark right after a tag dropped (it would join the placeholder). Later
 /// tags stay as they are written.
+#[cfg(test)]
 pub fn prepare(text: &str) -> Prepared {
+    prepare_lenses(text, &["latex"], &[])
+}
+
+/// [`prepare`] for the tags of tag lenses `tags` (the first
+/// [`MAX_FORMULAS`] of them all), with fence lenses `fences` for [`parse`].
+pub fn prepare_lenses(text: &str, tags: &[&str], fences: &[&str]) -> Prepared {
     let clean = sanitize(text);
     let mut out = String::with_capacity(clean.len());
-    let mut tags = Vec::new();
+    let mut found = Vec::new();
+    let mut lenses = Vec::new();
     let mut copied = 0;
-    for (range, src) in latex_tags(&clean).into_iter().take(MAX_FORMULAS) {
+    for (range, lens, src) in lens_tags(&clean, tags).into_iter().take(MAX_FORMULAS) {
         out.push_str(&clean[copied..range.start]);
-        out.push(placeholder(tags.len()));
-        tags.push(FormulaTag {
+        out.push(placeholder(found.len()));
+        found.push(FormulaTag {
             src,
             raw: clean[range.clone()].to_owned(),
         });
+        lenses.push(lens);
         let rest = &clean[range.end..];
         copied = range.end + (rest.len() - rest.trim_start_matches(is_combining).len());
     }
     out.push_str(&clean[copied..]);
-    Prepared { text: out, tags }
+    Prepared {
+        text: out,
+        tags: found,
+        lenses,
+        fences: fences.iter().map(|f| f.to_string()).collect(),
+    }
 }
 
 /// The placeholder of formula `i` (`i` < [`MAX_FORMULAS`]).
@@ -127,12 +154,34 @@ fn formula_of(c: char, count: usize) -> Option<usize> {
 pub fn parse(prepared: &Prepared) -> Doc {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut b = Builder::new(&prepared.tags);
+    let mut b = Builder::new(&prepared.tags, &prepared.fences);
     for event in Parser::new_ext(&prepared.text, options) {
         b.event(event);
     }
     b.flush();
     Doc { blocks: b.root }
+}
+
+impl Doc {
+    /// Call `f` with each fence-lens block's lens, source (its lines) and
+    /// rows, in document order, inside lists and quotes too.
+    pub fn each_lens(&mut self, f: &mut impl FnMut(&str, String, &mut Option<Vec<String>>)) {
+        fn walk(blocks: &mut [Block], f: &mut impl FnMut(&str, String, &mut Option<Vec<String>>)) {
+            for block in blocks {
+                match block {
+                    Block::Lens { lens, lines, rows } => f(lens, lines.join("\n"), rows),
+                    Block::List(_, items) => {
+                        for item in items {
+                            walk(item, f);
+                        }
+                    }
+                    Block::Quote(inner) => walk(inner, f),
+                    _ => {}
+                }
+            }
+        }
+        walk(&mut self.blocks, f);
+    }
 }
 
 /// A container being read.
@@ -146,6 +195,9 @@ enum Frame {
 /// being gathered.
 struct Builder<'a> {
     tags: &'a [FormulaTag],
+    fences: &'a [String],
+    /// The fence lens of the code block being read, if it is one's.
+    fence: Option<String>,
     root: Vec<Block>,
     frames: Vec<Frame>,
     /// Per open container start: whether it got a frame (`false`: it was
@@ -166,9 +218,11 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(tags: &'a [FormulaTag]) -> Builder<'a> {
+    fn new(tags: &'a [FormulaTag], fences: &'a [String]) -> Builder<'a> {
         Builder {
             tags,
+            fences,
+            fence: None,
             root: Vec::new(),
             frames: Vec::new(),
             open: Vec::new(),
@@ -216,9 +270,17 @@ impl<'a> Builder<'a> {
                 self.flush();
                 self.heading = Some(level as u8);
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.flush();
                 self.code = Some(String::new());
+                self.fence = match kind {
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .filter(|word| self.fences.iter().any(|f| f == word))
+                        .map(str::to_owned),
+                    CodeBlockKind::Indented => None,
+                };
             }
             Tag::BlockQuote(_) => self.open_frame(Frame::Quote(Vec::new())),
             Tag::List(start) => self.open_frame(Frame::List(start, Vec::new())),
@@ -249,7 +311,15 @@ impl<'a> Builder<'a> {
             TagEnd::CodeBlock => {
                 let code = self.code.take().unwrap_or_default();
                 let code = self.code_text(code.trim_end_matches('\n'), TAB);
-                self.push(Block::Code(code.split('\n').map(str::to_owned).collect()));
+                let lines = code.split('\n').map(str::to_owned).collect();
+                match self.fence.take() {
+                    Some(lens) => self.push(Block::Lens {
+                        lens,
+                        lines,
+                        rows: None,
+                    }),
+                    None => self.push(Block::Code(lines)),
+                }
             }
             TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item => self.close_frame(),
             TagEnd::TableCell => {
@@ -598,7 +668,9 @@ mod tests {
         for b in blocks {
             match b {
                 Block::Para(s) | Block::Heading(_, s) => spans(s),
-                Block::Code(lines) => lines.iter().for_each(|l| assert_eq!(*l, sanitize(l))),
+                Block::Code(lines) | Block::Lens { lines, .. } => {
+                    lines.iter().for_each(|l| assert_eq!(*l, sanitize(l)))
+                }
                 Block::List(_, items) => items.iter().for_each(|i| check(i, formulas, depth + 1)),
                 Block::Quote(inner) => check(inner, formulas, depth + 1),
                 Block::Table(rows) => rows.iter().flatten().for_each(|c| spans(c)),
@@ -606,5 +678,53 @@ mod tests {
                 Block::Display(i) => assert!(*i < formulas),
             }
         }
+    }
+
+    #[test]
+    fn every_tag_lens_gets_placeholders_and_fence_lenses_become_lens_blocks() {
+        let text = "Press <keys>Ctrl+C</keys> for <latex>x</latex> <kbd>k</kbd>.\n\n\
+                    ```mermaid extra\nflowchart LR\n\ta --> b\n```\n\n\
+                    - ```mermaid\n  graph TD\n  ```\n\n```text\nplain\n```\n";
+        let p = prepare_lenses(text, &["latex", "keys"], &["mermaid"]);
+        assert_eq!(p.lenses, ["keys", "latex"]);
+        assert_eq!(p.tags[0].src, "Ctrl+C");
+        assert_eq!(p.tags[0].raw, "<keys>Ctrl+C</keys>");
+        let mut d = parse(&p);
+        assert_eq!(
+            d.blocks[0],
+            Block::Para(vec![
+                plain("Press "),
+                Span::Formula(0),
+                plain(" for "),
+                Span::Formula(1),
+                plain(" <kbd>k</kbd>."),
+            ])
+        );
+        assert_eq!(
+            d.blocks[1],
+            Block::Lens {
+                lens: "mermaid".into(),
+                lines: vec!["flowchart LR".into(), "    a --> b".into()],
+                rows: None,
+            }
+        );
+        assert_eq!(d.blocks[3], Block::Code(vec!["plain".into()]));
+        // Every lens block, nested ones too, in order.
+        let mut seen = Vec::new();
+        d.each_lens(&mut |lens, src, rows| {
+            seen.push((lens.to_owned(), src));
+            *rows = Some(vec!["drawn".into()]);
+        });
+        assert_eq!(
+            seen,
+            [
+                ("mermaid".to_owned(), "flowchart LR\n    a --> b".to_owned()),
+                ("mermaid".to_owned(), "graph TD".to_owned()),
+            ]
+        );
+        assert!(matches!(&d.blocks[1], Block::Lens { rows: Some(r), .. } if r == &["drawn"]));
+        // Without fence lenses, fences are code.
+        let d = parse(&prepare_lenses(text, &["latex"], &[]));
+        assert!(matches!(&d.blocks[1], Block::Code(_)));
     }
 }

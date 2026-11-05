@@ -161,6 +161,43 @@ fn fits_inline(laid: &Laid) -> bool {
     laid.baseline <= INLINE_REACH && laid.rows.len() <= laid.baseline + 1 + INLINE_REACH
 }
 
+/// A code block's lines, indented, dim and cut at `width`.
+fn code(lines: &[String], width: usize, out: &mut Vec<Line>) {
+    for line in lines {
+        out.push(cut(&format!("{INDENT}{}", safe(line)), dim(), width));
+    }
+}
+
+/// A fence lens's block: its rendering's rows, indented, when there is one
+/// that fits `width`; else the code block it was, with one dim line saying
+/// how wide the rendering is when that is why.
+fn lens_block(
+    lens: &str,
+    lines: &[String],
+    rows: Option<&[String]>,
+    width: usize,
+    out: &mut Vec<Line>,
+) {
+    let Some(rows) = rows else {
+        return code(lines, width, out);
+    };
+    let rows: Vec<String> = rows.iter().map(|r| safe(&prepare(r))).collect();
+    let wide = rows.iter().map(|r| r.width()).max().unwrap_or(0);
+    if INDENT.width() + wide <= width {
+        for row in rows {
+            out.push(cut(&format!("{INDENT}{row}"), Style::default(), width));
+        }
+        return;
+    }
+    code(lines, width, out);
+    let what = if lens == "mermaid" { "diagram" } else { lens };
+    out.push(cut(
+        &format!("{INDENT}{what} is {wide} columns wide"),
+        dim(),
+        width,
+    ));
+}
+
 struct Ctx<'a> {
     formulas: &'a [Formula],
 }
@@ -188,10 +225,9 @@ impl Ctx<'_> {
                 };
                 out.extend(self.para(spans, style, width));
             }
-            Block::Code(lines) => {
-                for line in lines {
-                    out.push(cut(&format!("{INDENT}{}", safe(line)), dim(), width));
-                }
+            Block::Code(lines) => code(lines, width, out),
+            Block::Lens { lens, lines, rows } => {
+                lens_block(lens, lines, rows.as_deref(), width, out)
             }
             Block::List(start, items) => self.list(*start, items, width, out),
             Block::Quote(inner) => {
@@ -738,5 +774,39 @@ mod tests {
         assert!(wide.width() > 2);
         let lines = shown(&format!("a {wide} b"), &[], 20);
         assert_eq!(lines, ["a \u{fffd} b"]);
+    }
+
+    #[test]
+    fn lens_blocks_show_their_rows_or_their_code_with_why() {
+        let lines = vec!["graph TD".to_owned(), "a --> b".to_owned()];
+        let block = |rows: Option<Vec<&str>>| Doc {
+            blocks: vec![Block::Lens {
+                lens: "mermaid".into(),
+                lines: lines.clone(),
+                rows: rows.map(|r| r.iter().map(|s| s.to_string()).collect()),
+            }],
+        };
+        let text = |doc: &Doc, width| -> Vec<String> {
+            layout(doc, &[], width).iter().map(|l| l.text()).collect()
+        };
+        let drawn = block(Some(vec!["┌───┐", "│ a │\u{1b}", "└───┘"]));
+        assert_eq!(text(&drawn, 20), ["  ┌───┐", "  │ a │", "  └───┘"]);
+        // Too wide for the reader: the code, and how wide it is.
+        assert_eq!(
+            text(&drawn, 6),
+            ["  grap", "  a --", "  diag"],
+            "cut to the width"
+        );
+        assert_eq!(text(&drawn, 7)[2], "  └───┘", "two columns in, it fits");
+        let wide = layout(&drawn, &[], 6);
+        assert!(wide[0].0.iter().all(|s| s.style == dim()));
+        assert_eq!(text(&drawn, 40).len(), 3);
+        let narrow = block(Some(vec!["0123456789"]));
+        assert_eq!(
+            text(&narrow, 11),
+            ["  graph TD", "  a --> b", "  diagram i"]
+        );
+        // No rendering: the code block.
+        assert_eq!(text(&block(None), 20), ["  graph TD", "  a --> b"]);
     }
 }

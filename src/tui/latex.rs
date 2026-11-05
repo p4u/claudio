@@ -304,8 +304,20 @@ const ACCENT: Color = Color::Cyan;
 /// The most screen rows one tag may span: claude wraps long lines itself,
 /// indenting the rows that continue one.
 const MAX_SPAN_ROWS: u16 = 8;
-const OPEN_TAG: &str = "<latex>";
-const CLOSE_TAG: &str = "</latex>";
+/// The tags of a tag lens, as written on screen.
+struct Tags {
+    open: String,
+    close: String,
+}
+
+impl Tags {
+    fn of(tag: &str) -> Tags {
+        Tags {
+            open: format!("<{tag}>"),
+            close: format!("</{tag}>"),
+        }
+    }
+}
 /// The vertical border of Claude Code's tables: a tag followed by one on
 /// its row is a table cell.
 const TABLE_BORDER: &str = "│";
@@ -318,21 +330,28 @@ const TABLE_BORDER: &str = "│";
 /// moves; a row (or tag) whose result would not fit stays as it was. The
 /// selection, copy and the cursor still go by `screen`.
 pub fn overlay(buf: &mut Buffer, area: Rect, screen: &Screen, formulas: &[Formula]) {
+    overlay_tag(buf, area, screen, "latex", formulas);
+}
+
+/// [`overlay`] for the tags of tag lens `tag` (`<tag>…</tag>`), matched
+/// with `items` (the lens's renderings) by the same keys.
+pub fn overlay_tag(buf: &mut Buffer, area: Rect, screen: &Screen, tag: &str, items: &[Formula]) {
+    let tags = Tags::of(tag);
     let rows = area.height.min(screen.size().0);
     let mut row = 0;
     while row < rows {
-        row = if shows_open_tag(buf, area, row) {
-            overlay_row(buf, area, screen, formulas, row, rows)
+        row = if shows_open_tag(buf, area, row, &tags) {
+            overlay_row(buf, area, screen, items, row, rows, &tags)
         } else {
             row + 1
         };
     }
 }
 
-/// Whether row `row` of the drawn pane shows `<latex>`: a look at its
-/// cells, so a row without one costs nothing more.
-fn shows_open_tag(buf: &Buffer, area: Rect, row: u16) -> bool {
-    let tag = OPEN_TAG.as_bytes();
+/// Whether row `row` of the drawn pane shows the opening tag: a look at
+/// its cells, so a row without one costs nothing more.
+fn shows_open_tag(buf: &Buffer, area: Rect, row: u16, tags: &Tags) -> bool {
+    let tag = tags.open.as_bytes();
     let mut matched = 0;
     for x in area.left()..area.right() {
         let Some(cell) = buf.cell((x, area.y + row)) else {
@@ -359,15 +378,16 @@ fn overlay_row(
     formulas: &[Formula],
     row: u16,
     rows: u16,
+    tags: &Tags,
 ) -> u16 {
     let line = Row::read(screen, row, area.width);
-    let tags = line.tags();
-    match tags.as_slice() {
+    let found = line.tags(tags);
+    match found.as_slice() {
         [Tag { open, close: None }] => {
-            overlay_span(buf, area, screen, formulas, (row, rows), &line, *open)
+            overlay_span(buf, area, screen, formulas, (row, rows), &line, *open, tags)
         }
         _ => {
-            rebuild_row(buf, area, row, &line, &tags, formulas);
+            rebuild_row(buf, area, row, &line, &found, formulas, tags);
             row + 1
         }
     }
@@ -384,16 +404,17 @@ fn rebuild_row(
     area: Rect,
     row: u16,
     line: &Row,
-    tags: &[Tag],
+    found: &[Tag],
     formulas: &[Formula],
+    tags: &Tags,
 ) {
     let original = cells_of(buf, area, row);
     let mut out = Vec::with_capacity(original.len());
     let mut copied = 0;
-    for tag in tags {
+    for tag in found {
         let Some(close) = tag.close else { continue };
-        let (start, end) = (line.col(tag.open), line.col(close + CLOSE_TAG.len()));
-        let text = line.text(tag.open + OPEN_TAG.len(), close);
+        let (start, end) = (line.col(tag.open), line.col(close + tags.close.len()));
+        let text = line.text(tag.open + tags.open.len(), close);
         let Some(mut cells) = matching(formulas, &text)
             .and_then(|inline| text_cells(inline, accent_on(&original[start])))
         else {
@@ -436,17 +457,18 @@ fn overlay_span(
     (row, rows): (u16, u16),
     first: &Row,
     open: usize,
+    tags: &Tags,
 ) -> u16 {
-    let mut text = first.text(open + OPEN_TAG.len(), first.glyphs.len());
+    let mut text = first.text(open + tags.open.len(), first.glyphs.len());
     let mut closing = None;
     for last in (row + 1..rows).take(MAX_SPAN_ROWS as usize) {
         let line = Row::read(screen, last, area.width);
         // Another tag in the way: this one is not laid over.
-        if line.find(OPEN_TAG, 0).is_some() {
+        if line.find(&tags.open, 0).is_some() {
             break;
         }
         let indent = line.indent();
-        let close = line.find(CLOSE_TAG, indent);
+        let close = line.find(&tags.close, indent);
         text.push(' ');
         text.push_str(&line.text(indent, close.unwrap_or(line.glyphs.len())));
         if let Some(close) = close {
@@ -471,7 +493,7 @@ fn overlay_span(
         return last + 1;
     }
     let last_cells = cells_of(buf, area, last);
-    let suffix_start = line.col(close + CLOSE_TAG.len());
+    let suffix_start = line.col(close + tags.close.len());
     let suffix = &last_cells[suffix_start..content_end(&last_cells).max(suffix_start)];
     let suffix_fits = head.len() + suffix.len() <= width;
     if suffix_fits {
@@ -565,8 +587,8 @@ fn write_row(buf: &mut Buffer, area: Rect, row: u16, cells: Vec<Cell>, original:
     }
 }
 
-/// A `<latex>` on a row, by glyph index: its `<`, and the `<` of its
-/// `</latex>` when it closes on the same row.
+/// An opening tag on a row, by glyph index: its `<`, and the `<` of its
+/// closing tag when it closes on the same row.
 struct Tag {
     open: usize,
     close: Option<usize>,
@@ -597,20 +619,20 @@ impl Row {
         }
     }
 
-    /// Every `<latex>` that starts on the row, in order; only the last one
-    /// can be unclosed.
-    fn tags(&self) -> Vec<Tag> {
-        let mut tags = Vec::new();
+    /// Every opening tag that starts on the row, in order; only the last
+    /// one can be unclosed.
+    fn tags(&self, tags: &Tags) -> Vec<Tag> {
+        let mut found = Vec::new();
         let mut at = 0;
-        while let Some(open) = self.find(OPEN_TAG, at) {
-            let close = self.find(CLOSE_TAG, open + OPEN_TAG.len());
-            tags.push(Tag { open, close });
+        while let Some(open) = self.find(&tags.open, at) {
+            let close = self.find(&tags.close, open + tags.open.len());
+            found.push(Tag { open, close });
             match close {
-                Some(close) => at = close + CLOSE_TAG.len(),
+                Some(close) => at = close + tags.close.len(),
                 None => break,
             }
         }
-        tags
+        found
     }
 
     /// The glyph index of the next `tag` (ASCII) at or after glyph `from`.
@@ -1007,5 +1029,22 @@ mod tests {
         assert_eq!(text, "abc");
         // A wide cluster takes its cell and the one it covers.
         assert_eq!(text_cells("漢", style).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn any_tag_lens_is_laid_over_its_own_tags_only() {
+        let screen =
+            screen("Press <keys>Ctrl+C</keys> or <latex>Ctrl+C</latex>.\n<keys>a\n   b</keys> end");
+        let (rows, cols) = screen.size();
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(area);
+        screen.render(area, &mut buf);
+        let items = [formula("Ctrl+C", "⌃C"), formula("a b", "[a b]")];
+        overlay_tag(&mut buf, area, &screen, "keys", &items);
+        let shown = rows_of(&buf);
+        assert_eq!(shown[0], "Press ⌃C or <latex>Ctrl+C</latex>.");
+        assert_eq!(shown[1], "[a b] end");
+        assert_eq!(shown[2], "");
+        assert_eq!(buf[(6, 0)].fg, ACCENT);
     }
 }

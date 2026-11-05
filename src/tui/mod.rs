@@ -530,6 +530,9 @@ struct AnswersJob {
     gen: u64,
     id: crate::proto::SessionId,
     answers: Vec<crate::proto::Answer>,
+    /// The enabled tag and fence lenses (the registry's, when sent).
+    tags: Vec<String>,
+    fences: Vec<String>,
 }
 
 /// Work for the `latex-render` thread, one job at a time.
@@ -569,7 +572,12 @@ fn spawn_latex_worker(
                         done(Rendered::Latex(job, formulas));
                     }
                     RenderJob::Answers(job) => {
-                        let answers = render_answers(&job.answers, &mut cache, &running);
+                        let answers = render_lens_answers(
+                            &job.answers,
+                            (&job.tags, &job.fences),
+                            &mut cache,
+                            &running,
+                        );
                         done(Rendered::Answers(job, answers));
                     }
                 }
@@ -578,64 +586,101 @@ fn spawn_latex_worker(
     Ok(jobs)
 }
 
-/// `answers` as the reader shows them: each a markdown document whose
-/// formulas (the first `MAX_FORMULAS`) are rendered through the guard and
-/// its cache, like the pane's.
+/// `answers` as the reader shows them with only the latex lens (see
+/// [`render_lens_answers`]).
+#[cfg(test)]
 fn render_answers(
     answers: &[crate::proto::Answer],
     cache: &mut RenderCache,
     running: &Arc<AtomicUsize>,
 ) -> Vec<reader::RenderedAnswer> {
+    let tags = ["latex".to_owned()];
+    render_lens_answers(answers, (&tags, &[]), cache, running)
+}
+
+/// `answers` as the reader shows them: each a markdown document whose
+/// items of tag lenses `lenses.0` (the first `MAX_FORMULAS`) and blocks of
+/// fence lenses `lenses.1` are rendered through the guard and its cache,
+/// like the pane's. An external lens's are left raw here: the extension
+/// host renders them.
+fn render_lens_answers(
+    answers: &[crate::proto::Answer],
+    lenses: (&[String], &[String]),
+    cache: &mut RenderCache,
+    running: &Arc<AtomicUsize>,
+) -> Vec<reader::RenderedAnswer> {
+    let tags: Vec<&str> = lenses.0.iter().map(String::as_str).collect();
+    let fences: Vec<&str> = lenses.1.iter().map(String::as_str).collect();
     answers
         .iter()
         .map(|answer| {
-            let prepared = reader::doc::prepare(&answer.text);
+            let prepared = reader::doc::prepare_lenses(&answer.text, &tags, &fences);
             let formulas = prepared
                 .tags
                 .iter()
-                .map(|tag| cache.formula(&tag.src, running))
+                .zip(&prepared.lenses)
+                .map(|(tag, lens)| cache.render(lens, &tag.src, running))
                 .collect();
+            let mut doc = reader::doc::parse(&prepared);
+            doc.each_lens(&mut |lens, src, rows| {
+                *rows = cache.render(lens, &src, running).block.map(|b| b.rows);
+            });
             reader::RenderedAnswer {
                 prompt: answer.prompt.clone(),
-                doc: reader::doc::parse(&prepared),
+                doc,
                 formulas,
             }
         })
         .collect()
 }
 
-/// Rendered formulas by source, the [`CACHE_SIZE`] most recently used: each
-/// list resends every formula, and a source is rendered once.
+/// Renderings by lens and source, the [`CACHE_SIZE`] most recently used:
+/// each list resends every item, and a source is rendered once.
 #[derive(Default)]
 struct RenderCache {
-    entries: HashMap<String, (u64, latex::Formula)>,
+    entries: HashMap<(String, String), (u64, latex::Formula)>,
     /// Bumped on every lookup; an entry keeps the value of its last use.
     clock: u64,
 }
 
 impl RenderCache {
+    /// A `<latex>` formula's rendering.
     fn formula(&mut self, src: &str, running: &Arc<AtomicUsize>) -> latex::Formula {
+        self.render("latex", src, running)
+    }
+
+    fn render(&mut self, lens: &str, src: &str, running: &Arc<AtomicUsize>) -> latex::Formula {
         self.clock += 1;
-        if let Some((used, formula)) = self.entries.get_mut(src) {
+        let key = (lens.to_owned(), src.to_owned());
+        if let Some((used, formula)) = self.entries.get_mut(&key) {
             *used = self.clock;
             return formula.clone();
         }
-        let (formula, keep) = render_formula(src, running);
+        let (formula, keep) = render_lens(lens, src, running);
         if keep {
             if self.entries.len() >= CACHE_SIZE {
                 let oldest = self
                     .entries
                     .iter()
                     .min_by_key(|(_, (used, _))| *used)
-                    .map(|(src, _)| src.clone());
+                    .map(|(key, _)| key.clone());
                 if let Some(oldest) = oldest {
                     self.entries.remove(&oldest);
                 }
             }
-            self.entries
-                .insert(src.to_owned(), (self.clock, formula.clone()));
+            self.entries.insert(key, (self.clock, formula.clone()));
         }
         formula
+    }
+}
+
+/// Render `src` of lens `lens` with its built-in renderer: a tag lens's
+/// item, or a fence lens's block (its rows as `block`). A lens without one
+/// (an external lens's) stays raw. The flag says whether it may be cached.
+fn render_lens(lens: &str, src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
+    match lens {
+        "latex" => render_formula(src, running),
+        _ => (latex::Formula::raw(src), true),
     }
 }
 
@@ -1083,7 +1128,15 @@ fn run_effect(
             }
         }
         Effect::RenderAnswers { gen, id, answers } => {
-            let job = RenderJob::Answers(AnswersJob { gen, id, answers });
+            let tags = app.extensions.tag_lenses().iter().map(|t| t.to_string()).collect();
+            let fences = app.extensions.fence_lenses().iter().map(|f| f.to_string()).collect();
+            let job = RenderJob::Answers(AnswersJob {
+                gen,
+                id,
+                answers,
+                tags,
+                fences,
+            });
             if latex_jobs.is_none_or(|jobs| jobs.send(job).is_err()) {
                 app.on_answers_failed(gen, id, "the render thread is not running");
             }
@@ -1581,6 +1634,8 @@ mod tests {
             gen: 7,
             id: uuid::Uuid::new_v4(),
             answers,
+            tags: vec!["latex".into()],
+            fences: vec![],
         };
         jobs.send(RenderJob::Answers(job)).unwrap();
         let (gen, rendered) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
@@ -1635,7 +1690,62 @@ mod tests {
         cache.formula("0", &running); // used again: "1" is now the oldest
         cache.formula("new", &running);
         assert_eq!(cache.entries.len(), CACHE_SIZE);
-        assert!(cache.entries.contains_key("0") && cache.entries.contains_key("new"));
-        assert!(!cache.entries.contains_key("1"));
+        let has = |src: &str| cache.entries.contains_key(&("latex".to_owned(), src.to_owned()));
+        assert!(has("0") && has("new"));
+        assert!(!has("1"));
+    }
+
+    #[test]
+    fn answers_render_every_tag_lens_and_fence_lens_by_its_renderer() {
+        use crate::proto::Answer;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let jobs = spawn_latex_worker(move |done| {
+            if let Rendered::Answers(_, answers) = done {
+                let _ = tx.send(answers);
+            }
+        })
+        .unwrap();
+        let text = "Press <keys>Ctrl+C</keys> for <latex>x^2</latex>.\n\n\
+                    ```mermaid\nflowchart LR\n  a --> b\n```\n\n```rust\nfn main() {}\n```\n";
+        let job = AnswersJob {
+            gen: 1,
+            id: uuid::Uuid::new_v4(),
+            answers: vec![Answer {
+                prompt: "p".into(),
+                text: text.into(),
+            }],
+            tags: vec!["latex".into(), "keys".into()],
+            fences: vec!["mermaid".into()],
+        };
+        jobs.send(RenderJob::Answers(job)).unwrap();
+        let answers = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let answer = &answers[0];
+        // The external lens's item stays raw; latex is rendered.
+        assert_eq!(answer.formulas[0], latex::Formula::raw("Ctrl+C"));
+        assert_eq!(answer.formulas[1].inline.as_deref(), Some("x²"));
+        // The fence lens is a lens block; another fence stays code.
+        let lens: Vec<&reader::doc::Block> = answer
+            .doc
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, reader::doc::Block::Lens { .. }))
+            .collect();
+        assert_eq!(lens.len(), 1);
+        assert!(answer
+            .doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b, reader::doc::Block::Code(lines) if lines == &["fn main() {}"])));
+    }
+
+    #[test]
+    fn the_cache_keeps_lenses_apart() {
+        let running = Arc::new(AtomicUsize::new(0));
+        let mut cache = RenderCache::default();
+        let latex = cache.render("latex", "x^2", &running);
+        let keys = cache.render("keys", "x^2", &running);
+        assert_eq!(latex.inline.as_deref(), Some("x²"));
+        assert_eq!(keys, latex::Formula::raw("x^2"));
+        assert_eq!(cache.entries.len(), 2);
     }
 }
