@@ -18,6 +18,7 @@ mod git_view;
 mod interaction;
 mod keymap;
 mod latex;
+mod leader;
 mod notifications;
 mod plain;
 mod proxy_state;
@@ -530,6 +531,11 @@ enum HostEvent {
     },
     /// A notice from the extension host (an extension was disabled).
     ExtensionNotice(String),
+    /// An external action started under `gen` ended.
+    ActionDone {
+        gen: u64,
+        result: Result<extensions::ActionResult, String>,
+    },
 }
 
 // ── Formula rendering ─────────────────────────────────────────────────────────
@@ -1135,6 +1141,7 @@ async fn event_loop(
                     app.on_reader_external(gen, id, rendered);
                 }
                 Some(HostEvent::ExtensionNotice(text)) => app.notify(text),
+                Some(HostEvent::ActionDone { gen, result }) => app.on_action_result(gen, result),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -1255,6 +1262,20 @@ fn run_effect(
                         items,
                     })
                     .await;
+            });
+        }
+        Effect::RunAction {
+            gen,
+            extension,
+            action,
+            input,
+            session,
+        } => {
+            let done = ext_host.action(&extension, &action, input, session);
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = done.await;
+                let _ = tx.send(HostEvent::ActionDone { gen, result }).await;
             });
         }
         Effect::RenderAnswers { gen, id, answers } => {

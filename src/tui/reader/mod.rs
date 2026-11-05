@@ -82,6 +82,9 @@ pub struct ReaderView {
     /// The `App::modal_gen` it was opened under: replies for another are
     /// dropped.
     pub gen: u64,
+    /// A document's title (an extension's result), shown as the header;
+    /// `None` for a session's answers.
+    pub title: Option<String>,
     pub content: Content,
     /// The answer shown (an index into `Ready`).
     answer: usize,
@@ -101,12 +104,22 @@ impl ReaderView {
             session,
             host: host.into(),
             gen,
+            title: None,
             content: Content::Loading,
             answer: 0,
             list: false,
             scroll: 0,
             max_scroll: Cell::new(u16::MAX),
             layouts: RefCell::new((0, HashMap::new())),
+        }
+    }
+
+    /// A view of one document titled `title` (rendered like an answer,
+    /// under `gen`; `session` is the id its rendering is sent with).
+    pub fn document(session: SessionId, title: String, gen: u64) -> ReaderView {
+        ReaderView {
+            title: Some(title),
+            ..ReaderView::new(session, "local", gen)
         }
     }
 
@@ -247,6 +260,10 @@ impl ReaderView {
         };
         match &self.content {
             _ if self.list => push(&mut line, "formulas", Style::default()),
+            _ if self.title.is_some() => {
+                let title = self.title.as_deref().unwrap_or_default();
+                push(&mut line, &fit(title, width), Style::default());
+            }
             Content::Ready(answers) if !answers.is_empty() => {
                 let label = format!("answer {}/{}", self.answer + 1, answers.len());
                 let prompt = answers[self.answer]

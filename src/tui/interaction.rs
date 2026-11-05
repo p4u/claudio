@@ -21,6 +21,7 @@ use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
 use super::git_view::GitView;
 use super::keymap::Action;
+use super::leader::{Input, Picker};
 use super::extensions::protocol::Rendering;
 use super::latex::{Formula, Rendered};
 use super::reader::{External, ReaderView, RenderedAnswer};
@@ -59,6 +60,12 @@ pub enum Modal {
     /// The reader view of a session's answers (full pane, see
     /// `reader/`). Boxed like the history viewer.
     Reader(Box<ReaderView>),
+    /// The leader popup (Alt+z): the extension actions' keys.
+    Leader,
+    /// The line of input an extension action asks for (see `leader.rs`).
+    ActionInput(Box<Input>),
+    /// A list an extension action gave, to pick from.
+    Picker(Box<Picker>),
 }
 
 impl Modal {
@@ -72,6 +79,8 @@ impl Modal {
                 | Modal::Help
                 | Modal::ProxyStats { .. }
                 | Modal::Reader(_)
+                | Modal::Leader
+                | Modal::Picker(_)
         )
     }
 
@@ -85,12 +94,13 @@ impl Modal {
                 | (Modal::Help, Action::Help)
                 | (Modal::ProxyStats { .. }, Action::ProxyStats)
                 | (Modal::Reader(_), Action::Formulas)
+                | (Modal::Leader, Action::Extensions)
         )
     }
 
     /// Whether the modal takes mouse wheel and clicks.
     fn wants_mouse(&self) -> bool {
-        matches!(self, Modal::Git(_) | Modal::Reader(_))
+        matches!(self, Modal::Git(_) | Modal::Reader(_) | Modal::Picker(_))
     }
 }
 
@@ -194,6 +204,7 @@ impl App {
             Action::Help => self.open_help(),
             Action::GitLog => self.open_git_log(),
             Action::Formulas => self.open_reader(),
+            Action::Extensions => self.open_leader(),
             _ => {}
         }
         self.redraw = true;
@@ -213,7 +224,7 @@ impl App {
     /// The reader view of the active session (none without one): it asks
     /// the session's daemon for the answers, and shows "Loading…" until
     /// they are rendered.
-    fn open_reader(&mut self) {
+    pub(super) fn open_reader(&mut self) {
         let Some((id, host)) = self.active_view().map(|v| (v.id, v.host.clone())) else {
             return;
         };
@@ -376,6 +387,9 @@ impl App {
                     self.modal = None;
                 }
             }
+            Modal::Leader => self.leader_key(&key),
+            Modal::ActionInput(_) => self.action_input_key(&key),
+            Modal::Picker(_) => self.picker_key(&key),
         }
     }
 
@@ -386,6 +400,15 @@ impl App {
             match m.kind {
                 MouseEventKind::ScrollDown => view.on_wheel(true),
                 MouseEventKind::ScrollUp => view.on_wheel(false),
+                _ => return,
+            }
+            self.redraw = true;
+            return;
+        }
+        if let Some(Modal::Picker(picker)) = &mut self.modal {
+            match m.kind {
+                MouseEventKind::ScrollDown => picker.on_wheel(true),
+                MouseEventKind::ScrollUp => picker.on_wheel(false),
                 _ => return,
             }
             self.redraw = true;
@@ -421,8 +444,21 @@ impl App {
                 | Modal::Overview { .. }
                 | Modal::Help
                 | Modal::Confirm(_)
-                | Modal::Reader(_),
+                | Modal::Reader(_)
+                | Modal::Leader
+                | Modal::Picker(_),
             ) => {}
+            Some(Modal::ActionInput(input)) => {
+                let line = text.lines().next().unwrap_or("");
+                for c in line.chars().filter(|c| !c.is_control()) {
+                    if input.text.len() + c.len_utf8() > super::leader::INPUT_MAX {
+                        break;
+                    }
+                    input.text.insert(input.cursor, c);
+                    input.cursor += c.len_utf8();
+                }
+                self.redraw = true;
+            }
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());

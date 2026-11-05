@@ -161,6 +161,15 @@ pub enum Effect {
         seq: u64,
         items: Vec<crate::proto::LensItem>,
     },
+    /// Run an external extension's action in the extension host; the
+    /// result goes to [`App::on_action_result`] with `gen`.
+    RunAction {
+        gen: u64,
+        extension: String,
+        action: String,
+        input: Option<String>,
+        session: Option<super::extensions::protocol::SessionContext>,
+    },
     /// Render the answers of session `id` for the reader view opened under
     /// `gen`, on the `latex-render` worker; they come back through
     /// [`App::on_answers_rendered`].
@@ -316,6 +325,8 @@ pub struct App {
     /// taken and their `Latex` events ignored (an older daemon's `Latex`
     /// events are taken as `latex` items instead).
     pub(super) lens_hosts: HashSet<String>,
+    /// The `modal_gen` of the external action whose result is awaited.
+    pub(super) pending_action: Option<u64>,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -406,6 +417,7 @@ impl App {
                 &mut Vec::new(),
             ),
             lens_hosts: HashSet::new(),
+            pending_action: None,
         }
     }
 

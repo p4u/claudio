@@ -41,6 +41,8 @@ pub enum Action {
     /// name stays `formulas` (the v0.4.0 popup it replaced), so existing
     /// `[keys]` keep working.
     Formulas,
+    /// Open the leader popup: the extensions' actions, one key each.
+    Extensions,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
@@ -66,6 +68,7 @@ impl Action {
             Action::GitLog => "git_log",
             Action::Reset => "reset",
             Action::Formulas => "formulas",
+            Action::Extensions => "extensions",
             Action::ToggleHidden => "toggle_hidden",
             Action::GotoSession(_) => "goto_session",
         }
@@ -210,6 +213,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         action: Action::Formulas,
         scope: Scope::Global,
     },
+    // Alt+z: the extensions' leader key (Alt+p is Claude Code's model
+    // picker). Verified free in Claude Code 2.1.312 (no alt+z/meta+z in
+    // its bundle).
+    Binding {
+        code: KeyCode::Char('z'),
+        mods: KeyModifiers::ALT,
+        label: "extension actions (then a key)",
+        action: Action::Extensions,
+        scope: Scope::Global,
+    },
     // Quit is last so it's always visible in the status bar even when truncated.
     Binding {
         code: KeyCode::Char('q'),
@@ -245,12 +258,13 @@ fn goto_session(key: &KeyEvent) -> Option<Action> {
 
 /// The only actions `claudio --plain` keeps, in help order. Everything else
 /// (tabs, wizard, rename, quit, ...) belongs to the manager and goes to claude.
-pub const PLAIN_ACTIONS: [Action; 5] = [
+pub const PLAIN_ACTIONS: [Action; 6] = [
     Action::Help,
     Action::ProxyStats,
     Action::GitLog,
     Action::Reset,
     Action::Formulas,
+    Action::Extensions,
 ];
 
 /// The effective keymap: defaults + config overrides.
@@ -944,7 +958,10 @@ mod tests {
     fn plain_help_lists_exactly_the_plain_keys_in_order() {
         let (km, _) = plain_keymap(&[]);
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u"]);
+        assert_eq!(
+            keys,
+            ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u", "Alt+z"]
+        );
     }
 
     #[test]

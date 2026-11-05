@@ -13,6 +13,7 @@ use crate::proto::{SessionKind, SessionState};
 
 mod confirm;
 mod git;
+mod leader;
 mod reader;
 mod stats;
 mod status;
@@ -98,6 +99,9 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
         Some(Modal::Git(view)) => draw_git(frame, view, app.now, pane),
         Some(Modal::Reader(view)) => draw_reader(frame, app, view, pane),
+        Some(Modal::Leader) => leader::draw_leader(frame, app),
+        Some(Modal::ActionInput(input)) => leader::draw_action_input(frame, input),
+        Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
         None => {}
     }
 }
@@ -793,7 +797,10 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
 /// Render the help popup listing all key bindings.
 pub fn draw_help(frame: &mut Frame, app: &App) {
     let entries = app.keymap.help_entries();
-    let extra = if app.upgrade_notice.is_some() { 2 } else { 0 };
+    let leader = app.leader_entries();
+    let leader_key = app.keymap.key_for(super::keymap::Action::Extensions);
+    let extra = if app.upgrade_notice.is_some() { 2 } else { 0 }
+        + leader_key.as_ref().map_or(0, |_| leader.len() as u16 + 2);
     let height = (entries.len() as u16 + 6 + extra).min(frame.area().height.saturating_sub(2));
     let area = frame.area();
     let rect = centered(area, 72.min(area.width.saturating_sub(2)), height);
@@ -815,9 +822,29 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
             ])
         })
         .collect();
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    // The leader's keys, after it.
+    if let Some(key) = leader_key {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(format!("  {key} then:"), dim)));
+        for entry in &leader {
+            let ext = entry
+                .extension
+                .as_ref()
+                .map(|e| format!("  ({e})"))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:>14}  ", entry.key),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(super::reader::layout::safe(&entry.title)),
+                Span::styled(ext, dim),
+            ]));
+        }
+    }
     // Claude Code's own key, not ours: listed because it closes the tab.
     lines.push(Line::from(""));
-    let dim = Style::default().add_modifier(Modifier::DIM);
     let (ends, rest) = match app.mode {
         Mode::Manager => ("exit claude; the tab closes", None),
         Mode::Plain => (
