@@ -144,24 +144,35 @@ pub fn too_complex(src: &str) -> bool {
 /// guard in `tui/mod.rs`, after [`too_complex`].
 pub fn render(src: &str) -> Rendered {
     let parts = match typeset::environment(src) {
-        Environment::None => vec![src.to_owned()],
+        Environment::None => vec![(src.to_owned(), None)],
         Environment::Rows(rows) => rows,
         Environment::Unknown => return Rendered::default(),
     };
     let (mut blocks, mut texts, mut lines) = (Vec::new(), Vec::new(), Vec::new());
-    for part in parts {
-        let part = typeset::rewrite_roots(&part);
-        if too_complex(&part) {
+    for (left, right) in parts {
+        let Some(left) = part(&left) else {
             return Rendered::default();
-        }
-        let tree = rust_latex_parser::parse_equation(&part);
-        let text = typeset::typeset(&tree, false);
-        lines.push(match &text {
-            Some(one) if one.rows.len() == 1 => one.rows[0].clone(),
-            _ => typeset::walk::one_line(&tree),
-        });
-        blocks.push(typeset::typeset(&tree, true));
-        texts.push(text);
+        };
+        let Some(right) = right.as_deref().map(part) else {
+            lines.push(left.line);
+            blocks.push(left.block.map(typeset::Row::Whole));
+            texts.push(left.text.map(typeset::Row::Whole));
+            continue;
+        };
+        let Some(right) = right else {
+            return Rendered::default();
+        };
+        lines.push(format!("{} {}", left.line, right.line).trim().to_owned());
+        blocks.push(
+            left.block
+                .zip(right.block)
+                .map(|(l, r)| typeset::Row::Split(l, r)),
+        );
+        texts.push(
+            left.text
+                .zip(right.text)
+                .map(|(l, r)| typeset::Row::Split(l, r)),
+        );
     }
     let line = sanitize(&lines.join("; ")).trim().to_owned();
     let inline = (!line.is_empty() && line.width() <= INLINE_MAX_COLS).then_some(line);
@@ -170,6 +181,45 @@ pub fn render(src: &str) -> Rendered {
         block: capped(typeset::stacked(blocks)),
         text: capped(typeset::stacked(texts)),
     }
+}
+
+/// One part of a formula (a whole one, or a half of an aligned row), typeset:
+/// display style, text style and one line. A blank part is an empty box;
+/// `None` for one past [`too_complex`] once `\sqrt[n]` is rewritten.
+fn part(src: &str) -> Option<Part> {
+    if src.trim().is_empty() {
+        let empty = Laid {
+            rows: vec![String::new()],
+            baseline: 0,
+        };
+        return Some(Part {
+            block: Some(empty.clone()),
+            text: Some(empty),
+            line: String::new(),
+        });
+    }
+    let src = typeset::rewrite_roots(src);
+    if too_complex(&src) {
+        return None;
+    }
+    let tree = rust_latex_parser::parse_equation(&src);
+    let text = typeset::typeset(&tree, false);
+    let line = match &text {
+        Some(one) if one.rows.len() == 1 => one.rows[0].clone(),
+        _ => typeset::walk::one_line(&tree),
+    };
+    Some(Part {
+        block: typeset::typeset(&tree, true),
+        text,
+        line,
+    })
+}
+
+/// What [`part`] makes of a part of a formula.
+struct Part {
+    block: Option<Laid>,
+    text: Option<Laid>,
+    line: String,
 }
 
 /// `laid`, [`sanitize`]d, if it fits [`BLOCK_MAX_COLS`] × [`BLOCK_MAX_ROWS`].
@@ -256,6 +306,9 @@ const ACCENT: Color = Color::Cyan;
 const MAX_SPAN_ROWS: u16 = 8;
 const OPEN_TAG: &str = "<latex>";
 const CLOSE_TAG: &str = "</latex>";
+/// The vertical border of Claude Code's tables: a tag followed by one on
+/// its row is a table cell.
+const TABLE_BORDER: &str = "│";
 
 /// Replace, in the pane `buf` has just been drawn with from `screen` at
 /// `area`, each complete `<latex>…</latex>` whose text matches one of
@@ -322,7 +375,10 @@ fn overlay_row(
 
 /// Rebuild `row` with each closed tag that matches a formula replaced by
 /// its rendering, unless the row would no longer fit. An unmatched or
-/// unclosed tag stays as it is.
+/// unclosed tag stays as it is. In a table row (a [`TABLE_BORDER`] after
+/// the tag) the rendering is padded to the tag's width, so the borders
+/// claude aligned for the tag's text stay aligned; one wider than the tag
+/// stays raw.
 fn rebuild_row(
     buf: &mut Buffer,
     area: Rect,
@@ -338,11 +394,21 @@ fn rebuild_row(
         let Some(close) = tag.close else { continue };
         let (start, end) = (line.col(tag.open), line.col(close + CLOSE_TAG.len()));
         let text = line.text(tag.open + OPEN_TAG.len(), close);
-        let Some(cells) = matching(formulas, &text)
+        let Some(mut cells) = matching(formulas, &text)
             .and_then(|inline| text_cells(inline, accent_on(&original[start])))
         else {
             continue;
         };
+        if original[end..].iter().any(|c| c.symbol() == TABLE_BORDER) {
+            if cells.len() > end - start {
+                continue;
+            }
+            cells.extend(original[start + cells.len()..end].iter().map(|c| {
+                let mut blank = c.clone();
+                blank.set_symbol(" ");
+                blank
+            }));
+        }
         out.extend_from_slice(&original[copied..start]);
         out.extend(cells);
         copied = end;
@@ -646,12 +712,37 @@ mod tests {
     }
 
     #[test]
-    fn aligned_rows_are_rendered_one_by_one() {
+    fn aligned_rows_are_rendered_one_by_one_and_lined_up_on_the_ampersand() {
         let r = render(&prepare(
             "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}",
         ));
         assert_eq!(rows(r.block), ["a = b", "c = d"]);
         assert_eq!(r.inline.as_deref(), Some("a = b; c = d"));
+        // A derivation: the `=` of every row on one column, as in LaTeX,
+        // whatever is left of the `&` (the real answer of the AC11 check).
+        let r = render(&prepare(
+            "\\begin{aligned} (a+b)^2 &= (a+b)(a+b) \\\\ &= a^2 + ab + ba + b^2 \\\\ &= a^2 + 2ab + b^2 \\end{aligned}",
+        ));
+        let want = [
+            "(a + b)² = (a + b)(a + b)",
+            "         = a² + ab + ba + b²",
+            "         = a² + 2ab + b²",
+        ];
+        assert_eq!(rows(r.block), want);
+        assert_eq!(rows(r.text), want);
+        assert_eq!(
+            r.inline.as_deref(),
+            Some("(a + b)² = (a + b)(a + b); = a² + ab + ba + b²; = a² + 2ab + b²")
+        );
+        // Taller halves meet on their baselines; a row without `&` keeps
+        // the left edge.
+        let r = render(&prepare(
+            "\\begin{aligned} f(x) &= \\frac{1}{x} \\\\ \\text{so } &= 1 \\\\ x > 0 \\end{aligned}",
+        ));
+        assert_eq!(
+            rows(r.block),
+            ["       1", "f(x) = ─", "       x", "  so = 1", "x > 0"]
+        );
         // An environment the parser does not know is not rendered at all.
         assert_eq!(
             render(&prepare("\\begin{tabular}{c} a \\end{tabular}")),
@@ -662,6 +753,9 @@ mod tests {
         let deep = format!("\\sqrt[{}x{}]{{y}}", "{".repeat(32), "}".repeat(32));
         assert!(!too_complex(&deep));
         assert_eq!(render(&deep), Rendered::default());
+        // So does a half of an aligned row.
+        let half = format!("\\begin{{aligned}} a &= {deep} \\end{{aligned}}");
+        assert_eq!(render(&prepare(&half)), Rendered::default());
     }
 
     #[test]
@@ -856,6 +950,43 @@ mod tests {
         let mut s = Screen::new(14, 60);
         s.feed(long.replace('\n', "\r\n").as_bytes());
         assert_eq!(shown(&s, &ab), shown(&s, &[]));
+    }
+
+    /// A tag in one of claude's box-drawn tables keeps its width once
+    /// rendered, so the `│` borders stay where claude aligned them (the
+    /// real pane row of the AC11 check); a rendering wider than the tag
+    /// leaves it raw.
+    #[test]
+    fn a_tag_in_a_table_keeps_its_width_so_the_borders_stay_aligned() {
+        let head = format!("│ Distribution{}│ M │ V  │", " ".repeat(32));
+        let row = "│ N <latex>\\mathcal{N}(\\mu, \\sigma^2)</latex> │ μ │ σ² │";
+        let s = screen(&format!("{head}\n{row}"));
+        let f = formula("\\mathcal{N}(\\mu, \\sigma^2)", "𝒩(μ, σ²)");
+        let rows = shown(&s, &[f]);
+        assert_eq!(rows[0], head);
+        assert_eq!(rows[1], format!("│ N 𝒩(μ, σ²){}│ μ │ σ² │", " ".repeat(34)));
+        let borders = |s: &str| -> Vec<usize> {
+            s.chars()
+                .scan(0, |col, c| {
+                    let at = *col;
+                    *col += c.width().unwrap_or(0);
+                    Some((at, c))
+                })
+                .filter(|(_, c)| *c == '│')
+                .map(|(at, _)| at)
+                .collect()
+        };
+        assert_eq!(borders(&rows[1]), borders(&head));
+        // Wider than the tag: raw, so the row does not move.
+        let wide = formula("x", "a rendering wider than the tag");
+        let s = screen("│ <latex>x</latex> │ y │");
+        assert_eq!(shown(&s, &[wide])[0], "│ <latex>x</latex> │ y │");
+        // Not a table: the row still closes up.
+        let s = screen("so <latex>x</latex>, done | not a border");
+        assert_eq!(
+            shown(&s, &[formula("x", "X")])[0],
+            "so X, done | not a border"
+        );
     }
 
     #[test]

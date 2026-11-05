@@ -8,8 +8,9 @@
 //! - [`typeset`] — a parsed formula as rows, in display or text style.
 //! - [`rewrite_roots`] — `\sqrt[n]{x}` as the parser can read it.
 //! - [`environment`] — the rows of an `aligned`-like formula, which the
-//!   parser cannot read.
-//! - [`stacked`] — such rows, typeset one by one, as one block.
+//!   parser cannot read, each split at its first `&`.
+//! - [`stacked`] — such rows, typeset one by one, as one block aligned on
+//!   that `&`.
 //! - [`Laid`] — the result: rows and the row of the baseline.
 //! - [`walk::one_line`] — the one-line form when text style is taller.
 //!
@@ -127,8 +128,10 @@ pub enum Environment {
     /// No environment the parser cannot read.
     None,
     /// The whole formula is one environment of rows (`aligned`, `gather`,
-    /// `array`, …): its rows, `&` dropped, to be laid out one by one.
-    Rows(Vec<String>),
+    /// `array`, …): its rows, to be laid out one by one. A row is what is
+    /// before its first `&` and, when it has one, what follows (later `&`
+    /// dropped), so [`stacked`] can align the rows on it.
+    Rows(Vec<(String, Option<String>)>),
     /// An environment the parser does not know, or one of rows inside a
     /// larger formula: shown as its source.
     Unknown,
@@ -136,8 +139,8 @@ pub enum Environment {
 
 /// Whether `src` holds an environment the parser cannot read, and the rows
 /// of one it can be laid out from (see [`Environment`]). Rows are split on
-/// `\\` outside braces and nested environments; an `array`'s column spec
-/// and a row's `[2pt]` spacing are dropped.
+/// `\\` outside braces and nested environments, and each at its first `&`
+/// there; an `array`'s column spec and a row's `[2pt]` spacing are dropped.
 pub fn environment(src: &str) -> Environment {
     let src = src.trim();
     let begins = |s: &str| -> Option<(String, usize)> {
@@ -199,11 +202,13 @@ fn skip_group(s: &str) -> &str {
 }
 
 /// The rows of an environment's body: split on `\\` outside braces and
-/// nested environments, each without its `&` there, trimmed; empty rows
-/// dropped.
-fn split_rows(body: &str) -> Vec<String> {
+/// nested environments, each in two at its first `&` there (later ones
+/// dropped), trimmed; empty rows dropped.
+fn split_rows(body: &str) -> Vec<(String, Option<String>)> {
     let mut rows = Vec::new();
     let mut row = String::new();
+    // Where the row's first `&` was, once seen.
+    let mut split: Option<usize> = None;
     let (mut depth, mut nested) = (0usize, 0usize);
     let mut rest = body;
     while let Some(c) = rest.chars().next() {
@@ -214,7 +219,7 @@ fn split_rows(body: &str) -> Vec<String> {
         }
         let outside = depth == 0 && nested == 0;
         if outside && rest.starts_with("\\\\") {
-            rows.push(std::mem::take(&mut row));
+            rows.push((std::mem::take(&mut row), split.take()));
             rest = &rest[2..];
             // `\\[2pt]`: extra space after the row.
             if let Some(end) = rest
@@ -248,31 +253,84 @@ fn split_rows(body: &str) -> Vec<String> {
             '}' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if !(outside && c == '&') {
+        if outside && c == '&' {
+            if split.is_none() {
+                split = Some(row.len());
+            }
+        } else {
             row.push(c);
         }
         rest = &rest[c.len_utf8()..];
     }
-    rows.push(row);
+    rows.push((row, split));
     rows.into_iter()
-        .map(|r| r.trim().to_owned())
-        .filter(|r| !r.is_empty())
+        .map(|(row, split)| match split {
+            Some(at) => (
+                row[..at].trim().to_owned(),
+                Some(row[at..].trim().to_owned()),
+            ),
+            None => (row.trim().to_owned(), None),
+        })
+        .filter(|(left, right)| !left.is_empty() || right.as_ref().is_some_and(|r| !r.is_empty()))
         .collect()
 }
 
-/// `rows`, typeset one by one, as one block: one above the other,
-/// left-aligned, with the baseline at the middle row (the upper one of
-/// two). `None` when one of them is.
-pub fn stacked(rows: Vec<Option<Laid>>) -> Option<Laid> {
-    let rows: Vec<Laid> = rows.into_iter().collect::<Option<_>>()?;
-    if let [one] = rows.as_slice() {
+/// A row of [`stacked`], typeset: one box, or the two halves of a row that
+/// had an `&` (what was before it and what followed).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Row {
+    Whole(Laid),
+    Split(Laid, Laid),
+}
+
+/// `rows`, typeset one by one, as one block: one above the other, with
+/// the baseline at the middle row (the upper one of two). Whole rows are
+/// left-aligned; split rows are aligned on their `&`: the left halves
+/// right-aligned to the widest of them, one space, then the right halves
+/// (so the `=` signs of a derivation line up, as in LaTeX). `None` when one
+/// of them is, or the block is taller than [`MAX_ROWS`].
+pub fn stacked(rows: Vec<Option<Row>>) -> Option<Laid> {
+    let rows: Vec<Row> = rows.into_iter().collect::<Option<_>>()?;
+    if let [Row::Whole(one)] = rows.as_slice() {
         return Some(one.clone());
     }
-    let rows: Vec<String> = rows.into_iter().flat_map(|l| l.rows).collect();
-    (!rows.is_empty() && rows.len() <= MAX_ROWS).then(|| Laid {
-        baseline: (rows.len() - 1) / 2,
-        rows,
+    let indent = rows
+        .iter()
+        .map(|r| match r {
+            Row::Split(left, _) => left.width(),
+            Row::Whole(_) => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut out: Vec<String> = Vec::new();
+    for row in rows {
+        match row {
+            Row::Whole(laid) => out.extend(laid.rows),
+            Row::Split(left, right) => {
+                let pad = Block::text(&" ".repeat(indent - left.width()));
+                let parts = [pad, block_of(&left), Block::text(" "), block_of(&right)];
+                let joined = hcat(&parts)?;
+                out.extend(joined.rows.into_iter().map(|r| r.trim_end().to_owned()));
+            }
+        }
+        if out.len() > MAX_ROWS {
+            return None;
+        }
+    }
+    (!out.is_empty()).then(|| Laid {
+        baseline: (out.len() - 1) / 2,
+        rows: out,
     })
+}
+
+/// `laid` as a box: its rows padded to its width.
+fn block_of(laid: &Laid) -> Block {
+    let width = laid.width();
+    Block {
+        rows: laid.rows.iter().map(|r| padded(r.clone(), width)).collect(),
+        width,
+        baseline: laid.baseline,
+    }
 }
 
 /// Where the `]` that closes a bracket ends `s` (the text after `[`): the
@@ -1241,19 +1299,28 @@ mod tests {
 
     #[test]
     fn environments_of_rows_are_split_and_unknown_ones_refused() {
-        let rows = |v: &[&str]| Environment::Rows(v.iter().map(|r| r.to_string()).collect());
+        let rows = |v: &[(&str, Option<&str>)]| {
+            Environment::Rows(
+                v.iter()
+                    .map(|(l, r)| (l.to_string(), r.map(str::to_string)))
+                    .collect(),
+            )
+        };
         assert_eq!(
             environment("\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}"),
-            rows(&["a = b", "c = d"])
+            rows(&[("a", Some("= b")), ("c", Some("= d"))])
         );
+        // Only the first `&` splits a row; a row without one is whole.
         assert_eq!(
-            environment(" \\begin{array}{l|r} x & 1 \\\\[2pt] y & 2 \\\\ \\end{array} "),
-            rows(&["x  1", "y  2"])
+            environment(
+                " \\begin{array}{l|r|c} x & 1 & i \\\\[2pt] y \\\\ &= z \\\\ \\end{array} "
+            ),
+            rows(&[("x", Some("1  i")), ("y", None), ("", Some("= z"))])
         );
         // `&` and `\\` of a nested matrix stay with it.
         assert_eq!(
             environment("\\begin{gather} \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} \\\\ e \\end{gather}"),
-            rows(&["\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", "e"])
+            rows(&[("\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", None), ("e", None)])
         );
         assert_eq!(environment("\\{a\\} \\\\ b"), Environment::None);
         assert_eq!(
@@ -1270,18 +1337,83 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_stacked_left_aligned() {
+    fn rows_are_stacked_and_split_rows_aligned_on_their_ampersand() {
         let laid = |rows: &[&str], baseline| Laid {
             rows: rows.iter().map(|r| r.to_string()).collect(),
             baseline,
         };
         let one = laid(&["a", "─", "b"], 1);
-        assert_eq!(stacked(vec![Some(one.clone())]), Some(one.clone()));
         assert_eq!(
-            stacked(vec![Some(laid(&["x = 1"], 0)), Some(one.clone())]),
+            stacked(vec![Some(Row::Whole(one.clone()))]),
+            Some(one.clone())
+        );
+        assert_eq!(
+            stacked(vec![
+                Some(Row::Whole(laid(&["x = 1"], 0))),
+                Some(Row::Whole(one.clone()))
+            ]),
             Some(laid(&["x = 1", "a", "─", "b"], 1))
         );
-        assert_eq!(stacked(vec![Some(one), None]), None);
+        assert_eq!(stacked(vec![Some(Row::Whole(one.clone())), None]), None);
+        // The left halves end on one column; an empty left half is blank
+        // there; a whole row keeps the left edge.
+        let split = |l: &[&str], lb, r: &[&str], rb| Some(Row::Split(laid(l, lb), laid(r, rb)));
+        assert_eq!(
+            stacked(vec![
+                split(&["(a + b)²"], 0, &["= (a + b)(a + b)"], 0),
+                split(&[""], 0, &["= a² + 2ab + b²"], 0),
+                split(&["x"], 0, &["= y"], 0),
+                Some(Row::Whole(laid(&["whole"], 0))),
+            ]),
+            Some(laid(
+                &[
+                    "(a + b)² = (a + b)(a + b)",
+                    "         = a² + 2ab + b²",
+                    "       x = y",
+                    "whole",
+                ],
+                1
+            ))
+        );
+        // Halves meet on their baselines.
+        assert_eq!(
+            stacked(vec![split(&["y"], 0, &["  a", "= ─", "  b"], 1)]),
+            Some(laid(&["    a", "y = ─", "    b"], 1))
+        );
+    }
+
+    /// The `=` signs of a derivation line up on the `&` (the real answer
+    /// that showed them stacked left-aligned).
+    #[test]
+    fn aligned_derivations_line_up_on_the_ampersand() {
+        let src = "\\begin{aligned} (a+b)^2 &= (a+b)(a+b) \\\\ &= a^2 + ab + ba + b^2 \\\\ &= a^2 + 2ab + b^2 \\end{aligned}";
+        let rows = match environment(src) {
+            Environment::Rows(rows) => rows,
+            other => panic!("{other:?}"),
+        };
+        let half = |s: &str| {
+            let tree = rust_latex_parser::parse_equation(s);
+            if s.is_empty() {
+                Laid {
+                    rows: vec![String::new()],
+                    baseline: 0,
+                }
+            } else {
+                typeset(&tree, true).unwrap()
+            }
+        };
+        let laid: Vec<Option<Row>> = rows
+            .iter()
+            .map(|(l, r)| Some(Row::Split(half(l), half(r.as_deref().unwrap()))))
+            .collect();
+        assert_eq!(
+            stacked(laid).unwrap().rows,
+            [
+                "(a + b)² = (a + b)(a + b)",
+                "         = a² + ab + ba + b²",
+                "         = a² + 2ab + b²",
+            ]
+        );
     }
 
     #[test]
