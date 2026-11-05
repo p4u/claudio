@@ -1,0 +1,15 @@
+# An example claudio extension: copy this directory to
+# ~/.config/claudio/extensions/keys/ and restart claudio.
+name = "keys"
+description = "keyboard keys drawn as keycaps"
+command = ["python3", "keys.py"]
+
+[[lens]]
+tag = "keys"
+instruction = "This terminal draws keyboard keys. Write a key or a key combination as <keys>Ctrl+C</keys>, one combination per tag."
+
+[[action]]
+key = "k"
+title = "insert a timestamp"
+id = "stamp"
+input = "label"

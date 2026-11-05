@@ -204,6 +204,17 @@ In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such 
 
 `Alt+u` opens the reader view over the pane: claude's latest answer, rendered by claudio from the transcript, with its prompt on top. Markdown is laid out (headings, emphasis, lists, quotes, tables, code blocks) and every formula is typeset in 2D: a formula on its own line is a display formula, as tall as it needs; one inside a sentence grows its line by a row above and below at most (taller ones stay on one line). `←`/`→` (or `h`/`l`) go to the previous and next of the last 10 answers; `↑`/`↓`, `PgUp`/`PgDn`, `g`/`G` and the mouse wheel scroll; `Tab` switches to the session's last 64 formulas, each drawn in 2D above its LaTeX source; `Esc` or `Alt+u` closes. It works over SSH and in `--plain` too. A daemon older than the client shows "run `claudio daemon restart`" instead. In a terminal tab, `Alt+u` shadows readline's upcase-word.
 
+### Extensions (`Alt+z`)
+
+`Alt+z` opens a small popup of extension actions; the next key runs one, and `Esc` closes it. The built-in extensions:
+
+- **diagram**: claude is asked to draw diagrams as ```` ```mermaid ```` blocks (flowcharts and sequence diagrams), and the reader view (`Alt+u`) draws them with box characters. A diagram it cannot draw, or one wider than the view, stays as its code block.
+- **search** (`Alt+z s`): searches every claude conversation on the active session's host (prompts and answers, not tool output) and lists the matches, newest first. Enter resumes the chosen one in a new tab, or switches to the tab that has it.
+- **snippets** (`Alt+z p`): a filterable list of the prompts saved in `~/.config/claudio/snippets/` (`*.md`, `*.txt`); Enter pastes one into claude's prompt without sending it. `Alt+z P` saves the session's last prompt as a new snippet.
+- **latex**: the formulas above.
+
+`Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
+
 ### Keeping claude up to date
 
 Once a day claudio compares your `claude --version` with the latest release on your update channel, and asks before running `claude update`. When an SSH host connects, its claude is compared with yours. If it is older, claudio offers to update it; if it is missing, claudio offers to install it with the official installer. Either way it asks first. Prompts offer `[y] update`, `[n] not now` and `[s] skip this version`. Running sessions keep their binary; new sessions use the updated one.
@@ -229,6 +240,7 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+s` | Proxy stats |
 | `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
 | `Alt+u` | Reader view: the session's answers, formulas typeset (see [Formulas](#formulas-and-the-reader-view-altu)) |
+| `Alt+z` | Extension actions: `s` search, `p`/`P` snippets, `u` reader, and your own (see [Extensions](#extensions-altz)) |
 | `Alt+h` | Help |
 | `Alt+.` | In the wizard: show or hide dot-directories |
 | `Alt+q` | Quit the UI (sessions keep running) |
@@ -279,12 +291,16 @@ remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "
 latex = true                    # ask claude to write math in <latex> tags, rendered in the pane
                                 # (this host's sessions; `claudio daemon restart` after a change)
 
+[extensions]                    # every extension is on unless turned off here
+diagram = false                 # e.g. no Mermaid instruction or drawing
+
 [keys]                          # rebind any manager key
 new_session = "alt+n"
 terminal    = "alt+c"
 git_log     = "alt+l"
 reset       = "alt+e"
 formulas    = "alt+u"           # the reader view (its v0.4.0 name)
+extensions  = "alt+z"           # the extensions' leader key
 ```
 
 `CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.

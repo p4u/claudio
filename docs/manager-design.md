@@ -441,6 +441,48 @@ Spec: `docs/specs/2026-11-04-latex-render-design.md`.
   session or an older open are dropped (`modal_gen`). `Tab` shows the
   `Latex` list (the v0.4.0 popup's content).
 
+### 2.8 Extensions
+
+Spec: `docs/specs/2026-11-05-extensions-design.md`; author guide:
+`docs/extensions.md`.
+
+- **Registry** (`tui/extensions/`). Built-ins `latex` (tag lens),
+  `diagram` (fence lens `mermaid`), `search` (`s`) and `snippets`
+  (`p`, `P`), then external extensions from
+  `~/.config/claudio/extensions/<name>/extension.toml` (validated and admitted
+  by `manifest.rs`; at most 16). `[extensions] name = false` turns one off;
+  `[claude] latex = false` turns latex off.
+- **Context.** Every claude `Spawn`/`Respawn` carries `extensions` (the
+  enabled lenses and their instructions, capped). The daemon's effective
+  value: the request's, else the journal's, else the legacy latex lens (when
+  its `[claude] latex` is on); its `latex = false` drops the latex lens. The
+  instructions go to `<runtime dir>/context/<session>.txt` (0700/0600,
+  atomic, removed with the session, cleared at daemon start) and SessionStart
+  runs `__context file <path>` (no symlinks, regular files of the uid,
+  16 KiB, sanitized). `__context latex` still answers older sessions.
+- **Lens items.** The transcript cursor gathers the tag lenses' items
+  (`lens_tags`, latex's rules) and the daemon sends `SessionEvent::Lens`
+  (seq rules as `Latex`, replayed after it on attach, ≤ 256 KiB) beside
+  `Latex`. `Welcome.features` has `lens`; for a daemon without it, its
+  `Latex` events are taken as `latex` items.
+- **Rendering.** Built-in lenses render on the render worker through the
+  guard, cached by (lens, source). External lenses are rendered by the
+  extension host, never on the worker: the pane's items through
+  `Effect::RenderExternal`, the reader's through the worker's list of
+  external slots. The pane overlays every enabled tag lens; the reader turns
+  fence lenses into blocks, with the code block as the fallback.
+- **Host** (`tui/extensions/host.rs`, driven by `tui/mod.rs`). One program
+  per external extension, started lazily in its directory and process
+  group with a scrubbed env; JSON lines (protocol v1), ≤ 16 requests in
+  flight, render 1 s / action 15 s, results capped and sanitized
+  (`protocol.rs`); 3 failures in 5 minutes disable it; stopped on exit.
+- **Leader** (`Alt+z`, `tui/leader.rs`). The popup, an action's input line,
+  the list picker, documents (a reader view) and paste (only into an
+  attached claude session with bracketed paste on). Built-in actions are in
+  `tui/builtins.rs`: search (`Msg::Search` on the active host, Enter resumes
+  or switches) and snippets (files read and written by the event loop;
+  `Msg::LastPrompt`).
+
 ## 3. UX
 
 ### 3.1 Layout

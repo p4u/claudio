@@ -125,8 +125,11 @@ daemons coexist.
   `SessionEvent::Latex { seq, formulas }`: the whole list, only when it
   changed (`seq` + 1, for the session's whole life; a new conversation
   sends an empty list under the next `seq`). The last list is replayed to a
-  client right after its `Attached` + snapshot. `command()` adds the
-  `__context latex` SessionStart hook unless `[claude] latex = false`.
+  client right after its `Attached` + snapshot. The same refresh sends the
+  tag lenses' items as `SessionEvent::Lens` (own `seq`, replayed right
+  after the formulas, ≤ 256 KiB). `spawn` writes the session's extension
+  instructions to `<runtime dir>/context/<id>.txt` and `command()` adds the
+  `__context file <path>` SessionStart hook when there are any.
 - `git_status.rs` — `git status --porcelain=v2 --branch` for the status
   bar's `⎇` segment: 1 s deadline, capped output, same scrubbed env as
   `git.rs`.
@@ -197,6 +200,19 @@ is idle (checked every 2 min).
   (`ReaderView`: answer, scroll, Tab list, layout cache). Drawn by
   `ui/reader.rs`.
 - `formulas.rs` — the lines of the reader's formulas list (Tab).
+- `extensions/` — the extension registry (`mod.rs`: built-ins latex,
+  diagram, search, snippets; `Registry`, `ActionResult`), external
+  manifests (`manifest.rs`: `~/.config/claudio/extensions/<name>/`, the
+  HTML-tag rule, admission, at most 16), protocol v1 (`protocol.rs`: request
+  lines, result caps and sanitizing) and the extension host (`host.rs`: one
+  program per extension, lazy start, scrubbed env, own process group,
+  ≤ 16 in flight, render 1 s / action 15 s, 3 failures in 5 min disable it,
+  killed on exit; driven by `mod.rs`, never by `App`).
+- `leader.rs` — Alt+z: the leader popup, action input, list picker,
+  documents (a reader view) and paste (attached claude session with
+  bracketed paste on only, never Enter). `builtins.rs` — the built-in
+  actions: search (`Msg::Search`, resume or switch) and snippets
+  (`Effect::LoadSnippets`/`SaveSnippet`, `Msg::LastPrompt`).
 - `confirm.rs` — the generic confirm prompt (kill, reset, claude update).
 - `claude_update.rs` — local/remote claude version checks and updates.
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
@@ -265,11 +281,14 @@ is idle (checked every 2 min).
   wizard's resume list), and `recent_answers` (the reader's last 10 answers
   of a transcript tail: real prompts and the assistant text after them).
 - `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
-  to the daemon socket. Also `__context latex`, the SessionStart hook that asks
-  claude to wrap math in `<latex>` tags (`[claude] latex`, on by default); it prints one
-  constant JSON line and never touches the socket.
-- `latex.rs` — `extract_latex` and `latex_tags` (the formulas of an
-  assistant text, code excluded; the latter with their byte ranges) and
+  to the daemon socket. Also `__context file <path>`, the SessionStart hook
+  that prints the session's context file (the extensions' instructions: no
+  symlinks, a regular file of the uid, 16 KiB, sanitized) as one JSON line,
+  and `__context latex` for sessions of older daemons; neither touches the
+  socket.
+- `latex.rs` — `lens_tags` (the items of any tag lenses in an assistant
+  text, code excluded, with their byte ranges), `extract_latex` and
+  `latex_tags` (its `<latex>` wrappers) and
   `sanitize`, the character filter every formula and answer goes through
   in the daemon and again in the client.
 - `state.rs` — session state tracker derived from hook events.

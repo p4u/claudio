@@ -597,4 +597,13 @@ input = "label"
         assert!(load(&dir.join("missing"), &mut notices).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn the_example_extension_is_valid() {
+        let text = include_str!("../../../examples/extensions/keys/extension.toml");
+        let ext = parse("keys", Path::new("/ext/keys"), text).unwrap();
+        assert_eq!(ext.lenses[0].name, "keys");
+        assert_eq!(ext.actions[0].key, 'k');
+        assert!(admit(vec![ext], &mut Vec::new()).len() == 1);
+    }
 }
