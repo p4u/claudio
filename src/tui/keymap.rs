@@ -37,6 +37,8 @@ pub enum Action {
     GitLog,
     /// Restart the active session in its tab (asks how).
     Reset,
+    /// Open the popup of the active session's rendered formulas.
+    Formulas,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
@@ -61,6 +63,7 @@ impl Action {
             Action::Terminal => "terminal",
             Action::GitLog => "git_log",
             Action::Reset => "reset",
+            Action::Formulas => "formulas",
             Action::ToggleHidden => "toggle_hidden",
             Action::GotoSession(_) => "goto_session",
         }
@@ -195,6 +198,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         action: Action::ToggleHidden,
         scope: Scope::Wizard,
     },
+    // Alt+u: the formulas popup. Verified free in Claude Code 2.1.312 (no
+    // alt+u/meta+u in its bundle); readline's Alt+u (upcase-word) is
+    // shadowed in terminal tabs, like Alt+l and Alt+c.
+    Binding {
+        code: KeyCode::Char('u'),
+        mods: KeyModifiers::ALT,
+        label: "rendered formulas of the session",
+        action: Action::Formulas,
+        scope: Scope::Global,
+    },
     // Quit is last so it's always visible in the status bar even when truncated.
     Binding {
         code: KeyCode::Char('q'),
@@ -230,11 +243,12 @@ fn goto_session(key: &KeyEvent) -> Option<Action> {
 
 /// The only actions `claudio --plain` keeps, in help order. Everything else
 /// (tabs, wizard, rename, quit, ...) belongs to the manager and goes to claude.
-pub const PLAIN_ACTIONS: [Action; 4] = [
+pub const PLAIN_ACTIONS: [Action; 5] = [
     Action::Help,
     Action::ProxyStats,
     Action::GitLog,
     Action::Reset,
+    Action::Formulas,
 ];
 
 /// The effective keymap: defaults + config overrides.
@@ -578,6 +592,22 @@ mod tests {
             Some(Action::Reset)
         );
         assert_eq!(km.key_for(Action::Reset).as_deref(), Some("Alt+e"));
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('u'), KeyModifiers::ALT)),
+            Some(Action::Formulas)
+        );
+        assert_eq!(Action::Formulas.name(), "formulas");
+    }
+
+    /// No two default bindings of one scope share a key.
+    #[test]
+    fn default_bindings_never_collide() {
+        for (i, a) in DEFAULT_BINDINGS.iter().enumerate() {
+            for b in &DEFAULT_BINDINGS[i + 1..] {
+                let same = a.scope == b.scope && a.code == b.code && a.mods == b.mods;
+                assert!(!same, "{} and {}", a.action.name(), b.action.name());
+            }
+        }
     }
 
     #[test]
@@ -874,6 +904,7 @@ mod tests {
         assert_eq!(km.lookup(&alt('s')), Some(Action::ProxyStats));
         assert_eq!(km.lookup(&alt('l')), Some(Action::GitLog));
         assert_eq!(km.lookup(&alt('e')), Some(Action::Reset));
+        assert_eq!(km.lookup(&alt('u')), Some(Action::Formulas));
         // Every other manager key goes to claude.
         for c in ['n', 'x', 'r', 'g', 'c', 'a', 'q'] {
             assert_eq!(km.lookup(&alt(c)), None, "Alt+{c}");
@@ -893,7 +924,7 @@ mod tests {
     fn plain_help_lists_exactly_the_plain_keys_in_order() {
         let (km, _) = plain_keymap(&[]);
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e"]);
+        assert_eq!(keys, ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u"]);
     }
 
     #[test]

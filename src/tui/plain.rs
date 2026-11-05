@@ -223,7 +223,7 @@ mod tests {
         app.take_effects();
         app.on_terminal(alt('h'));
         let text = screen(&app).join("\n");
-        for key in ["Alt+h", "Alt+s", "Alt+l", "Alt+e"] {
+        for key in ["Alt+h", "Alt+s", "Alt+l", "Alt+e", "Alt+u"] {
             assert!(text.contains(key), "{key} missing:\n{text}");
         }
         for gone in ["Alt+n", "Alt+x", "Alt+q", "Alt+g", "Alt+c", "Alt+Shift"] {

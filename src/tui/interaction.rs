@@ -19,6 +19,7 @@ use crate::term::screen::{MouseMode, Screen};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
+use super::formulas::FormulasView;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::latex::Formula;
@@ -54,6 +55,8 @@ pub enum Modal {
     Confirm(ConfirmPrompt),
     /// The commit-history viewer (full pane).
     Git(Box<GitView>),
+    /// The active session's rendered formulas (see `formulas.rs`).
+    Formulas(FormulasView),
 }
 
 impl Modal {
@@ -62,7 +65,11 @@ impl Modal {
     pub fn yields_to_actions(&self) -> bool {
         matches!(
             self,
-            Modal::Git(_) | Modal::Overview { .. } | Modal::Help | Modal::ProxyStats { .. }
+            Modal::Git(_)
+                | Modal::Overview { .. }
+                | Modal::Help
+                | Modal::ProxyStats { .. }
+                | Modal::Formulas(_)
         )
     }
 
@@ -75,6 +82,7 @@ impl Modal {
                 | (Modal::Overview { .. }, Action::Overview)
                 | (Modal::Help, Action::Help)
                 | (Modal::ProxyStats { .. }, Action::ProxyStats)
+                | (Modal::Formulas(_), Action::Formulas)
         )
     }
 
@@ -183,6 +191,7 @@ impl App {
             Action::Overview => self.open_overview(),
             Action::Help => self.open_help(),
             Action::GitLog => self.open_git_log(),
+            Action::Formulas => self.open_formulas(),
             _ => {}
         }
         self.redraw = true;
@@ -197,6 +206,13 @@ impl App {
     fn open_help(&mut self) {
         self.modal = Some(Modal::Help);
         self.redraw = true;
+    }
+
+    /// The formulas popup of the active session (none without one).
+    fn open_formulas(&mut self) {
+        if let Some(id) = self.active_view().map(|v| v.id) {
+            self.modal = Some(Modal::Formulas(FormulasView::new(id)));
+        }
     }
 
     pub fn modal_key(&mut self, key: KeyEvent) {
@@ -299,6 +315,11 @@ impl App {
                 let outcome = view.on_key(&key, rows);
                 self.git_outcome(outcome);
             }
+            Modal::Formulas(view) => {
+                if view.on_key(&key) {
+                    self.modal = None;
+                }
+            }
         }
     }
 
@@ -330,7 +351,13 @@ impl App {
                 view.on_paste(text);
                 self.redraw = true;
             }
-            Some(Modal::ProxyStats(_) | Modal::Overview { .. } | Modal::Help | Modal::Confirm(_)) => {}
+            Some(
+                Modal::ProxyStats(_)
+                | Modal::Overview { .. }
+                | Modal::Help
+                | Modal::Confirm(_)
+                | Modal::Formulas(_),
+            ) => {}
             None => {
                 if let Some(v) = self.active_view().filter(|v| v.attached) {
                     let bytes = encode_paste(text, &v.mirror.modes());
@@ -1132,6 +1159,30 @@ mod tests {
         let cleared = SessionEvent::ClaudeSessionCleared;
         app.on_incoming_from(&host, Incoming::Event { id, event: cleared });
         assert_eq!(app.sessions[0].latex_seq, 0);
+    }
+
+    #[test]
+    fn alt_u_opens_and_closes_the_formulas_popup() {
+        use crate::tui::test_support::alt;
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.on_terminal(alt('u'));
+        let Some(Modal::Formulas(view)) = &app.modal else {
+            panic!("no formulas popup")
+        };
+        assert_eq!(view.session, app.sessions[0].id);
+        // Its own key closes it; so does Esc.
+        app.on_terminal(alt('u'));
+        assert!(app.modal.is_none());
+        app.on_terminal(alt('u'));
+        app.on_terminal(press(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        // It is read-only: another manager key closes it and acts, and a
+        // paste goes nowhere.
+        app.on_terminal(alt('u'));
+        app.on_terminal(Event::Paste("text".into()));
+        assert!(app.take_effects().is_empty(), "the paste reached the session");
+        app.on_terminal(alt('h'));
+        assert!(matches!(app.modal, Some(Modal::Help)));
     }
 
     #[test]

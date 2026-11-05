@@ -344,9 +344,10 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  --plain [--proxy NAME|--no-proxy] [--first-party] [claude args…]\n\
 \x20                              Run one plain interactive claude, full screen, with the proxy env of a\n\
 \x20                              manager session: no tabs, status bar or wizard. Alt+h (help), Alt+s\n\
-\x20                              (proxy stats), Alt+l (git history) and Alt+e (restart) are claudio's;\n\
-\x20                              every other key goes to claude. Exits with claude; the session is\n\
-\x20                              not kept. Must be the first argument; -p/--api are rejected.\n\
+\x20                              (proxy stats), Alt+l (git history), Alt+e (restart) and Alt+u\n\
+\x20                              (formulas) are claudio's; every other key goes to claude. Exits with\n\
+\x20                              claude; the session is not kept. Must be the first argument;\n\
+\x20                              -p/--api are rejected.\n\
 \x20  --fast                      Strip human-like typing/quiescence delays for lowest latency.\n\
 \x20  --log-messages              Log the full CLI⇄claudio⇄claude message flow to stderr (colorized).\n\
 \x20  --log-messages-file <path>  Also append the raw message flow to <path> as JSON Lines (untruncated).\n\
