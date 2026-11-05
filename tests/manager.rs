@@ -2124,7 +2124,9 @@ fn test_wizard_recent_dir_offers_resume() {
 /// then runs its own SessionStart hook so the daemon reads it.
 fn write_latex_fake_claude(h: &ManagerHarness, settings: &std::path::Path) {
     let sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-    let project = h.home.join(".claude/projects").join(encode_cwd(&h.dirs[0]));
+    // claude (and now the daemon) file the transcript under the resolved cwd.
+    let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
+    let project = h.home.join(".claude/projects").join(encode_cwd(&cwd));
     let record = serde_json::json!({
         "type": "assistant",
         "message": {
