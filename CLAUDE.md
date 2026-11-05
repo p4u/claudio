@@ -184,7 +184,7 @@ is idle (checked every 2 min).
 - `latex.rs` — `<latex>` formulas, pure: `Formula` (source, one-line form,
   display- and text-style layouts, match keys), the `too_complex`
   pre-check, `render` (the `typeset` engine; `aligned`-like environments
-  row by row) and `overlay`. The overlay swaps matched on-screen tags for
+  row by row, aligned on their first `&`) and `overlay`. The overlay swaps matched on-screen tags for
   their one-line rendering in the pane's buffer, cell by cell, and moves
   no row.
 - `typeset/` — the 2D layout engine, pure: TeX's display and text styles
