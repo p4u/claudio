@@ -473,6 +473,15 @@ impl SessionExtensions {
         Ok(())
     }
 
+    /// The names of the tag lenses: the tags the daemon extracts.
+    pub fn tags(&self) -> Vec<String> {
+        self.lenses
+            .iter()
+            .filter(|l| l.kind == LensKind::Tag)
+            .map(|l| l.name.clone())
+            .collect()
+    }
+
     /// What claude is told: the non-empty instructions, sanitized, joined
     /// by a blank line.
     pub fn context(&self) -> String {
@@ -710,10 +719,46 @@ pub enum SessionEvent {
         seq: u64,
         formulas: Vec<String>,
     },
+    /// The conversation's recent tag-lens items (every tag lens of the
+    /// session, `latex` included), oldest first, by `Latex`'s rules: the
+    /// whole list, `seq` growing for the session's whole life. Sent beside
+    /// `Latex` by a daemon with the `lens` feature; at most
+    /// [`LENS_EVENT_MAX`] bytes encoded ([`lens_event`]). Old clients map
+    /// this to `Unknown`.
+    Lens {
+        seq: u64,
+        items: Vec<LensItem>,
+    },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
     Unknown,
+}
+
+/// One tag-lens item: the tag (the lens name) and its text, sanitized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensItem {
+    pub tag: String,
+    pub text: String,
+}
+
+/// The most a `Lens` event takes encoded.
+pub const LENS_EVENT_MAX: usize = 256 * 1024;
+
+/// The `Lens` event for `items`, its oldest items dropped until it encodes
+/// to at most [`LENS_EVENT_MAX`] bytes.
+pub fn lens_event(seq: u64, items: Vec<LensItem>) -> SessionEvent {
+    let mut event = SessionEvent::Lens { seq, items };
+    while serde_json::to_vec(&event).map_or(0, |b| b.len()) > LENS_EVENT_MAX {
+        let SessionEvent::Lens { items, .. } = &mut event else {
+            break;
+        };
+        if items.is_empty() {
+            break;
+        }
+        items.remove(0);
+    }
+    event
 }
 
 /// A working tree's state, from `git status --porcelain=v2 --branch`.
@@ -1685,5 +1730,36 @@ mod tests {
             extensions: Some(ext),
         };
         assert!(!format!("{respawn:?}").contains("Keys."));
+    }
+
+    #[test]
+    fn lens_events_stay_under_their_cap_dropping_the_oldest_items() {
+        let item = |i: usize| LensItem {
+            tag: "keys".into(),
+            text: format!("{i}{}", "\\".repeat(2040)),
+        };
+        // 64 items of 2 KiB backslashes encode to about 260 KiB.
+        let items: Vec<LensItem> = (0..64).map(item).collect();
+        let event = lens_event(7, items);
+        let encoded = serde_json::to_vec(&event).unwrap().len();
+        assert!(encoded <= LENS_EVENT_MAX, "{encoded}");
+        let SessionEvent::Lens { seq, items } = event else {
+            panic!("not a lens event")
+        };
+        assert_eq!(seq, 7);
+        assert!(items.len() < 64);
+        assert!(items.last().unwrap().text.starts_with("63"));
+        // A small list is untouched; an old client reads the event as Unknown.
+        let small = lens_event(1, vec![item(0)]);
+        let json = serde_json::to_string(&small).unwrap();
+        assert!(json.contains("\"lens\""), "{json}");
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum OldEvent {
+            Latex {},
+            #[serde(other)]
+            Unknown,
+        }
+        assert!(matches!(serde_json::from_str::<OldEvent>(&json), Ok(OldEvent::Unknown)));
     }
 }

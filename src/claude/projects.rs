@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::claude::latex::{extract_latex, sanitize, MAX_FORMULAS};
-use crate::proto::{Answer, ClaudeSession};
+use crate::claude::latex::{extract_latex, lens_tags, sanitize, MAX_FORMULAS};
+use crate::proto::{Answer, ClaudeSession, LensItem};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -227,6 +227,11 @@ pub struct TranscriptCursor {
     /// The `<latex>` formulas of the conversation's answers, oldest first:
     /// the last [`MAX_FORMULAS`].
     latex: VecDeque<String>,
+    /// The tags of the session's tag lenses ([`TranscriptCursor::with_tags`]).
+    tags: Vec<String>,
+    /// Their items in the conversation's answers, all tags together, oldest
+    /// first: the last [`MAX_FORMULAS`].
+    lens: VecDeque<LensItem>,
 }
 
 impl TranscriptCursor {
@@ -240,7 +245,15 @@ impl TranscriptCursor {
             last_message_id: None,
             totals: TranscriptTotals::default(),
             latex: VecDeque::new(),
+            tags: Vec::new(),
+            lens: VecDeque::new(),
         }
+    }
+
+    /// The cursor, also gathering the items of tag lenses `tags`.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// The claude session id this cursor follows.
@@ -255,6 +268,11 @@ impl TranscriptCursor {
     /// The conversation's most recent formulas, oldest first.
     pub fn latex(&self) -> &VecDeque<String> {
         &self.latex
+    }
+
+    /// The conversation's most recent tag-lens items, oldest first.
+    pub fn lens(&self) -> &VecDeque<LensItem> {
+        &self.lens
     }
 
     /// Whether the cursor has seen an assistant record.
@@ -277,6 +295,7 @@ impl TranscriptCursor {
             self.last_message_id = None;
             self.totals = TranscriptTotals::default();
             self.latex.clear();
+            self.lens.clear();
         }
         if len == self.offset {
             return false;
@@ -325,6 +344,7 @@ impl TranscriptCursor {
                 // A subagent's work is not the answer on screen.
                 if v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true) {
                     push_latex(&mut self.latex, msg.get("content"));
+                    push_lens(&mut self.lens, &self.tags, msg.get("content"));
                 }
                 let Some(usage) = msg.get("usage") else { return };
                 let count = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -353,6 +373,37 @@ impl TranscriptCursor {
             }
             _ => {}
         }
+    }
+}
+
+/// Append the items of tag lenses `tags` in an assistant message to `lens`,
+/// keeping the last [`MAX_FORMULAS`]; only its `text` blocks count, as for
+/// [`push_latex`].
+fn push_lens(lens: &mut VecDeque<LensItem>, tags: &[String], content: Option<&serde_json::Value>) {
+    if tags.is_empty() {
+        return;
+    }
+    let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let mut add = |text: &str| {
+        for (_, tag, text) in lens_tags(text, &tags) {
+            if lens.len() == MAX_FORMULAS {
+                lens.pop_front();
+            }
+            lens.push_back(LensItem { tag, text });
+        }
+    };
+    match content {
+        Some(serde_json::Value::String(text)) => add(text),
+        Some(serde_json::Value::Array(blocks)) => {
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        add(text);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1525,7 +1576,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     // ── last_prompt ───────────────────────────────────────────────────────
 
     #[test]
@@ -1590,5 +1640,41 @@ mod tests {
         assert_eq!(read_last_prompt(&path), Some(("again".into(), false)));
         assert_eq!(read_last_prompt(&dir.join("missing.jsonl")), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_collects_the_items_of_its_tag_lenses_in_order() {
+        let mut c = cursor().with_tags(vec!["latex".into(), "keys".into()]);
+        let mut jsonl = String::new();
+        jsonl += &said(
+            r#"[{"type":"thinking","thinking":"<keys>t</keys>"},{"type":"text","text":"press <keys>Ctrl+C</keys> for <latex>a^2</latex>, not <kbd>x</kbd>"}]"#,
+        );
+        jsonl += &said(r#"[{"type":"text","text":"<keys>side</keys>"}]"#)
+            .replacen('{', r#"{"isSidechain":true,"#, 1);
+        jsonl += &said(r#""then <keys>Esc</keys>""#);
+        c.feed(jsonl.as_bytes());
+        let items: Vec<(&str, &str)> = c
+            .lens()
+            .iter()
+            .map(|i| (i.tag.as_str(), i.text.as_str()))
+            .collect();
+        assert_eq!(items, [("keys", "Ctrl+C"), ("latex", "a^2"), ("keys", "Esc")]);
+        // The latex list is kept as before.
+        assert_eq!(c.latex().iter().collect::<Vec<_>>(), ["a^2"]);
+        // Without tags, no items.
+        let mut plain = cursor();
+        plain.feed(jsonl.as_bytes());
+        assert!(plain.lens().is_empty());
+    }
+
+    #[test]
+    fn cursor_keeps_the_last_64_lens_items() {
+        let mut c = cursor().with_tags(vec!["keys".into()]);
+        for i in 0..70 {
+            c.feed(said(&format!(r#""<keys>k{i}</keys>""#)).as_bytes());
+        }
+        assert_eq!(c.lens().len(), 64);
+        assert_eq!(c.lens().front().map(|i| i.text.as_str()), Some("k6"));
+        assert_eq!(c.lens().back().map(|i| i.text.as_str()), Some("k69"));
     }
 }

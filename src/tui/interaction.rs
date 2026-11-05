@@ -835,6 +835,8 @@ impl App {
                     self.emit(render);
                 }
             }
+            // Taken from Task 3 on (`Welcome.features`).
+            SessionEvent::Lens { .. } => {}
             SessionEvent::Unknown => {}
         }
     }

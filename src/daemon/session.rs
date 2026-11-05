@@ -32,7 +32,7 @@ use super::{host, Daemon};
 use crate::claude::hooks;
 use crate::claude::state::Tracker;
 use crate::proto::{
-    Envelope, Frame, Msg, SessionEvent, SessionId, SessionKind, SessionState, SpawnSpec,
+    Envelope, Frame, LensItem, Msg, SessionEvent, SessionId, SessionKind, SessionState, SpawnSpec,
 };
 use crate::proxy::env::env_diff;
 use crate::term::probe::ProbeResponder;
@@ -252,7 +252,8 @@ pub fn spawn(
         spawned_with_resume,
         spawn_time,
         kind,
-        meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind),
+        meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind)
+            .with_tags(spec.extensions.as_ref().map(|e| e.tags()).unwrap_or_default()),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
     Ok((Handle { tx, token, pid }, committed_tx))
@@ -524,7 +525,13 @@ impl Subscriber {
         if !self.sync(id, size, snapshot) {
             return false;
         }
-        let Some(event) = latex else { return true };
+        self.replay(id, latex)
+    }
+
+    /// Queue `event` (a replay after [`Subscriber::attach`]), if any.
+    /// Returns `false` if the client is gone.
+    fn replay(&mut self, id: SessionId, event: Option<SessionEvent>) -> bool {
+        let Some(event) = event else { return true };
         let frame = Frame::Control(Envelope::event(Msg::Event { id, event }));
         match self.queue.try_send(frame) {
             Ok(()) => true,
@@ -579,12 +586,18 @@ struct MetaRefresher {
     cursor: Arc<std::sync::Mutex<Option<crate::claude::projects::TranscriptCursor>>>,
     /// The formulas last sent to clients, replayed to a client that attaches.
     latex: Arc<std::sync::Mutex<LatexSent>>,
+    /// The session's tag lenses: the tags the transcript cursor gathers.
+    tags: Vec<String>,
+    /// The lens items last sent, replayed like `latex`.
+    lens: Arc<std::sync::Mutex<LensSent>>,
     busy: Arc<std::sync::atomic::AtomicBool>,
     started_at: Option<std::time::Instant>,
 }
 
 /// The last `SessionEvent::Latex` sent: its `seq` and formulas.
 type LatexSent = Option<(u64, Vec<String>)>;
+/// The last `SessionEvent::Lens` sent: its `seq` and items.
+type LensSent = Option<(u64, Vec<LensItem>)>;
 
 impl MetaRefresher {
     fn new(id: SessionId, daemon: Arc<Daemon>, cwd: PathBuf, kind: SessionKind) -> Self {
@@ -595,9 +608,22 @@ impl MetaRefresher {
             kind,
             cursor: Arc::default(),
             latex: Arc::default(),
+            tags: Vec::new(),
+            lens: Arc::default(),
             busy: Arc::default(),
             started_at: None,
         }
+    }
+
+    /// The refresher, also sending the items of tag lenses `tags`.
+    fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// The last lens items sent, as the event a client attaching now needs.
+    fn last_lens(&self) -> Option<SessionEvent> {
+        last_lens(&self.lens.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The last formulas sent, as the event a client attaching now needs.
@@ -619,10 +645,11 @@ impl MetaRefresher {
         let (id, daemon, cwd, kind) = (self.id, Arc::clone(&self.daemon), self.cwd.clone(), self.kind);
         let (cursor, busy) = (Arc::clone(&self.cursor), Arc::clone(&self.busy));
         let latex = Arc::clone(&self.latex);
+        let (lens, tags) = (Arc::clone(&self.lens), self.tags.clone());
         let session_id = session_id.map(str::to_owned);
         tokio::spawn(async move {
             let git = super::git_status::read(&cwd).await;
-            let (transcript, formulas) = match (kind, session_id) {
+            let (transcript, formulas, items) = match (kind, session_id) {
                 (SessionKind::Claude, Some(sid)) => {
                     let cwd = cwd.clone();
                     tokio::task::spawn_blocking(move || {
@@ -630,21 +657,28 @@ impl MetaRefresher {
                         let same = slot.take().filter(|c| c.session_id() == sid);
                         let cursor = slot.insert(same.unwrap_or_else(|| {
                             crate::claude::projects::TranscriptCursor::new(&cwd, &sid)
+                                .with_tags(tags)
                         }));
                         cursor.advance();
                         let mut sent = latex.lock().unwrap_or_else(|e| e.into_inner());
                         let formulas = latex_event(&mut sent, cursor.latex());
+                        let mut sent = lens.lock().unwrap_or_else(|e| e.into_inner());
+                        let items = lens_items_event(&mut sent, cursor.lens());
                         let totals = cursor.has_assistant().then(|| cursor.totals().clone());
-                        (totals, formulas)
+                        (totals, formulas, items)
                     })
                     .await
                     .unwrap_or_default()
                 }
-                _ => (None, None),
+                _ => (None, None, None),
             };
             daemon.broadcast(id, meta_event(&cwd, git, transcript));
+            // Latex first, for old clients and in the order a replay has.
             if let Some(formulas) = formulas {
                 daemon.broadcast(id, formulas);
+            }
+            if let Some(items) = items {
+                daemon.broadcast(id, items);
             }
             busy.store(false, Ordering::Release);
         });
@@ -678,6 +712,27 @@ fn last_latex(sent: &LatexSent) -> Option<SessionEvent> {
         seq: *seq,
         formulas: formulas.clone(),
     })
+}
+
+/// The `Lens` event a refresh owes clients, by [`latex_event`]'s rules
+/// (its own `seq`), capped by [`crate::proto::lens_event`].
+fn lens_items_event(sent: &mut LensSent, lens: &VecDeque<LensItem>) -> Option<SessionEvent> {
+    let (seq, unchanged) = match sent {
+        Some((seq, list)) => (*seq, list.iter().eq(lens.iter())),
+        None => (0, lens.is_empty()),
+    };
+    if unchanged {
+        return None;
+    }
+    let items: Vec<LensItem> = lens.iter().cloned().collect();
+    *sent = Some((seq + 1, items.clone()));
+    Some(crate::proto::lens_event(seq + 1, items))
+}
+
+/// The event that replays `sent` to a client that attaches.
+fn last_lens(sent: &LensSent) -> Option<SessionEvent> {
+    sent.as_ref()
+        .map(|(seq, items)| crate::proto::lens_event(*seq, items.clone()))
 }
 
 /// The `Meta` event for a refresh's findings. The branch falls back to
@@ -901,7 +956,10 @@ impl Actor {
             pending_req: req,
         };
         let latex = self.meta.last_latex();
-        if sub.attach(self.id, self.screen.size(), &self.screen.snapshot(), latex) {
+        // Lens items right after the formulas.
+        if sub.attach(self.id, self.screen.size(), &self.screen.snapshot(), latex)
+            && sub.replay(self.id, self.meta.last_lens())
+        {
             self.subs.insert(client, sub);
         }
     }
@@ -1311,6 +1369,61 @@ mod tests {
         assert!(sub.attach(id, (24, 80), b"SNAP", last_latex(&None)));
         assert!(matches!(rx.try_recv(), Ok(Frame::Control(_))));
         assert!(matches!(rx.try_recv(), Ok(Frame::Data { .. })));
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn items(list: &[(&str, &str)]) -> VecDeque<LensItem> {
+        list.iter()
+            .map(|(tag, text)| LensItem {
+                tag: tag.to_string(),
+                text: text.to_string(),
+            })
+            .collect()
+    }
+
+    fn lens(seq: u64, list: &[(&str, &str)]) -> Option<SessionEvent> {
+        let items = items(list).into_iter().collect();
+        Some(SessionEvent::Lens { seq, items })
+    }
+
+    #[test]
+    fn lens_items_are_sent_when_they_change_with_their_own_growing_seq() {
+        let mut sent = None;
+        assert_eq!(lens_items_event(&mut sent, &items(&[])), None, "nothing yet");
+        let one = items(&[("keys", "a")]);
+        assert_eq!(lens_items_event(&mut sent, &one), lens(1, &[("keys", "a")]));
+        assert_eq!(lens_items_event(&mut sent, &one), None, "unchanged");
+        let two = items(&[("keys", "a"), ("latex", "x")]);
+        let want = lens(2, &[("keys", "a"), ("latex", "x")]);
+        assert_eq!(lens_items_event(&mut sent, &two), want);
+        // A new conversation: the empty list under the next seq.
+        assert_eq!(lens_items_event(&mut sent, &items(&[])), lens(3, &[]));
+        assert_eq!(last_lens(&sent), lens(3, &[]));
+        assert_eq!(last_lens(&None), None);
+    }
+
+    #[test]
+    fn an_attach_gets_the_lens_items_right_after_the_formulas() {
+        let id = uuid::Uuid::new_v4();
+        let mut latex_sent = None;
+        latex_event(&mut latex_sent, &formulas(&["x"]));
+        let mut lens_sent = None;
+        lens_items_event(&mut lens_sent, &items(&[("keys", "k")]));
+        let (queue, mut rx) = mpsc::channel(8);
+        let mut sub = Subscriber {
+            queue,
+            lagging: false,
+            pending_req: None,
+        };
+        assert!(sub.attach(id, (24, 80), b"SNAP", last_latex(&latex_sent)));
+        assert!(sub.replay(id, last_lens(&lens_sent)));
+        assert!(matches!(rx.try_recv(), Ok(Frame::Control(_))), "attached");
+        assert!(matches!(rx.try_recv(), Ok(Frame::Data { .. })), "snapshot");
+        let event = |e: Option<SessionEvent>| {
+            Frame::Control(Envelope::event(Msg::Event { id, event: e.unwrap() }))
+        };
+        assert_eq!(rx.try_recv().unwrap(), event(latex(1, &["x"])));
+        assert_eq!(rx.try_recv().unwrap(), event(lens(1, &[("keys", "k")])));
         assert!(rx.try_recv().is_err());
     }
 

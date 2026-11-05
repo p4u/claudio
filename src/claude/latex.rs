@@ -11,9 +11,6 @@ pub const MAX_FORMULA_BYTES: usize = 2048;
 /// How many of a conversation's most recent formulas are kept.
 pub const MAX_FORMULAS: usize = 64;
 
-const OPEN: &[u8] = b"<latex>";
-const CLOSE: &[u8] = b"</latex>";
-
 /// `s` without what could reach the terminal as anything but text: controls
 /// (`Cc`, except `\n` and `\t`), format characters (`Cf`: bidi controls,
 /// zero-width characters, BOM, soft hyphen), private-use code points and
@@ -105,8 +102,27 @@ pub fn extract_latex(text: &str) -> Vec<String> {
 /// `</latex>`) and its formula. Tags that are not formulas (in code, empty,
 /// too long) are not listed.
 pub fn latex_tags(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    lens_tags(text, &["latex"])
+        .into_iter()
+        .map(|(range, _, formula)| (range, formula))
+        .collect()
+}
+
+/// The tags of any of `tags` in one assistant text, in order, by
+/// [`extract_latex`]'s rules for `<latex>`: what is between `<tag>` and the
+/// next `</tag>` (case-sensitive, across lines), trimmed and [`sanitize`]d,
+/// outside fenced code blocks and inline code spans; empty texts and ones
+/// longer than [`MAX_FORMULA_BYTES`] are dropped. Each tag's byte range in
+/// `text` (from its `<tag>` to the end of its `</tag>`), its tag and its
+/// text. Where tags start inside one another, the one that opens first wins.
+pub fn lens_tags(text: &str, tags: &[&str]) -> Vec<(std::ops::Range<usize>, String, String)> {
     let mut out = Vec::new();
-    if !text.contains("<latex>") {
+    let pairs: Vec<(&str, String, String)> = tags
+        .iter()
+        .map(|t| (*t, format!("<{t}>"), format!("</{t}>")))
+        .filter(|(_, open, _)| text.contains(open.as_str()))
+        .collect();
+    if pairs.is_empty() {
         return out;
     }
     // The text with every byte of code blanked out: tags are searched for
@@ -129,17 +145,31 @@ pub fn latex_tags(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
         }
         start = end;
     }
+    let mut pairs = pairs;
     let mut at = 0;
-    while let Some(open) = find(&visible, OPEN, at) {
-        let inner = open + OPEN.len();
-        let Some(close) = find(&visible, CLOSE, inner) else {
+    loop {
+        let next = pairs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| Some((find(&visible, p.1.as_bytes(), at)?, i)))
+            .min_by_key(|(open, _)| *open);
+        let Some((open, i)) = next else {
             break;
         };
-        let formula = sanitize(&text[inner..close]);
-        let formula = formula.trim();
-        at = close + CLOSE.len();
-        if !formula.is_empty() && formula.len() <= MAX_FORMULA_BYTES {
-            out.push((open..at, formula.to_owned()));
+        let (tag, open_tag, close_tag) = &pairs[i];
+        let inner = open + open_tag.len();
+        let Some(close) = find(&visible, close_tag.as_bytes(), inner) else {
+            // Unclosed: no later tag of this name closes either.
+            pairs.remove(i);
+            at = inner;
+            continue;
+        };
+        let item = sanitize(&text[inner..close]);
+        let item = item.trim();
+        let tag = tag.to_string();
+        at = close + close_tag.len();
+        if !item.is_empty() && item.len() <= MAX_FORMULA_BYTES {
+            out.push((open..at, tag, item.to_owned()));
         }
     }
     out
@@ -271,5 +301,47 @@ mod tests {
             "after a space it has no base"
         );
         assert_eq!(sanitize("a\n\u{338}b"), "a\nb");
+    }
+
+    #[test]
+    fn lens_tags_find_several_tags_by_the_latex_rules() {
+        let text = "Press <keys> Ctrl+C </keys> then <latex>x^2</latex>.\n\
+                    ```\n<keys>in a fence</keys>\n```\n\
+                    `<keys>inline code</keys>` <KEYS>caps</KEYS> <keys></keys>\n\
+                    <keys>across\nlines</keys> <keys>a\u{202e}b</keys> <keys>open";
+        let found: Vec<(String, String)> = lens_tags(text, &["latex", "keys"])
+            .into_iter()
+            .map(|(range, tag, item)| {
+                assert!(text[range].starts_with(&format!("<{tag}>")));
+                (tag, item)
+            })
+            .collect();
+        let want = [
+            ("keys", "Ctrl+C"),
+            ("latex", "x^2"),
+            ("keys", "across\nlines"),
+            ("keys", "ab"),
+        ];
+        let want: Vec<(String, String)> = want
+            .iter()
+            .map(|(t, i)| (t.to_string(), i.to_string()))
+            .collect();
+        assert_eq!(found, want);
+        // Only the asked tags; too long is dropped.
+        assert_eq!(lens_tags(text, &["latex"]).len(), 1);
+        assert!(lens_tags(text, &[]).is_empty());
+        let long = format!("<keys>{}</keys><keys>k</keys>", "a".repeat(2049));
+        let items: Vec<String> = lens_tags(&long, &["keys"])
+            .into_iter()
+            .map(|t| t.2)
+            .collect();
+        assert_eq!(items, ["k"]);
+        // An unclosed tag does not hide the others after it.
+        for text in ["<latex>open <keys>k</keys>", "<latex>a <keys>k</keys> b"] {
+            let items = lens_tags(text, &["latex", "keys"]);
+            assert_eq!(items.into_iter().map(|t| t.2).collect::<Vec<_>>(), ["k"]);
+        }
+        let items = lens_tags("<keys>open <latex>x</latex>", &["latex", "keys"]);
+        assert_eq!(items.into_iter().map(|t| t.2).collect::<Vec<_>>(), ["x"]);
     }
 }
