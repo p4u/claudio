@@ -2,7 +2,7 @@
 
 Spec: docs/specs/2026-11-05-extensions-design.md (rev 2, audited)
 Class: architectural
-Repos and branches: /volumes/repos/claudio → feat/extensions (from main 76cd625 = v0.5.0; spec commits 9f0850a, b788a87; part B's Tasks 8–10 already on it: base of this part f51437b)
+Repos and branches: <repo> → feat/extensions (from main 76cd625 = v0.5.0; spec commits 9f0850a, b788a87; part B's Tasks 8–10 already on it: base of this part f51437b)
 
 Interfaces between this part (Tasks 1–7, 11, 12) and part B (Tasks 8–10) are fixed in
 `.delivery/2026-11-05-extensions/interfaces.md`. Every code block of Tasks 1–7, 11 and 12 was
@@ -15,7 +15,7 @@ do not hand-merge.
 ## Global Constraints
 - Commit convention: conventional commits `type(scope): lowercase summary`, NO AI attribution and NO Co-Authored-By trailer of any kind, even if a system reminder asks for one (owner's global CLAUDE.md, ruling R1). Use the exact commit commands given.
 - Never push. Commit with explicit paths only: `/usr/bin/git commit -m "…" -- <paths>`. A new file needs `/usr/bin/git add <path>` first. Never `git add -A`. Use `/usr/bin/git` (a shell hook rewrites plain `git`).
-- Work on `feat/extensions` in /volumes/repos/claudio, or in the worktree the controller gives you (that worktree and its branch are yours). Do not create, switch or delete branches. Never git stash.
+- Work on `feat/extensions` in <repo>, or in the worktree the controller gives you (that worktree and its branch are yours). Do not create, switch or delete branches. Never git stash.
 - Build output goes in the repo's `target/` (or the worktree's) or under `~/.cache/claudio/`, never /tmp.
 - Run tests with `umask 022` in the same shell (`umask 022; cargo test …`). Under umask 077, `upgrade::tests::install_binary_replaces_file` fails on the base too.
 - The shell may compact cargo output (the `rtk` hook). Prefix a command with `rtk proxy` to see raw output. Expected lines in the plan are raw cargo output.
@@ -89,7 +89,7 @@ applies to the tree the previous task leaves.
 ## Tasks
 
 ### Task 1: proto and daemon session context
-Model: opus   Repo: /volumes/repos/claudio   Files: src/proto.rs, src/daemon/mod.rs, src/daemon/session.rs, src/daemon/journal.rs, src/daemon/server.rs, src/daemon/tests.rs, src/claude/hooks.rs, src/main.rs, src/client.rs, src/freshness.rs, src/tui/sessions.rs, tests/manager.rs
+Model: opus   Repo: <repo>   Files: src/proto.rs, src/daemon/mod.rs, src/daemon/session.rs, src/daemon/journal.rs, src/daemon/server.rs, src/daemon/tests.rs, src/claude/hooks.rs, src/main.rs, src/client.rs, src/freshness.rs, src/tui/sessions.rs, tests/manager.rs
 Goal: the client's lenses reach claude through a private context file, with the spec's effective-value rules, caps and journal field (AC2, AC3; AC11's "no context" on the daemon side).
 
 What this task does:
@@ -1368,7 +1368,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `proto::{SessionExtensions, LensSpec, LensKind, lens_name_ok, MAX_LENSES, MAX_INSTRUCTION, MAX_INSTRUCTIONS, DAEMON_FEATURES}`, `Welcome.features: Vec<String>`, `SpawnSpec.extensions`/`RespawnSpec.extensions: Option<SessionExtensions>`, `journal::Entry.extensions`, `daemon::session::{context_path, remove_context, clear_contexts}`, `hooks::settings(bin, socket, token, Option<&Path>)`, `hooks::context(kind, path)`.
 
 ### Task 2: daemon tag-lens extraction and the Lens event
-Model: sonnet   Repo: /volumes/repos/claudio   Files: src/claude/latex.rs, src/claude/projects.rs, src/daemon/session.rs, src/proto.rs, src/tui/interaction.rs
+Model: sonnet   Repo: <repo>   Files: src/claude/latex.rs, src/claude/projects.rs, src/daemon/session.rs, src/proto.rs, src/tui/interaction.rs
 Goal: the daemon sends every tag lens's items as `SessionEvent::Lens` beside `Latex` (AC4, daemon side).
 
 What this task does:
@@ -2050,7 +2050,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `claude::latex::lens_tags`, `proto::{LensItem, LENS_EVENT_MAX, lens_event}`, `SessionEvent::Lens { seq, items }`, `SessionExtensions::tags()`, `TranscriptCursor::{with_tags, lens}`.
 
 ### Task 3: client registry, manifests and config
-Model: sonnet   Repo: /volumes/repos/claudio   Files: src/tui/extensions/mod.rs (new), src/tui/extensions/manifest.rs (new), src/config.rs, src/tui/app.rs, src/tui/interaction.rs, src/tui/sessions.rs, src/tui/mod.rs
+Model: sonnet   Repo: <repo>   Files: src/tui/extensions/mod.rs (new), src/tui/extensions/manifest.rs (new), src/config.rs, src/tui/app.rs, src/tui/interaction.rs, src/tui/sessions.rs, src/tui/mod.rs
 Goal: one registry of built-in and external extensions drives the spawn context and which lens items the client keeps (AC4 client side, AC11).
 
 What this task does:
@@ -3480,7 +3480,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `tui::extensions::{Extension, Lens, ActionDecl, Source, Registry, builtins, READER_KEY, DIAGRAM_CONTEXT}`, `tui::extensions::manifest::{Program, parse, admit, load, dir, HTML_ELEMENTS, MAX_EXTERNAL}`, `config::ExtensionsSection`, `App.extensions`, `App::set_host_features`, `SessionView.{lens_items, lens}`.
 
 ### Task 4: rendering lenses in the pane and the reader
-Model: sonnet   Repo: /volumes/repos/claudio   Files: src/tui/latex.rs, src/tui/mod.rs, src/tui/reader/doc.rs, src/tui/reader/layout.rs, src/tui/ui/mod.rs
+Model: sonnet   Repo: <repo>   Files: src/tui/latex.rs, src/tui/mod.rs, src/tui/reader/doc.rs, src/tui/reader/layout.rs, src/tui/ui/mod.rs
 Goal: every enabled tag lens is overlaid in the pane and placed in the reader, and fence lenses become reader blocks, with latex unchanged (AC1, AC5's and AC8's drawing paths).
 
 What this task does:
@@ -4334,7 +4334,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `latex::overlay_tag`, `reader::doc::{prepare_lenses, Prepared.lenses, Prepared.fences, Block::Lens, Doc::each_lens}`, `RenderCache::render(lens, src, running)`, `render_lens(lens, src, running) -> (Formula, bool)` (Task 11 adds the `mermaid` arm), `render_lens_answers(answers, (tags, fences), cache, running)`.
 
 ### Task 5: the extension host for external programs
-Model: opus   Repo: /volumes/repos/claudio   Files: src/tui/extensions/host.rs (new), src/tui/extensions/protocol.rs (new), src/tui/extensions/mod.rs, src/tui/app.rs, src/tui/interaction.rs, src/tui/mod.rs, src/tui/reader/mod.rs
+Model: opus   Repo: <repo>   Files: src/tui/extensions/host.rs (new), src/tui/extensions/protocol.rs (new), src/tui/extensions/mod.rs, src/tui/app.rs, src/tui/interaction.rs, src/tui/mod.rs, src/tui/reader/mod.rs
 Goal: external lens items are rendered by their programs, asynchronously and bounded, in the pane and the reader; actions can be run (AC5, AC7's host part).
 
 What this task does:
@@ -6044,7 +6044,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `extensions::{ActionResult, ListItem}`, `extensions::protocol::{Rendering, SessionContext, action_result, rendering}`, `extensions::host::{ExtensionHost::{new, render, action, shutdown}, Failure, RENDER_TIMEOUT, ACTION_TIMEOUT, MAX_IN_FLIGHT}`, `Effect::RenderExternal`, `HostEvent::{ExternalRendered, ReaderExternalRendered, ExtensionNotice}`, `App::{on_external_rendered, on_reader_external}`, `reader::{Slot, External}`, `ReaderView::set_external`, `render_all(host, requests)` in `tui/mod.rs`.
 
 ### Task 6: the leader key and action UI
-Model: sonnet   Repo: /volumes/repos/claudio   Files: src/tui/leader.rs (new), src/tui/ui/leader.rs (new), src/tui/app.rs, src/tui/interaction.rs, src/tui/keymap.rs, src/tui/mod.rs, src/tui/plain.rs, src/tui/reader/mod.rs, src/tui/ui/mod.rs, tests/manager.rs
+Model: sonnet   Repo: <repo>   Files: src/tui/leader.rs (new), src/tui/ui/leader.rs (new), src/tui/app.rs, src/tui/interaction.rs, src/tui/keymap.rs, src/tui/mod.rs, src/tui/plain.rs, src/tui/reader/mod.rs, src/tui/ui/mod.rs, tests/manager.rs
 Goal: Alt+z lists and runs actions; results show as notices, lists, documents or pastes (AC6, AC7's UI, AC1's permitted plain key-set edits).
 
 What this task does:
@@ -7259,7 +7259,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `keymap::Action::Extensions`, `Modal::{Leader, ActionInput, Picker}`, `leader::{LeaderEntry, Input, Picker, INPUT_MAX, PASTE_MAX}`, `App::{leader_entries, start_action, on_action_result, apply_result, open_document, paste, open_reader (now pub(super))}`, `App.pending_action`, `Effect::RunAction`, `HostEvent::ActionDone`, `ReaderView::document`, `ReaderView.title`. Task 11 provides `App::builtin_action` (this task's placeholder is removed there).
 
 ### Task 7: framework manager tests
-Model: sonnet   Repo: /volumes/repos/claudio   Files: tests/manager.rs
+Model: sonnet   Repo: <repo>   Files: tests/manager.rs
 Goal: one end-to-end test with a fake external extension (a shell script) and a fake claude: AC2 (argv and `--settings` without the instruction, context file with it), AC5 (pane and reader render `<keys>`), AC6 (leader lists built-in and external actions, Esc sends nothing, Alt+z u), AC7 (paste reaches claude without Enter and with no API key in the program's env; list; document with its own lens rendered; refused when bracketed paste is off; a hanging action times out with a notice). Crash/restart/disable is covered by Task 5's unit tests.
 
 Step 1: write the test (it passes at once: Tasks 1–6 implement what it checks)
@@ -7499,7 +7499,7 @@ Interfaces this task provides to later tasks: `tests/manager.rs` helpers `ALT_Z`
 > Tasks 8–10 were executed before the rest of the plan (controller decision, ledger 17:30–17:45): they are on feat/extensions as 1ddd880 (T8), d323c1c (T10), f51437b (T9). Kept here for the record and the gate audit; Tasks 1–7, 11, 12 run on top of f51437b. Ruling R9 replaced their DAEMON_FEATURES steps.
 
 ### Task 8: diagram engine (`src/tui/diagram/`)
-Model: opus   Repo: /volumes/repos/claudio (feat/extensions, or the worktree the controller gives)
+Model: opus   Repo: <repo> (feat/extensions, or the worktree the controller gives)
 Files: create `src/tui/diagram/mod.rs`, `src/tui/diagram/text.rs`, `src/tui/diagram/canvas.rs`, `src/tui/diagram/flowchart.rs`, `src/tui/diagram/sequence.rs`, `src/tui/diagram/tests.rs`; modify `src/tui/mod.rs` (two lines after `mod connections;`).
 Parallel: independent of every other task (Task 1 included). In `src/tui/mod.rs` Task 10 adds its two lines after `mod sessions;` and part A may add `mod extensions;`: different lines of the `mod` list.
 Goal: the pure Mermaid engine of spec §7 (AC8, unit part): `too_complex`, `render`, `Unsupported`, for flowcharts (`graph`/`flowchart`, TD/TB/BT/LR/RL) and `sequenceDiagram`; the v1-distinct set drawn distinctly and the rest mapped to it; every cap checked before allocating; nothing recursive on the input.
@@ -10260,7 +10260,7 @@ Interfaces this task provides to later tasks:
 
 
 ### Task 9: search (`src/claude/search.rs`, `Msg::Search`, daemon arm)
-Model: sonnet   Repo: /volumes/repos/claudio (feat/extensions after Task 1, or the controller's worktree)
+Model: sonnet   Repo: <repo> (feat/extensions after Task 1, or the controller's worktree)
 Files: create `src/claude/search.rs`; modify `src/claude/mod.rs` (one line), `src/claude/projects.rs` (`flag`, `answer_prompt`, `push_texts` become `pub(crate)`), `src/proto.rs` (`Msg::Search` after `GitDiff`, `Msg::SearchReply` after `GitPatch`, `SEARCH_REPLY_MAX`/`SearchHit`/`search_reply` after `answers_reply`, two tests after `an_answers_reply_always_fits_a_frame`, `"search"` in `DAEMON_FEATURES`), `src/daemon/mod.rs` (one `Daemon` field), `src/daemon/server.rs` (one `request` arm before `other =>`, `spawn_search` after `spawn_git`, `SearchSlot` after `recent_projects`), `src/daemon/tests.rs` (one test before `list_dir_sorts_dirs_first`).
 Depends on: Task 1 (`DAEMON_FEATURES`, `Welcome.features`). Parallel with Tasks 8 and 10. Task 10 edits `proto.rs`, `server.rs`, `projects.rs` and `daemon/tests.rs` in other places (after `Msg::Answers`/`AnswersReply`; after the `Answers` arm and the `answers` fn; `read_answers` and new fns after `cut`; before `kill_removes_session_everywhere`). A scratch merge of both branches conflicts only on the `DAEMON_FEATURES` line → resolve to `&["lens", "search", "last_prompt"]`. Neither task edits a `use` line of `server.rs` (both write `std::path::PathBuf`/`std::sync::Mutex` in full): keep it so.
 Goal: spec §8 daemon side and the AC9 unit tests: query rules (trimmed, sanitized, 2..=200 bytes, ≤ 8 words, every word must appear, Unicode lowercase); scope `<projects>/*/*.jsonl` (real dirs and regular files only, no deeper levels, ids `[A-Za-z0-9_-]+`), newest first; messages are real prompts (`answer_prompt`) and assistant `text` blocks (never tool results, thinking, tool input, Claude Code's own records, sidechains or API errors); one hit per conversation (`matches`; `snippet` = ≤ 160 chars of the newest match around its first word, one line; `title` = the first real prompt read, ≤ 80 chars; `cwd` from the records; all sanitized); streaming `BufReader` 64 KiB, lines > 1 MiB skipped without being kept, last 64 MiB per file (partial first line skipped), stop at 3 s / 1 GiB / `limit` (0 → 50, ≤ 100) with `truncated`, `scanned`/`total` count files; reply ≤ 512 KiB; one search per daemon (`Error "search busy"` at once); `Error "bad query: <why>"`.
@@ -11387,7 +11387,7 @@ Interfaces this task provides to later tasks:
 
 
 ### Task 10: last prompt op and snippets store
-Model: sonnet   Repo: /volumes/repos/claudio (feat/extensions after Task 1, or the controller's worktree)
+Model: sonnet   Repo: <repo> (feat/extensions after Task 1, or the controller's worktree)
 Files: create `src/tui/snippets.rs`; modify `src/tui/mod.rs` (two lines after `mod sessions;`), `src/claude/projects.rs` (`read_answers` split into `read_tail`; `read_last_prompt`; `MAX_LAST_PROMPT` and `last_prompt` after `cut`; tests at the end), `src/proto.rs` (`Msg::LastPrompt` after `Answers`, `Msg::LastPromptReply` after `AnswersReply`, one test before `an_answers_reply_always_fits_a_frame`, `"last_prompt"` in `DAEMON_FEATURES`), `src/daemon/server.rs` (arm after the `Answers` arm; `answers` uses the new `transcript` helper; `last_prompt` and `transcript` after `answers`), `src/daemon/tests.rs` (one test before `kill_removes_session_everywhere`).
 Depends on: Task 1 (`DAEMON_FEATURES`). Parallel with Tasks 8 and 9 (see Task 9: only the `DAEMON_FEATURES` line conflicts).
 Goal: spec §9 and AC10 (load/save unit parts) plus the F4 op. `LastPrompt` answers the newest real prompt of the transcript tail (`answer_prompt`'s rules, answered or not; sidechains skipped), sanitized and trimmed, ≤ 64 KiB cut on a char boundary with no mark and `cut: true`; `prompt: None` when there is none; an unknown session → `Error "no such session: …"`. Snippets: `load` (`*.md`/`*.txt`, ≤ 64 KiB each, read without trusting the size; the first 500 by name; hidden, non-regular and non-UTF-8 files skipped; name = stem; sanitized; missing dir → empty), `save` (`slug`, then `-2`, `-3`… while a `.md` or `.txt` has the name; dir 0700 via `paths::ensure_private_dir`, file 0600 via `paths::write_atomic`), `slug` (first words, `[a-z0-9-]`, ≤ 40, `snippet` when empty), `dir()`.
@@ -12061,7 +12061,7 @@ Interfaces this task provides to later tasks:
 
 
 ### Task 11: wiring diagram, search and snippets into the framework
-Model: sonnet   Repo: /volumes/repos/claudio   Files: src/tui/builtins.rs (new), src/tui/app.rs, src/tui/extensions/mod.rs, src/tui/interaction.rs, src/tui/leader.rs, src/tui/mod.rs, src/tui/sessions.rs, tests/manager.rs
+Model: sonnet   Repo: <repo>   Files: src/tui/builtins.rs (new), src/tui/app.rs, src/tui/extensions/mod.rs, src/tui/interaction.rs, src/tui/leader.rs, src/tui/mod.rs, src/tui/sessions.rs, tests/manager.rs
 Goal: the three built-in extensions work end to end (AC8, AC9, AC10), coded against interfaces.md.
 
 Uses Tasks 8–10 as they are on the branch (f51437b): `tui::diagram::{too_complex, render, Unsupported}`, `Msg::Search`/`SearchReply`/`SearchHit`, `Msg::LastPrompt`/`LastPromptReply`, `tui::snippets::{Snippet, dir, load, save}`. The diffs below were replayed on those real modules. Step 2 also removes the two `#[allow(dead_code)] // Wired into … by Task 11, which removes this.` lines above `mod diagram;` and `mod snippets;` in `src/tui/mod.rs`.
@@ -12982,7 +12982,7 @@ Step 3: commit
 Interfaces this task provides to later tasks: `ActionResult::Resume`, `App::{builtin_action, resume_conversation, preselected_proxy, on_search_reply, on_snippets, on_last_prompt_reply, on_snippet_saved}`, `ReplyTo::{Search, LastPrompt}`, `Effect::{LoadSnippets, SaveSnippet}`, `HostEvent::{SnippetsLoaded, SnippetSaved}`, `render_diagram`.
 
 ### Task 12: docs and the example extension
-Model: sonnet   Repo: /volumes/repos/claudio   Files: README.md, CLAUDE.md, docs/manager-design.md, docs/extensions.md (new), examples/extensions/keys/extension.toml (new), examples/extensions/keys/keys.py (new), src/tui/extensions/manifest.rs
+Model: sonnet   Repo: <repo>   Files: README.md, CLAUDE.md, docs/manager-design.md, docs/extensions.md (new), examples/extensions/keys/extension.toml (new), examples/extensions/keys/keys.py (new), src/tui/extensions/manifest.rs
 Goal: users and extension authors can use and write extensions; the example stays valid (AC12's documentation, the spec's "docs" deliverable).
 
 Step 1: write the failing test (the example manifest must parse and be admitted)
@@ -13418,7 +13418,7 @@ Run: `umask 022; cargo test --locked --bin claudio`
 Expected: `test result: ok. 977 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
 Run: `printf '%s\n' '{"id":1,"method":"render","params":{"kind":"tag","lens":"keys","source":"Ctrl+C"}}' | python3 -I examples/extensions/keys/keys.py`
 Expected: `{"id": 1, "result": {"inline": "⌃C", "block": ["┌───┐ ┌───┐", "│ ⌃ │ │ C │", "└───┘ └───┘"]}}`
-Run: `grep -rnE '/volumes/|/home/p4u|z6' docs/extensions.md examples/ src/tui/extensions/ src/tui/leader.rs src/tui/builtins.rs` → nothing.
+Run: a grep for personal paths and host names over `docs/extensions.md examples/ src/tui/extensions/ src/tui/leader.rs src/tui/builtins.rs` → nothing.
 
 Step 3: commit
 `/usr/bin/git add docs/extensions.md examples/extensions/keys/extension.toml examples/extensions/keys/keys.py && /usr/bin/git commit -m "docs: extensions, the leader key and the protocol" -- README.md CLAUDE.md docs/manager-design.md docs/extensions.md examples/extensions/keys/extension.toml examples/extensions/keys/keys.py src/tui/extensions/manifest.rs`
@@ -13452,7 +13452,7 @@ Interfaces this task provides to later tasks: none.
 7. Post-release checks: `gh run list --limit 5` → the `ci` run on `main` and the `release` run on `v0.6.0` succeed (`gh run watch <id>` until done); `gh release view v0.6.0` lists the assets of every target in `release.yml`; `claudio upgrade` from a v0.5.0 install reaches 0.6.0.
 
 ## Scratch verification record
-- Where: `~/.cache/claudio/scratch/plan-ext-a`, a clone of /volumes/repos/claudio at `feat/extensions`, rebased onto f51437b once part B landed (tags N0 = f51437b, N1…N7, N11, N12 = the task commits). Every task was rebuilt as two commits on top of the previous one (Step 1: tests only, Step 2: the rest), and every diff block here is the `git diff` between them; the Step 2 tree equals the task commit. Every Expected line is copied from those runs.
+- Where: `~/.cache/claudio/scratch/plan-ext-a`, a clone of <repo> at `feat/extensions`, rebased onto f51437b once part B landed (tags N0 = f51437b, N1…N7, N11, N12 = the task commits). Every task was rebuilt as two commits on top of the previous one (Step 1: tests only, Step 2: the rest), and every diff block here is the `git diff` between them; the Step 2 tree equals the task commit. Every Expected line is copied from those runs.
 - Replay: the blocks were extracted from this file and applied with `git apply`, with each Step 3 commit command, onto a fresh clone at f51437b (`~/.cache/claudio/scratch/plan-ext-a-replay`): every block applied, nothing was left uncommitted, and the result is identical to the scratch tip (`git diff` empty).
 - Unit totals: 920 (f51437b) → 933 (Task 1) → 939 (Task 2) → 950 (Task 3) → 955 (Task 4) → 966 (Task 5) → 972 (Task 6) → 972 (Task 7) → 976 (Task 11) → 977 (Task 12).
 - Step 1 states fail as stated (compile errors where the tests name what the step adds; Tasks 6 and 11 fail at run time as stated).
