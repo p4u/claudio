@@ -8,6 +8,8 @@ pub mod app;
 mod claude_update;
 mod confirm;
 mod connections;
+#[allow(dead_code)] // Wired into the reader by Task 11, which removes this.
+mod diagram;
 mod fmt;
 mod formulas;
 mod git_app;
