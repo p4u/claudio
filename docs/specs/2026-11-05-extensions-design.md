@@ -528,7 +528,9 @@ choice the wizard would preselect there. The search runs on the active session's
 - [ ] AC1 (no regression): all existing unit and manager tests pass, the only permitted edits
   being the plain-mode key-set assertions (`src/tui/plain.rs`, `keymap.rs` `PLAIN_ACTIONS`)
   extended with Alt+z; latex pane overlay, reader view, Tab list and `[claude] latex = false`
-  behave as in v0.5.0.
+  behave as in v0.5.0. (Exception, by §2: on a host whose daemon has `[claude] latex = false`, a
+  new client overlays no `<latex>` tags for that host's sessions, since the daemon extracts
+  none; v0.5.0 clients still get them through `Latex`.)
 - [ ] AC2 (context): a spawn with `extensions` writes the context file 0600 and the
   SessionStart hooks run `__context file`; `__context file` prints the JSON line for a good
   file and nothing for a missing, symlinked, foreign-owned or non-regular one (unit tests);
