@@ -43,6 +43,9 @@ pub enum Action {
     Formulas,
     /// Open the leader popup: the extensions' actions, one key each.
     Extensions,
+    /// Open the extensions screen: each extension's description, keys and
+    /// lenses, and turn it on or off.
+    ExtensionsMenu,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
@@ -69,6 +72,7 @@ impl Action {
             Action::Reset => "reset",
             Action::Formulas => "formulas",
             Action::Extensions => "extensions",
+            Action::ExtensionsMenu => "extensions_menu",
             Action::ToggleHidden => "toggle_hidden",
             Action::GotoSession(_) => "goto_session",
         }
@@ -223,6 +227,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         action: Action::Extensions,
         scope: Scope::Global,
     },
+    // Alt+i: the extensions screen. Verified free in Claude Code 2.1.318
+    // (no alt+i/meta+i in its bundle; it uses alt+b/d/f/y and
+    // o/p/t/w/j/m/k/v); readline has no default Alt+i.
+    Binding {
+        code: KeyCode::Char('i'),
+        mods: KeyModifiers::ALT,
+        label: "extensions: describe, turn on/off",
+        action: Action::ExtensionsMenu,
+        scope: Scope::Global,
+    },
     // Quit is last so it's always visible in the status bar even when truncated.
     Binding {
         code: KeyCode::Char('q'),
@@ -258,13 +272,14 @@ fn goto_session(key: &KeyEvent) -> Option<Action> {
 
 /// The only actions `claudio --plain` keeps, in help order. Everything else
 /// (tabs, wizard, rename, quit, ...) belongs to the manager and goes to claude.
-pub const PLAIN_ACTIONS: [Action; 6] = [
+pub const PLAIN_ACTIONS: [Action; 7] = [
     Action::Help,
     Action::ProxyStats,
     Action::GitLog,
     Action::Reset,
     Action::Formulas,
     Action::Extensions,
+    Action::ExtensionsMenu,
 ];
 
 /// The effective keymap: defaults + config overrides.
@@ -613,6 +628,12 @@ mod tests {
             Some(Action::Formulas)
         );
         assert_eq!(Action::Formulas.name(), "formulas");
+        assert_eq!(
+            km.lookup(&key(KeyCode::Char('i'), KeyModifiers::ALT)),
+            Some(Action::ExtensionsMenu)
+        );
+        assert_eq!(km.key_for(Action::ExtensionsMenu).as_deref(), Some("Alt+i"));
+        assert_eq!(Action::ExtensionsMenu.name(), "extensions_menu");
     }
 
     /// The reader view keeps the v0.4.0 popup's config name, `formulas`.
@@ -939,6 +960,8 @@ mod tests {
         assert_eq!(km.lookup(&alt('l')), Some(Action::GitLog));
         assert_eq!(km.lookup(&alt('e')), Some(Action::Reset));
         assert_eq!(km.lookup(&alt('u')), Some(Action::Formulas));
+        assert_eq!(km.lookup(&alt('z')), Some(Action::Extensions));
+        assert_eq!(km.lookup(&alt('i')), Some(Action::ExtensionsMenu));
         // Every other manager key goes to claude.
         for c in ['n', 'x', 'r', 'g', 'c', 'a', 'q'] {
             assert_eq!(km.lookup(&alt(c)), None, "Alt+{c}");
@@ -960,7 +983,7 @@ mod tests {
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
-            ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u", "Alt+z"]
+            ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+i"]
         );
     }
 

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::{builtins, ActionDecl, Extension, Lens, Source, READER_KEY};
+use super::{builtins, ActionDecl, Extension, Lens, Source, MANAGE_KEY, READER_KEY};
 use crate::claude::latex::sanitize;
 use crate::proto::{lens_name_ok, LensKind, MAX_INSTRUCTION};
 
@@ -335,7 +335,7 @@ pub fn admit(candidates: Vec<Extension>, notices: &mut Vec<String>) -> Vec<Exten
     let mut keys: Vec<char> = taken
         .iter()
         .flat_map(|e| e.actions.iter().map(|a| a.key))
-        .chain([READER_KEY])
+        .chain([READER_KEY, MANAGE_KEY])
         .collect();
     let builtin_count = taken.len();
     for mut ext in candidates {
@@ -546,12 +546,13 @@ input = "label"
                 ext("third", "latex", 't'), // a built-in's lens
                 ext("fourth", "four", 's'), // a taken key: the action goes
                 ext("fifth", "five", 'u'),  // the reader's key
+                ext("sixth", "six", 'e'),   // the extensions screen's key
             ],
             &mut notices,
         );
         let names: Vec<&str> = admitted.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["keys", "fourth", "fifth"]);
-        assert!(admitted[1].actions.is_empty() && admitted[2].actions.is_empty());
+        assert_eq!(names, ["keys", "fourth", "fifth", "sixth"]);
+        assert!(admitted[1..].iter().all(|e| e.actions.is_empty()));
         assert_eq!(
             notices,
             [
@@ -560,6 +561,7 @@ input = "label"
                 "extension third: lens latex is taken",
                 "extension fourth: key s is taken",
                 "extension fifth: key u is taken",
+                "extension sixth: key e is taken",
             ]
         );
         let many: Vec<Extension> = (0..18)
@@ -573,7 +575,11 @@ input = "label"
             .collect();
         let mut notices = Vec::new();
         assert_eq!(admit(many, &mut notices).len(), MAX_EXTERNAL);
-        assert_eq!(notices.len(), 2 + 1, "two over the cap, and key p is taken");
+        assert_eq!(
+            notices.len(),
+            2 + 2,
+            "two over the cap, and keys e and p are taken"
+        );
     }
 
     #[test]

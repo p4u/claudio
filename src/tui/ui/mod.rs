@@ -12,6 +12,7 @@ use ratatui::Frame;
 use crate::proto::{SessionKind, SessionState};
 
 mod confirm;
+mod extensions;
 mod git;
 mod leader;
 mod reader;
@@ -102,6 +103,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::Leader) => leader::draw_leader(frame, app),
         Some(Modal::ActionInput(input)) => leader::draw_action_input(frame, input),
         Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
+        Some(Modal::ExtensionsMenu(view)) => extensions::draw_extensions(frame, app, view),
         None => {}
     }
 }
@@ -320,7 +322,9 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     view.mirror.render(area, frame.buffer_mut());
-    if !view.latex.is_empty() {
+    // Only while the latex extension is on (it may be turned off live).
+    let latex_on = app.extensions.tag_lenses().contains(&"latex");
+    if latex_on && !view.latex.is_empty() {
         super::latex::overlay(frame.buffer_mut(), area, &view.mirror, &view.latex);
     }
     // The external tag lenses' renderings, each over its own tags.
@@ -930,6 +934,12 @@ mod tests {
         let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
         assert_eq!(row.trim_end(), "energy: E = mc\u{b2}.");
         assert!(app.sessions[0].mirror.row_chars(0).iter().collect::<String>().contains("<latex>"));
+        // The latex extension turned off: the tags show as written.
+        app.extensions.set_enabled("latex", false);
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(row.trim_end(), "energy: <latex>E = mc^2</latex>.");
     }
 
     fn total_width(titles: &[(String, String)]) -> usize {

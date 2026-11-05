@@ -176,6 +176,12 @@ pub enum Effect {
         input: Option<String>,
         session: Option<super::extensions::protocol::SessionContext>,
     },
+    /// Turn external extension `name` on or off in the extension host
+    /// (off: its program is stopped, off the UI thread).
+    SetExtension { name: String, on: bool },
+    /// Write `[extensions] name = on` to config.toml; the outcome is a
+    /// notice.
+    SaveExtension { name: String, on: bool },
     /// Render the answers of session `id` for the reader view opened under
     /// `gen`, on the `latex-render` worker; they come back through
     /// [`App::on_answers_rendered`].
@@ -337,6 +343,9 @@ pub struct App {
     pub(super) lens_hosts: HashSet<String>,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
+    /// The external extensions the extension host disabled after
+    /// failures (until claudio restarts), by name.
+    pub failed_extensions: Vec<String>,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -428,6 +437,7 @@ impl App {
             ),
             lens_hosts: HashSet::new(),
             pending_action: None,
+            failed_extensions: Vec::new(),
         }
     }
 

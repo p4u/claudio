@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, Effect};
 use super::extensions::protocol::SessionContext;
-use super::extensions::{ActionResult, ListItem, Source, READER_KEY};
+use super::extensions::{ActionResult, ListItem, Source, MANAGE_KEY, READER_KEY};
 use super::interaction::Modal;
 use super::reader::ReaderView;
 use crate::claude::latex::sanitize;
@@ -187,7 +187,8 @@ impl App {
     }
 
     /// The leader's lines: the reader, then each enabled extension's
-    /// actions (search is not offered in plain mode).
+    /// actions (search is not offered in plain mode), then the extensions
+    /// screen.
     pub fn leader_entries(&self) -> Vec<LeaderEntry> {
         let mut entries = vec![LeaderEntry {
             key: READER_KEY,
@@ -205,6 +206,11 @@ impl App {
                 extension: Some(ext.name.clone()),
             });
         }
+        entries.push(LeaderEntry {
+            key: MANAGE_KEY,
+            title: "manage extensions".to_owned(),
+            extension: None,
+        });
         entries
     }
 
@@ -228,6 +234,9 @@ impl App {
                 return;
             }
             return self.open_reader();
+        }
+        if c == MANAGE_KEY {
+            return self.open_extensions_menu();
         }
         let found = self
             .extensions
@@ -458,8 +467,27 @@ mod tests {
                 ('p', ext("snippets")),
                 ('P', ext("snippets")),
                 ('k', ext("fake")),
+                ('e', None),
             ]
         );
+        let last = app.leader_entries().pop().unwrap();
+        assert_eq!(last.title, "manage extensions");
+    }
+
+    #[test]
+    fn alt_z_e_opens_the_extensions_screen() {
+        let mut app = app_with_fake(None);
+        app.on_terminal(alt('z'));
+        app.on_terminal(key('e'));
+        assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
+        // Even with no session.
+        app.modal = None;
+        app.sessions.clear();
+        app.active = None;
+        app.on_terminal(alt('z'));
+        app.on_terminal(key('e'));
+        assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
+        assert!(runs(&mut app).is_empty());
     }
 
     #[test]
@@ -637,6 +665,6 @@ mod tests {
             ..crate::tui::test_support::config()
         });
         let keys: Vec<char> = app.leader_entries().iter().map(|e| e.key).collect();
-        assert_eq!(keys, ['u', 'p', 'P']);
+        assert_eq!(keys, ['u', 'p', 'P', 'e']);
     }
 }

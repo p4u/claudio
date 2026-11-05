@@ -16,10 +16,14 @@
 //!   stopped reading) is a timeout too, and the program is stopped;
 //! - [`ExtensionHost::shutdown`] stops every program (SIGTERM to its group,
 //!   SIGKILL after a second), even one a stuck request still holds.
+//!
+//! The host knows every loaded external extension, on or off: one the user
+//! turned off ([`ExtensionHost::set_enabled`]) is refused without starting
+//! its program, and turning it off stops a running one the same way.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -54,6 +58,8 @@ const STOP_GRACE: Duration = Duration::from_secs(1);
 pub enum Failure {
     /// The extension was disabled after too many failures.
     Disabled,
+    /// The user turned the extension off.
+    Off,
     /// The program could not be started.
     Start(String),
     /// It exited, or broke the protocol, before answering.
@@ -67,6 +73,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Disabled => write!(f, "disabled after {FAILURES} failures"),
+            Failure::Off => write!(f, "turned off"),
             Failure::Start(why) => write!(f, "could not start: {why}"),
             Failure::Crashed => write!(f, "stopped before answering"),
             Failure::Timeout => write!(f, "timed out"),
@@ -105,6 +112,8 @@ struct Ext {
     pending: Pending,
     /// Failure times within the window, and whether it is disabled.
     health: StdMutex<(VecDeque<Instant>, bool)>,
+    /// Turned off by the user (not a failure; turned on again at will).
+    off: AtomicBool,
     slots: Semaphore,
     next_id: AtomicU64,
     gen: AtomicU64,
@@ -116,9 +125,24 @@ impl Ext {
         self.health.lock().unwrap_or_else(|e| e.into_inner()).1
     }
 
+    /// Why a request is refused now: turned off, or disabled.
+    fn refused(&self) -> Option<Failure> {
+        if self.off.load(Ordering::Acquire) {
+            Some(Failure::Off)
+        } else if self.disabled() {
+            Some(Failure::Disabled)
+        } else {
+            None
+        }
+    }
+
     /// Count a failure; the [`FAILURES`]th within the window disables the
-    /// extension, with a notice.
+    /// extension, with a notice. What ends because it was turned off is
+    /// not one.
     fn fail(&self, why: &str) {
+        if self.off.load(Ordering::Acquire) {
+            return;
+        }
         let mut health = self.health.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         health.0.push_back(now);
@@ -145,13 +169,13 @@ impl Ext {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, Failure> {
-        if self.disabled() {
-            return Err(Failure::Disabled);
+        if let Some(refused) = self.refused() {
+            return Err(refused);
         }
         let _slot = self.slots.acquire().await.map_err(|_| Failure::Disabled)?;
         // It may have been disabled while this waited for a slot.
-        if self.disabled() {
-            return Err(Failure::Disabled);
+        if let Some(refused) = self.refused() {
+            return Err(refused);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
@@ -162,9 +186,9 @@ impl Ext {
         let written = {
             let mut slot = self.proc.lock().await;
             // Or while it waited for the program: do not start it again.
-            if self.disabled() {
+            if let Some(refused) = self.refused() {
                 self.lock_pending().remove(&id);
-                return Err(Failure::Disabled);
+                return Err(refused);
             }
             if slot.is_none() {
                 match self.start() {
@@ -292,6 +316,34 @@ impl Ext {
             self.fail(why);
         }
     }
+
+    /// Stop the running program, if any: SIGTERM to its group, SIGKILL
+    /// after [`STOP_GRACE`]. Bounded even when a request holds the lock:
+    /// the program is then signalled by its pid, without the lock.
+    async fn halt(&self) {
+        let Ok(mut slot) = tokio::time::timeout(STOP_GRACE, self.proc.lock()).await else {
+            let pid = self.lock_pid().take().map(|(_, pid)| pid);
+            signal_group(pid, libc::SIGTERM);
+            tokio::time::sleep(STOP_GRACE).await;
+            signal_group(pid, libc::SIGKILL);
+            return;
+        };
+        let Some(mut proc) = slot.take() else {
+            return;
+        };
+        drop(slot);
+        *self.lock_pid() = None;
+        // What waits on it ends now (not as a timeout).
+        self.lock_pending().clear();
+        signal_group(proc.pid, libc::SIGTERM);
+        if tokio::time::timeout(STOP_GRACE, proc.child.wait())
+            .await
+            .is_err()
+        {
+            signal_group(proc.pid, libc::SIGKILL);
+            let _ = proc.child.wait().await;
+        }
+    }
 }
 
 /// Read start `gen`'s replies until it exits or breaks the protocol.
@@ -368,12 +420,12 @@ pub struct ExtensionHost {
 }
 
 impl ExtensionHost {
-    /// The host of `registry`'s enabled external extensions (none started
-    /// yet). Notices (an extension disabled) go to `notices`.
+    /// The host of `registry`'s external extensions, on or off (none
+    /// started yet). Notices (an extension disabled) go to `notices`.
     pub fn new(registry: &Registry, notices: mpsc::UnboundedSender<String>) -> ExtensionHost {
         let mut exts = HashMap::new();
         let mut lenses = HashMap::new();
-        for ext in registry.enabled() {
+        for ext in &registry.extensions {
             let Source::External(program) = &ext.source else {
                 continue;
             };
@@ -387,6 +439,7 @@ impl ExtensionHost {
                 pid: StdMutex::new(None),
                 pending: Arc::default(),
                 health: StdMutex::new((VecDeque::new(), false)),
+                off: AtomicBool::new(!ext.enabled),
                 slots: Semaphore::new(MAX_IN_FLIGHT),
                 next_id: AtomicU64::new(0),
                 gen: AtomicU64::new(0),
@@ -422,7 +475,7 @@ impl ExtensionHost {
             _ => "tag",
         };
         async move {
-            let ext = ext?;
+            let ext = ext.filter(|e| !e.off.load(Ordering::Acquire))?;
             if let Some((at, cached)) = cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -435,6 +488,10 @@ impl ExtensionHost {
             }
             let params = protocol::render_params(&key.0, kind, &key.1);
             let result = ext.call("render", params, RENDER_TIMEOUT).await;
+            // Turned off meanwhile: not a failed rendering to remember.
+            if result == Err(Failure::Off) {
+                return None;
+            }
             let rendering = result.ok().as_ref().and_then(protocol::rendering);
             let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             if cache.entries.len() >= RENDER_CACHE {
@@ -473,33 +530,40 @@ impl ExtensionHost {
         }
     }
 
+    /// Turn extension `name` on or off. Off, its requests are refused
+    /// without starting it, and the returned future stops its running
+    /// program (see [`ExtensionHost::shutdown`]); on, it starts again on
+    /// the next request, unless it was disabled after failures (that
+    /// lasts until claudio restarts). The flag changes at once.
+    pub fn set_enabled(&self, name: &str, on: bool) -> impl Future<Output = ()> + Send + 'static {
+        let ext = self.exts.get(name).cloned();
+        if let Some(ext) = &ext {
+            ext.off.store(!on, Ordering::Release);
+        }
+        async move {
+            if let Some(ext) = ext.filter(|_| !on) {
+                ext.halt().await;
+            }
+        }
+    }
+
+    /// The extensions disabled after failures, by name.
+    pub fn failed(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .exts
+            .values()
+            .filter(|e| e.disabled())
+            .map(|e| e.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Stop every program: SIGTERM to its group, SIGKILL after a second.
     /// Bounded even when a request holds a program's lock: the program is
     /// then signalled by its pid, without the lock.
     pub async fn shutdown(&self) {
-        futures::future::join_all(self.exts.values().map(|ext| async move {
-            let Ok(mut slot) = tokio::time::timeout(STOP_GRACE, ext.proc.lock()).await else {
-                let pid = ext.lock_pid().take().map(|(_, pid)| pid);
-                signal_group(pid, libc::SIGTERM);
-                tokio::time::sleep(STOP_GRACE).await;
-                signal_group(pid, libc::SIGKILL);
-                return;
-            };
-            let Some(mut proc) = slot.take() else {
-                return;
-            };
-            drop(slot);
-            *ext.lock_pid() = None;
-            signal_group(proc.pid, libc::SIGTERM);
-            if tokio::time::timeout(STOP_GRACE, proc.child.wait())
-                .await
-                .is_err()
-            {
-                signal_group(proc.pid, libc::SIGKILL);
-                let _ = proc.child.wait().await;
-            }
-        }))
-        .await;
+        futures::future::join_all(self.exts.values().map(|ext| ext.halt())).await;
     }
 }
 
@@ -627,6 +691,15 @@ mod tests {
             result,
             Err("extension fake: disabled after 3 failures".to_owned())
         );
+        assert_eq!(host.failed(), ["fake"]);
+        // Turning it off and on again does not undo that.
+        host.set_enabled("fake", false).await;
+        host.set_enabled("fake", true).await;
+        let result = host.action("fake", "stamp", None, None).await;
+        assert_eq!(
+            result,
+            Err("extension fake: disabled after 3 failures".to_owned())
+        );
         host.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -701,6 +774,74 @@ mod tests {
             notices.try_recv().unwrap(),
             "extension fake disabled after 3 failures (exited)"
         );
+        host.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_disabled_extension_is_not_started_and_disabling_stops_it() {
+        let script = format!(
+            "echo started >> starts\nsleep 60 &\necho $! > child\n{}",
+            answering(
+                "case \"$line\" in\n\
+                 *render*) printf '{\"id\":%s,\"result\":{\"inline\":\"R\"}}\\n' \"$id\" ;;\n\
+                 *) printf '{\"id\":%s,\"result\":{\"kind\":\"notice\",\"text\":\"up\"}}\\n' \"$id\" ;;\n\
+                 esac",
+            )
+        );
+        let (dir, program) = program(&script);
+        let ext = Extension {
+            name: "fake".into(),
+            description: String::new(),
+            enabled: true,
+            lenses: vec![Lens {
+                name: "keys".into(),
+                kind: LensKind::Tag,
+                instruction: String::new(),
+            }],
+            actions: vec![],
+            source: Source::External(program),
+        };
+        // Off in config.toml: the host knows it, but starts nothing.
+        let off = [("fake".to_owned(), false)].into();
+        let registry = Registry::new(&off, true, vec![ext], &mut Vec::new());
+        let (tx, _notices) = mpsc::unbounded_channel();
+        let host = ExtensionHost::new(&registry, tx);
+        assert_eq!(host.render("keys", LensKind::Tag, "a").await, None);
+        let refused = host.action("fake", "a", None, None).await;
+        assert_eq!(refused, Err("extension fake: turned off".to_owned()));
+        assert!(!dir.join("starts").exists(), "never started");
+
+        // On: it starts on the next request, and a render refused while it
+        // was off is not remembered as a failure.
+        host.set_enabled("fake", true).await;
+        let up = host.action("fake", "a", None, None).await;
+        assert_eq!(up, Ok(ActionResult::Notice { text: "up".into() }));
+        let rendered = host.render("keys", LensKind::Tag, "a").await;
+        assert_eq!(rendered, Some((Some("R".to_owned()), None)));
+        let child: i32 = std::fs::read_to_string(dir.join("child"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        // Off again: its process group is stopped, without a failure.
+        let stopped = tokio::time::timeout(Duration::from_secs(5), host.set_enabled("fake", false));
+        stopped.await.expect("stopping is bounded");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // SAFETY: signal 0 only checks that the process exists.
+        assert!(unsafe { libc::kill(child, 0) } != 0, "the group is gone");
+        let ext = &host.exts["fake"];
+        assert!(ext.proc.lock().await.is_none());
+        assert!(
+            ext.health.lock().unwrap().0.is_empty(),
+            "no failure counted"
+        );
+        assert!(host.failed().is_empty());
+        let refused = host.action("fake", "a", None, None).await;
+        assert_eq!(refused, Err("extension fake: turned off".to_owned()));
+        let starts = std::fs::read_to_string(dir.join("starts")).unwrap();
+        assert_eq!(starts.lines().count(), 1, "not started again");
         host.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();
     }

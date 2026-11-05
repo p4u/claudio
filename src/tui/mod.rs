@@ -11,6 +11,7 @@ mod confirm;
 mod connections;
 mod diagram;
 mod extensions;
+mod extensions_view;
 mod fmt;
 mod formulas;
 mod git_app;
@@ -1182,7 +1183,11 @@ async fn event_loop(
                 Some(HostEvent::ReaderExternalRendered { gen, id, rendered }) => {
                     app.on_reader_external(gen, id, rendered);
                 }
-                Some(HostEvent::ExtensionNotice(text)) => app.notify(text),
+                Some(HostEvent::ExtensionNotice(text)) => {
+                    app.notify(text);
+                    // The one notice the host sends: an extension disabled.
+                    app.failed_extensions = ext_host.failed();
+                }
                 Some(HostEvent::ActionDone { gen, result }) => app.on_action_result(gen, result),
                 Some(HostEvent::SnippetsLoaded { gen, dir, result }) => {
                     app.on_snippets(gen, &dir, result);
@@ -1354,6 +1359,17 @@ fn run_effect(
                 let result = done.await;
                 let _ = tx.send(HostEvent::ActionDone { gen, result }).await;
             });
+        }
+        Effect::SetExtension { name, on } => {
+            // Stopping a program waits up to its grace: never here.
+            tokio::spawn(ext_host.set_enabled(&name, on));
+        }
+        Effect::SaveExtension { name, on } => {
+            let state = if on { "on" } else { "off" };
+            match crate::config::save_extension(&paths::config_file(), &name, on) {
+                Ok(()) => app.notify(format!("extension {name} {state} (saved)")),
+                Err(e) => app.notify(format!("could not save: {e}")),
+            }
         }
         Effect::RenderAnswers { gen, id, answers } => {
             let names = |list: Vec<&str>| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();

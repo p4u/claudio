@@ -19,6 +19,7 @@ use crate::term::screen::{MouseMode, Screen};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
+use super::extensions_view::ExtensionsView;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::leader::{Input, Picker};
@@ -66,6 +67,8 @@ pub enum Modal {
     ActionInput(Box<Input>),
     /// A list an extension action gave, to pick from.
     Picker(Box<Picker>),
+    /// The extensions screen (Alt+i, see `extensions_view.rs`).
+    ExtensionsMenu(ExtensionsView),
 }
 
 impl Modal {
@@ -81,6 +84,7 @@ impl Modal {
                 | Modal::Reader(_)
                 | Modal::Leader
                 | Modal::Picker(_)
+                | Modal::ExtensionsMenu(_)
         )
     }
 
@@ -95,12 +99,16 @@ impl Modal {
                 | (Modal::ProxyStats { .. }, Action::ProxyStats)
                 | (Modal::Reader(_), Action::Formulas)
                 | (Modal::Leader, Action::Extensions)
+                | (Modal::ExtensionsMenu(_), Action::ExtensionsMenu)
         )
     }
 
     /// Whether the modal takes mouse wheel and clicks.
     fn wants_mouse(&self) -> bool {
-        matches!(self, Modal::Git(_) | Modal::Reader(_) | Modal::Picker(_))
+        matches!(
+            self,
+            Modal::Git(_) | Modal::Reader(_) | Modal::Picker(_) | Modal::ExtensionsMenu(_)
+        )
     }
 }
 
@@ -205,6 +213,7 @@ impl App {
             Action::GitLog => self.open_git_log(),
             Action::Formulas => self.open_reader(),
             Action::Extensions => self.open_leader(),
+            Action::ExtensionsMenu => self.open_extensions_menu(),
             _ => {}
         }
         self.redraw = true;
@@ -390,6 +399,7 @@ impl App {
             Modal::Leader => self.leader_key(&key),
             Modal::ActionInput(_) => self.action_input_key(&key),
             Modal::Picker(_) => self.picker_key(&key),
+            Modal::ExtensionsMenu(_) => self.extensions_menu_key(&key),
         }
     }
 
@@ -409,6 +419,16 @@ impl App {
             match m.kind {
                 MouseEventKind::ScrollDown => picker.on_wheel(true),
                 MouseEventKind::ScrollUp => picker.on_wheel(false),
+                _ => return,
+            }
+            self.redraw = true;
+            return;
+        }
+        let count = self.extensions.extensions.len();
+        if let Some(Modal::ExtensionsMenu(view)) = &mut self.modal {
+            match m.kind {
+                MouseEventKind::ScrollDown => view.on_wheel(true, count),
+                MouseEventKind::ScrollUp => view.on_wheel(false, count),
                 _ => return,
             }
             self.redraw = true;
@@ -446,7 +466,8 @@ impl App {
                 | Modal::Confirm(_)
                 | Modal::Reader(_)
                 | Modal::Leader
-                | Modal::Picker(_),
+                | Modal::Picker(_)
+                | Modal::ExtensionsMenu(_),
             ) => {}
             Some(Modal::ActionInput(input)) => {
                 let line = text.lines().next().unwrap_or("");

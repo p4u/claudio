@@ -146,6 +146,10 @@ pub fn builtins() -> Vec<Extension> {
 /// The reader's leader key: always offered, not an extension's.
 pub const READER_KEY: char = 'u';
 
+/// The leader key of the extensions screen (also Alt+i): always offered,
+/// not an extension's.
+pub const MANAGE_KEY: char = 'e';
+
 /// The extensions this client runs with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Registry {
@@ -190,6 +194,17 @@ impl Registry {
             }
         }
         Registry { extensions }
+    }
+
+    /// Turn extension `name` on or off; whether there is one.
+    pub fn set_enabled(&mut self, name: &str, on: bool) -> bool {
+        match self.extensions.iter_mut().find(|e| e.name == name) {
+            Some(ext) => {
+                ext.enabled = on;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The enabled extensions, in order.
@@ -376,6 +391,29 @@ mod tests {
         );
         assert!(r.external_lens("keys").is_none());
         assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn an_extension_turned_off_and_on_again_takes_its_lenses_and_actions_along() {
+        let ext = vec![external("keys", "keys", 'k')];
+        let mut r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
+        assert!(r.set_enabled("keys", false));
+        assert!(r.set_enabled("diagram", false));
+        assert_eq!(r.tag_lenses(), ["latex"]);
+        assert!(r.fence_lenses().is_empty());
+        assert!(r.external_lens("keys").is_none());
+        assert_eq!(names(&r.session_extensions()), ["latex"]);
+        let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
+        assert_eq!(keys, ['s', 'p', 'P']);
+        // Still listed, off.
+        assert_eq!(r.extensions.len(), 5);
+        assert!(r.set_enabled("keys", true));
+        assert!(r.set_enabled("diagram", true));
+        assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
+        let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
+        assert_eq!(keys, ['s', 'p', 'P', 'k']);
+        assert!(r.external_lens("keys").is_some());
+        assert!(!r.set_enabled("nope", true));
     }
 
     #[test]
