@@ -757,6 +757,59 @@ async fn resize_resyncs_other_subscribers() {
     assert_eq!(size, (30, 100));
 }
 
+/// `Search` runs off the client loop over the daemon's projects root, one
+/// at a time; a bad query and a second search are refused at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_finds_conversations_one_search_at_a_time() {
+    let d = TestDaemon::start().await;
+    let project = d.dir.join("projects/-w");
+    std::fs::create_dir_all(&project).unwrap();
+    let record = serde_json::json!({"type": "user", "cwd": "/w",
+        "message": {"role": "user", "content": "find the Needle"}});
+    std::fs::write(project.join("c1.jsonl"), format!("{record}\n")).unwrap();
+    d.daemon.search.set_root(d.dir.join("projects"));
+    let mut c = d.client().await;
+    let ask = |query: &str| Msg::Search {
+        query: query.into(),
+        limit: 0,
+    };
+    match c.call(ask("needle")).await {
+        Msg::SearchReply {
+            query,
+            hits,
+            scanned,
+            total,
+            truncated,
+        } => {
+            assert_eq!(
+                (query.as_str(), scanned, total, truncated),
+                ("needle", 1, 1, false)
+            );
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                (hits[0].conversation.as_str(), hits[0].cwd.as_str()),
+                ("c1", "/w")
+            );
+            assert_eq!(hits[0].snippet, "find the Needle");
+        }
+        other => panic!("expected a reply, got {other:?}"),
+    }
+    match c.call(ask(" x ")).await {
+        Msg::Error { message } => assert_eq!(message, "bad query: too short"),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    let running = d.daemon.search.hold();
+    match c.call(ask("needle")).await {
+        Msg::Error { message } => assert_eq!(message, "search busy"),
+        other => panic!("expected busy, got {other:?}"),
+    }
+    drop(running);
+    assert!(matches!(
+        c.call(ask("needle")).await,
+        Msg::SearchReply { .. }
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_dir_sorts_dirs_first() {
     let d = TestDaemon::start().await;

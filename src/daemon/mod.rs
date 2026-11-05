@@ -346,6 +346,8 @@ pub(crate) struct Daemon {
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
     pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
+    /// `Search`: one at a time, and the transcripts it reads.
+    pub(crate) search: server::SearchSlot,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -384,6 +386,7 @@ impl Daemon {
             skip_permissions_supported: Mutex::new(None),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
+            search: server::SearchSlot::new(),
         }
     }
 

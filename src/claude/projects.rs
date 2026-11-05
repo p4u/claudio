@@ -634,14 +634,14 @@ pub fn recent_answers(bytes: &[u8]) -> Vec<Answer> {
 }
 
 /// Whether `record` has `key: true`.
-fn flag(record: &serde_json::Value, key: &str) -> bool {
+pub(crate) fn flag(record: &serde_json::Value, key: &str) -> bool {
     record.get(key).and_then(|f| f.as_bool()) == Some(true)
 }
 
 /// The prompt of a `type:"user"` record that starts an answer (see
 /// [`recent_answers`]): its string content, or its text blocks joined by
 /// newlines.
-fn answer_prompt(record: &serde_json::Value) -> Option<String> {
+pub(crate) fn answer_prompt(record: &serde_json::Value) -> Option<String> {
     let own = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
     if own.iter().any(|key| flag(record, key)) || !is_real_prompt(record) {
         return None;
@@ -656,7 +656,7 @@ fn answer_prompt(record: &serde_json::Value) -> Option<String> {
 
 /// Append the text of a message's `content` to `texts`: the string itself,
 /// or its `text` blocks (not `thinking`, `tool_use` or `tool_result`).
-fn push_texts(texts: &mut Vec<String>, content: Option<&serde_json::Value>) {
+pub(crate) fn push_texts(texts: &mut Vec<String>, content: Option<&serde_json::Value>) {
     match content {
         Some(serde_json::Value::String(text)) => texts.push(text.clone()),
         Some(serde_json::Value::Array(blocks)) => {

@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, mpsc, Semaphore};
 use super::session::{ClientId, Cmd};
 use super::{git, host, update, Config, Daemon};
 use crate::claude::projects;
+use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
 use crate::proto::{
     self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
@@ -551,6 +552,10 @@ impl Client {
                 });
                 return;
             }
+            Msg::Search { query, limit } => match self.spawn_search(req, query, limit) {
+                Ok(()) => return,
+                Err(refused) => refused,
+            },
             other => Msg::Error {
                 message: format!("unsupported op: {}", op_name(&other)),
             },
@@ -604,6 +609,44 @@ impl Client {
                 }
                 _ = queue.closed() => {}
             }
+        });
+        Ok(())
+    }
+
+    /// Run a search off the client loop and queue its reply when done. One
+    /// search runs per daemon: while one does, another is refused at once
+    /// with "search busy". A bad query is refused before anything runs.
+    fn spawn_search(&self, req: Option<u64>, query: String, limit: u32) -> Result<(), Msg> {
+        if let Err(BadQuery(why)) = search::terms(&query) {
+            return Err(Msg::Error {
+                message: format!("bad query: {why}"),
+            });
+        }
+        let permit = Arc::clone(&self.daemon.search.running)
+            .try_acquire_owned()
+            .map_err(|_| Msg::Error {
+                message: "search busy".into(),
+            })?;
+        let root = self.daemon.search.root();
+        let queue = self.queue.clone();
+        tokio::spawn(async move {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            let scan = tokio::task::spawn_blocking(move || {
+                // Held until the scan ends, even if the client has left.
+                let _permit = permit;
+                let outcome = search::search(&root, &query, limit, Budget::default());
+                outcome.map(|o| proto::search_reply(query, o.hits, o.scanned, o.total, o.truncated))
+            });
+            let msg = match scan.await {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(BadQuery(why))) => Msg::Error {
+                    message: format!("bad query: {why}"),
+                },
+                Err(e) => Msg::Error {
+                    message: format!("search failed: {e}"),
+                },
+            };
+            let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
         });
         Ok(())
     }
@@ -788,6 +831,41 @@ async fn recent_projects(limit: u32) -> Msg {
         Err(e) => Msg::Error {
             message: format!("recent_projects failed: {e}"),
         },
+    }
+}
+
+/// `Search` state shared by a daemon's clients.
+pub(crate) struct SearchSlot {
+    /// One permit: the search that holds it is the one running.
+    running: Arc<Semaphore>,
+    /// Where the transcripts are: [`projects::projects_root`] unless a test
+    /// set its own.
+    root: std::sync::Mutex<Option<std::path::PathBuf>>,
+}
+
+impl SearchSlot {
+    pub(crate) fn new() -> SearchSlot {
+        SearchSlot {
+            running: Arc::new(Semaphore::new(1)),
+            root: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn root(&self) -> std::path::PathBuf {
+        let root = self.root.lock().unwrap_or_else(|e| e.into_inner());
+        root.clone().unwrap_or_else(projects::projects_root)
+    }
+
+    /// Search `root` instead of the user's transcripts.
+    #[cfg(test)]
+    pub(crate) fn set_root(&self, root: std::path::PathBuf) {
+        *self.root.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
+    }
+
+    /// Take the slot as a running search would, until the permit drops.
+    #[cfg(test)]
+    pub(crate) fn hold(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.running).try_acquire_owned().expect("free")
     }
 }
 

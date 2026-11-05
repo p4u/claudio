@@ -197,6 +197,16 @@ pub enum Msg {
         #[serde(default)]
         old_path: Option<String>,
     },
+    /// Search this host's claude conversations (prompts and answers) for
+    /// every word of `query`; at most `limit` hits (0: the default, see
+    /// [`crate::claude::search`]). Answered by `SearchReply`, or `Error
+    /// "search busy"` while another search runs on this daemon, or `Error
+    /// "bad query: …"`. An older daemon answers `Error "unsupported op…"`.
+    Search {
+        query: String,
+        #[serde(default)]
+        limit: u32,
+    },
 
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
@@ -252,6 +262,16 @@ pub enum Msg {
     GitLogPage(GitLogPage),
     GitCommitInfo(GitCommitInfo),
     GitPatch(GitPatch),
+    /// Reply to `Search`, built by [`search_reply`]: one hit per
+    /// conversation, newest first. `scanned` of `total` transcripts were
+    /// read to their end; `truncated` when the search stopped early.
+    SearchReply {
+        query: String,
+        hits: Vec<SearchHit>,
+        scanned: u32,
+        total: u32,
+        truncated: bool,
+    },
     Ok,
     Error {
         message: String,
@@ -713,6 +733,55 @@ pub fn answers_reply(id: SessionId, answers: Vec<Answer>) -> Msg {
         match &mut msg {
             Msg::AnswersReply { answers, .. } if !answers.is_empty() => {
                 answers.remove(0);
+            }
+            _ => break,
+        }
+    }
+    msg
+}
+
+/// The largest encoded `SearchReply` the daemon sends (as for answers).
+pub const SEARCH_REPLY_MAX: usize = 512 * 1024;
+
+/// One conversation that matched a `Search`. Every text is sanitized by
+/// the daemon; `title` is its first prompt and `snippet` the newest match,
+/// each on one line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// The claude session id (the transcript's name), for `--resume`.
+    pub conversation: String,
+    pub cwd: String,
+    /// Unix seconds of the transcript's last modification.
+    pub modified: u64,
+    pub title: String,
+    pub snippet: String,
+    /// How many messages matched.
+    pub matches: u32,
+}
+
+/// The `SearchReply` for `query`, without as many of the last hits as it
+/// takes for its JSON to fit [`SEARCH_REPLY_MAX`] (then `truncated`).
+pub fn search_reply(
+    query: String,
+    hits: Vec<SearchHit>,
+    scanned: u32,
+    total: u32,
+    truncated: bool,
+) -> Msg {
+    let mut msg = Msg::SearchReply {
+        query,
+        hits,
+        scanned,
+        total,
+        truncated,
+    };
+    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > SEARCH_REPLY_MAX) {
+        match &mut msg {
+            Msg::SearchReply {
+                hits, truncated, ..
+            } if !hits.is_empty() => {
+                hits.pop();
+                *truncated = true;
             }
             _ => break,
         }
@@ -1250,6 +1319,75 @@ mod tests {
                 answers: answers[..2].to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn search_round_trips_and_is_unknown_to_older_daemons() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum V05 {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let ask: Msg = serde_json::from_str(r#"{"op":"search","query":"toml"}"#).unwrap();
+        assert_eq!(
+            ask,
+            Msg::Search {
+                query: "toml".into(),
+                limit: 0
+            }
+        );
+        let json = serde_json::to_string(&Envelope::request(3, ask.clone())).unwrap();
+        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
+        let reply = search_reply(
+            "toml".into(),
+            vec![SearchHit {
+                conversation: "c1".into(),
+                cwd: "/p".into(),
+                modified: 7,
+                title: "t".into(),
+                snippet: "s".into(),
+                matches: 2,
+            }],
+            1,
+            3,
+            false,
+        );
+        let frame = Frame::Control(Envelope::request(3, reply.clone()));
+        assert_eq!(roundtrip(frame.clone()), frame);
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains(r#""op":"search_reply""#), "{json}");
+        assert_eq!(serde_json::from_str::<V05>(&json).unwrap(), V05::Unknown);
+    }
+
+    #[test]
+    fn a_search_reply_always_fits_a_frame() {
+        // 100 hits with 8 KiB of quotes each: 1.6 MiB once encoded.
+        let hits: Vec<SearchHit> = (0..100)
+            .map(|i| SearchHit {
+                conversation: format!("c{i}"),
+                cwd: "\"".repeat(4096),
+                modified: i,
+                title: "\"".repeat(4096),
+                snippet: String::new(),
+                matches: 1,
+            })
+            .collect();
+        let msg = search_reply("q".into(), hits.clone(), 100, 100, false);
+        assert!(serde_json::to_vec(&msg).unwrap().len() <= SEARCH_REPLY_MAX);
+        let Msg::SearchReply {
+            hits: kept,
+            truncated,
+            ..
+        } = msg
+        else {
+            panic!("{msg:?}")
+        };
+        // The newest stay, in order; the reply says it is cut.
+        assert!(truncated);
+        assert_eq!(kept[..], hits[..kept.len()]);
+        assert_eq!(kept.len(), 31);
     }
 
     #[test]

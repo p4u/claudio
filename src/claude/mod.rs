@@ -16,6 +16,7 @@
 pub mod hooks;
 pub mod latex;
 pub mod projects;
+pub mod search;
 pub mod state;
 pub mod update;
 
