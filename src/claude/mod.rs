@@ -4,6 +4,8 @@
 //!
 //! - [`hooks`] — hook event constants, settings builder, per-spawn token
 //!   generator, and the short-lived relay process.
+//! - [`latex`] — the `<latex>` formulas of claude's answers, and the
+//!   character filter they go through before they are shown.
 //! - [`projects`] — locating project directories, listing sessions, and
 //!   reading transcript metadata.
 //! - [`update`] — version parsing, release-channel lookup and the daily
@@ -12,6 +14,7 @@
 //!   [`proto::SessionEvent`]s.
 
 pub mod hooks;
+pub mod latex;
 pub mod projects;
 pub mod state;
 pub mod update;

@@ -3,9 +3,11 @@
 //! All paths honour `$CLAUDE_CONFIG_DIR`; the default is `~/.claude`.
 //! Subagent transcripts (under `<uuid>/subagents/`) are ignored.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::claude::latex::{extract_latex, MAX_FORMULAS};
 use crate::proto::ClaudeSession;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -219,6 +221,9 @@ pub struct TranscriptCursor {
     /// be counted once.
     last_message_id: Option<String>,
     totals: TranscriptTotals,
+    /// The `<latex>` formulas of the conversation's answers, oldest first:
+    /// the last [`MAX_FORMULAS`].
+    latex: VecDeque<String>,
 }
 
 impl TranscriptCursor {
@@ -231,6 +236,7 @@ impl TranscriptCursor {
             partial: Vec::new(),
             last_message_id: None,
             totals: TranscriptTotals::default(),
+            latex: VecDeque::new(),
         }
     }
 
@@ -241,6 +247,11 @@ impl TranscriptCursor {
 
     pub fn totals(&self) -> &TranscriptTotals {
         &self.totals
+    }
+
+    /// The conversation's most recent formulas, oldest first.
+    pub fn latex(&self) -> &VecDeque<String> {
+        &self.latex
     }
 
     /// Whether the cursor has seen an assistant record.
@@ -262,6 +273,7 @@ impl TranscriptCursor {
             self.partial.clear();
             self.last_message_id = None;
             self.totals = TranscriptTotals::default();
+            self.latex.clear();
         }
         if len == self.offset {
             return false;
@@ -307,6 +319,10 @@ impl TranscriptCursor {
         match v.get("type").and_then(|t| t.as_str()) {
             Some("assistant") => {
                 let Some(msg) = v.get("message") else { return };
+                // A subagent's work is not the answer on screen.
+                if v.get("isSidechain").and_then(|s| s.as_bool()) != Some(true) {
+                    push_latex(&mut self.latex, msg.get("content"));
+                }
                 let Some(usage) = msg.get("usage") else { return };
                 let count = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                 if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
@@ -334,6 +350,33 @@ impl TranscriptCursor {
             }
             _ => {}
         }
+    }
+}
+
+/// Append the formulas of an assistant message to `latex`, keeping the last
+/// [`MAX_FORMULAS`]. `content` is a string or an array of blocks, of which
+/// only `text` blocks are the answer (not `thinking` or `tool_use`).
+fn push_latex(latex: &mut VecDeque<String>, content: Option<&serde_json::Value>) {
+    let mut add = |text: &str| {
+        for formula in extract_latex(text) {
+            if latex.len() == MAX_FORMULAS {
+                latex.pop_front();
+            }
+            latex.push_back(formula);
+        }
+    };
+    match content {
+        Some(serde_json::Value::String(text)) => add(text),
+        Some(serde_json::Value::Array(blocks)) => {
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        add(text);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -897,6 +940,61 @@ mod tests {
         assert_eq!(c.totals().output_tokens, 1);
         assert_eq!(c.totals().model.as_deref(), Some("claude-y"));
         assert_eq!(c.session_id(), "sid");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An assistant record whose `message.content` is `content` (JSON).
+    fn said(content: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"m","model":"claude-x","content":{content},"usage":{{"output_tokens":1}}}}}}"#
+        ) + "\n"
+    }
+
+    #[test]
+    fn cursor_collects_formulas_from_the_answer_text_only() {
+        let mut c = cursor();
+        let mut jsonl = String::new();
+        jsonl += &said(
+            r#"[{"type":"thinking","thinking":"<latex>t</latex>"},{"type":"text","text":"so <latex>a^2</latex>"},{"type":"tool_use","input":{"x":"<latex>u</latex>"}}]"#,
+        );
+        jsonl += &said(r#""a string <latex>b^2</latex>""#);
+        // A subagent's record and the user's own text are not the answer.
+        jsonl += &said(r#"[{"type":"text","text":"<latex>side</latex>"}]"#)
+            .replacen('{', r#"{"isSidechain":true,"#, 1);
+        jsonl += r#"{"type":"user","message":{"content":"<latex>user</latex>"}}"#;
+        jsonl += "\n";
+        // A record without usage is still read for formulas.
+        jsonl += r#"{"type":"assistant","message":{"content":[{"type":"text","text":"<latex>c</latex>"}]}}"#;
+        jsonl += "\n";
+        c.feed(jsonl.as_bytes());
+        assert_eq!(c.latex().iter().collect::<Vec<_>>(), ["a^2", "b^2", "c"]);
+    }
+
+    #[test]
+    fn cursor_keeps_the_last_64_formulas() {
+        let mut c = cursor();
+        for i in 0..70 {
+            c.feed(said(&format!(r#""<latex>x_{{{i}}}</latex>""#)).as_bytes());
+        }
+        assert_eq!(c.latex().len(), crate::claude::latex::MAX_FORMULAS);
+        assert_eq!(c.latex().front().map(String::as_str), Some("x_{6}"));
+        assert_eq!(c.latex().back().map(String::as_str), Some("x_{69}"));
+    }
+
+    #[test]
+    fn cursor_forgets_the_formulas_of_a_rewritten_file() {
+        let dir = std::env::temp_dir().join(format!("claudio-cursor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let mut c = TranscriptCursor::new(Path::new("/x"), "sid");
+        c.path = path.clone();
+        std::fs::write(&path, said(r#""<latex>old</latex>""#)).unwrap();
+        assert!(c.advance());
+        assert_eq!(c.latex().iter().collect::<Vec<_>>(), ["old"]);
+        // A shorter file is a new one.
+        std::fs::write(&path, said(r#""<latex>n</latex>""#)).unwrap();
+        c.advance();
+        assert_eq!(c.latex().iter().collect::<Vec<_>>(), ["n"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
