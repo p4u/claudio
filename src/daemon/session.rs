@@ -15,7 +15,7 @@
 //! `Attached` + snapshot instead of the bytes it missed. A slow client
 //! therefore never blocks the PTY.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -456,6 +456,32 @@ impl Subscriber {
         true
     }
 
+    /// [`Subscriber::sync`], then `latex` (the last formulas sent, if any):
+    /// formulas are broadcast only when they change, so a client attaching
+    /// now would not see them otherwise. Returns `false` if the client is
+    /// gone.
+    fn attach(
+        &mut self,
+        id: SessionId,
+        size: (u16, u16),
+        snapshot: &[u8],
+        latex: Option<SessionEvent>,
+    ) -> bool {
+        if !self.sync(id, size, snapshot) {
+            return false;
+        }
+        let Some(event) = latex else { return true };
+        let frame = Frame::Control(Envelope::event(Msg::Event { id, event }));
+        match self.queue.try_send(frame) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.lagging = true;
+                true
+            }
+            Err(TrySendError::Closed(_)) => false,
+        }
+    }
+
     /// A lagging subscriber is ready for a resync.
     fn can_resync(&self) -> bool {
         self.lagging && self.queue.capacity() > RESYNC_ROOM
@@ -497,9 +523,14 @@ struct MetaRefresher {
     kind: SessionKind,
     /// The transcript cursor, held by the running refresh.
     cursor: Arc<std::sync::Mutex<Option<crate::claude::projects::TranscriptCursor>>>,
+    /// The formulas last sent to clients, replayed to a client that attaches.
+    latex: Arc<std::sync::Mutex<LatexSent>>,
     busy: Arc<std::sync::atomic::AtomicBool>,
     started_at: Option<std::time::Instant>,
 }
+
+/// The last `SessionEvent::Latex` sent: its `seq` and formulas.
+type LatexSent = Option<(u64, Vec<String>)>;
 
 impl MetaRefresher {
     fn new(id: SessionId, daemon: Arc<Daemon>, cwd: PathBuf, kind: SessionKind) -> Self {
@@ -509,9 +540,15 @@ impl MetaRefresher {
             cwd,
             kind,
             cursor: Arc::default(),
+            latex: Arc::default(),
             busy: Arc::default(),
             started_at: None,
         }
+    }
+
+    /// The last formulas sent, as the event a client attaching now needs.
+    fn last_latex(&self) -> Option<SessionEvent> {
+        last_latex(&self.latex.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Start a refresh unless one is running or the last one started less
@@ -527,34 +564,66 @@ impl MetaRefresher {
         self.started_at = Some(std::time::Instant::now());
         let (id, daemon, cwd, kind) = (self.id, Arc::clone(&self.daemon), self.cwd.clone(), self.kind);
         let (cursor, busy) = (Arc::clone(&self.cursor), Arc::clone(&self.busy));
+        let latex = Arc::clone(&self.latex);
         let session_id = session_id.map(str::to_owned);
         tokio::spawn(async move {
             let git = super::git_status::read(&cwd).await;
-            let transcript = match (kind, session_id) {
+            let (transcript, formulas) = match (kind, session_id) {
                 (SessionKind::Claude, Some(sid)) => {
                     let cwd = cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut slot = cursor.lock().unwrap_or_else(|e| e.into_inner());
-                        let cursor = slot
-                            .take()
-                            .filter(|c| c.session_id() == sid)
-                            .unwrap_or_else(|| {
-                                crate::claude::projects::TranscriptCursor::new(&cwd, &sid)
-                            });
-                        let cursor = slot.insert(cursor);
+                        let same = slot.take().filter(|c| c.session_id() == sid);
+                        let cursor = slot.insert(same.unwrap_or_else(|| {
+                            crate::claude::projects::TranscriptCursor::new(&cwd, &sid)
+                        }));
                         cursor.advance();
-                        cursor.has_assistant().then(|| cursor.totals().clone())
+                        let mut sent = latex.lock().unwrap_or_else(|e| e.into_inner());
+                        let formulas = latex_event(&mut sent, cursor.latex());
+                        let totals = cursor.has_assistant().then(|| cursor.totals().clone());
+                        (totals, formulas)
                     })
                     .await
-                    .ok()
-                    .flatten()
+                    .unwrap_or_default()
                 }
-                _ => None,
+                _ => (None, None),
             };
             daemon.broadcast(id, meta_event(&cwd, git, transcript));
+            if let Some(formulas) = formulas {
+                daemon.broadcast(id, formulas);
+            }
             busy.store(false, Ordering::Release);
         });
     }
+}
+
+/// The `Latex` event a refresh owes clients, recorded in `sent`: `None` when
+/// `latex` is the list last sent. Each change takes the next `seq`, for the
+/// actor's whole life: a new transcript cursor (a new conversation) starts
+/// with an empty list under a seq above everything sent before, so a replay
+/// that crosses a `/clear` can never pin a stale list.
+fn latex_event(sent: &mut LatexSent, latex: &VecDeque<String>) -> Option<SessionEvent> {
+    let (seq, unchanged) = match sent {
+        Some((seq, list)) => (*seq, list.iter().eq(latex.iter())),
+        None => (0, latex.is_empty()),
+    };
+    if unchanged {
+        return None;
+    }
+    let formulas: Vec<String> = latex.iter().cloned().collect();
+    *sent = Some((seq + 1, formulas.clone()));
+    Some(SessionEvent::Latex {
+        seq: seq + 1,
+        formulas,
+    })
+}
+
+/// The event that replays `sent` to a client that attaches.
+fn last_latex(sent: &LatexSent) -> Option<SessionEvent> {
+    sent.as_ref().map(|(seq, formulas)| SessionEvent::Latex {
+        seq: *seq,
+        formulas: formulas.clone(),
+    })
 }
 
 /// The `Meta` event for a refresh's findings. The branch falls back to
@@ -777,7 +846,8 @@ impl Actor {
             lagging: false,
             pending_req: req,
         };
-        if sub.sync(self.id, self.screen.size(), &self.screen.snapshot()) {
+        let latex = self.meta.last_latex();
+        if sub.attach(self.id, self.screen.size(), &self.screen.snapshot(), latex) {
             self.subs.insert(client, sub);
         }
     }
@@ -1122,6 +1192,68 @@ mod tests {
         assert_eq!(start(&cfg).as_array().unwrap().len(), 1);
         let latex = super::super::Config { latex: true, ..cfg.clone() };
         assert_eq!(start(&latex)[1]["command"], "'/bin/claudio' __context latex");
+    }
+
+    fn formulas(list: &[&str]) -> VecDeque<String> {
+        list.iter().map(|f| f.to_string()).collect()
+    }
+
+    fn latex(seq: u64, list: &[&str]) -> Option<SessionEvent> {
+        let formulas = list.iter().map(|f| f.to_string()).collect();
+        Some(SessionEvent::Latex { seq, formulas })
+    }
+
+    #[test]
+    fn formulas_are_sent_when_they_change_with_a_growing_seq() {
+        let mut sent = None;
+        assert_eq!(latex_event(&mut sent, &formulas(&[])), None, "nothing yet");
+        assert_eq!(latex_event(&mut sent, &formulas(&["a"])), latex(1, &["a"]));
+        assert_eq!(latex_event(&mut sent, &formulas(&["a"])), None, "unchanged");
+        let both = formulas(&["a", "b"]);
+        assert_eq!(latex_event(&mut sent, &both), latex(2, &["a", "b"]));
+        // A rewritten transcript without them: the empty list goes out.
+        assert_eq!(latex_event(&mut sent, &formulas(&[])), latex(3, &[]));
+        assert_eq!(latex_event(&mut sent, &formulas(&["c"])), latex(4, &["c"]));
+        // A new conversation (a new, empty cursor) keeps counting, so its
+        // lists always outrank anything sent before.
+        assert_eq!(latex_event(&mut sent, &formulas(&[])), latex(5, &[]));
+        assert_eq!(latex_event(&mut sent, &formulas(&["d"])), latex(6, &["d"]));
+    }
+
+    #[test]
+    fn an_attach_gets_the_last_formulas_right_after_the_snapshot() {
+        let id = uuid::Uuid::new_v4();
+        let mut sent = None;
+        latex_event(&mut sent, &formulas(&["E = mc^2"]));
+        let (queue, mut rx) = mpsc::channel(8);
+        let mut sub = Subscriber {
+            queue,
+            lagging: false,
+            pending_req: Some(3),
+        };
+        assert!(sub.attach(id, (24, 80), b"SNAP", last_latex(&sent)));
+        let attached = Envelope {
+            req: Some(3),
+            msg: Msg::Attached {
+                id,
+                rows: 24,
+                cols: 80,
+            },
+        };
+        assert_eq!(rx.try_recv().unwrap(), Frame::Control(attached));
+        let snapshot = Frame::Data {
+            session: id,
+            bytes: b"SNAP".to_vec(),
+        };
+        assert_eq!(rx.try_recv().unwrap(), snapshot);
+        let event = latex(1, &["E = mc^2"]).unwrap();
+        let replay = Frame::Control(Envelope::event(Msg::Event { id, event }));
+        assert_eq!(rx.try_recv().unwrap(), replay);
+        // Nothing sent yet: nothing replayed.
+        assert!(sub.attach(id, (24, 80), b"SNAP", last_latex(&None)));
+        assert!(matches!(rx.try_recv(), Ok(Frame::Control(_))));
+        assert!(matches!(rx.try_recv(), Ok(Frame::Data { .. })));
+        assert!(rx.try_recv().is_err());
     }
 
     const ALLOW: &str = "--allow-dangerously-skip-permissions";

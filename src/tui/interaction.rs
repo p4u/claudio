@@ -721,6 +721,8 @@ impl App {
                     v.turns = turns;
                 }
             }
+            // Rendered and drawn by the formulas overlay (a later change).
+            SessionEvent::Latex { .. } => {}
             SessionEvent::Unknown => {}
         }
     }

@@ -539,6 +539,16 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turns: Option<u32>,
     },
+    /// The conversation's recent `<latex>` formulas, oldest first: always
+    /// the whole list, which replaces the client's. `seq` grows with every
+    /// change for the session's whole life (a new conversation starts with
+    /// an empty list under the next `seq`), so a client keeps the newer of
+    /// an attach replay and a broadcast that cross. Old clients map this to
+    /// `Unknown`.
+    Latex {
+        seq: u64,
+        formulas: Vec<String>,
+    },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
@@ -1085,6 +1095,28 @@ mod tests {
         assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SessionEvent::ClaudeSessionCleared);
+    }
+
+    #[test]
+    fn latex_round_trips_and_is_unknown_to_older_clients() {
+        let event = SessionEvent::Latex {
+            seq: 7,
+            formulas: vec!["E = mc^2".into(), "a \\neq 0".into()],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"latex","seq":7,"formulas":["E = mc^2","a \\neq 0"]}"#
+        );
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), event);
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Older {
+            Removed,
+            #[serde(other)]
+            Unknown,
+        }
+        assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
     }
 
     #[test]
