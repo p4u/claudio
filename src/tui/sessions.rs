@@ -117,7 +117,7 @@ impl SessionView {
         }
     }
 
-    /// Forget the formulas: a new conversation has its own, from seq 1.
+    /// Forget the formulas: a new conversation sends its own (any later seq is taken).
     pub fn clear_latex(&mut self) {
         self.latex_seq = 0;
         self.latex_srcs.clear();

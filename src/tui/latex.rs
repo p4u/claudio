@@ -1,4 +1,5 @@
-//! `<latex>` formulas: rendering them as Unicode text.
+//! `<latex>` formulas: rendering them as Unicode text, and laying them over
+//! the session pane.
 //!
 //! Pure functions only. The render itself ([`render`]) parses and lays out
 //! attacker-influenced text with a parser that is slow and deep on hostile
@@ -9,11 +10,17 @@
 //! - [`Formula`] — one formula's source, its renderings and matching keys.
 //! - [`render`] — the 2D block (term-maths) and the one-line form.
 //! - [`too_complex`] — the pre-check that runs before any parsing.
+//! - [`overlay`] — the pane's `<latex>` tags replaced by one-line renderings.
 
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use rust_latex_parser::{AccentKind, EqNode, MatrixKind};
-use unicode_width::UnicodeWidthStr;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::claude::latex::{sanitize, MAX_FORMULA_BYTES};
+use crate::claude::latex::{is_unsafe, sanitize, MAX_FORMULA_BYTES};
+use crate::term::screen::Screen;
 
 /// Deepest `{`…`}` nesting a formula may have to be rendered.
 const MAX_DEPTH: usize = 32;
@@ -466,6 +473,333 @@ fn without_html(s: &str) -> String {
     out
 }
 
+// ── Pane overlay ──────────────────────────────────────────────────────────────
+
+/// The colour of a formula rendered in the pane.
+const ACCENT: Color = Color::Cyan;
+/// The most screen rows one tag may span: claude wraps long lines itself,
+/// indenting the rows that continue one.
+const MAX_SPAN_ROWS: u16 = 8;
+const OPEN_TAG: &str = "<latex>";
+const CLOSE_TAG: &str = "</latex>";
+
+/// Replace, in the pane `buf` has just been drawn with from `screen` at
+/// `area`, each complete `<latex>…</latex>` whose text matches one of
+/// `formulas` by that formula's one-line rendering, in [`ACCENT`]. A tag may
+/// continue on the next rows (up to [`MAX_SPAN_ROWS`]) when it is the only
+/// one on its first row. Rows are rebuilt from their own cells, so no row
+/// moves; a row (or tag) whose result would not fit stays as it was. The
+/// selection, copy and the cursor still go by `screen`.
+pub fn overlay(buf: &mut Buffer, area: Rect, screen: &Screen, formulas: &[Formula]) {
+    let rows = area.height.min(screen.size().0);
+    let mut row = 0;
+    while row < rows {
+        row = if shows_open_tag(buf, area, row) {
+            overlay_row(buf, area, screen, formulas, row, rows)
+        } else {
+            row + 1
+        };
+    }
+}
+
+/// Whether row `row` of the drawn pane shows `<latex>`: a look at its
+/// cells, so a row without one costs nothing more.
+fn shows_open_tag(buf: &Buffer, area: Rect, row: u16) -> bool {
+    let tag = OPEN_TAG.as_bytes();
+    let mut matched = 0;
+    for x in area.left()..area.right() {
+        let Some(cell) = buf.cell((x, area.y + row)) else {
+            return false;
+        };
+        matched = match cell.symbol().as_bytes() {
+            [b] if *b == tag[matched] => matched + 1,
+            b"<" => 1,
+            _ => 0,
+        };
+        if matched == tag.len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Lay the formulas over the tags that start on `row`; returns the next row
+/// to look at (past a tag that continues on later rows).
+fn overlay_row(
+    buf: &mut Buffer,
+    area: Rect,
+    screen: &Screen,
+    formulas: &[Formula],
+    row: u16,
+    rows: u16,
+) -> u16 {
+    let line = Row::read(screen, row, area.width);
+    let tags = line.tags();
+    match tags.as_slice() {
+        [Tag { open, close: None }] => {
+            overlay_span(buf, area, screen, formulas, (row, rows), &line, *open)
+        }
+        _ => {
+            rebuild_row(buf, area, row, &line, &tags, formulas);
+            row + 1
+        }
+    }
+}
+
+/// Rebuild `row` with each closed tag that matches a formula replaced by
+/// its rendering, unless the row would no longer fit. An unmatched or
+/// unclosed tag stays as it is.
+fn rebuild_row(
+    buf: &mut Buffer,
+    area: Rect,
+    row: u16,
+    line: &Row,
+    tags: &[Tag],
+    formulas: &[Formula],
+) {
+    let original = cells_of(buf, area, row);
+    let mut out = Vec::with_capacity(original.len());
+    let mut copied = 0;
+    for tag in tags {
+        let Some(close) = tag.close else { continue };
+        let (start, end) = (line.col(tag.open), line.col(close + CLOSE_TAG.len()));
+        let text = line.text(tag.open + OPEN_TAG.len(), close);
+        let Some(cells) = matching(formulas, &text)
+            .and_then(|inline| text_cells(inline, accent_on(&original[start])))
+        else {
+            continue;
+        };
+        out.extend_from_slice(&original[copied..start]);
+        out.extend(cells);
+        copied = end;
+    }
+    if copied == 0 {
+        return;
+    }
+    out.extend_from_slice(&original[copied..content_end(&original).max(copied)]);
+    if out.len() <= original.len() {
+        write_row(buf, area, row, out, &original);
+    }
+}
+
+/// A tag opened on `row` (its only one) that closes on one of the next
+/// [`MAX_SPAN_ROWS`] rows; its text is its rows' text after their
+/// indentation, joined by spaces. When it matches, the first row ends with
+/// the rendering, then the text after the tag if it fits there (else that
+/// text stays on the last row, after its indentation), and the tag's other
+/// rows are blanked. Returns the next row to look at.
+fn overlay_span(
+    buf: &mut Buffer,
+    area: Rect,
+    screen: &Screen,
+    formulas: &[Formula],
+    (row, rows): (u16, u16),
+    first: &Row,
+    open: usize,
+) -> u16 {
+    let mut text = first.text(open + OPEN_TAG.len(), first.glyphs.len());
+    let mut closing = None;
+    for last in (row + 1..rows).take(MAX_SPAN_ROWS as usize) {
+        let line = Row::read(screen, last, area.width);
+        // Another tag in the way: this one is not laid over.
+        if line.find(OPEN_TAG, 0).is_some() {
+            break;
+        }
+        let indent = line.indent();
+        let close = line.find(CLOSE_TAG, indent);
+        text.push(' ');
+        text.push_str(&line.text(indent, close.unwrap_or(line.glyphs.len())));
+        if let Some(close) = close {
+            closing = Some((last, line, indent, close));
+            break;
+        }
+    }
+    let Some((last, line, indent, close)) = closing else {
+        return row + 1;
+    };
+    let first_cells = cells_of(buf, area, row);
+    let start = first.col(open);
+    let Some(rendered) = matching(formulas, &text)
+        .and_then(|inline| text_cells(inline, accent_on(&first_cells[start])))
+    else {
+        return last + 1;
+    };
+    let width = first_cells.len();
+    let mut head = first_cells[..start].to_vec();
+    head.extend(rendered);
+    if head.len() > width {
+        return last + 1;
+    }
+    let last_cells = cells_of(buf, area, last);
+    let suffix_start = line.col(close + CLOSE_TAG.len());
+    let suffix = &last_cells[suffix_start..content_end(&last_cells).max(suffix_start)];
+    let suffix_fits = head.len() + suffix.len() <= width;
+    if suffix_fits {
+        head.extend_from_slice(suffix);
+    }
+    write_row(buf, area, row, head, &first_cells);
+    for blank in row + 1..last {
+        let cells = cells_of(buf, area, blank);
+        write_row(buf, area, blank, Vec::new(), &cells);
+    }
+    let mut tail = Vec::new();
+    if !suffix_fits {
+        tail.extend_from_slice(&last_cells[..line.col(indent)]);
+        tail.extend_from_slice(suffix);
+    }
+    write_row(buf, area, last, tail, &last_cells);
+    last + 1
+}
+
+/// The one-line rendering of the newest formula whose key matches a tag's
+/// on-screen `text`: strictly, then without emphasis characters, then also
+/// without HTML-looking runs (markdown ate them from the screen). `None`
+/// when no formula matches, or the matching one has no rendering.
+fn matching<'a>(formulas: &'a [Formula], text: &str) -> Option<&'a str> {
+    let (strict, loose) = (normalize(text), normalize_loose(text));
+    let newest = || formulas.iter().rev();
+    newest()
+        .find(|f| f.key_strict == strict)
+        .or_else(|| newest().find(|f| f.key_loose == loose))
+        .or_else(|| newest().find(|f| f.key_html == loose))?
+        .inline
+        .as_deref()
+}
+
+/// The accent colour on the background the tag had.
+fn accent_on(cell: &Cell) -> Style {
+    Style::default().fg(ACCENT).bg(cell.bg)
+}
+
+/// `text` as pane cells in `style`: one grapheme cluster per cell, a wide
+/// one followed by the blank cell it covers (as `Buffer::set_string` lays
+/// them out). Clusters of width 0, or holding a character [`sanitize`]
+/// removes, are dropped; `None` when one is wider than two columns.
+pub(super) fn text_cells(text: &str, style: Style) -> Option<Vec<Cell>> {
+    let mut cells = Vec::with_capacity(text.len());
+    for cluster in text.graphemes(true) {
+        if cluster
+            .chars()
+            .any(|c| is_unsafe(c) || c == '\n' || c == '\t')
+        {
+            continue;
+        }
+        let mut cell = Cell::default();
+        cell.set_symbol(cluster).set_style(style);
+        match cluster.width() {
+            0 => {}
+            1 => cells.push(cell),
+            2 => cells.extend([cell, Cell::default()]),
+            _ => return None,
+        }
+    }
+    Some(cells)
+}
+
+/// The cells of pane row `row`.
+fn cells_of(buf: &Buffer, area: Rect, row: u16) -> Vec<Cell> {
+    (area.left()..area.right())
+        .map(|x| buf[(x, area.y + row)].clone())
+        .collect()
+}
+
+/// Where a row's content ends: past its last non-blank cell (and the cell a
+/// wide one covers).
+fn content_end(cells: &[Cell]) -> usize {
+    cells
+        .iter()
+        .rposition(|c| c.symbol() != " ")
+        .map_or(0, |i| {
+            (i + cells[i].symbol().width().max(1)).min(cells.len())
+        })
+}
+
+/// Put `cells` on pane row `row`, padded with blanks styled like the row's
+/// last cell (of `original`).
+fn write_row(buf: &mut Buffer, area: Rect, row: u16, cells: Vec<Cell>, original: &[Cell]) {
+    let mut blank = original.last().cloned().unwrap_or_default();
+    blank.set_symbol(" ");
+    let padded = cells.into_iter().chain(std::iter::repeat(blank));
+    for (x, cell) in (area.left()..area.right()).zip(padded) {
+        buf[(x, area.y + row)] = cell;
+    }
+}
+
+/// A `<latex>` on a row, by glyph index: its `<`, and the `<` of its
+/// `</latex>` when it closes on the same row.
+struct Tag {
+    open: usize,
+    close: Option<usize>,
+}
+
+/// The characters of a screen row: each once (a wide one at its first
+/// column), with the column it starts at.
+struct Row {
+    glyphs: Vec<(usize, char)>,
+    width: usize,
+}
+
+impl Row {
+    fn read(screen: &Screen, row: u16, width: u16) -> Row {
+        let mut chars = screen.row_chars(row);
+        chars.truncate(width as usize);
+        let mut glyphs = Vec::with_capacity(chars.len());
+        let mut col = 0;
+        while col < chars.len() {
+            let c = chars[col];
+            glyphs.push((col, c));
+            // `row_chars` repeats a wide character in its second column.
+            col += c.width().unwrap_or(1).max(1);
+        }
+        Row {
+            glyphs,
+            width: chars.len(),
+        }
+    }
+
+    /// Every `<latex>` that starts on the row, in order; only the last one
+    /// can be unclosed.
+    fn tags(&self) -> Vec<Tag> {
+        let mut tags = Vec::new();
+        let mut at = 0;
+        while let Some(open) = self.find(OPEN_TAG, at) {
+            let close = self.find(CLOSE_TAG, open + OPEN_TAG.len());
+            tags.push(Tag { open, close });
+            match close {
+                Some(close) => at = close + CLOSE_TAG.len(),
+                None => break,
+            }
+        }
+        tags
+    }
+
+    /// The glyph index of the next `tag` (ASCII) at or after glyph `from`.
+    fn find(&self, tag: &str, from: usize) -> Option<usize> {
+        let n = tag.len();
+        let last = self.glyphs.len().checked_sub(n)?;
+        (from..=last).find(|&i| self.glyphs[i..i + n].iter().map(|g| g.1).eq(tag.chars()))
+    }
+
+    /// The text of glyphs `from..to`, trailing blanks dropped.
+    fn text(&self, from: usize, to: usize) -> String {
+        let text: String = self.glyphs[from..to].iter().map(|g| g.1).collect();
+        text.trim_end().to_owned()
+    }
+
+    /// The column glyph `i` starts at (the row's width past its end).
+    fn col(&self, i: usize) -> usize {
+        self.glyphs.get(i).map_or(self.width, |g| g.0)
+    }
+
+    /// The index of the first non-blank glyph.
+    fn indent(&self) -> usize {
+        self.glyphs
+            .iter()
+            .position(|g| !g.1.is_whitespace())
+            .unwrap_or(self.glyphs.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +900,173 @@ mod tests {
         let f = Formula::raw("x <b> y </b> < z");
         assert_eq!(f.key_html, "xy<z");
         assert_eq!(f.key_loose, "x<b>y</b><z");
+    }
+
+    // ── overlay ───────────────────────────────────────────────────────────────
+
+    /// A 60×6 screen showing `text`.
+    fn screen(text: &str) -> Screen {
+        let mut screen = Screen::new(6, 60);
+        screen.feed(text.replace('\n', "\r\n").as_bytes());
+        screen
+    }
+
+    /// The pane `screen` draws, with `formulas` laid over it.
+    fn drawn(screen: &Screen, formulas: &[Formula]) -> Buffer {
+        let (rows, cols) = screen.size();
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(area);
+        screen.render(area, &mut buf);
+        overlay(&mut buf, area, screen, formulas);
+        buf
+    }
+
+    /// The rows of `buf` as text: each cell's symbol once (a wide one's
+    /// covered cell skipped), trailing blanks dropped.
+    fn rows_of(buf: &Buffer) -> Vec<String> {
+        let area = buf.area;
+        (0..area.height)
+            .map(|y| {
+                let mut line = String::new();
+                let mut covered = 0;
+                for x in 0..area.width {
+                    if covered > 0 {
+                        covered -= 1;
+                        continue;
+                    }
+                    let symbol = buf[(x, y)].symbol();
+                    line.push_str(symbol);
+                    covered = symbol.width().saturating_sub(1);
+                }
+                line.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    fn shown(screen: &Screen, formulas: &[Formula]) -> Vec<String> {
+        rows_of(&drawn(screen, formulas))
+    }
+
+    /// A formula `src` whose one-line rendering is `inline`.
+    fn formula(src: &str, inline: &str) -> Formula {
+        Formula::new(src, (Some(inline.to_owned()), None))
+    }
+
+    #[test]
+    fn a_tag_on_one_row_is_replaced_in_the_accent_colour() {
+        let s = screen("before\nso <latex>E = mc^2</latex>, done\nafter");
+        let buf = drawn(&s, &[formula("E = mc^2", "E = mc²")]);
+        assert_eq!(rows_of(&buf)[..3], ["before", "so E = mc², done", "after"]);
+        assert_eq!(buf[(3, 1)].fg, ACCENT);
+        assert_ne!(buf[(10, 1)].fg, ACCENT, "the rest keeps its colour");
+        // Without formulas nothing changes.
+        assert_eq!(shown(&s, &[])[1], "so <latex>E = mc^2</latex>, done");
+    }
+
+    #[test]
+    fn two_tags_on_a_row_are_both_replaced() {
+        let s = screen("<latex>\\alpha</latex> and <latex>\\beta</latex>!");
+        let formulas = [formula("\\alpha", "α"), formula("\\beta", "β")];
+        assert_eq!(shown(&s, &formulas)[0], "α and β!");
+    }
+
+    #[test]
+    fn tags_match_after_markdown_ate_escapes_emphasis_or_html() {
+        let cases = [
+            // `\{` and `\,` lost their backslash on screen.
+            (
+                "\\{a_i\\} \\cup \\{b_i\\}",
+                "{a_i} \\cup {b_i}",
+                "{aᵢ} ∪ {bᵢ}",
+            ),
+            ("x^2\\,dx", "x^2,dx", "x² dx"),
+            // `_i + b_` was taken for emphasis.
+            ("a_i + b_i", "ai + bi", "aᵢ + bᵢ"),
+            // `<y>` was taken for an HTML tag.
+            ("x <y> z", "x  z", "x y z"),
+        ];
+        for (src, on_screen, inline) in cases {
+            let s = screen(&format!("<latex>{on_screen}</latex>"));
+            assert_eq!(shown(&s, &[formula(src, inline)])[0], inline, "{src}");
+        }
+    }
+
+    #[test]
+    fn the_newest_matching_formula_wins() {
+        let s = screen("<latex>x</latex>");
+        let formulas = [formula("x", "old"), formula("x", "new")];
+        assert_eq!(shown(&s, &formulas)[0], "new");
+    }
+
+    #[test]
+    fn a_tag_continued_on_an_indented_row_is_joined() {
+        let s =
+            screen("root: <latex>x = \\frac{-b \\pm\n  \\sqrt{b^2 - 4ac}}{2a}</latex> here\nnext");
+        let f = formula(
+            "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}",
+            "x = (-b ± √(b² - 4ac))/(2a)",
+        );
+        assert_eq!(
+            shown(&s, &[f])[..3],
+            ["root: x = (-b ± √(b² - 4ac))/(2a) here", "", "next"]
+        );
+    }
+
+    #[test]
+    fn a_suffix_that_no_longer_fits_stays_on_the_last_row() {
+        let s = screen(&format!("{}<latex>a\n  b</latex> tail", "p".repeat(50)));
+        let f = formula("a b", "abcdefgh");
+        let want = [format!("{}abcdefgh", "p".repeat(50)), "   tail".to_owned()];
+        assert_eq!(shown(&s, &[f])[..2], want);
+    }
+
+    #[test]
+    fn tags_that_cannot_be_replaced_stay_raw() {
+        let raw = |text: &str, formulas: &[Formula]| {
+            let s = screen(text);
+            assert_eq!(shown(&s, formulas), shown(&s, &[]), "{text}");
+        };
+        let ab = [formula("a b", "AB")];
+        raw("<latex>z</latex>", &ab); // no formula matches
+        raw("<latex>a b", &ab); // never closed
+        raw("<latex>a b</latex>", &[Formula::raw("a b")]); // no rendering
+        let wide = [formula("a b", &"w".repeat(30))];
+        raw(&format!("{}<latex>a b</latex>", "p".repeat(40)), &wide); // too wide
+                                                                      // A tag continued on the next row after another tag on its first row
+                                                                      // stays raw, while that other tag is still replaced.
+        raw("<latex>q</latex> <latex>a\n  b</latex>", &ab);
+        let s = screen("<latex>q</latex> <latex>a\n  b</latex>");
+        assert_eq!(
+            shown(&s, &[formula("q", "Q")])[..2],
+            ["Q <latex>a", "  b</latex>"]
+        );
+        // A tag that runs past MAX_SPAN_ROWS rows.
+        let long = format!(
+            "<latex>a{}\n  b</latex>",
+            "\n  x".repeat(MAX_SPAN_ROWS as usize)
+        );
+        let mut s = Screen::new(14, 60);
+        s.feed(long.replace('\n', "\r\n").as_bytes());
+        assert_eq!(shown(&s, &ab), shown(&s, &[]));
+    }
+
+    #[test]
+    fn wide_characters_after_a_tag_keep_their_two_cells() {
+        let s = screen("<latex>a</latex>漢字x");
+        let buf = drawn(&s, &[formula("a", "α")]);
+        assert_eq!(rows_of(&buf)[0], "α漢字x");
+        assert_eq!(buf[(1, 0)].symbol(), "漢");
+        assert_eq!(buf[(3, 0)].symbol(), "字");
+        assert_eq!(buf[(5, 0)].symbol(), "x");
+    }
+
+    #[test]
+    fn unsafe_clusters_never_become_cells() {
+        let style = Style::default();
+        let cells = text_cells("a\u{202e}b\u{1b}c\u{200b}", style).unwrap();
+        let text: String = cells.iter().map(Cell::symbol).collect();
+        assert_eq!(text, "abc");
+        // A wide cluster takes its cell and the one it covers.
+        assert_eq!(text_cells("漢", style).unwrap().len(), 2);
     }
 }

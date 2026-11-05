@@ -313,6 +313,9 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     view.mirror.render(area, frame.buffer_mut());
+    if !view.latex.is_empty() {
+        super::latex::overlay(frame.buffer_mut(), area, &view.mirror, &view.latex);
+    }
     if let Some(sel) = app.selection.as_ref().filter(|s| s.session == view.id) {
         highlight_selection(frame.buffer_mut(), area, sel);
     }
@@ -861,6 +864,27 @@ mod tests {
         for expected in ["Explore local dirs", "~/web", "prod-db", "build-01"] {
             assert!(screen.contains(expected), "{expected} missing:\n{screen}");
         }
+    }
+
+    /// The active session's rendered formulas replace their tags in the
+    /// pane; the mirror (what selection copies) keeps the tags.
+    #[test]
+    fn the_pane_shows_formulas_rendered() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = crate::tui::test_support::app_with(&[crate::tui::test_support::info(
+            Some(1),
+            None,
+        )]);
+        let v = &mut app.sessions[0];
+        v.mirror.feed(b"energy: <latex>E = mc^2</latex>.");
+        let rendered = (Some("E = mc\u{b2}".to_owned()), None);
+        v.latex = vec![crate::tui::latex::Formula::new("E = mc^2", rendered)];
+        let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert_eq!(row.trim_end(), "energy: E = mc\u{b2}.");
+        assert!(app.sessions[0].mirror.row_chars(0).iter().collect::<String>().contains("<latex>"));
     }
 
     fn total_width(titles: &[(String, String)]) -> usize {
