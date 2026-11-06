@@ -1,11 +1,12 @@
 # Plugin manifests: design
 
-Status: draft   Class: architectural
+Status: audited (round 2 pending)   Class: architectural
 Owner decisions so far (2026-11-06):
 - A proxy plugin is a TOML manifest, not a zip: it declares marketplaces, plugins, MCP servers (with the secret each needs), subagents, instructions and env; claudio installs and configures all of it. Installing plugins into the member's `~/.claude` is wanted.
 - A member who already holds a proxy user token needs no browser login; the token alone grants the manifest and its secrets. The browser login stays for members without one.
 - The proxy side (merged, live on claude.vocdoni.net) stays as is: it serves the manifest's URL + SHA-256 and the secret env.
-- The first manifest is `vocdoni-internal` in `vocdoni/skills`; it pulls in every plugin of the vocdoni marketplace plus firecrawl, context7 and remember from the official one, and the MCP servers vocdoni-kb, jina and hackmd.
+- The first manifest is `vocdoni-internal` in `vocdoni/skills`: every plugin of the vocdoni marketplace plus firecrawl, context7 and remember from the official one; the MCP servers vocdoni-kb, jina and hackmd; the reviewer, glm-worker and qwen-worker agents.
+- Per-item opt-out: on a manifest's first apply the member is shown every item and chooses what to disable; the choice is editable later and persisted; new items of a newer version default on with a notice.
 
 Supersedes the zip bundle of `docs/specs/2026-11-06-session-plugins-design.md`
 (merged to `main` at `ed65dec`, never released). The proxy spec
@@ -19,25 +20,31 @@ is always exactly one plugin (verified: a zip of two plugin folders loads as one
 empty plugin), so a team bundle would have to merge every team plugin into one,
 renaming every skill, and it could carry no MCP server secrets, no marketplace
 plugins such as context7, and no subagents outside a plugin. The owner wants one
-text file that says what a member needs and a claudio that installs it.
+text file that says what a member needs, a claudio that installs it, and a member
+who can leave parts of it out.
 
 ## Goals
 
-1. A proxy plugin is a manifest file; claudio fetches it per host (hash-checked,
-   as the zip was), parses it, and applies it: marketplaces registered, plugins
-   installed in the member's user scope, MCP servers and subagents given to every
-   session, instructions in every session's context, env merged.
+1. A proxy plugin is a manifest file; claudio fetches it (hash-checked), parses
+   it, shows its items, and applies the chosen ones per host: marketplaces
+   registered, plugins installed in the member's user scope, MCP servers and
+   subagents given to every session, instructions in every session's context,
+   env merged.
 2. What is already there is left alone: an installed plugin, a marketplace
    already added, an MCP server or agent the member defined with the same name.
-3. The extensions screen shows, per host, what the manifest did and what it
-   skipped and why; turning the plugin off stops applying it to new sessions.
-4. A manifest is untrusted input with caps; a bad one is refused with a reason
-   and never half-applied into a session.
+3. The member chooses, item by item, what to apply: a setup screen on first
+   sight of a manifest, the same screen later from the extensions screen; the
+   choice is saved in `config.toml`.
+4. The extensions screen shows, per host, what was installed, what was already
+   there, what is still installing and what was skipped and why.
+5. A manifest is untrusted input with caps; a bad one is refused with a reason
+   and nothing of it reaches a session.
 
 ## Non-goals
 
-- Uninstalling or updating plugins (Claude Code's own updater does updates; a
-  member removes a plugin by hand and turns the manifest off to keep it away).
+- Uninstalling or updating plugins (Claude Code's updater does updates; a member
+  removes a plugin with `claude plugin uninstall`; disabling an item only stops
+  applying it).
 - Project or local scope installs; per-member secrets; writing MCP servers or
   agents into the member's `~/.claude.json` or `~/.claude/agents`.
 - Changing the proxy.
@@ -45,161 +52,262 @@ text file that says what a member needs and a claudio that installs it.
 ## Current state
 
 - `src/proto.rs:215 Msg::Bundle { name, url, sha256, installed_id }` and `:289
-  Msg::Bundled { name, path, installed }` (unreleased); the daemon's
-  `src/daemon/bundle.rs` validates the op, checks `installed_plugins.json`,
-  keeps `<cache>/plugins/<name>.zip` + `.sha256`, downloads with caps, one
-  download per name, replies from a spawned task through the client's queue
-  (`src/daemon/server.rs`). `Daemon::claude_flags` (`src/daemon/mod.rs`) probes
-  `claude --help` once for `--plugin-dir` and `command()`
-  (`src/daemon/session.rs`) drops the pairs when absent.
+  Msg::Bundled { name, path, installed }` are on `main` at `d143cdb` ("release
+  v0.7.0", tagged locally, never pushed; no v0.7.0 release exists on GitHub);
+  this branch forks from `ed65dec`, the commit before that release commit.
+  `src/daemon/bundle.rs` validates the op, checks `installed_plugins.json` under
+  `$CLAUDE_CONFIG_DIR` else `~/.claude` (`:56-60`), keeps `<cache>/plugins/
+  <name>.zip` + `.sha256`, downloads with a 64 MiB cap (`:26`, `:235-247`), one
+  download per name (`:36-40`, `:80-84`), replies from a spawned task
+  (`src/daemon/server.rs`). `Daemon::claude_flags` (`src/daemon/mod.rs:461`)
+  probes `claude --help` once; `command()` (`src/daemon/session.rs:321-357`)
+  drops `--plugin-dir` pairs and appends only `-n <name>` after the args.
+  `Daemon::updating` is the lock `claude update` takes.
+- Journal: `src/daemon/journal.rs:40-42` stores `args` verbatim and re-spawns
+  them at daemon start; `RespawnSpec` has no args (`src/tui/sessions.rs:588`).
+- Session extensions: `SessionExtensions { lenses: Vec<LensSpec> }`
+  (`src/proto.rs:435-447`), each lens a named tag/fence with an instruction;
+  `MAX_LENSES 16`, `MAX_INSTRUCTION 2048`, `MAX_INSTRUCTIONS 8192` (`:463-467`),
+  `validate` (`:470-493`) refused by the daemon on Spawn/Respawn
+  (`src/daemon/mod.rs:513`, `:884`). `src/claude/hooks.rs:66` adds `'<claudio>'
+  __context file '<path>'` as a SessionStart hook when there are instructions;
+  `write_context` (`src/daemon/session.rs`) writes `spec.extensions.context()`;
+  the hook reads at most 16 KiB (`hooks.rs:46`).
 - `src/tui/plugins.rs`: `BundleState { Pending, Ready(path), Installed,
-  Failed(String), TooOld }` per `(host, plugin)`, `request_bundles` (re-asks
-  `Failed`), `on_plugins` (401/403 → signed out), the Alt+i rows and details.
-  `src/tui/sessions.rs plugin_bundles` turns `Ready` into `--plugin-dir <path>`
-  and merges the plugin env (`proxy::env::merge`, proxy wins); `src/tui/mod.rs
-  wait_bundles` defers a spawn up to 20 s.
+  Failed(String), TooOld }`, `request_bundles` (re-asks `Failed` only,
+  `:166-171`), `on_plugins` (401/403 → signed out); `src/tui/sessions.rs
+  plugin_bundles` → `--plugin-dir`, `proxy::env::merge` (`src/proxy/env.rs:112`,
+  later key wins, as `apply_env` `src/daemon/session.rs:371-374`);
+  `src/tui/mod.rs:1588 BUNDLE_WAIT = 20 s`, `wait_bundles` (`:1594-1640`).
 - `src/proxy/plugins.rs`: `Plugin { name, version, bundle_url, bundle_sha256,
-  installed_id, env }`, `admit` (names, https, hash, env key denylist, caps),
-  `plugins.json` cache (0600, per profile).
-- Session context: `src/claude/hooks.rs:66` adds `'<claudio>' __context file
-  '<path>'` as a SessionStart hook when `SpawnSpec.extensions` has instructions;
-  `src/daemon/session.rs write_context` writes `<runtime>/context/<id>.txt`
-  from `spec.extensions.context()` (16 KiB cap in `hooks.rs:45`).
-- Claude Code (2.1.x) surfaces: `claude plugin marketplace add <source> --scope
-  user` (source: a GitHub `owner/repo`, a URL or a path), `claude plugin install
-  <name>@<marketplace> --scope user` (a marketplace-declared install command
-  needs `-y` or `--accept-command <sha256>`), `~/.claude/plugins/
-  known_marketplaces.json` (keys: marketplace names), `installed_plugins.json`
-  (`plugins` keyed by `<name>@<marketplace>`), `--mcp-config <file>` (JSON
-  `{"mcpServers": {...}}`, `${VAR}` expanded from the environment),
-  `--agents <json>` (object keyed by agent name: `description`, `prompt`,
-  optional `model`, `tools`), `~/.claude.json` `mcpServers` (the member's own),
-  `~/.claude/agents/<name>.md`.
+  installed_id, env }`, `admit`, private `key_ok` (`:188-203`), `plugins.json`
+  cache. `config::save_extension` (`src/config.rs:429-467`) is the minimal line
+  edit of `[extensions]`.
+- Freshness: `src/freshness.rs:76-85` orders daemons by SemVer, then mtime.
+- Claude Code (2.1.x), verified: `claude plugin marketplace add <source> --scope
+  user --json` (source `owner/repo`, URL or path); `claude plugin install
+  <name>@<marketplace> --scope user --json` (a marketplace-declared install
+  command needs `-y`/`--accept-command`, and `-y` is "required when stdin or
+  stdout is not a TTY" for those; `--json` reports `shownCommand.sha256` then);
+  `<claude_config>/plugins/known_marketplaces.json` keyed by the name the
+  marketplace declares in its own `.claude-plugin/marketplace.json`;
+  `installed_plugins.json` `{"version":2,"plugins":{"<name>@<marketplace>":
+  [{scope,…}]}}`; `<claude_config>/.claude.json` has `mcpServers` (277 KiB on
+  the owner's machine); `~/.claude/agents/<name>.md`; `--mcp-config
+  <configs...>` is variadic and takes JSON files or strings, and an inline
+  string has `${VAR}` expanded from the environment (verified); `--agents
+  <json>` (object keyed by name: `description`, `prompt`, optional `model`,
+  `tools`).
 
 ## Design
 
 ### 1. The manifest
 
-A TOML document, ≤ 256 KiB, served as the plugin's `bundle` on the proxy. Format:
+A TOML document, ≤ 256 KiB, served as the plugin's `bundle` on the proxy.
+Unknown keys or tables, a `format` other than 1, and duplicate names within a
+section are refused. Names below are `[a-z0-9-]{1,40}`; "text" is UTF-8 with
+no C0 control but `\n`/`\t`; header names are RFC 7230 token characters ≤ 64.
 
 ```toml
-format = 1                      # required; a higher number is refused
+format = 1                      # required
 name = "vocdoni-internal"       # must equal the proxy's plugin name
-version = "1.0.0"               # ≤ 64 printable ASCII, shown
-description = "…"               # ≤ 200 chars, shown
-instructions = """…"""          # ≤ 16 KiB; added to every session's context
+version = "1.0.0"               # ≤ 64 printable ASCII, shown (SemVer not required)
+description = "…"               # text ≤ 200
+instructions = """…"""          # text ≤ 8 KiB; added to every session's context
 
 [[marketplace]]                 # ≤ 16
-name = "vocdoni"                # [a-z0-9-]{1,40}
-source = "github:vocdoni/skills"   # github:<owner>/<repo> or https:// URL
+name = "vocdoni"                # must equal the name the marketplace declares in its own
+                                # .claude-plugin/marketplace.json (the key Claude Code uses)
+source = "github:vocdoni/skills"   # github:<owner>/<repo>, each [A-Za-z0-9_.-]{1,64}
+                                # (passed to the CLI as <owner>/<repo>), or https://… ≤ 512
+                                # printable ASCII (passed verbatim); nothing else
 
 [[plugin]]                      # ≤ 64
-name = "agentic-dev"            # [a-z0-9-]{1,40}
-marketplace = "vocdoni"         # a [[marketplace]] above, or a marketplace Claude Code has built in
+name = "agentic-dev"
+marketplace = "vocdoni"         # a [[marketplace]] of this manifest; there is no built-in set:
+                                # the official one is declared like any other
+                                # (name = "claude-plugins-official", source = "github:anthropics/claude-plugins-official")
 
-[[mcp]]                         # ≤ 32
-name = "vocdoni-kb"             # [a-z0-9-]{1,40}
+[[mcp]]                         # ≤ 32; a name may not repeat an [[agent]] name
+name = "vocdoni-kb"
 type = "http"                   # http | sse | stdio
-url = "https://kb-gw.vocdoni.net/mcp"          # https only (http/sse)
-headers = { Authorization = "Bearer ${VOCDONI_KB_TOKEN}" }   # ≤ 16, values ≤ 4 KiB
-secrets = ["VOCDONI_KB_TOKEN"]  # env names (admit's key rule) the server needs
-auth = "oauth"                  # optional: claude runs the member's own OAuth; no secret
-command = "npx"                 # stdio only; args = [...] ≤ 32; env = {...} ≤ 16
+url = "https://kb-gw.vocdoni.net/mcp"   # http/sse: https only, ≤ 512 printable ASCII
+headers = { Authorization = "Bearer ${VOCDONI_KB_TOKEN}" }   # ≤ 16, values text ≤ 4 KiB
+secrets = ["VOCDONI_KB_TOKEN"]  # env names (key rule below) the server needs; ≤ 16
+auth = "oauth"                  # optional, http/sse: documentation only; rendered with type and url
+                                # and no headers; secrets must be empty; the member signs in with /mcp
+command = "npx"                 # stdio only, ≤ 256 printable ASCII; args = [...] ≤ 32 × 1 KiB text;
+                                # env = {...} ≤ 16, key rule, values text ≤ 4 KiB
 
 [[agent]]                       # ≤ 32
-name = "reviewer"               # [a-z0-9-]{1,40}
-description = "…"               # ≤ 500
-model = "opus"                  # optional
-tools = ["Read", "Grep"]        # optional, ≤ 32 names
-prompt = """…"""                # ≤ 32 KiB; all agents together ≤ 64 KiB
+name = "reviewer"
+description = "…"               # text ≤ 500
+model = "opus"                  # optional, [A-Za-z0-9._-]{1,64}
+tools = ["Read", "Grep"]        # optional, ≤ 32 × [A-Za-z0-9_:*()-]{1,64}
+prompt = """…"""                # text ≤ 32 KiB; the rendered agents JSON ≤ 32 KiB
 
-[env]                           # non-secret env for sessions; same key rule and denylist as the proxy env
+[env]                           # ≤ 64 keys; key rule; values text ≤ 4 KiB
 ```
 
-`${NAME}` in `headers`, `env` and `args` is left for Claude Code to expand; a
-name used there must be listed in `secrets` or in the manifest's `[env]`.
-Anything unknown (a key, a table) is refused: the format is versioned, not
-extensible. Duplicate names within a section are refused.
+Key rule: `plugins::key_ok` (made `pub`): `[A-Z_][A-Z0-9_]{0,63}` outside the
+denylist (`ANTHROPIC_*`, `CLAUDIO_*`, `CLAUDE_*`, `NODE_*`, `LD_*`, `DYLD_*`,
+`GIT_*`, `SSL_*`, `XDG_*`, `SSH_*`, `PATH`, `HOME`, `SHELL`, `TERM`, `USER`,
+`LOGNAME`, `TMPDIR`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PERL5OPT`, the proxy
+variables). `${NAME}` in `headers`, `env`, `args` and `url` is left for Claude
+Code to expand; a name used there must be listed in that server's `secrets` or
+in `[env]`.
 
-### 2. Fetch and cache (daemon, as today)
+Item ids, used everywhere a member chooses or a host reports:
+`plugin:<name>@<marketplace>`, `mcp:<name>`, `agent:<name>`, `instructions`,
+`env`. A marketplace has no id: it is added when at least one of its plugins is
+enabled.
 
-`Msg::Bundle` and `Msg::Bundled` are renamed `Msg::Manifest` and `Msg::Applied`
-(both unreleased):
+The parser is `src/plugins/manifest.rs` (pure; `Manifest::parse(&str) ->
+Result<Manifest, String>`, reasons name ids and fields, never values), shared
+by the client and the daemon.
 
-```rust
-Msg::Manifest { name: String, url: String, sha256: String, secrets: Vec<String> }
-Msg::Applied  { name: String, result: Result<Applied, String> }   // serde: {"ok": {...}} | {"err": "…"}
-pub struct Applied {
-    pub version: String,
-    pub mcp_config: Option<String>,   // path on this host, or None when no server applies
-    pub agents: Option<String>,       // the --agents JSON (≤ 64 KiB), or None
-    pub instructions: String,         // the manifest's text, sanitized
-    pub env: Vec<(String, String)>,   // the manifest's [env]
-    pub installed: Vec<String>,       // "<plugin>@<marketplace>" installed by this apply
-    pub present: Vec<String>,         // already there: plugins, marketplaces, servers, agents (ids)
-    pub skipped: Vec<(String, String)>, // (id, reason): "missing secret X", "yours", "install failed: …"
-}
-```
-
-`secrets` are the names (never values) of the env the client holds for this
-plugin, so the daemon knows which servers can work. The file is cached as
-`<cache>/plugins/<name>.toml` + `.sha256` with the existing download code
-(same caps, https, single flight, no partial file).
-
-### 3. Apply (daemon, `src/daemon/manifest.rs`)
-
-After the file is current, the daemon parses it (caps above; a refused manifest
-is `Err("manifest: <reason>")` and nothing runs) and applies, one apply per
-plugin name at a time, from the spawned task:
-
-1. Marketplaces: for each not in `known_marketplaces.json`, run `claude plugin
-   marketplace add <source> --scope user` (the daemon's claude, `Config::path`,
-   own process group, 120 s, output capped 64 KiB, stdin null). Failure →
-   `skipped: (marketplace, "add failed: <first line>")` and every plugin of it.
-2. Plugins: for each `<name>@<marketplace>` not in `installed_plugins.json`,
-   run `claude plugin install <name>@<marketplace> --scope user` (same limits,
-   never `-y`: a marketplace-declared install command is not accepted by
-   claudio; the install fails and the row says "needs manual install").
-   Success → `installed`; failure → `skipped`. Installs run at most once per
-   `(manifest sha, plugin)` per daemon life; a later `Manifest` request with
-   the same sha re-reads the installed list only.
-3. MCP servers: a server whose name is in the member's `~/.claude.json`
-   `mcpServers` → `skipped: (name, "yours")`; one whose `secrets` are not all in
-   the request's `secrets` → `skipped: (name, "missing secret X")`; the rest are
-   written as `{"mcpServers": {...}}` to `<runtime>/plugins/<name>.mcp.json`
-   (0600, `write_atomic`; it holds `${VAR}` placeholders, never values).
-4. Agents: one whose name has `~/.claude/agents/<name>.md` → `skipped: (name,
-   "yours")`; the rest become the `--agents` JSON.
-5. `instructions` through `claude::latex::sanitize`; `[env]` through `admit`'s
-   key rule.
-
-The daemon reads `~/.claude.json` and the plugins files of the uid it runs as,
-1 MiB cap, unparsable = empty. Reads of `known_marketplaces.json`,
-`installed_plugins.json` and `~/.claude.json` never log their content.
-
-### 4. Client
+### 2. Client: fetch, choose, request
 
 - `src/proxy/plugins.rs`: `Plugin` keeps its fields; `installed_id` is accepted
   and ignored. `admit` unchanged.
-- `src/tui/plugins.rs`: `BundleState` becomes `ApplyState { Pending,
-  Ready(Applied), Failed(String), TooOld }`. `request_bundles` →
-  `request_manifests` (same cadence: connect, list change, `r`, retry of
-  `Failed`), sending the plugin's env key names as `secrets`. The details pane
-  shows per host: `ready · <n> installed, <m> present, <k> skipped` and one
-  line per skipped id with its reason; `Failed` and `TooOld` as today.
-- Spawn (`src/tui/sessions.rs`): for each enabled plugin whose host state is
-  `Ready`: `--mcp-config <mcp_config>` when `Some`, `--agents <json>` when
-  `Some`, the manifest `[env]` merged before the proxy env (proxy wins), and
-  `instructions` appended to `SpawnSpec.extensions`' instructions (the existing
-  context file; the 16 KiB cap applies to the total, a longer total is cut at
-  the cap with a notice). The deferral (`wait_bundles`, 20 s) and the old-daemon
-  fail-safe stay. `--plugin-dir` is no longer added; the `--help` probe and the
-  drop stay for `--mcp-config`/`--agents` instead (an old claude without them
-  starts without the plugin, with the state `claude too old`).
-- `--plain` and `reset_session` go through the same path.
-- A plugin toggled off: nothing applied to new sessions; already-installed
-  plugins remain (the details say "installed plugins stay until you remove
-  them").
+- The client fetches each admitted plugin's manifest itself
+  (`Effect::FetchManifest { name, url, sha256 }`, 256 KiB cap, https, hash
+  checked, kept in memory only; refetched when the list's hash changes and on
+  `r`). A refused or unreachable manifest is the row's state
+  `manifest: <reason>`; nothing is requested of any host for it.
+- Choices: `config.toml` gains `[plugins.<name>]` with `disabled = ["mcp:jina",
+  …]` (item ids) and `reviewed = "<version>"`, written by
+  `config::save_plugin_choices` (the same minimal table edit as
+  `save_extension`: replace the table's lines, or insert the table at the end).
+- Setup screen (`src/tui/plugin_setup.rs`, a pure view like `confirm.rs`,
+  drawn by `ui/plugin_setup.rs`): every item by section with its title (a
+  plugin's `name@marketplace`, a server's `name` + type + url, an agent's
+  `name` + description, "instructions", "env (<n> keys)"), each with a
+  checkbox. Keys inside the modal: Up/Down (or j/k), Space toggles, `a` all
+  on, `n` all off, Enter saves and closes, Esc closes keeping everything as
+  shown (on first sight: everything on). It opens when a manifest arrives and
+  `config.toml` has no `[plugins.<name>]` table (first sight), and from the
+  extensions screen with Enter on the plugin's row. A newer `version` than
+  `reviewed` with items not seen before gives a notice "`<name> <version>`
+  adds <ids>; Alt+i, Enter to review"; new items default on. Saving sets
+  `reviewed` and sends a new `Manifest` request to every host.
+- Request: `Msg::Manifest { name, url, sha256, secrets: Vec<String>, disabled:
+  Vec<String> }` where `secrets` are the names (never values) of the plugin's
+  proxy env and `disabled` the saved ids. Sent to each connected host on
+  connect, when the list's hash changes, when choices are saved, on `r`, and
+  every 30 s while a reply still lists an `installing` id (10 min at most per
+  manifest hash). Nothing is sent before the first-sight screen closes.
+
+### 3. Daemon: fetch, apply, reply (`src/daemon/manifest.rs`)
+
+The op is checked as `Bundle` was (name, 64-hex hash, https), the file cached
+as `<cache>/plugins/<name>.toml` + `.sha256` by the existing download code with
+the cap as a parameter (256 KiB here). A stale `<name>.zip` from a dev build is
+removed at daemon start.
+
+Reply, sent as soon as the manifest is parsed and the static parts rendered,
+before any subprocess runs:
+
+```rust
+Msg::Applied {
+    name: String, version: String,
+    mcp_config: Option<String>,   // the {"mcpServers": {...}} JSON string (≤ 64 KiB), placeholders only
+    agents: Option<String>,       // the --agents JSON (≤ 32 KiB)
+    instructions: String,         // sanitized, ≤ 8 KiB
+    env: Vec<(String, String)>,   // the manifest's [env]
+    installed: Vec<String>,       // ids installed by this daemon (this hash)
+    present: Vec<String>,         // ids already there: plugins, servers, agents
+    skipped: Vec<(String, String)>, // (id, reason)
+}                                 // every list #[serde(default)]
+```
+
+A refused manifest or a failed download is `Msg::Error { message: "manifest
+<name>: <reason>" }`, which the client maps to `Failed` as today.
+
+Per item, honouring `disabled` (a disabled id is neither applied nor listed):
+
+1. Plugins: `<name>@<marketplace>` already a key of `installed_plugins.json`
+   (any scope) → `present`. Else, if its marketplace `name` is not a key of
+   `known_marketplaces.json`, the marketplace is added first. The install's
+   outcome is remembered per `(manifest hash, id)`: a success for the daemon's
+   life, a failure for 10 minutes, `needs manual install` for the daemon's
+   life. An id whose install has not run or has aged out is reported
+   `skipped: (id, "installing")` and queued.
+2. MCP servers: a name present in `<claude_config>/.claude.json` `mcpServers`
+   → `skipped: (id, "yours")`; `secrets` not all in the request's `secrets` →
+   `skipped: (id, "missing secret X")`; else rendered into `mcp_config` as
+   Claude Code expects: `{"type":"http","url":…,"headers":{…}}`,
+   `{"type":"sse",…}`, `{"type":"stdio","command":…,"args":[…],"env":{…}}`.
+3. Agents: `<claude_config>/agents/<name>.md` exists → `skipped: (id,
+   "yours")`; else `{"<name>": {"description", "prompt", "model"?, "tools"?}}`.
+4. `instructions` through `claude::latex::sanitize`; `[env]` through
+   `key_ok` and the value rules.
+
+Files read: `<claude_config>/.claude.json`, `plugins/known_marketplaces.json`,
+`plugins/installed_plugins.json`, `agents/` (`$CLAUDE_CONFIG_DIR` else
+`~/.claude`), each a regular file of this uid, cap 16 MiB, content never
+logged. An unreadable or unparsable `.claude.json` skips every server with
+`(id, "cannot read .claude.json")`; an unreadable plugins file counts as "not
+installed"/"not added" (the CLI then says so).
+
+Installs run after the reply, in a spawned task, under one daemon-wide
+`tokio::sync::Mutex` shared with `claude update` (`Daemon::updating`), so two
+manifests never write `~/.claude` at once. Each subprocess: `claude plugin
+marketplace add <source> --scope user --json` or `claude plugin install
+<name>@<marketplace> --scope user --json`, the daemon's claude on
+`Config::path`, stdin `/dev/null`, stdout and stderr piped and capped at 64
+KiB each, env: the daemon's with the session markers scrubbed,
+`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/bin/true`; own process group, 120 s,
+killed as a group on timeout. The outcome is the last stdout line parsed as
+JSON: a `shownCommand` → `needs manual install: claude plugin install <id>`;
+a non-zero exit or an `error` field → that message (first 200 chars); after a
+marketplace add the daemon re-reads `known_marketplaces.json` and, when `name`
+is still absent, the marketplace and its plugins are `skipped: (…, "added
+under another name")`. Never `-y`, never `--accept-command`.
+
+### 4. Spawn
+
+`src/tui/sessions.rs` (`send_spawn`, `reset_session`, `--plain`): for each
+enabled plugin whose state on the host is `Ready`:
+
+- args: appended after every other argument, per plugin `--agents <json>`
+  then `--mcp-config <json>` (so the variadic `--mcp-config` is followed by
+  another flag, the next plugin's `--agents`, or the daemon's `-n <name>`,
+  never by a positional); a unit test on `command()` asserts the order.
+- env: the manifest `[env]` (from `Applied.env`), then the plugin's proxy env
+  (secrets), then the proxy profile env; a later key replaces an earlier one
+  (`env::merge` twice).
+- instructions: `SessionExtensions.instructions: String` (new,
+  `#[serde(default)]`, counted apart from the lenses: ≤ 8 KiB after
+  `sanitize`, checked in `validate`, appended by `context()` after the lenses
+  with a blank line, journaled with the rest) holds the concatenation of the
+  `Applied.instructions` of every enabled plugin whose state is `Ready` on
+  that host, blank line between; over 8 KiB it is cut at the last whole
+  instruction that fits, with a notice. Lenses (≤ 8 KiB) and instructions
+  (≤ 8 KiB) always fit the hook's 16 KiB read.
+- The daemon's `command()` drops an `--agents <v>` or `--mcp-config <v>` pair
+  when its `claude --help` lacks the flag (the one cached probe, like
+  `--plugin-dir`, which is no longer added); it removes exactly one value. A
+  journal re-spawn keeps the flags (no secret in them); `reset_session` keeps
+  the journaled flags and sends the current env.
+- Deferral: `wait_bundles` waits (20 s) only for a host that has not answered
+  `Manifest` at all; an `Applied` with `installing` ids is `Ready` (sessions
+  start with the servers, agents and instructions while plugins install).
+- `--plain` fetches the manifest and sends the request like the manager; on
+  first sight it opens the same setup screen before its session spawns.
+
+### 5. Extensions screen
+
+Each admitted plugin stays a `Source::Plugin` row; its details show the
+version and description, one line per host (`<host>: ready · <i> installed,
+<p> present, <s> installing, <k> skipped`, then one line per skipped id with
+its reason; `failed: …`; `daemon too old`; `claude too old` when the host's
+claude lacks `--mcp-config`/`--agents`), the manifest state (`manifest: …`),
+`<n> items disabled (Enter to change)`, and `installed plugins stay until you
+remove them: claude plugin uninstall <id>`. Enter opens the setup screen.
+Turning the plugin off: nothing applied to new sessions; a running install
+is not stopped and nothing is uninstalled; the last reply is kept so turning
+it on again needs no new apply.
 
 ### Alternatives considered
 
@@ -208,53 +316,66 @@ The daemon reads `~/.claude.json` and the plugins files of the uid it runs as,
 | Keep the zip and merge every team plugin into one | Renames every skill; no marketplace plugins, no MCP secrets, no standalone agents. |
 | Apply the manifest on the client and `claude mcp add` into `~/.claude.json` | Writes secrets into the member's config in plaintext; the daemon is the host that has claude. |
 | `-y` on plugin install | Would run a marketplace-declared command without a person seeing it. |
-| Keep `Bundle`/`Bundled` names | Unreleased; a rename keeps the wire honest. |
+| An mcp JSON file under the runtime dir | Dies at reboot while the journal keeps its path; the inline string holds only placeholders and works on every host. |
+| The daemon parses the manifest and the client shows the setup from the reply | The member would choose after the first apply; the client must know the items before anything is installed. |
 
 ## Compatibility and rollout
 
-- Wire: `Bundle`/`Bundled` were never released; `Manifest`/`Applied` replace
-  them. An old daemon answers `Error "unsupported op"` → `TooOld`, as before.
-- Proxy: unchanged; `bundle.url` points at a `.toml`; `installed_id` left empty.
-- Cache: `<cache>/plugins/<name>.toml`; a stale `.zip` from a dev build is
-  removed by the daemon at start.
-- Rollout: register `vocdoni-internal` (manifest URL + sha + env) on the proxy,
-  release claudio v0.7.0, members run `claudio proxy login --token` (or the
-  browser flow).
-- Rollback: the previous claudio ignores the manifest (no Bundle op in a
-  release); plugins installed by claudio stay installed.
+- Wire: `Bundle`/`Bundled` exist only on the unpushed local `main`;
+  `Manifest`/`Applied` replace them. An old daemon answers `Error "unsupported
+  op"` → `TooOld`. `SessionExtensions.instructions` is `#[serde(default)]`: an
+  old daemon ignores it (no instructions, nothing worse), an old client sends
+  none.
+- Base and release: the branch forks from `ed65dec`; the local release commit
+  `d143cdb` and tag `v0.7.0` are dropped (owner OK), and v0.7.0 is cut from
+  this work. No host ran a `0.7.0` build (`z6` ran a `0.6.1` dev build of
+  `ed65dec`); `freshness::compare` replaces it by mtime.
+- Proxy: unchanged; `bundle.url` points at a `.toml`; `installed_id` empty.
+- Config: `[plugins.<name>]` is new; an older claudio ignores it.
+- Rollout: register `vocdoni-internal` (manifest URL pinned to a commit of
+  `vocdoni/skills`, its sha, the env) on the proxy; release claudio v0.7.0;
+  members run `claudio proxy login --token` (or the browser flow) and review
+  the setup screen once.
+- Rollback: the previous claudio ignores everything new; plugins installed by
+  claudio stay installed.
 
 ## Failure modes and security
 
-- The manifest is admin-pinned by hash; what it installs runs as the member.
-  Accepted, as a bundle's hooks were: the admin owns the content repo.
+- The manifest is admin-pinned by hash; what it installs and the stdio
+  commands it declares run as the member. Accepted: the admin owns the content
+  repo, and the member sees every item before the first apply.
 - No `-y`: no marketplace-declared command runs without a person.
 - Secrets: values exist only in the proxy env on the client, in `plugins.json`
-  (0600) and in `Spawn.env`; the mcp JSON on the host holds placeholders; the
-  `--agents` JSON and `--mcp-config` path on argv carry no secret; logs name
-  ids and reasons only.
-- Installs are bounded (120 s, process group, capped output) and never block
-  the actor or accept loop; a hung `claude plugin install` is killed as a group.
-- A refused manifest applies nothing; a partially failed apply (one install
-  failed) still yields a `Ready` with that id in `skipped`.
-- `~/.claude.json` and the plugins files are read with size caps; a symlink or
-  a non-regular file counts as empty.
-- Per-host apply concurrency: one at a time per plugin name; two hosts are
-  independent.
+  (0600) and in `Spawn.env`; the mcp JSON on argv holds placeholders; agent
+  prompts are team content, not secrets: they are visible in `ps` and stored
+  in the journal with the session's args (rendered JSON ≤ 32 KiB).
+- Installs are bounded (120 s, process group, capped output, one at a time
+  per daemon) and never block the actor or accept loop; a claude session
+  running during an install may or may not see the plugin before its next
+  start (accepted).
+- A refused manifest applies nothing; a partial apply reports each id's
+  outcome; a failed install is retried after 10 minutes, a manual one never
+  without a person.
+- Config files are read with size caps; a symlink or a non-regular file counts
+  as unreadable (servers skipped with a reason, plugins treated as absent).
+- Two hosts are independent; on one host, downloads are one per name and
+  `~/.claude` writes one at a time.
 
 ## Acceptance criteria
 
-- [ ] AC1: unit tests for the manifest parser: every cap and charset, unknown keys refused, duplicate names refused, `format` other than 1 refused, placeholders must be declared.
-- [ ] AC2: daemon tests with a fake `claude` that records its argv and writes fake `known_marketplaces.json`/`installed_plugins.json`: a marketplace is added once, an installed plugin is not reinstalled, an install failure lands in `skipped` with the reason, a server with a missing secret is skipped and absent from the mcp JSON, a server the member has is skipped "yours", the mcp JSON holds placeholders only, no `-y` on argv.
-- [ ] AC3: manager test: with a fake proxy serving a manifest (one marketplace, one plugin, one http server with a secret, one agent, instructions), the spawned session's argv has `--mcp-config <runtime path>` and `--agents` with the agent, its env has the secret, the session context file has the instructions, and the fake claude's recorded install argv matches; toggled off, the next spawn has none; the Alt+i details list installed/present/skipped.
-- [ ] AC4: `make test-unit`, `make test-manager` green; CI green.
-- [ ] AC5: `tests/remote.rs` t9 reworked for `Manifest`/`Applied` on `z6` (release build).
-- [ ] AC6: manual: with `vocdoni-internal` registered on claude.vocdoni.net, `claudio proxy login --token` with a member token, Alt+i shows the plugin ready, a new session has the vocdoni-kb server and the team skills.
+- [ ] AC1: unit tests for `Manifest::parse`: every cap and charset, unknown keys, `format` ≠ 1, duplicates, undeclared placeholders, `auth = "oauth"` with headers or secrets refused, source forms; and for the renderers (mcp JSON per type, agents JSON, ids).
+- [ ] AC2: daemon tests with a fake `claude` that records argv and answers `--json` (success, error, `shownCommand`) and fake `known_marketplaces.json`/`installed_plugins.json`/`.claude.json`/`agents/`: a marketplace is added once, an installed plugin is `present`, a failing install is `skipped` with the reason and retried after the 10 min window (clock injected), `shownCommand` is `needs manual install` for the daemon's life, a server with a missing secret and one the member has are skipped with their reasons, the reply comes before the install runs (`installing`), a disabled id is neither applied nor listed, no `-y` on argv, the install lock is shared with `claude update`, an unreadable `.claude.json` skips servers with the reason.
+- [ ] AC3: unit tests for the setup view (keys, first sight, new-items notice), `save_plugin_choices` (table replaced or inserted, other lines untouched), `SessionExtensions` validation and `context()` with instructions, `command()` argv order and the pair drops.
+- [ ] AC4: manager test: a fake proxy serving a manifest (one marketplace, one plugin, one http server with a secret, one agent, instructions): the setup screen appears first; after Enter the spawned session's argv has `--agents` and `--mcp-config` (placeholders only, env has the secret), the context file has the instructions, the fake claude recorded the install; a server disabled in the setup screen is absent; toggled off, the next spawn has none; the details list installed/present/skipped.
+- [ ] AC5: `make test-unit`, `make test-manager` green; CI green.
+- [ ] AC6: `tests/remote.rs` t9 reworked for `Manifest`/`Applied` on `z6` (release build).
+- [ ] AC7: manual: with `vocdoni-internal` registered on claude.vocdoni.net, `claudio proxy login --token` with a member token, the setup screen lists its 13 plugins, 3 servers and 3 agents, a new session has the vocdoni-kb server, the team skills and the reviewer agent.
 
 ## Constraints
 
-- The spec's previous constraints hold: `app.rs` pure; no field added to an existing released op; secrets never in argv, journal, `state.json`, logs or notices; keys on `Alt`; `cli.rs` forwards claude's flags unchanged; conventional commits, no AI attribution; Linux and macOS.
-- Never `-y`/`--accept-command` on `claude plugin install`.
-- The daemon never writes into `~/.claude` itself; only `claude plugin …` does.
+- `app.rs` pure; no field added to a released op (`SessionExtensions.instructions` is `#[serde(default)]` and ignorable); secrets never in argv, journal, `state.json`, logs or notices; keys on `Alt` outside modals; `cli.rs` forwards claude's flags unchanged; conventional commits, no AI attribution; Linux and macOS.
+- Never `-y`/`--accept-command` on `claude plugin install`; the daemon never writes into `~/.claude` itself.
+- One parser (`src/plugins/manifest.rs`) for client and daemon; reasons name ids and fields, never values.
 
 ## Open questions
 
