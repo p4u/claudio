@@ -182,7 +182,7 @@ pub fn spawn(
                 &cwd,
                 &token,
                 daemon.skip_permissions(),
-                daemon.plugin_dir(),
+                daemon.claude_flags(),
                 context.as_deref(),
             );
             let program = PathBuf::from(cmd.get_argv()[0].clone());
@@ -318,16 +318,19 @@ pub(super) fn clear_contexts(socket: &Path) {
 /// `--resume`, resume-retry), rather than in `spec.args`, so the journal never
 /// stores it. It is left out when the args already choose a permissions flag.
 ///
-/// Without `plugin_dir` (this claude does not know `--plugin-dir`) every
-/// `--plugin-dir <path>` pair of the args is dropped, so an old claude still
-/// starts; the journal keeps them for a newer one.
+/// A `--plugin-dir`, `--agents` or `--mcp-config` pair (or `--flag=value`)
+/// of the args is dropped when this claude lacks the flag (`flags`), so an
+/// old claude still starts; exactly one value goes with the flag. The
+/// journal keeps them for a newer claude. The args keep their order, and
+/// `-n <name>` follows them: the client puts the plugin flags last, so the
+/// variadic `--mcp-config` is always followed by a flag or nothing.
 fn command(
     cfg: &super::Config,
     spec: &SpawnSpec,
     cwd: &Path,
     token: &str,
     skip_permissions: bool,
-    plugin_dir: bool,
+    flags: host::ClaudeFlags,
     context: Option<&Path>,
 ) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, context);
@@ -342,13 +345,19 @@ fn command(
     {
         cmd.arg(host::ALLOW_SKIP_PERMISSIONS);
     }
+    let unknown = |flag: &str| {
+        flags
+            .optional()
+            .iter()
+            .any(|(name, known)| !known && *name == flag)
+    };
     let mut args = spec.args.iter();
     while let Some(a) = args.next() {
-        if !plugin_dir && a == host::PLUGIN_DIR {
+        if unknown(a) {
             args.next();
             continue;
         }
-        if !plugin_dir && a.starts_with("--plugin-dir=") {
+        if a.split_once('=').is_some_and(|(flag, _)| unknown(flag)) {
             continue;
         }
         cmd.arg(a);
@@ -1290,7 +1299,8 @@ mod tests {
             ephemeral: false,
             extensions: None,
         };
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, true, None);
+        let flags = host::ClaudeFlags::default();
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, flags, None);
         let argv = argv_of(&cmd);
         assert_eq!(argv[0], "/bin/claude");
         assert_eq!(argv[1], "--settings");
@@ -1303,7 +1313,7 @@ mod tests {
 
         // With skip-permissions on, the flag follows --settings, ahead of
         // the spec args (which are what the journal stores).
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, true, None);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, flags, None);
         assert_eq!(
             &argv_of(&cmd)[3..],
             [ALLOW, "--resume", "abc", "-n", "work"]
@@ -1318,7 +1328,7 @@ mod tests {
                 Path::new("/"),
                 "t",
                 false,
-                true,
+                flags,
                 context,
             ));
             let settings: Value = serde_json::from_str(&argv[2]).unwrap();
@@ -1483,7 +1493,16 @@ mod tests {
                 ephemeral: false,
                 extensions: None,
             };
-            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true, true, None));
+            let flags = host::ClaudeFlags::default();
+            let argv = argv_of(&command(
+                &cfg,
+                &spec,
+                Path::new("/"),
+                "t",
+                true,
+                flags,
+                None,
+            ));
             assert_eq!(&argv[3..], [given]);
         }
     }
@@ -1520,17 +1539,92 @@ mod tests {
             extensions: None,
         };
         let argv = |plugin_dir| {
+            let flags = host::ClaudeFlags {
+                plugin_dir,
+                ..Default::default()
+            };
             argv_of(&command(
                 &cfg,
                 &spec,
                 Path::new("/"),
                 "t",
                 false,
-                plugin_dir,
+                flags,
                 None,
             ))
         };
         assert_eq!(&argv(false)[3..], ["--resume", "abc"]);
         assert_eq!(&argv(true)[3..], &spec.args[..]);
+    }
+
+    /// The plugin flags stay where the client put them, after every other
+    /// argument and right before `-n <name>`, so the variadic
+    /// `--mcp-config` never takes a positional; a claude without one of
+    /// them loses exactly that flag and its value.
+    #[test]
+    fn plugin_flags_keep_their_order_and_are_dropped_when_unknown() {
+        let cfg = super::super::Config {
+            socket: "/run/d.sock".into(),
+            lock: "/run/d.lock".into(),
+            journal: "/j.json".into(),
+            claude: "/bin/claude".into(),
+            claudio: "/bin/claudio".into(),
+            skip_permissions: false,
+            latex: false,
+            build: None,
+            path: None,
+        };
+        let agents = r#"{"reviewer":{"description":"d","prompt":"p"}}"#;
+        let mcp = r#"{"mcpServers":{"kb":{"type":"http","url":"https://e.org"}}}"#;
+        let spec = SpawnSpec {
+            id: uuid::Uuid::nil(),
+            cwd: "/".into(),
+            name: Some("s1".into()),
+            args: vec![
+                "--resume".into(),
+                "abc".into(),
+                "--agents".into(),
+                agents.into(),
+                "--mcp-config".into(),
+                mcp.into(),
+                "--agents".into(),
+                agents.into(),
+                format!("--mcp-config={mcp}"),
+            ],
+            env: vec![],
+            rows: 24,
+            cols: 80,
+            ephemeral: false,
+            extensions: None,
+        };
+        let argv = |agents, mcp_config| {
+            let flags = host::ClaudeFlags {
+                agents,
+                mcp_config,
+                ..Default::default()
+            };
+            argv_of(&command(
+                &cfg,
+                &spec,
+                Path::new("/"),
+                "t",
+                false,
+                flags,
+                None,
+            ))
+        };
+        let all = argv(true, true);
+        assert_eq!(&all[3..12], &spec.args[..]);
+        assert_eq!(&all[12..], ["-n", "s1"]);
+        let mcp_eq = format!("--mcp-config={mcp}");
+        assert_eq!(
+            &argv(false, true)[3..],
+            ["--resume", "abc", "--mcp-config", mcp, &mcp_eq, "-n", "s1"]
+        );
+        assert_eq!(
+            &argv(true, false)[3..],
+            ["--resume", "abc", "--agents", agents, "--agents", agents, "-n", "s1"]
+        );
+        assert_eq!(&argv(false, false)[3..], ["--resume", "abc", "-n", "s1"]);
     }
 }

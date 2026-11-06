@@ -342,8 +342,9 @@ pub(crate) struct Daemon {
     /// Held while `claude update` runs: one at a time.
     updating: tokio::sync::Mutex<()>,
     /// Which optional flags this claude knows (`--allow-dangerously-skip-
-    /// permissions`, `--plugin-dir`; it runs `claude --help`). Probed on
-    /// first use, and again after a claude update or install, like `host`.
+    /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
+    /// `claude --help`). Probed on first use, and again after a claude
+    /// update or install, like `host`.
     claude_flags: Mutex<Option<host::ClaudeFlags>>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
@@ -445,12 +446,6 @@ impl Daemon {
     /// time (it runs `claude --help`); call it off the async runtime.
     pub(crate) fn skip_permissions(&self) -> bool {
         self.config.skip_permissions && self.claude_flags().skip_permissions
-    }
-
-    /// Whether this claude takes `--plugin-dir`. Blocking the first time,
-    /// like [`Daemon::skip_permissions`].
-    pub(crate) fn plugin_dir(&self) -> bool {
-        self.claude_flags().plugin_dir
     }
 
     /// The optional flags this claude knows: probed once (`claude --help`),
