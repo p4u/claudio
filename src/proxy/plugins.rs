@@ -570,6 +570,7 @@ mod tests {
             url,
             token: "tok".into(),
             first_party: false,
+            email: None,
         };
         let ok = axum::Router::new().route(
             "/v1/claudio/plugins",

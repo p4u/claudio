@@ -6,6 +6,7 @@
 pub mod api;
 pub mod cmd;
 pub mod env;
+pub mod login;
 pub mod plugins;
 pub mod profile;
 pub mod resolve;

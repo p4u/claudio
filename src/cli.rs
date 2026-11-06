@@ -361,6 +361,7 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_COLS=<n> / CLAUDIO_ROWS=<n>  Emulated terminal size (default: 120x40).\n\
 \x20  CLAUDIO_DEBUG=1                   Verbose wrapper diagnostics.\n\
 \x20  CLAUDIO_RAW_LOG=<path>            Dump the raw PTY byte stream to a file.\n\
+\x20  CLAUDIO_NO_BROWSER=1              `claudio proxy login` prints the sign-in URL without opening a browser.\n\
 \n\
 \x20Environment variables — API server (--api):\n\
 \x20  CLAUDIO_API_BIND=<host:port>      Listen address (default: 127.0.0.1:8080).\n\
@@ -394,7 +395,7 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_NO_UPDATE_CHECK=1 or `[update] check = false` is set in config.toml.\n\
 \n\
 \x20Proxy commands (optional claude-proxy integration):\n\
-\x20  claudio proxy login [URL]         Add or update a proxy profile (prompts for token).\n\
+\x20  claudio proxy login [URL]         Sign in through the browser (--token: paste a token instead).\n\
 \x20  claudio proxy status              Show profiles, live stats and pool health.\n\
 \x20  claudio proxy logout [NAME]       Remove a proxy profile.\n\
 \x20  claudio proxy use NAME|none       Set (or clear) the default proxy profile.\n\

@@ -171,6 +171,7 @@ mod tests {
             url: url.into(),
             token: token.into(),
             first_party: false,
+            email: None,
         }
     }
 

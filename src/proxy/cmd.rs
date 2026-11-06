@@ -7,6 +7,8 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 use super::api;
+use super::login::{self, Granted};
+use super::plugins;
 use super::profile::{self, Profile};
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -43,14 +45,20 @@ const PROXY_HELP: &str = "\
 claudio proxy — manage claude-proxy profiles
 
 USAGE
-  claudio proxy login [URL]         Add or update a proxy profile
+  claudio proxy login [URL]         Sign in through the browser (or paste a token)
   claudio proxy status              Show profiles and live stats
-  claudio proxy logout [NAME]       Remove a proxy profile
+  claudio proxy logout [NAME]       Remove a proxy profile and its cached plugins
   claudio proxy use NAME|none       Set the default profile
 
 OPTIONS (login)
-  --name NAME    Profile name (default: first DNS label of the host)
+  URL            The proxy (default: the default profile's)
+  --name NAME    Profile name (default: the default profile's when URL is not
+                 given, else the first DNS label of the host)
+  --token        Paste a token instead of signing in through the browser
   --unverified   Save the profile even if token verification fails
+
+The sign-in page opens in a browser when there is a display; set
+CLAUDIO_NO_BROWSER=1 to only print its URL.
 ";
 
 // ── login ─────────────────────────────────────────────────────────────────────
@@ -60,6 +68,7 @@ fn cmd_login(args: &[String]) -> ExitCode {
     let mut name_override: Option<String> = None;
     let mut url_arg: Option<String> = None;
     let mut unverified = false;
+    let mut paste = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -69,6 +78,9 @@ fn cmd_login(args: &[String]) -> ExitCode {
             }
             "--unverified" => {
                 unverified = true;
+            }
+            "--token" => {
+                paste = true;
             }
             a if !a.starts_with('-') => {
                 url_arg = Some(a.to_owned());
@@ -81,10 +93,24 @@ fn cmd_login(args: &[String]) -> ExitCode {
         i += 1;
     }
 
-    // Get URL.
-    let url_raw = match url_arg {
-        Some(u) => u,
-        None => {
+    let mut sec = match profile::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("claudio proxy login: could not read config.toml: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Get URL: given, else the default profile's (keeping its name), else
+    // asked for.
+    let default = sec
+        .default
+        .as_ref()
+        .and_then(|n| sec.profiles.get(n).map(|p| (p.url.clone(), n.clone())));
+    let (url_raw, default_name) = match (url_arg, default) {
+        (Some(u), _) => (u, None),
+        (None, Some((url, name))) => (url, Some(name)),
+        (None, None) => {
             eprint!("Proxy URL (e.g. https://claude.example.net): ");
             let _ = io::stderr().flush();
             let mut line = String::new();
@@ -92,7 +118,7 @@ fn cmd_login(args: &[String]) -> ExitCode {
                 eprintln!("claudio proxy login: no URL provided");
                 return ExitCode::FAILURE;
             }
-            line.trim().to_owned()
+            (line.trim().to_owned(), None)
         }
     };
 
@@ -113,19 +139,40 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     };
 
-    let token = read_token_from_tty_or_stdin();
+    let name = name_override
+        .or(default_name)
+        .unwrap_or_else(|| profile::name_from_url(&url));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // The browser sign-in, unless a token is to be pasted (asked, or the
+    // proxy has none).
+    let (token, email) = if paste {
+        (read_token_from_tty_or_stdin(), None)
+    } else {
+        match rt.block_on(browser_login(&url)) {
+            Ok(Some(granted)) => {
+                let email = Some(granted.email).filter(|e| !e.is_empty());
+                (granted.token, email)
+            }
+            Ok(None) => {
+                eprintln!("This proxy has no browser login; paste a token.");
+                (read_token_from_tty_or_stdin(), None)
+            }
+            Err(e) => {
+                eprintln!("claudio proxy login: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
     if token.is_empty() {
         eprintln!("claudio proxy login: no token provided");
         return ExitCode::FAILURE;
     }
 
-    let name = name_override.unwrap_or_else(|| profile::name_from_url(&url));
-
     // Validate with the proxy.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let verified = rt.block_on(async {
         match api::check_root(&url, &token).await {
             Ok(true) => {
@@ -163,30 +210,86 @@ fn cmd_login(args: &[String]) -> ExitCode {
     }
 
     // Save.
-    let mut sec = match profile::load() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("claudio proxy login: could not read config.toml: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
     let is_first = sec.profiles.is_empty();
-    store_login(&mut sec, &name, url.clone(), token);
-    if is_first || sec.default.is_none() {
+    store_login(&mut sec, &name, url.clone(), token, email.clone());
+    let as_default = is_first || sec.default.is_none();
+    if as_default {
         sec.default = Some(name.clone());
-        println!("  Set '{name}' as default proxy.");
     }
     if let Err(e) = profile::save(&sec) {
         eprintln!("claudio proxy login: could not save config.toml: {e}");
         return ExitCode::FAILURE;
     }
-    println!("  Saved profile '{name}'.");
+    let saved = if as_default {
+        format!("Profile \"{name}\" saved as default.")
+    } else {
+        format!("Profile \"{name}\" saved.")
+    };
+    match &email {
+        Some(email) => println!("Signed in as {}. {saved}", printable(email)),
+        None => println!("{saved}"),
+    }
+
+    // The new token's plugins, so the next session has them.
+    if let Some(p) = sec.profiles.get(&name) {
+        rt.block_on(refresh_plugins(&name, p));
+    }
     ExitCode::SUCCESS
 }
 
+/// The browser sign-in at `url`: `Ok(None)` when the proxy has none.
+async fn browser_login(url: &str) -> Result<Option<Granted>, login::LoginError> {
+    use std::io::IsTerminal;
+    let Some(start) = login::start(url).await? else {
+        return Ok(None);
+    };
+    let page = printable(&start.verify_url);
+    println!("Open this page, sign in, and type your code:");
+    println!("  {page}");
+    println!("Your code: {}", printable(&start.user_code));
+    let web = page.starts_with("https://") || page.starts_with("http://");
+    let env = |k: &str| std::env::var(k).ok();
+    if web && login::browser_wanted(std::env::consts::OS, env, io::stdout().is_terminal()) {
+        login::open_browser(&page);
+    }
+    println!("Waiting… (Ctrl+C to cancel)");
+    let _ = io::stdout().flush();
+    login::poll(url, &start, std::time::Duration::from_secs(1))
+        .await
+        .map(Some)
+}
+
+/// Fetch profile `name`'s plugins and cache them; say which there are. A
+/// proxy without plugins (404) says nothing.
+async fn refresh_plugins(name: &str, p: &Profile) {
+    match plugins::fetch(name, p).await {
+        Ok(list) => {
+            if let Err(e) = plugins::save_cache(&list) {
+                eprintln!("  notice: could not save the plugins: {e}");
+            } else if !list.plugins.is_empty() {
+                println!("  Plugins: {}", printable(&list.summary()));
+            }
+        }
+        Err(api::ApiError::Http(s)) if s.as_u16() == 404 => {}
+        Err(e) => eprintln!("  notice: could not fetch the plugins: {e}"),
+    }
+}
+
+/// `text` from a proxy, safe to print: no control characters.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Store a logged-in profile, replacing any profile of that name. A re-login
-/// keeps the profile's `first_party` mode: only the URL and token change.
-fn store_login(sec: &mut profile::ProxySection, name: &str, url: String, token: String) {
+/// keeps the profile's `first_party` mode: only the URL, token and e-mail
+/// change (a pasted token has no e-mail).
+fn store_login(
+    sec: &mut profile::ProxySection,
+    name: &str,
+    url: String,
+    token: String,
+    email: Option<String>,
+) {
     let first_party = sec.profiles.get(name).is_some_and(|p| p.first_party);
     sec.profiles.insert(
         name.to_owned(),
@@ -194,6 +297,7 @@ fn store_login(sec: &mut profile::ProxySection, name: &str, url: String, token: 
             url,
             token,
             first_party,
+            email,
         },
     );
 }
@@ -364,6 +468,7 @@ fn cmd_status() -> ExitCode {
             " (env)"
         };
         println!("  {n}{marker}  {}  {}", p.url, p.masked_token());
+        print_plugins(n);
     }
     for (n, p) in &sec.profiles {
         let marker = if default_name.as_deref() == Some(n.as_str()) {
@@ -371,7 +476,10 @@ fn cmd_status() -> ExitCode {
         } else {
             ""
         };
-        println!("  {n}{marker}  {}  {}", p.url, p.masked_token());
+        let email = p.email.as_deref().map(printable).unwrap_or_default();
+        let line = format!("  {n}{marker}  {}  {}  {email}", p.url, p.masked_token());
+        println!("{}", line.trim_end());
+        print_plugins(n);
     }
 
     // Live stats for the default profile.
@@ -390,6 +498,21 @@ fn cmd_status() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// Profile `name`'s cached plugins (the admitted ones), if any.
+fn print_plugins(name: &str) {
+    let Some(list) = plugins::load_cache(name) else {
+        return;
+    };
+    let names: Vec<String> = list
+        .admitted()
+        .iter()
+        .map(|p| printable(&format!("{} {}", p.name, p.version)))
+        .collect();
+    if !names.is_empty() {
+        println!("    plugins: {}", names.join(", "));
+    }
 }
 
 async fn print_live_status(p: &Profile) {
@@ -480,6 +603,11 @@ fn cmd_logout(args: &[String]) -> ExitCode {
         eprintln!("claudio proxy logout: profile '{name}' not found");
         return ExitCode::FAILURE;
     }
+    // Its plugins' secrets go with it.
+    if let Err(e) = plugins::remove_cache(&name) {
+        eprintln!("claudio proxy logout: could not update plugins.json: {e}");
+        return ExitCode::FAILURE;
+    }
 
     // If we removed the default, clear it (or pick another one).
     if sec.default.as_deref() == Some(&name) {
@@ -545,6 +673,7 @@ mod tests {
                 url: "https://old.example.net".into(),
                 token: "old".into(),
                 first_party: true,
+                email: None,
             },
         );
         store_login(
@@ -552,17 +681,34 @@ mod tests {
             "work",
             "https://new.example.net".into(),
             "new".into(),
+            Some("pau@example.org".into()),
         );
         let p = &sec.profiles["work"];
         assert_eq!(p.url, "https://new.example.net");
         assert_eq!(p.token, "new");
         assert!(p.first_party);
+        assert_eq!(p.email.as_deref(), Some("pau@example.org"));
     }
 
     #[test]
     fn new_profile_is_gateway() {
         let mut sec = profile::ProxySection::default();
-        store_login(&mut sec, "work", "https://a.example.net".into(), "t".into());
+        store_login(
+            &mut sec,
+            "work",
+            "https://a.example.net".into(),
+            "t".into(),
+            None,
+        );
         assert!(!sec.profiles["work"].first_party);
+        assert_eq!(sec.profiles["work"].email, None);
+    }
+
+    #[test]
+    fn proxy_text_is_printed_without_control_characters() {
+        assert_eq!(
+            printable("https://p.example/\u{1b}]52;c;x\u{7}login\n"),
+            "https://p.example/]52;c;xlogin"
+        );
     }
 }

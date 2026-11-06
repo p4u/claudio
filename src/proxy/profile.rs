@@ -11,6 +11,7 @@
 //! url   = "https://proxy.example.com"
 //! token = "…"
 //! first_party = true  # optional: see `Profile::first_party`
+//! email = "pau@example.org"  # optional: set by a browser login
 //! ```
 //!
 //! The env var `CLAUDIO_PROXY_URL=<token>@<host>` creates an ephemeral profile
@@ -41,6 +42,10 @@ pub struct Profile {
     /// server-side tools through.
     #[serde(default, skip_serializing_if = "is_false")]
     pub first_party: bool,
+    /// The member's e-mail, when the token came from a browser login
+    /// (`claudio proxy login`); shown by `claudio proxy status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -53,6 +58,7 @@ impl fmt::Debug for Profile {
             .field("url", &self.url)
             .field("token", &"[redacted]")
             .field("first_party", &self.first_party)
+            .field("email", &self.email)
             .finish()
     }
 }
@@ -234,6 +240,7 @@ pub fn from_env() -> Option<(&'static str, Profile)> {
                 url,
                 token,
                 first_party: false,
+                email: None,
             },
         )),
         Err(e) => {
@@ -342,6 +349,7 @@ mod tests {
             url: "https://x.net".into(),
             token: "supersecret".into(),
             first_party: false,
+            email: None,
         };
         let dbg = format!("{p:?}");
         assert!(!dbg.contains("supersecret"));
@@ -365,6 +373,7 @@ mod tests {
                 url: "https://proxy.example.com".into(),
                 token: "topsecret".into(),
                 first_party: false,
+                email: None,
             },
         );
         save_to(&path, &sec).unwrap();
@@ -382,6 +391,32 @@ mod tests {
     }
 
     // ── first_party ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn email_is_optional_and_round_trips() {
+        let dir =
+            std::env::temp_dir().join(format!("claudio-proxy-email-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[proxy.profiles.a]\nurl = \"https://a.net\"\ntoken = \"t\"\n",
+        )
+        .unwrap();
+        let mut loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.profiles["a"].email, None);
+        save_to(&path, &loaded).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("email"));
+        loaded.profiles.get_mut("a").unwrap().email = Some("pau@example.org".into());
+        save_to(&path, &loaded).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("email = \"pau@example.org\""), "{saved}");
+        assert_eq!(
+            load_from(&path).unwrap().profiles["a"].email.as_deref(),
+            Some("pau@example.org")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn first_party_round_trips_and_defaults_to_false() {
@@ -410,6 +445,7 @@ mod tests {
                 url: "https://b.net".into(),
                 token: "t2".into(),
                 first_party: true,
+                email: None,
             },
         );
         save_to(&path, &sec).unwrap();
@@ -429,6 +465,7 @@ mod tests {
             url: "u".into(),
             token: t.into(),
             first_party: false,
+            email: None,
         };
         assert_eq!(p("abcdefghwxyz").masked_token(), "abcd…wxyz");
         assert_eq!(p("ab").masked_token(), "**");
@@ -442,6 +479,7 @@ mod tests {
             url: "u".into(),
             token: "🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑".into(),
             first_party: false,
+            email: None,
         };
         // Should not panic; result length varies by char count.
         let masked = p.masked_token();
@@ -451,6 +489,7 @@ mod tests {
             url: "u".into(),
             token: "🔑🔑".into(),
             first_party: false,
+            email: None,
         };
         assert_eq!(p2.masked_token(), "**");
     }
