@@ -22,6 +22,7 @@ mod latex;
 mod leader;
 mod notifications;
 mod plain;
+mod plugin_setup;
 mod plugins;
 mod proxy_state;
 mod reader;
@@ -1419,6 +1420,12 @@ fn run_effect(
         Effect::SetExtension { name, on } => {
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
+        }
+        Effect::SavePluginChoices { name, choices } => {
+            match crate::config::save_plugin_choices(&paths::config_file(), &name, &choices) {
+                Ok(()) => app.notify(format!("plugin {name} set up (saved)")),
+                Err(e) => app.notify(format!("could not save: {e}")),
+            }
         }
         Effect::SaveExtension { name, on } => {
             let state = if on { "on" } else { "off" };

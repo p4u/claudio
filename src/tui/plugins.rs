@@ -11,7 +11,7 @@
 //! is asked on connect, when the list's hash changes, on `r`, and every
 //! 30 s while it still installs.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
@@ -103,6 +103,11 @@ pub struct Plugins {
     pub manifests: HashMap<String, (String, ManifestState)>,
     /// Per `(host, plugin)`: what that host answered.
     pub applies: HashMap<(String, String), Apply>,
+    /// Plugins whose first-sight setup the member put off (Esc) in this
+    /// run: nothing is asked of a host for them until the setup is saved.
+    pub deferred: BTreeSet<String>,
+    /// `(plugin, hash)` whose new items were named in a notice already.
+    pub noticed: HashSet<(String, String)>,
 }
 
 /// What one enabled plugin brings to a spawn on a host.
@@ -249,6 +254,11 @@ impl App {
             .collect()
     }
 
+    /// Whether plugin `name` (of any profile) is on.
+    pub(super) fn plugin_enabled(&self, name: &str) -> bool {
+        self.all_enabled_plugins().iter().any(|p| p.name == name)
+    }
+
     /// Every enabled plugin of every profile, in registry order.
     fn all_enabled_plugins(&self) -> Vec<&Plugin> {
         let lists = self.plugins.lists.keys();
@@ -329,6 +339,7 @@ impl App {
             // A hash since replaced.
             _ => return,
         }
+        self.on_manifest_ready(name, sha256);
         self.request_all();
         self.redraw = true;
     }
@@ -365,12 +376,14 @@ impl App {
     }
 
     /// Whether a host may be asked for `p`'s manifest now: the client has
-    /// it, good, at the list's hash.
+    /// it, good, at the list's hash, and the member's choices are saved
+    /// (nothing is sent before the first-sight setup closes with Enter).
     fn requestable(&self, p: &Plugin) -> bool {
-        matches!(
+        let fetched = matches!(
             self.plugins.manifests.get(&p.name),
             Some((sha, ManifestState::Ready(_))) if *sha == p.bundle_sha256
-        )
+        );
+        fetched && self.plugins.choices.contains_key(&p.name)
     }
 
     /// Ask `host` for each enabled plugin's manifest it has not answered for
@@ -576,6 +589,7 @@ impl App {
         if let Some(m) = manifest.filter(|m| !m.description.trim().is_empty()) {
             lines.push(m.description.clone());
         }
+        lines.extend(self.setup_details(name));
         let mut hosts: Vec<&String> = self.plugins.hosts.iter().collect();
         hosts.sort_by_key(|h| (h.as_str() != "local", h.as_str()));
         for host in hosts {
@@ -858,12 +872,15 @@ KB_REGION = "eu"
         assert_eq!(details[1], "manifest: hash mismatch");
     }
 
-    /// An app with `local` connected and profile `work` serving `kb`, whose
-    /// manifest is here and which `local` answered with `answer` (`None`:
-    /// not yet).
+    /// An app with `local` connected and profile `work` serving `kb`, set
+    /// up, whose manifest is here and which `local` answered with `answer`
+    /// (`None`: not yet).
     fn app_with_kb(answer: Option<Msg>) -> App {
         let mut app = app_with(&[]);
         app.modal = None;
+        app.plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
         app.on_plugin_host("local");
         app.on_plugins(
             "work",
@@ -915,6 +932,9 @@ KB_REGION = "eu"
         installing.skipped = vec![("plugin:p@m".into(), "installing".into())];
         let mut app = app_with(&[]);
         app.now = 1000;
+        app.plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
         app.on_plugin_host("local");
         app.on_plugins(
             "work",
@@ -1198,6 +1218,7 @@ KB_REGION = "eu"
             [
                 "turning it on or off applies to new sessions",
                 "The knowledge base",
+                "0 items disabled (Enter to change)",
                 "local: ready · 1 installed, 0 present, 1 installing, 1 skipped",
                 "  mcp:kb: missing secret KB_TOKEN",
                 "local: claude too old: --agents",

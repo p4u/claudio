@@ -3,7 +3,8 @@
 //! [`ConfirmPrompt`] is generic: it carries the question and the keys that
 //! answer it, each with the [`ConfirmAction`] it runs (or none, to just close).
 //! `Esc` always closes. Prompts raised while another modal is open wait their
-//! turn in `App::confirms`, and ignore keys for a moment after appearing so a
+//! turn in `App::confirms` (with the plugin setup screens, see
+//! `plugin_setup.rs`), and ignore keys for a moment after appearing so a
 //! stray keystroke meant for a session cannot answer one.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,6 +13,7 @@ use crate::proto::SessionId;
 
 use super::app::App;
 use super::interaction::Modal;
+use super::plugin_setup::PluginSetup;
 
 /// Ticks (250 ms each) during which a new prompt ignores the keyboard.
 const ARM_TICKS: u8 = 4;
@@ -82,6 +84,12 @@ impl Choice {
     }
 }
 
+/// A modal waiting its turn: a prompt or a plugin setup screen.
+pub enum Queued {
+    Confirm(ConfirmPrompt),
+    Setup(Box<PluginSetup>),
+}
+
 pub struct ConfirmPrompt {
     pub title: String,
     /// The question; may span lines.
@@ -120,23 +128,29 @@ impl ConfirmPrompt {
 impl App {
     /// Show `prompt` now, or as soon as no other modal is open.
     pub(super) fn queue_confirm(&mut self, prompt: ConfirmPrompt) {
-        self.confirms.push_back(prompt);
+        self.confirms.push_back(Queued::Confirm(prompt));
         self.show_next_confirm();
     }
 
-    fn show_next_confirm(&mut self) {
+    /// Open the first waiting prompt or setup screen if no modal is open.
+    pub(super) fn show_next_confirm(&mut self) {
         if self.modal.is_none() {
-            if let Some(prompt) = self.confirms.pop_front() {
-                self.modal = Some(Modal::Confirm(prompt));
-                self.redraw = true;
+            match self.confirms.pop_front() {
+                Some(Queued::Confirm(prompt)) => self.modal = Some(Modal::Confirm(prompt)),
+                Some(Queued::Setup(setup)) => self.modal = Some(Modal::PluginSetup(setup)),
+                None => return,
             }
+            self.redraw = true;
         }
     }
 
-    /// Per-tick upkeep: arm the open prompt, open a waiting one.
+    /// Per-tick upkeep: arm the open prompt or setup screen, open a waiting
+    /// one.
     pub(super) fn confirm_tick(&mut self) {
-        if let Some(Modal::Confirm(prompt)) = &mut self.modal {
-            prompt.armed = prompt.armed.saturating_sub(1);
+        match &mut self.modal {
+            Some(Modal::Confirm(prompt)) => prompt.armed = prompt.armed.saturating_sub(1),
+            Some(Modal::PluginSetup(setup)) => setup.armed = setup.armed.saturating_sub(1),
+            _ => {}
         }
         self.show_next_confirm();
     }

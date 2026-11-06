@@ -46,12 +46,24 @@ impl App {
     /// Start the plain UI's session on the local daemon, with the proxy
     /// profile the startup choice picks (like the wizard's default). The app
     /// is one made in [`Mode::Plain`].
+    ///
+    /// With a proxy profile whose enabled plugins include one never set up
+    /// (no `[plugins.<name>]`), the start waits until each such manifest
+    /// has arrived or failed (at most 20 s) and every setup screen they
+    /// open has closed (`plugin_setup.rs`).
     pub fn start_plain(&mut self, start: PlainStart) {
         debug_assert_eq!(self.mode, Mode::Plain);
         let proxy = self
             .proxy_override
             .pick(self.proxy_default.as_deref())
             .map(str::to_owned);
+        let deadline = self.now + super::BUNDLE_WAIT.as_secs();
+        self.plain_pending = Some((start, proxy, deadline));
+        self.plain_try_start();
+    }
+
+    /// Start the plain UI's session now, with `proxy`.
+    pub(super) fn start_plain_now(&mut self, start: PlainStart, proxy: Option<String>) {
         let PlainStart { id, args, cwd } = start;
         let started = self.start(id, "local".to_owned(), cwd, SessionKind::Claude, args, proxy, 0);
         if let Err(e) = started {

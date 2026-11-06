@@ -2,8 +2,9 @@
 //! extension (built-ins first, then the external ones that loaded, then the
 //! proxy plugins, on or off) with its kind, keys and lenses; below the list,
 //! the selected one's description, actions and lenses (for a plugin, its
-//! state on each host). Space or Enter turns it on or off; `r` fetches the
-//! plugin lists again.
+//! manifest and its state on each host). Space turns it on or off, as
+//! Enter does on every row but a plugin's, where Enter opens its setup
+//! screen (`plugin_setup.rs`); `r` fetches the plugin lists again.
 //!
 //! Pure, like `app.rs`: a toggle changes the registry at once and returns
 //! [`Effect::SaveExtension`] (the event loop writes `config.toml`) and, for
@@ -20,7 +21,7 @@ use crate::claude::latex::sanitize;
 use crate::proto::LensKind;
 
 /// The screen's title.
-pub const TITLE: &str = "Extensions (Space toggle · r refresh · Esc close)";
+pub const TITLE: &str = "Extensions (Space toggle · Enter plugin setup · r refresh · Esc close)";
 /// The screen's last line.
 pub const FOOTER: &str =
     "changes apply now; claude's instructions change for new sessions (Alt+e restarts one)";
@@ -40,6 +41,8 @@ pub struct ExtensionsView {
 enum Outcome {
     Stay,
     Toggle(usize),
+    /// Enter: a plugin's setup screen, else a toggle.
+    Enter(usize),
     /// `r`: fetch the plugin lists again.
     Refresh,
     Close,
@@ -51,9 +54,8 @@ impl ExtensionsView {
         let last = count.saturating_sub(1);
         match key.code {
             KeyCode::Esc => return Outcome::Close,
-            KeyCode::Char(' ') | KeyCode::Enter if count > 0 => {
-                return Outcome::Toggle(self.selected.min(last))
-            }
+            KeyCode::Char(' ') if count > 0 => return Outcome::Toggle(self.selected.min(last)),
+            KeyCode::Enter if count > 0 => return Outcome::Enter(self.selected.min(last)),
             KeyCode::Char('r') => return Outcome::Refresh,
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(last),
@@ -237,10 +239,15 @@ impl App {
         let Some(Modal::ExtensionsMenu(view)) = &mut self.modal else {
             return;
         };
+        let back = view.clone();
         match view.on_key(key, count) {
             Outcome::Stay => {}
             Outcome::Close => self.modal = None,
             Outcome::Toggle(index) => self.toggle_extension(index),
+            Outcome::Enter(index) => match self.extensions.extensions.get(index) {
+                Some(ext) if ext.is_plugin() => self.open_plugin_setup(index, back),
+                _ => self.toggle_extension(index),
+            },
             Outcome::Refresh => self.refresh_plugins(),
         }
         self.redraw = true;
@@ -264,6 +271,11 @@ impl App {
             self.plugins.config.insert(name.clone(), on);
             self.extensions.extensions[index].enabled = on;
             if on {
+                // Its setup if it was never set up, else its manifest.
+                let sha = self.plugins.manifests.get(&name).map(|(s, _)| s.clone());
+                if let Some(sha) = sha {
+                    self.on_manifest_ready(&name, &sha);
+                }
                 self.request_all();
             }
             self.emit(Effect::SaveExtension { name, on });
@@ -551,8 +563,16 @@ mod tests {
         let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
         let manifest = crate::plugins::manifest::Manifest::parse(src).unwrap();
         let sha = "a".repeat(64);
+        app.plugins.choices.insert("kb".into(), Default::default());
         app.on_manifest("kb", &sha, Ok(manifest));
-        assert_eq!(details(&app, 5)[2..], ["KB", "local: applying"]);
+        assert_eq!(
+            details(&app, 5)[2..],
+            [
+                "KB",
+                "0 items disabled (Enter to change)",
+                "local: applying"
+            ]
+        );
         let ready = Msg::Applied(crate::proto::Applied {
             name: "kb".into(),
             version: "1.4.0".into(),
@@ -565,7 +585,7 @@ mod tests {
         };
         app.on_reply(to.clone(), Ok(ready));
         assert_eq!(
-            details(&app, 5)[3],
+            details(&app, 5)[4],
             "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
         );
         app.on_reply(
@@ -575,7 +595,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            details(&app, 5)[3],
+            details(&app, 5)[4],
             "local: failed: download failed: HTTP 404"
         );
         assert!(

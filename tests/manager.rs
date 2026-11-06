@@ -2699,7 +2699,7 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
 
     tui.send_keys(ALT_I);
     tui.wait_for(
-        "Extensions (Space toggle · r refresh · Esc close)",
+        "Extensions (Space toggle · Enter plugin setup · r refresh · Esc close)",
         Region::Screen,
         WAIT,
     );
@@ -2748,7 +2748,7 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     // `e` opens the screen too.
     tui.send_keys(b"e");
     tui.wait_for(
-        "Extensions (Space toggle · r refresh · Esc close)",
+        "Extensions (Space toggle · Enter plugin setup · r refresh · Esc close)",
         Region::Screen,
         WAIT,
     );

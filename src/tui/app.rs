@@ -207,6 +207,11 @@ pub enum Effect {
         url: String,
         sha256: String,
     },
+    /// Write `[plugins.<name>]` to config.toml; a failure is a notice.
+    SavePluginChoices {
+        name: String,
+        choices: crate::config::PluginChoices,
+    },
 }
 
 /// A plugin manifest a deferred spawn waits for: its `Manifest` request,
@@ -350,8 +355,8 @@ pub struct App {
     pub claude_skipped: HashMap<String, String>,
     /// Hosts whose claude was already checked in this run.
     pub(super) claude_checked: HashSet<String>,
-    /// Prompts waiting for the open modal to close.
-    pub(super) confirms: VecDeque<ConfirmPrompt>,
+    /// Prompts and plugin setup screens waiting for the open modal to close.
+    pub(super) confirms: VecDeque<super::confirm::Queued>,
     /// The SSH hosts the wizard offers: recently used ones, then
     /// `~/.ssh/config` aliases.
     pub(super) ssh_hosts: Vec<String>,
@@ -381,6 +386,9 @@ pub struct App {
     /// The proxy plugins: lists, saved choices, manifests, each host's
     /// answers.
     pub plugins: super::plugins::Plugins,
+    /// `--plain`'s session while plugin setup holds it: what to start, its
+    /// proxy profile, and until when (Unix seconds) manifests are awaited.
+    pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -474,6 +482,7 @@ impl App {
             pending_action: None,
             failed_extensions: Vec::new(),
             plugins: Default::default(),
+            plain_pending: None,
         }
     }
 
@@ -886,6 +895,7 @@ impl App {
         self.now = crate::paths::unix_now();
         self.confirm_tick();
         self.reask_installing();
+        self.plain_try_start();
         self.refresh_session_cred(SESSION_CRED_POLL_SECS);
         if let Some(n) = &mut self.notice {
             n.ticks_left = n.ticks_left.saturating_sub(1);
