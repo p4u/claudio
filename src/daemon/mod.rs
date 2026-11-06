@@ -11,19 +11,19 @@
 //! - [`update`] — `claude update` (or the installer), on request.
 //! - [`git`] — the read-only git queries behind the TUI's git viewer.
 //! - [`login_path`] — the user's login-shell `PATH`, for claude and sessions.
-//! - [`bundle`] — proxy plugin bundles: the zips sessions load with
-//!   `--plugin-dir`.
+//! - [`manifest`] — proxy plugin manifests: what a plugin's sessions get
+//!   here, and the plugin installs it needs.
 //!
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
 
-mod bundle;
 pub mod ctl;
 mod git;
 mod git_status;
 mod host;
 mod journal;
 mod login_path;
+mod manifest;
 mod server;
 mod session;
 mod stats;
@@ -305,7 +305,14 @@ pub fn run() -> std::process::ExitCode {
     };
     let (code, lock) = runtime.block_on(async move {
         match server::start(config) {
-            Ok(Some(listening)) => (std::process::ExitCode::SUCCESS, Some(listening.serve().await)),
+            Ok(Some(listening)) => {
+                // Zips a pre-manifest build cached: nothing uses them now.
+                manifest::remove_stale_zips(&crate::paths::cache_dir().join("plugins"));
+                (
+                    std::process::ExitCode::SUCCESS,
+                    Some(listening.serve().await),
+                )
+            }
             Ok(None) => {
                 tracing::info!("another daemon is already running");
                 (std::process::ExitCode::SUCCESS, None)
@@ -339,7 +346,8 @@ pub(crate) struct Daemon {
     /// Probed on first use (it runs `claude --version`), and again after a
     /// claude update.
     host: tokio::sync::Mutex<Option<HostInfo>>,
-    /// Held while `claude update` runs: one at a time.
+    /// Held while `claude update` or one `claude plugin …` runs: one at a
+    /// time, so `~/.claude` has one writer.
     updating: tokio::sync::Mutex<()>,
     /// Which optional flags this claude knows (`--allow-dangerously-skip-
     /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
@@ -352,8 +360,9 @@ pub(crate) struct Daemon {
     pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
     /// `Search`: one at a time, and the transcripts it reads.
     pub(crate) search: server::SearchSlot,
-    /// `Bundle`: where plugin zips go, one download per name at a time.
-    pub(crate) bundles: bundle::Bundles,
+    /// `Manifest`: where manifests go, one download per name at a time,
+    /// and what the plugin installs did.
+    pub(crate) manifests: manifest::Manifests,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -395,7 +404,7 @@ impl Daemon {
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
             search: server::SearchSlot::new(),
-            bundles: bundle::Bundles::new(),
+            manifests: manifest::Manifests::new(),
         }
     }
 

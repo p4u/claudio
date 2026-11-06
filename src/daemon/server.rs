@@ -26,7 +26,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use super::session::{ClientId, Cmd};
-use super::{bundle, git, host, update, Config, Daemon};
+use super::{git, host, manifest, update, Config, Daemon};
 use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
@@ -558,19 +558,19 @@ impl Client {
                 Ok(()) => return,
                 Err(refused) => refused,
             },
-            Msg::Bundle {
+            Msg::Manifest {
                 name,
                 url,
                 sha256,
-                installed_id,
+                secrets,
+                disabled,
             } => {
                 // A download (up to minutes): reply from a task, like
-                // `UpdateClaude`.
+                // `UpdateClaude`. The installs run after the reply.
                 let daemon = Arc::clone(&self.daemon);
                 let queue = self.queue.clone();
                 tokio::spawn(async move {
-                    let msg =
-                        bundle::handle(&daemon.bundles, name, url, sha256, installed_id).await;
+                    let msg = manifest::handle(&daemon, name, url, sha256, secrets, disabled).await;
                     let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
                 });
                 return;

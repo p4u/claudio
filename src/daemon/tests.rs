@@ -2036,25 +2036,226 @@ async fn a_daemon_start_clears_old_context_files() {
     assert!(!context.join("old.txt").exists());
 }
 
-// ── Bundle ───────────────────────────────────────────────────────────────────
+// ── Manifest ─────────────────────────────────────────────────────────────────
 
-/// A daemon whose bundles go to `<dir>/cache/plugins` and whose Claude Code
-/// config is `<dir>/claude` (http allowed, for the local test server).
-async fn bundle_daemon() -> (TestDaemon, PathBuf, PathBuf) {
-    let d = TestDaemon::start().await;
-    let cache = d.dir.join("cache/plugins");
-    let claude = d.dir.join("claude");
-    d.daemon.bundles.set_dirs(cache.clone(), claude.clone());
-    (d, cache, claude)
+/// The manifest the `Manifest` tests apply: one marketplace with plugins
+/// `a` and `b`, servers `kb` (secret `KB_TOKEN`), `mine` and `jina`
+/// (secret `JINA_KEY`), agents `reviewer` and `helper`, instructions, env.
+const TEAM: &str = r#"
+format = 1
+name = "team"
+version = "1.0.0"
+instructions = "Team rules.\u202e"
+
+[[marketplace]]
+name = "market"
+source = "github:acme/market"
+
+[[plugin]]
+name = "a"
+marketplace = "market"
+
+[[plugin]]
+name = "b"
+marketplace = "market"
+
+[[mcp]]
+name = "kb"
+type = "http"
+url = "https://kb.example.org/mcp"
+headers = { Authorization = "Bearer ${KB_TOKEN}" }
+secrets = ["KB_TOKEN"]
+
+[[mcp]]
+name = "mine"
+type = "sse"
+url = "https://mine.example.org/sse"
+
+[[mcp]]
+name = "jina"
+type = "http"
+url = "https://jina.example.org"
+headers = { Authorization = "Bearer ${JINA_KEY}" }
+secrets = ["JINA_KEY"]
+
+[[agent]]
+name = "reviewer"
+description = "Reviews"
+prompt = "Review."
+
+[[agent]]
+name = "helper"
+description = "Helps"
+prompt = "Help."
+
+[env]
+REGION = "eu"
+"#;
+
+/// The fake `claude` of the `Manifest` tests, shared (written once). Its
+/// control dir is the first entry of its `PATH` (the test daemon's
+/// `Config::path`), and Claude Code's config dir is `<ctl>/../claude`.
+/// Every `plugin …` run appends its argv to `<ctl>/log`. `marketplace
+/// add` registers the name in `<ctl>/market-name` (default `market`), or
+/// fails with `<ctl>/market-fails`; with `<ctl>/market-raced` it registers
+/// the name and then fails, as when another run added it meanwhile.
+/// `install <spec>` waits while `<ctl>/gate-<spec>` exists, then fails
+/// with `<ctl>/fail-<spec>`, needs a person with `<ctl>/manual-<spec>`,
+/// succeeds without listing it with `<ctl>/silent-<spec>`, or adds the
+/// spec to `installed_plugins.json`. `--help` prints `<ctl>/help`.
+fn fake_plugin_claude() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("claudio-fake-plugins-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let script = r#"#!/bin/sh
+ctl="${PATH%%:*}"
+cfg="$ctl/../claude"
+case "$1" in
+--version) echo '9.9.9 (Claude Code)'; exit 0;;
+--help) [ -f "$ctl/help" ] && cat "$ctl/help"; exit 0;;
+update) echo updated; exit 0;;
+plugin) ;;
+*) exit 2;;
+esac
+echo "$*" >> "$ctl/log"
+mkdir -p "$cfg/plugins"
+if [ "$2" = marketplace ]; then
+  if [ -f "$ctl/market-fails" ]; then echo '{"error":"repository not found"}'; exit 1; fi
+  name=$(cat "$ctl/market-name" 2>/dev/null || echo market)
+  printf '{"%s":{"source":{"source":"github","repo":"%s"}}}\n' "$name" "$4" \
+    > "$cfg/plugins/known_marketplaces.json"
+  if [ -f "$ctl/market-raced" ]; then echo '{"error":"already exists"}'; exit 1; fi
+  echo '{"ok":true}'
+  exit 0
+fi
+spec="$3"
+while [ -e "$ctl/gate-$spec" ]; do sleep 0.05; done
+if [ -f "$ctl/fail-$spec" ]; then echo 'Installing'; echo '{"error":"network down"}'; exit 1; fi
+if [ -f "$ctl/manual-$spec" ]; then echo '{"shownCommand":{"command":"npx x","sha256":"ab"}}'; exit 1; fi
+if [ -f "$ctl/silent-$spec" ]; then echo '{"ok":true}'; exit 0; fi
+echo "$spec" >> "$ctl/installed"
+{
+  printf '{"version":2,"plugins":{'
+  sep=
+  while read -r k; do printf '%s"%s":[{"scope":"user"}]' "$sep" "$k"; sep=,; done < "$ctl/installed"
+  printf '}}\n'
+} > "$cfg/plugins/installed_plugins.json"
+echo "done $spec" >> "$ctl/log"
+echo '{"ok":true}'
+"#;
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        bin
+    })
 }
 
-fn bundle(name: &str, url: &str, sha256: &str, installed_id: &str) -> Msg {
-    Msg::Bundle {
-        name: name.into(),
-        url: url.into(),
-        sha256: sha256.into(),
-        installed_id: installed_id.into(),
+/// A `Manifest` test's daemon: the fake plugin claude, manifests cached in
+/// `<dir>/cache/plugins` (TEAM there already), Claude Code's config in
+/// `<dir>/claude`, and the fake's control dir `<dir>/ctl`.
+struct PluginHost {
+    d: TestDaemon,
+    cache: PathBuf,
+    claude: PathBuf,
+    ctl: PathBuf,
+}
+
+impl PluginHost {
+    async fn start() -> PluginHost {
+        let dir = TestDaemon::new_dir();
+        let (cache, claude, ctl) = (
+            dir.join("cache/plugins"),
+            dir.join("claude"),
+            dir.join("ctl"),
+        );
+        for d in [&cache, &claude, &ctl] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(cache.join("team.toml"), TEAM).unwrap();
+        std::fs::write(
+            cache.join("team.sha256"),
+            format!("{}\n", sha256_hex(TEAM.as_bytes())),
+        )
+        .unwrap();
+        let config = Config {
+            claude: fake_plugin_claude().to_path_buf(),
+            path: Some(format!("{}:/usr/bin:/bin", ctl.display()).into()),
+            ..TestDaemon::config(&dir)
+        };
+        let d = TestDaemon::start_with_config(dir, config);
+        d.daemon.manifests.set_dirs(cache.clone(), claude.clone());
+        PluginHost {
+            d,
+            cache,
+            claude,
+            ctl,
+        }
     }
+
+    /// Create (or with `on` false, remove) control file `name`.
+    fn set(&self, name: &str, on: bool) {
+        let path = self.ctl.join(name);
+        if on {
+            std::fs::write(path, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// The fake's `plugin …` runs so far.
+    fn log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.ctl.join("log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Wait until the log has a line equal to `line`.
+    async fn logged(&self, line: &str) {
+        within(async {
+            while !self.log().iter().any(|l| l == line) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    }
+
+    /// Wait until no install of manifest TEAM is queued or running.
+    async fn idle(&self) {
+        within(async {
+            while self.d.daemon.manifests.busy() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+    }
+}
+
+/// A `Manifest` request for TEAM (cached; its URL is never reached).
+fn team(secrets: &[&str], disabled: &[&str]) -> Msg {
+    Msg::Manifest {
+        name: "team".into(),
+        url: "https://127.0.0.1:9/never.toml".into(),
+        sha256: sha256_hex(TEAM.as_bytes()),
+        secrets: secrets.iter().map(|s| s.to_string()).collect(),
+        disabled: disabled.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn applied(reply: Msg) -> proto::Applied {
+    match reply {
+        Msg::Applied(a) => a,
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2062,13 +2263,391 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
-/// Serve `body` at `/kb.zip` on loopback, counting the requests.
-async fn serve_zip(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+/// The reply comes before any install runs: plugins are `installing`,
+/// every static part is there (servers with their secrets, agents, the
+/// instructions sanitized, the env), and no `-y` reaches the CLI. The
+/// marketplace is added once for both plugins; later replies say
+/// `installed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_replies_first_then_installs_each_plugin_once() {
+    let h = PluginHost::start().await;
+    h.set("gate-a@market", true);
+    let mut c = h.d.client().await;
+    let a = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
+    assert_eq!((a.name.as_str(), a.version.as_str()), ("team", "1.0.0"));
+    assert_eq!(
+        a.skipped,
+        pairs(&[
+            ("plugin:a@market", "installing"),
+            ("plugin:b@market", "installing")
+        ])
+    );
+    assert!(a.installed.is_empty() && a.present.is_empty());
+    let mcp: serde_json::Value = serde_json::from_str(a.mcp_config.as_deref().unwrap()).unwrap();
+    let servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
+    assert_eq!(servers, ["jina", "kb", "mine"]);
+    assert_eq!(
+        mcp["mcpServers"]["kb"]["headers"]["Authorization"],
+        "Bearer ${KB_TOKEN}"
+    );
+    let agents: serde_json::Value = serde_json::from_str(a.agents.as_deref().unwrap()).unwrap();
+    assert_eq!(agents["reviewer"]["prompt"], "Review.");
+    assert_eq!(a.instructions, "Team rules.");
+    assert_eq!(a.env, pairs(&[("REGION", "eu")]));
+    // The fake's `--help` lists neither flag.
+    assert_eq!(a.dropped, ["--mcp-config", "--agents"]);
+
+    // Asked again while `a` is blocked: nothing is queued twice.
+    h.logged("plugin install a@market --scope user --json")
+        .await;
+    let again = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
+    assert_eq!(again.skipped, a.skipped);
+    h.set("gate-a@market", false);
+    h.idle().await;
+    assert_eq!(
+        h.log(),
+        [
+            "plugin marketplace add acme/market --scope user --json",
+            "plugin install a@market --scope user --json",
+            "done a@market",
+            "plugin install b@market --scope user --json",
+            "done b@market",
+        ]
+    );
+    assert!(!h
+        .log()
+        .iter()
+        .any(|l| l.contains("-y") || l.contains("--yes") || l.contains("--accept-command")));
+    let done = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
+    assert_eq!(done.installed, ["plugin:a@market", "plugin:b@market"]);
+    assert!(done.skipped.is_empty() && done.present.is_empty());
+    assert_eq!(h.log().len(), 5, "nothing ran again");
+    assert!(h.cache.join("team.toml").is_file());
+}
+
+/// What is already there is left alone: an installed plugin (any scope) is
+/// `present`, a server in `.claude.json` and an agent in `agents/` are the
+/// member's (`yours`), a server whose secret the request lacks is skipped,
+/// and a disabled id is neither applied nor listed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_leaves_the_members_own_alone_and_honours_disabled() {
+    let h = PluginHost::start().await;
+    std::fs::create_dir_all(h.claude.join("plugins")).unwrap();
+    std::fs::create_dir_all(h.claude.join("agents")).unwrap();
+    std::fs::write(
+        h.claude.join("plugins/installed_plugins.json"),
+        r#"{"version":2,"plugins":{"a@market":[{"scope":"project"}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        h.claude.join(".claude.json"),
+        r#"{"mcpServers":{"mine":{}}}"#,
+    )
+    .unwrap();
+    std::fs::write(h.claude.join("agents/helper.md"), "my helper").unwrap();
+    let mut c = h.d.client().await;
+    let a = applied(
+        c.call(team(
+            &["KB_TOKEN"],
+            &["plugin:b@market", "env", "instructions"],
+        ))
+        .await,
+    );
+    assert_eq!(a.present, ["plugin:a@market"]);
+    assert_eq!(
+        a.skipped,
+        pairs(&[
+            ("mcp:mine", "yours"),
+            ("mcp:jina", "missing secret JINA_KEY"),
+            ("agent:helper", "yours"),
+        ])
+    );
+    let mcp: serde_json::Value = serde_json::from_str(a.mcp_config.as_deref().unwrap()).unwrap();
+    let servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
+    assert_eq!(servers, ["kb"]);
+    let agents: serde_json::Value = serde_json::from_str(a.agents.as_deref().unwrap()).unwrap();
+    assert!(agents.get("helper").is_none() && agents.get("reviewer").is_some());
+    assert!(a.instructions.is_empty() && a.env.is_empty());
+    h.idle().await;
+    assert!(h.log().is_empty(), "nothing to install: {:?}", h.log());
+
+    // Every server and agent disabled: no JSON at all.
+    let all = [
+        "plugin:b@market",
+        "mcp:kb",
+        "mcp:mine",
+        "mcp:jina",
+        "agent:reviewer",
+        "agent:helper",
+    ];
+    let a = applied(c.call(team(&["KB_TOKEN"], &all)).await);
+    assert_eq!((a.mcp_config, a.agents), (None, None));
+    assert!(a.skipped.is_empty(), "{:?}", a.skipped);
+
+    // An unreadable `.claude.json` skips every server, with the reason.
+    std::fs::write(h.claude.join(".claude.json"), "{").unwrap();
+    let a = applied(
+        c.call(team(&["KB_TOKEN", "JINA_KEY"], &["plugin:b@market"]))
+            .await,
+    );
+    assert_eq!(a.mcp_config, None);
+    let unreadable: Vec<&(String, String)> = a
+        .skipped
+        .iter()
+        .filter(|(_, why)| why == "cannot read .claude.json")
+        .collect();
+    assert_eq!(unreadable.len(), 3, "{:?}", a.skipped);
+}
+
+/// A failed install is skipped with the CLI's reason and tried again only
+/// after 10 minutes; one that needs a person stays `needs manual install`
+/// for the daemon's life.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_installs_retry_after_the_window_and_manual_ones_never() {
+    let h = PluginHost::start().await;
+    h.set("fail-a@market", true);
+    h.set("manual-b@market", true);
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    let manual = "needs manual install: claude plugin install b@market";
+    let failed = pairs(&[
+        ("plugin:a@market", "network down"),
+        ("plugin:b@market", manual),
+    ]);
+    assert_eq!(&a.skipped[..2], &failed[..]);
+    let runs = h.log().len();
+
+    // Within the window: nothing runs again.
+    h.d.daemon.manifests.advance(Duration::from_secs(9 * 60));
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(&a.skipped[..2], &failed[..]);
+    h.idle().await;
+    assert_eq!(h.log().len(), runs);
+
+    // After it: the failure is tried again (and now works); the manual one
+    // still waits for a person.
+    h.set("fail-a@market", false);
+    h.d.daemon.manifests.advance(Duration::from_secs(2 * 60));
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.skipped[0], pairs(&[("plugin:a@market", "installing")])[0]);
+    assert_eq!(a.skipped[1].1, manual);
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.installed, ["plugin:a@market"]);
+    assert_eq!(a.skipped[0], pairs(&[("plugin:b@market", manual)])[0]);
+    let installs = h
+        .log()
+        .iter()
+        .filter(|l| l.contains("install b@market"))
+        .count();
+    assert_eq!(installs, 1);
+}
+
+/// A marketplace Claude Code files under another name than the manifest's
+/// skips its plugins with that reason (and is not added again at once).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_marketplace_added_under_another_name_skips_its_plugins() {
+    let h = PluginHost::start().await;
+    std::fs::write(h.ctl.join("market-name"), "acme").unwrap();
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    let why = "marketplace market: added under another name";
+    assert_eq!(
+        &a.skipped[..2],
+        &pairs(&[("plugin:a@market", why), ("plugin:b@market", why)])[..]
+    );
+    assert_eq!(
+        h.log(),
+        ["plugin marketplace add acme/market --scope user --json"]
+    );
+}
+
+/// An install that exits 0 but leaves the plugin out of
+/// `installed_plugins.json` is remembered as a failure for the window, not
+/// run again on every re-ask.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_install_claude_does_not_list_is_remembered_as_failed() {
+    let h = PluginHost::start().await;
+    h.set("silent-a@market", true);
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.installed, ["plugin:b@market"]);
+    assert_eq!(
+        a.skipped[0],
+        pairs(&[("plugin:a@market", "installed but not listed")])[0]
+    );
+
+    // Within the window: not run again.
+    h.d.daemon.manifests.advance(Duration::from_secs(9 * 60));
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.skipped[0].1, "installed but not listed");
+    h.idle().await;
+    let installs = |h: &PluginHost| {
+        h.log()
+            .iter()
+            .filter(|l| l.as_str() == "plugin install a@market --scope user --json")
+            .count()
+    };
+    assert_eq!(installs(&h), 1);
+
+    // After it: tried again.
+    h.d.daemon.manifests.advance(Duration::from_secs(2 * 60));
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.skipped[0].1, "installing");
+    h.idle().await;
+    assert_eq!(installs(&h), 2);
+}
+
+/// A marketplace add that fails while the name is known by then (another
+/// manifest's install added it meanwhile) counts as added: its plugins
+/// install, and no failure is remembered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_marketplace_add_of_a_name_known_by_then_counts_as_added() {
+    let h = PluginHost::start().await;
+    h.set("market-raced", true);
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.installed, ["plugin:a@market", "plugin:b@market"]);
+    assert!(
+        !a.skipped.iter().any(|(id, _)| id.starts_with("plugin:")),
+        "{:?}",
+        a.skipped
+    );
+    assert_eq!(
+        h.log(),
+        [
+            "plugin marketplace add acme/market --scope user --json",
+            "plugin install a@market --scope user --json",
+            "done a@market",
+            "plugin install b@market --scope user --json",
+            "done b@market",
+        ]
+    );
+}
+
+/// Installs share `claude update`'s lock, one subprocess at a time: an
+/// update during an install is refused with a message naming both, and a
+/// waiter that queued during one install gets the lock before the next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installs_and_claude_update_take_turns() {
+    let h = PluginHost::start().await;
+    h.set("gate-a@market", true);
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.logged("plugin install a@market --scope user --json")
+        .await;
+    assert_eq!(
+        c.call(Msg::UpdateClaude { install: false }).await,
+        Msg::Error {
+            message: "a claude update or plugin install is already running on this host".into()
+        }
+    );
+    // Queue for the lock while `a` installs; `b` must wait for us.
+    let daemon = Arc::clone(&h.d.daemon);
+    let (got, held) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let waiter = tokio::spawn(async move {
+        let _lock = daemon.updating.lock().await;
+        let _ = got.send(());
+        let _ = released.await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.set("gate-a@market", false);
+    within(held).await.unwrap();
+    h.logged("done a@market").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !h.log().iter().any(|l| l.contains("install b@market")),
+        "{:?}",
+        h.log()
+    );
+    release.send(()).unwrap();
+    waiter.await.unwrap();
+    h.idle().await;
+    // Between installs (here: after them) an update runs.
+    assert!(matches!(
+        c.call(Msg::UpdateClaude { install: false }).await,
+        Msg::ClaudeUpdated { ok: true, .. }
+    ));
+}
+
+/// The fake's `--help` lists the flags: nothing is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_names_the_flags_this_claude_lacks() {
+    let h = PluginHost::start().await;
+    std::fs::write(
+        h.ctl.join("help"),
+        "  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n",
+    )
+    .unwrap();
+    let mut c = h.d.client().await;
+    let a = applied(
+        c.call(team(&[], &["plugin:a@market", "plugin:b@market"]))
+            .await,
+    );
+    assert!(a.dropped.is_empty(), "{:?}", a.dropped);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_refuses_a_bad_request() {
+    let d = TestDaemon::start().await;
+    let cache = d.dir.join("cache/plugins");
+    // The real daemon: no http, even on loopback.
+    let mut c = d.client().await;
+    let good = "a".repeat(64);
+    let req = |name: &str, url: &str, sha: &str, secrets: Vec<String>, disabled: Vec<String>| {
+        Msg::Manifest {
+            name: name.into(),
+            url: url.into(),
+            sha256: sha.into(),
+            secrets,
+            disabled,
+        }
+    };
+    let url = "https://e.org/x.toml";
+    let many_secrets: Vec<String> = (0..65).map(|i| format!("K{i}")).collect();
+    let many_ids: Vec<String> = (0..257).map(|i| format!("mcp:s{i}")).collect();
+    for (msg, shown) in [
+        (req("../x", url, &good, vec![], vec![]), "?"),
+        (req("kb", url, "abc", vec![], vec![]), "kb"),
+        (
+            req("kb", "http://e.org/x.toml", &good, vec![], vec![]),
+            "kb",
+        ),
+        (req("kb", "file:///etc/passwd", &good, vec![], vec![]), "kb"),
+        (req("kb", url, &good, vec!["PATH".into()], vec![]), "kb"),
+        (req("kb", url, &good, vec!["bad key".into()], vec![]), "kb"),
+        (req("kb", url, &good, many_secrets, vec![]), "kb"),
+        (req("kb", url, &good, vec![], vec!["skill:x".into()]), "kb"),
+        (req("kb", url, &good, vec![], many_ids), "kb"),
+    ] {
+        let reply = c.call(msg.clone()).await;
+        assert_eq!(
+            reply,
+            Msg::Error {
+                message: format!("manifest {shown}: bad request")
+            },
+            "{msg:?}"
+        );
+    }
+    assert!(!cache.exists(), "nothing written");
+}
+
+/// Serve `body` at `/team.toml` on loopback, counting the requests.
+async fn serve(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let hits = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&hits);
     let router = axum::Router::new().route(
-        "/kb.zip",
+        "/team.toml",
         axum::routing::get(move || {
             counted.fetch_add(1, Ordering::SeqCst);
             async move { body }
@@ -2077,7 +2656,7 @@ async fn serve_zip(body: &'static [u8]) -> (String, Arc<std::sync::atomic::Atomi
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (format!("http://127.0.0.1:{port}/kb.zip"), hits)
+    (format!("http://127.0.0.1:{port}/team.toml"), hits)
 }
 
 fn files_in(dir: &Path) -> Vec<String> {
@@ -2092,173 +2671,97 @@ fn files_in(dir: &Path) -> Vec<String> {
     names
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bundle_refuses_a_bad_name_hash_or_url() {
-    let d = TestDaemon::start().await;
-    let cache = d.dir.join("cache/plugins");
-    // The real daemon: no http, even on loopback.
-    let mut c = d.client().await;
-    let good = "a".repeat(64);
-    for (msg, shown) in [
-        (bundle("../x", "https://e.org/x.zip", &good, ""), "?"),
-        (bundle("Kb", "https://e.org/x.zip", &good, ""), "?"),
-        (
-            bundle("kb", "https://e.org/x.zip", &"A".repeat(64), ""),
-            "kb",
-        ),
-        (bundle("kb", "https://e.org/x.zip", "abc", ""), "kb"),
-        (bundle("kb", "http://e.org/x.zip", &good, ""), "kb"),
-        (bundle("kb", "file:///etc/passwd", &good, ""), "kb"),
-    ] {
-        let reply = c.call(msg.clone()).await;
-        assert_eq!(
-            reply,
-            Msg::Error {
-                message: format!("bundle {shown}: bad request")
-            },
-            "{msg:?}"
-        );
+fn download(url: &str, sha256: &str) -> Msg {
+    Msg::Manifest {
+        name: "team".into(),
+        url: url.into(),
+        sha256: sha256.into(),
+        secrets: vec![],
+        disabled: vec!["plugin:a@market".into(), "plugin:b@market".into()],
     }
-    assert!(!cache.exists(), "nothing written");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bundle_is_skipped_when_claude_code_has_the_plugin_installed() {
-    let (d, cache, claude) = bundle_daemon().await;
-    std::fs::create_dir_all(claude.join("plugins")).unwrap();
-    std::fs::write(
-        claude.join("plugins/installed_plugins.json"),
-        r#"{"version":2,"plugins":{"kb@vocdoni":[{"scope":"user"}]}}"#,
-    )
-    .unwrap();
-    let mut c = d.client().await;
-    let url = "https://127.0.0.1:9/never.zip";
-    let reply = c
-        .call(bundle("kb", url, &"a".repeat(64), "kb@vocdoni"))
-        .await;
-    assert_eq!(
-        reply,
-        Msg::Bundled {
-            name: "kb".into(),
-            path: None,
-            installed: true
-        }
-    );
-    assert!(!cache.exists(), "no download");
-    // Another id is not installed: on to the cache and the download.
-    let reply = c.call(bundle("kb", url, &"a".repeat(64), "kb@other")).await;
-    assert!(
-        matches!(&reply, Msg::Error { message } if message.starts_with("bundle kb: download failed")),
-        "{reply:?}"
-    );
-    // A broken file counts as not installed.
-    std::fs::write(claude.join("plugins/installed_plugins.json"), "{").unwrap();
-    let reply = c
-        .call(bundle("kb", url, &"a".repeat(64), "kb@vocdoni"))
-        .await;
-    assert!(matches!(reply, Msg::Error { .. }), "{reply:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cached_zip_with_its_sidecar_is_reused() {
-    let (d, cache, _) = bundle_daemon().await;
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::write(cache.join("kb.zip"), b"zip").unwrap();
-    let hash = sha256_hex(b"zip");
-    std::fs::write(cache.join("kb.sha256"), format!("{hash}\n")).unwrap();
-    let mut c = d.client().await;
-    // A URL the daemon never reaches.
-    let reply = c
-        .call(bundle("kb", "https://127.0.0.1:9/kb.zip", &hash, ""))
-        .await;
-    let path = cache.join("kb.zip").to_string_lossy().into_owned();
-    assert_eq!(
-        reply,
-        Msg::Bundled {
-            name: "kb".into(),
-            path: Some(path),
-            installed: false
-        }
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_download_is_verified_stored_privately_and_shared() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::Ordering;
-    let (d, cache, _) = bundle_daemon().await;
-    let (url, hits) = serve_zip(b"the bundle").await;
-    let hash = sha256_hex(b"the bundle");
-    let mut a = d.client().await;
-    let mut b = d.client().await;
-    let (ra, rb) = tokio::join!(
-        a.call(bundle("kb", &url, &hash, "")),
-        b.call(bundle("kb", &url, &hash, ""))
-    );
-    let path = cache.join("kb.zip").to_string_lossy().into_owned();
-    for reply in [ra, rb] {
-        assert_eq!(
-            reply,
-            Msg::Bundled {
-                name: "kb".into(),
-                path: Some(path.clone()),
-                installed: false
-            }
-        );
-    }
+    let h = PluginHost::start().await;
+    std::fs::remove_dir_all(&h.cache).unwrap();
+    let (url, hits) = serve(TEAM.as_bytes()).await;
+    let hash = sha256_hex(TEAM.as_bytes());
+    let mut a = h.d.client().await;
+    let mut b = h.d.client().await;
+    let (ra, rb) = tokio::join!(a.call(download(&url, &hash)), b.call(download(&url, &hash)));
+    assert_eq!(applied(ra), applied(rb));
     assert_eq!(hits.load(Ordering::SeqCst), 1, "one download for both");
-    assert_eq!(std::fs::read(cache.join("kb.zip")).unwrap(), b"the bundle");
     assert_eq!(
-        std::fs::read_to_string(cache.join("kb.sha256")).unwrap(),
+        std::fs::read_to_string(h.cache.join("team.toml")).unwrap(),
+        TEAM
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.cache.join("team.sha256")).unwrap(),
         format!("{hash}\n")
     );
-    assert_eq!(files_in(&cache), ["kb.sha256", "kb.zip"]);
-    let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+    assert_eq!(files_in(&h.cache), ["team.sha256", "team.toml"]);
+    let mode = std::fs::metadata(&h.cache).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wrong_hash_is_an_error_and_leaves_no_file() {
-    let (d, cache, _) = bundle_daemon().await;
-    let (url, _) = serve_zip(b"tampered").await;
-    let mut c = d.client().await;
-    let reply = c.call(bundle("kb", &url, &"b".repeat(64), "")).await;
+async fn a_wrong_hash_a_bad_manifest_or_an_oversized_one_is_an_error() {
+    static BIG: OnceLock<Vec<u8>> = OnceLock::new();
+    let h = PluginHost::start().await;
+    std::fs::remove_dir_all(&h.cache).unwrap();
+    let (url, _) = serve(b"tampered").await;
+    let mut c = h.d.client().await;
     assert_eq!(
-        reply,
+        c.call(download(&url, &"b".repeat(64))).await,
         Msg::Error {
-            message: "bundle kb: hash mismatch".into()
+            message: "manifest team: hash mismatch".into()
         }
     );
-    assert!(files_in(&cache).is_empty(), "{:?}", files_in(&cache));
-
-    // A new version replaces the old zip in place, and its sidecar.
-    std::fs::write(cache.join("kb.zip"), b"old").unwrap();
-    std::fs::write(cache.join("kb.sha256"), sha256_hex(b"old")).unwrap();
-    let reply = c
-        .call(bundle("kb", &url, &sha256_hex(b"tampered"), ""))
-        .await;
-    assert!(
-        matches!(reply, Msg::Bundled { path: Some(_), .. }),
-        "{reply:?}"
+    assert!(files_in(&h.cache).is_empty(), "{:?}", files_in(&h.cache));
+    // Downloaded and verified, but not a manifest: refused with the reason.
+    assert_eq!(
+        c.call(download(&url, &sha256_hex(b"tampered"))).await,
+        Msg::Error {
+            message: "manifest team: not valid TOML, or a value of the wrong type (line 1)".into()
+        }
     );
-    assert_eq!(std::fs::read(cache.join("kb.zip")).unwrap(), b"tampered");
-    assert_eq!(files_in(&cache), ["kb.sha256", "kb.zip"]);
+    let other = TEAM.replacen("name = \"team\"", "name = \"other\"", 1);
+    let other: &'static [u8] = Box::leak(other.into_bytes().into_boxed_slice());
+    let (url, _) = serve(other).await;
+    assert_eq!(
+        c.call(download(&url, &sha256_hex(other))).await,
+        Msg::Error {
+            message: "manifest team: the manifest is other's".into()
+        }
+    );
+    let big = BIG.get_or_init(|| vec![b'#'; (256 << 10) + 1]);
+    let (url, _) = serve(big).await;
+    assert_eq!(
+        c.call(download(&url, &sha256_hex(big))).await,
+        Msg::Error {
+            message: "manifest team: over 256 KiB".into()
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_cache_keeps_at_most_32_bundles() {
-    let (d, cache, _) = bundle_daemon().await;
-    std::fs::create_dir_all(&cache).unwrap();
-    for i in 0..super::bundle::MAX_BUNDLES {
-        std::fs::write(cache.join(format!("p{i}.zip")), b"z").unwrap();
+async fn the_cache_keeps_at_most_32_manifests() {
+    let h = PluginHost::start().await;
+    std::fs::remove_dir_all(&h.cache).unwrap();
+    std::fs::create_dir_all(&h.cache).unwrap();
+    for i in 0..super::manifest::MAX_MANIFESTS {
+        std::fs::write(h.cache.join(format!("p{i}.toml")), b"z").unwrap();
     }
-    let (url, hits) = serve_zip(b"x").await;
-    let mut c = d.client().await;
-    let reply = c.call(bundle("kb", &url, &sha256_hex(b"x"), "")).await;
+    let (url, hits) = serve(TEAM.as_bytes()).await;
+    let mut c = h.d.client().await;
+    let reply = c.call(download(&url, &sha256_hex(TEAM.as_bytes()))).await;
     assert_eq!(
         reply,
         Msg::Error {
-            message: "bundle kb: cache holds 32 bundles already".into()
+            message: "manifest team: cache holds 32 manifests already".into()
         }
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);

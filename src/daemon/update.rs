@@ -32,11 +32,12 @@ const TAIL_BYTES: usize = 4096;
 const INSTALLER: &str = "{ curl -fsSL https://claude.ai/install.sh | bash; } 2>&1";
 
 /// Run the update (or the install) and answer `ClaudeUpdated`. Only one runs
-/// at a time per daemon.
+/// at a time per daemon, and never beside a plugin install (which waits
+/// for the same lock).
 pub async fn run(daemon: &Daemon, install: bool) -> Msg {
     let Ok(_running) = daemon.updating.try_lock() else {
         return Msg::Error {
-            message: "a claude update is already running on this host".into(),
+            message: "a claude update or plugin install is already running on this host".into(),
         };
     };
     let claude = daemon.config.claude_bin();
@@ -117,7 +118,7 @@ async fn execute(
 
 /// Stop the update's whole process group: SIGTERM, a grace period for the
 /// leader to exit, then SIGKILL for whatever is left. Reaps the leader.
-async fn kill_group(child: &mut Child) {
+pub(super) async fn kill_group(child: &mut Child) {
     // The leader's pid is the group id (`process_group(0)`); `None` once
     // it has been reaped, and then its pid may already be reused.
     let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {

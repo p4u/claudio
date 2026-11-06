@@ -184,6 +184,16 @@ pub fn key_ok(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `url` is a plain-http loopback URL a test lets through:
+/// `http://127.0.0.1:<port>/…` in a debug build run with
+/// `CLAUDIO_TEST_LOOPBACK_HTTP=1` (the manager tests' fake proxy). Always
+/// false in a release build.
+pub fn test_http_ok(url: &str) -> bool {
+    cfg!(debug_assertions)
+        && url.starts_with("http://127.0.0.1:")
+        && std::env::var_os("CLAUDIO_TEST_LOOPBACK_HTTP").is_some_and(|v| v == "1")
+}
+
 /// `''` or `[a-z0-9-]{1,40}@[a-z0-9-]{1,40}`.
 fn installed_id_ok(id: &str) -> bool {
     id.is_empty()
