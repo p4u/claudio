@@ -142,6 +142,15 @@ daemons coexist.
   bounded output, sanitized text, no textconv/ext-diff, repo env scrubbed.
 - `update.rs` — `claude update` (or the official installer) on request, in its
   own process group, killed as a group on timeout.
+- `bundle.rs` — `Bundle` (a proxy plugin's zip for `--plugin-dir`): checks
+  the op itself (name `[a-z0-9-]{1,40}`, 64-hex hash, https), skips it when
+  `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` has the plugin, else
+  `<cache>/plugins/<name>.zip` whose `.sha256` sidecar matches, else
+  downloads it (30 s connect, 120 s, 64 MiB, https redirects only) to a temp
+  file, verifies, renames into place. 0700 dir, ≤ 32 zips, one download per
+  name at a time, no partial file on failure. Replies from a spawned task.
+  `Daemon::claude_flags` (one `claude --help`) says whether claude knows
+  `--plugin-dir`; `command()` drops the pairs when it does not.
 - `host.rs`, `stats.rs` — host facts for `Welcome`, directory listing, CPU and
   memory samples. `ctl.rs` — `claudio daemon status|stop|restart` (status
   shows the claude path and version the daemon uses).
@@ -201,7 +210,8 @@ is idle (checked every 2 min).
   `ui/reader.rs`.
 - `formulas.rs` — the lines of the reader's formulas list (Tab).
 - `extensions/` — the extension registry (`mod.rs`: built-ins latex,
-  diagram, search, snippets; `Registry`, `ActionResult`), external
+  diagram, search, snippets; `Registry`, `ActionResult`; the proxy plugins
+  as `Source::Plugin` rows, `Registry::set_plugins`), external
   manifests (`manifest.rs`: `~/.config/claudio/extensions/<name>/`, the
   HTML-tag rule, admission, at most 16), protocol v1 (`protocol.rs`: request
   lines, result caps and sanitizing) and the extension host (`host.rs`: one
@@ -214,8 +224,10 @@ is idle (checked every 2 min).
   details, toggles. A toggle flips the registry at once and emits
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
   (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
-  a minimal line edit of config.toml, never a whole-file rewrite). Drawn by
-  `ui/extensions.rs`. The leader keys `u` and `e` are reserved.
+  a minimal line edit of config.toml, never a whole-file rewrite); a
+  plugin's toggle also updates `App::plugins.config`, and `r` refetches the
+  plugin lists. Drawn by `ui/extensions.rs`. The leader keys `u` and `e`
+  are reserved.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -240,6 +252,12 @@ is idle (checked every 2 min).
 - `state.rs` — `ClientState`: persisted session order, names and recent dirs
   (`state.json`).
 - `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
+- `plugins.rs` — proxy plugins, pure: each profile's list (`plugins.json` at
+  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), the
+  registry's `Source::Plugin` rows, each `(host, plugin)` `Bundle` answer,
+  and what a spawn gets (`--plugin-dir` per ready bundle, the plugin env).
+  A spawn whose host has not answered for a bundle is deferred
+  (`Effect::SpawnWithProxy { bundles }`; `tui/mod.rs` waits ≤ 20 s).
 - `notifications.rs` — debounce logic for attention notifications.
 - `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
   pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
@@ -276,6 +294,11 @@ is idle (checked every 2 min).
   for what a launched claude inherits (session markers scrubbed, an API key
   dropped when a proxy token is set).
 - `cmd.rs` — `claudio proxy login|status|logout|use`.
+- `login.rs` — the browser sign-in (`/v1/claudio/login/start|poll`, device
+  style: the member types the code; `--token` pastes one instead).
+- `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (names, https, hash,
+  env keys a plugin may not set, caps), the `plugins.json` cache (0600, one
+  entry per profile; a 401/403 drops it). `Debug` never shows a value.
 - `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
   `/pool/health` and `/session` (which credential a claude session is on).
 
@@ -321,14 +344,19 @@ is idle (checked every 2 min).
 - **Don't send `ESC` immediately before `Alt+key` in tests.** `ESC ESC q` is
   ambiguous — the VT parser may interpret it as two separate `ESC` sequences.
   Use the crossterm key-event encoding instead.
-- **Secrets never go in argv or state files.** Proxy tokens are passed only
-  through `Spawn.env` over the Unix socket. The journal and `state.json` store
-  only profile names, never tokens.
+- **Secrets never go in argv or state files.** Proxy tokens and plugin env
+  are passed only through `Spawn.env` over the Unix socket. The journal and
+  `state.json` never hold secrets (profile names only); `config.toml` and
+  `plugins.json` do, both mode 0600. Logs and notices name keys, never
+  values. `--plugin-dir` is added by claudio's spawn path only, never parsed
+  from the user's args.
 - **New request ops must fail safe on old daemons.** An old daemon answers an
   unknown op with `Error "unsupported op…"`; `App::older_daemon_notice` turns
   that into "run `claudio daemon restart`". Never add a field to an existing
   op that an old daemon would silently ignore into wrong behaviour (that is
-  why terminals are `SpawnShell`, not `Spawn{kind}`).
+  why terminals are `SpawnShell`, not `Spawn{kind}`, and plugin bundles are
+  a `Bundle` op, not a `SpawnSpec` field: an old daemon's error becomes
+  `daemon too old` and the session starts without the bundle).
 - **A daemon is replaced only by a newer build.** `freshness::compare` orders
   builds by version, then binary mtime; "different" is not enough, or two
   binaries (a release and a dev build) would replace each other's daemon

@@ -80,9 +80,13 @@ curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | 
 [claude-proxy](https://github.com/p4u/claude-proxy) is a multi-subscription credential proxy for Claude Code: sessions authenticate through it instead of a local `claude` login.
 
 ```bash
-claudio proxy login https://proxy.example.com   # prompts for your token; it is never an argument
+claudio proxy login https://proxy.example.com   # sign in through the browser
 claudio                                         # new sessions now use the proxy by default
 ```
+
+`claudio proxy login` prints a page and a one-time code, opens the page in a browser when there is a display (`CLAUDIO_NO_BROWSER=1` only prints it), and waits while you sign in and type the code there. The proxy then hands claudio your own token, saved with your e-mail in the profile (`claudio proxy status` shows it). Without a URL it signs in again to the default profile's proxy. `--token`, or a proxy without browser sign-in, asks for a pasted token instead; a token is never an argument.
+
+The proxy can also serve **plugins**: a pinned bundle of skills, agents, hooks and MCP servers, plus the env (API keys) its servers need. Every session claudio opens with that proxy profile (manager, `--plain`, SSH hosts) loads each plugin with `--plugin-dir` and gets its env, unless you installed that plugin in Claude Code yourself. Nothing is installed into `~/.claude`. Each host's daemon downloads a bundle once per version into `~/.cache/claudio/plugins/` (https only, hash-checked, 64 MiB at most). The list and its env are cached in `~/.config/claudio/plugins.json` (mode 0600), so a session still gets them when the proxy is unreachable, and refreshed every 15 minutes. `claudio proxy logout` deletes them. Plugins are listed in the extensions screen (`Alt+i`), where you can turn one off for new sessions.
 
 - `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
 - `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
@@ -215,7 +219,7 @@ In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such 
 
 `Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
 
-`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in or external, with its keys and lenses, and below the list the selected one's description, actions and lenses. `Space` or `Enter` turns it on or off. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
+`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile and state on each host). `Space` or `Enter` turns it on or off; `r` fetches the plugin lists again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
 
 ### Keeping claude up to date
 
@@ -296,7 +300,8 @@ latex = true                    # ask claude to write math in <latex> tags, rend
 
 [extensions]                    # every extension is on unless turned off here
 diagram = false                 # e.g. no Mermaid instruction or drawing
-                                # (Alt+i turns them on and off and writes this table)
+                                # (Alt+i turns them on and off and writes this table;
+                                # proxy plugins too, by name)
 
 [keys]                          # rebind any manager key
 new_session = "alt+n"
@@ -308,7 +313,7 @@ extensions  = "alt+z"           # the extensions' leader key
 extensions_menu = "alt+i"       # the extensions screen
 ```
 
-`CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks.
+`CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks. `CLAUDIO_NO_BROWSER=1` keeps `claudio proxy login` from opening a browser.
 
 ---
 

@@ -27,19 +27,21 @@ screen (also `Alt+i`).
 ### The extensions screen (`Alt+i`)
 
 ```
-[x] latex     built-in  —          <latex>
-[ ] diagram   built-in  —          ```mermaid
-[x] search    built-in  Alt+z s    —
-[x] snippets  built-in  Alt+z p/P  —
-[x] keys      external  Alt+z k    <keys>
+[x] latex             built-in  —          <latex>
+[ ] diagram           built-in  —          ```mermaid
+[x] search            built-in  Alt+z s    —
+[x] snippets          built-in  Alt+z p/P  —
+[x] keys              external  Alt+z k    <keys>
+[x] vocdoni-internal  plugin    —          —
 ```
 
 One row per extension: the built-ins, then the external ones that loaded
-(one that failed to load is not listed; its notice at start said why).
+(one that failed to load is not listed; its notice at start said why), then
+the plugins of your proxy profiles (see below).
 Below the list, the selected extension's description, its actions and its
 lenses. `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the mouse wheel move;
-`Space` or `Enter` turns the selected extension on or off; `Esc` or `Alt+i`
-closes the screen.
+`Space` or `Enter` turns the selected extension on or off; `r` fetches the
+plugin lists again; `Esc` or `Alt+i` closes the screen.
 
 A change applies at once: the extension's keys leave the `Alt+z` popup, its
 tag lenses stop rendering in the pane (at the next draw) and in the reader,
@@ -73,6 +75,34 @@ diagram = false        # by name, built-in or external; every extension is on by
 host's sessions. On a host whose daemon has `[claude] latex = false`, a new
 client overlays no `<latex>` tags for that host's sessions (the daemon extracts
 none); v0.5.0 clients still get them through `Latex`.
+
+### Proxy plugins
+
+A claude-proxy profile can serve plugins (`GET /v1/claudio/plugins`): for
+each, a pinned bundle (a zip of skills, agents, hooks and MCP servers, by
+URL and SHA-256) and the env its servers need. claudio fetches the list of
+every profile in use at start, every 15 minutes, after `claudio proxy login`
+and on `r` in the extensions screen, and caches it in
+`~/.config/claudio/plugins.json` (mode 0600: it holds the plugins' secrets).
+
+A plugin's row shows its version and profile; its details say, per
+connected host, `ready`, `downloading`, `installed in Claude Code (bundle
+skipped)`, `download failed: …` or `daemon too old`, and for the list
+`proxy unreachable, cached <age>` when the proxy did not answer. A plugin
+claudio refuses (a bad name, URL or hash, an env key it may not set such as
+`PATH`, `LD_*` or `ANTHROPIC_*`, a name another extension has) is listed as
+`refused: <reason>` and never used.
+
+Each session started with that profile gets `--plugin-dir <zip>` for every
+plugin that is on and the plugin's env (the proxy's own env wins on a shared
+key). The zip is the host's own copy: each daemon downloads it once per
+version into `~/.cache/claudio/plugins/` (https only, 64 MiB, hash-checked)
+and skips it when Claude Code there has the plugin installed. A new session
+waits up to 20 s for a bundle still downloading, then starts without it (a
+notice says so). A claude that does not know `--plugin-dir` starts without
+the bundles. Turning a plugin off is saved as `name = false` under
+`[extensions]` and applies to new sessions; `Alt+e` keeps a session's
+bundles and gives it the current env.
 
 Snippets are files in `~/.config/claudio/snippets/` (`*.md` or `*.txt`, the
 file name without its extension is the snippet's name). A paste never presses
