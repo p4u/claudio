@@ -40,8 +40,9 @@ One row per extension: the built-ins, then the external ones that loaded
 the plugins of your proxy profiles (see below).
 Below the list, the selected extension's description, its actions and its
 lenses. `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the mouse wheel move;
-`Space` or `Enter` turns the selected extension on or off; `r` fetches the
-plugin lists again; `Esc` or `Alt+i` closes the screen.
+`Space` turns the selected extension on or off, and so does `Enter` except
+on a plugin's row, where it opens the plugin's setup screen; `r` fetches the
+plugin lists and manifests again; `Esc` or `Alt+i` closes the screen.
 
 A change applies at once: the extension's keys leave the `Alt+z` popup, its
 tag lenses stop rendering in the pane (at the next draw) and in the reader,
@@ -79,30 +80,96 @@ none); v0.5.0 clients still get them through `Latex`.
 ### Proxy plugins
 
 A claude-proxy profile can serve plugins (`GET /v1/claudio/plugins`): for
-each, a pinned bundle (a zip of skills, agents, hooks and MCP servers, by
-URL and SHA-256) and the env its servers need. claudio fetches the list of
-every profile in use at start, every 15 minutes, after `claudio proxy login`
-and on `r` in the extensions screen, and caches it in
-`~/.config/claudio/plugins.json` (mode 0600: it holds the plugins' secrets).
+each, a pinned manifest (a TOML file, by URL and SHA-256) and the env its MCP
+servers need (their secrets). claudio fetches the list of every profile in
+use at start, every 15 minutes, after `claudio proxy login` and on `r` in
+the extensions screen, and caches it in `~/.config/claudio/plugins.json`
+(mode 0600: it holds the secrets). It fetches each manifest itself (https,
+256 KiB at most, hash-checked, kept in memory).
 
-A plugin's row shows its version and profile; its details say, per
-connected host, `ready`, `downloading`, `installed in Claude Code (bundle
-skipped)`, `download failed: …` or `daemon too old`, and for the list
-`proxy unreachable, cached <age>` when the proxy did not answer. A plugin
-claudio refuses (a bad name, URL or hash, an env key it may not set such as
-`PATH`, `LD_*` or `ANTHROPIC_*`, a name another extension has) is listed as
-`refused: <reason>` and never used.
+A manifest declares marketplaces and the plugins to install from them, MCP
+servers (http, sse or stdio, with the names of the secrets each needs),
+subagents, instructions for every session's context, and env:
 
-Each session started with that profile gets `--plugin-dir <zip>` for every
-plugin that is on and the plugin's env (the proxy's own env wins on a shared
-key). The zip is the host's own copy: each daemon downloads it once per
-version into `~/.cache/claudio/plugins/` (https only, 64 MiB, hash-checked)
-and skips it when Claude Code there has the plugin installed. A new session
-waits up to 20 s for a bundle still downloading, then starts without it (a
-notice says so). A claude that does not know `--plugin-dir` starts without
-the bundles. Turning a plugin off is saved as `name = false` under
-`[extensions]` and applies to new sessions; `Alt+e` keeps a session's
-bundles and gives it the current env.
+```toml
+format = 1
+name = "vocdoni-internal"
+version = "1.0.0"
+description = "Vocdoni team setup"
+instructions = """Search the vocdoni-kb server before asking a colleague."""
+
+[[marketplace]]
+name = "vocdoni"                       # the name its .claude-plugin/marketplace.json declares
+source = "github:vocdoni/skills"       # github:<owner>/<repo> or an https URL
+
+[[plugin]]
+name = "agentic-dev"
+marketplace = "vocdoni"
+
+[[mcp]]
+name = "vocdoni-kb"
+type = "http"
+url = "https://kb-gw.vocdoni.net/mcp"
+headers = { Authorization = "Bearer ${VOCDONI_KB_TOKEN}" }
+secrets = ["VOCDONI_KB_TOKEN"]         # served by the proxy as env; never on argv
+
+[[agent]]
+name = "reviewer"
+description = "Read-only code reviewer"
+tools = ["Read", "Grep", "Glob"]
+prompt = """You are a code reviewer…"""
+```
+
+The first time claudio sees a manifest (no `[plugins.<name>]` table in
+`config.toml`), its setup screen lists every item by section, all on:
+`↑`/`↓` (or `j`/`k`) move, `Space` toggles, `a` turns all on, `n` all off,
+`Enter` saves the choice and applies it, `Esc` puts it off until the next
+start (nothing is applied meanwhile). `Enter` on the plugin's row of the
+extensions screen opens it again. The choice is saved as
+
+```toml
+[plugins.vocdoni-internal]
+disabled = ["mcp:jina-mcp-server"]
+reviewed = "1.0.0"
+seen = ["plugin:agentic-dev@vocdoni", "mcp:vocdoni-kb", "mcp:jina-mcp-server", "agent:reviewer", "instructions"]
+```
+
+(the table is replaced or appended; the rest of the file stays as it was).
+A newer version's items that are not in `seen` are on, and a notice names
+them.
+
+Each host's daemon applies the chosen items: it adds a marketplace Claude
+Code does not know (`claude plugin marketplace add --scope user`) and
+installs the plugins in your user scope (`claude plugin install --scope
+user`), in the background, one at a time, never with `-y`: a plugin whose
+marketplace declares a command to run is `needs manual install` with the
+command to type. A failed install is tried again after 10 minutes. What you
+already have is left alone: an installed plugin is `present`, an MCP server
+in your `~/.claude.json` or an agent in `~/.claude/agents/` of the same name
+is skipped as `yours`. A server whose secret the proxy does not serve is
+skipped too.
+
+Every session started with that profile then gets, per plugin that is on,
+`--agents` and `--mcp-config` (the server definitions with `${NAME}`
+placeholders; the secrets are only in the session's env), the manifest's
+env and its instructions (through the same context hook as the lenses'). A
+new session waits up to 20 s for a host that has not answered yet, then
+starts without the plugin; installs still under way do not hold it. A
+claude without `--agents` or `--mcp-config` starts without them (the
+details say `claude too old`). At most 8 plugins go on one session.
+
+A plugin's details say, per connected host, `ready · <i> installed, <p>
+present, <s> installing, <k> skipped` with a line per skipped item and its
+reason, `failed: …` or `daemon too old`; the manifest's state when it could
+not be used (`manifest: <reason>`); `setup pending (Enter)` or `<n> items
+disabled (Enter to change)`; and `proxy unreachable, cached <age>` when the
+proxy did not answer. A plugin claudio refuses (a bad name, URL or hash, an
+env key it may not set such as `PATH`, `LD_*` or `ANTHROPIC_*`, a name
+another extension has) is listed as `refused: <reason>` and never used.
+Turning a plugin off is saved as `name = false` under `[extensions]` and
+applies to new sessions; nothing is uninstalled (`claude plugin uninstall
+<id>` does that). `Alt+e` keeps a session's flags and gives it the current
+env and instructions.
 
 Snippets are files in `~/.config/claudio/snippets/` (`*.md` or `*.txt`, the
 file name without its extension is the snippet's name). A paste never presses

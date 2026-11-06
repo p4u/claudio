@@ -142,15 +142,29 @@ daemons coexist.
   bounded output, sanitized text, no textconv/ext-diff, repo env scrubbed.
 - `update.rs` — `claude update` (or the official installer) on request, in its
   own process group, killed as a group on timeout.
-- `bundle.rs` — `Bundle` (a proxy plugin's zip for `--plugin-dir`): checks
-  the op itself (name `[a-z0-9-]{1,40}`, 64-hex hash, https), skips it when
-  `$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json` has the plugin, else
-  `<cache>/plugins/<name>.zip` whose `.sha256` sidecar matches, else
-  downloads it (30 s connect, 120 s, 64 MiB, https redirects only) to a temp
-  file, verifies, renames into place. 0700 dir, ≤ 32 zips, one download per
-  name at a time, no partial file on failure. Replies from a spawned task.
+- `manifest.rs` — `Manifest` (a proxy plugin's manifest, parsed by
+  `crate::plugins::manifest`): checks the op itself (name `[a-z0-9-]{1,40}`,
+  64-hex hash, https, ≤ 64 secret names by `key_ok`, ≤ 256 disabled item
+  ids), keeps `<cache>/plugins/<name>.toml` + `.sha256` (downloaded once:
+  30 s connect, 120 s, 256 KiB, https redirects only, temp file, verified,
+  renamed; 0700 dir, ≤ 32 manifests, one download per name), and
+  replies `Applied` before any install runs: the `--mcp-config` and
+  `--agents` JSON (placeholders only), the sanitized instructions, the
+  `[env]`, and per id `installed` / `present` / `skipped` (`installing`,
+  `yours`, `missing secret X`, a failure). It reads Claude Code's files
+  under `$CLAUDE_CONFIG_DIR` else `~/.claude` (`.claude.json`,
+  `plugins/known_marketplaces.json`, `plugins/installed_plugins.json`,
+  `agents/`; regular files of this uid, ≤ 16 MiB, never logged) and never
+  writes there itself: one task per manifest hash runs `claude plugin
+  marketplace add … --json` / `claude plugin install … --json` (never `-y`),
+  each holding `Daemon::updating` (shared with `claude update`), stdin null,
+  output capped, markers scrubbed, `GIT_TERMINAL_PROMPT=0`, own process
+  group, 120 s. Outcomes are remembered per (hash, id): installed (daemon's
+  life), `needs manual install` (daemon's life), a failure (10 min).
   `Daemon::claude_flags` (one `claude --help`) says whether claude knows
-  `--plugin-dir`; `command()` drops the pairs when it does not.
+  `--plugin-dir`, `--agents`, `--mcp-config`; `command()` drops such a pair
+  when it does not, and `Applied.dropped` names them. Stale zips of a
+  pre-manifest build are removed at daemon start.
 - `host.rs`, `stats.rs` — host facts for `Welcome`, directory listing, CPU and
   memory samples. `ctl.rs` — `claudio daemon status|stop|restart` (status
   shows the claude path and version the daemon uses).
@@ -225,9 +239,19 @@ is idle (checked every 2 min).
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
   (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
   a minimal line edit of config.toml, never a whole-file rewrite); a
-  plugin's toggle also updates `App::plugins.config`, and `r` refetches the
-  plugin lists. Drawn by `ui/extensions.rs`. The leader keys `u` and `e`
-  are reserved.
+  plugin's toggle (Space) also updates `App::plugins.config`, Enter on a
+  plugin's row opens its setup screen, and `r` refetches the plugin lists
+  and manifests and asks every host again. Drawn by `ui/extensions.rs`.
+  The leader keys `u` and `e` are reserved.
+- `plugin_setup.rs` — a proxy plugin's setup screen, pure: every item of
+  its manifest with a checkbox (Space, `a`, `n`, Enter saves to
+  `[plugins.<name>]` through `Effect::SavePluginChoices` and
+  `config::save_plugin_choices`, Esc). It opens on first sight (no table
+  yet; Esc then defers for the run: nothing written or sent) and from the
+  extensions screen; it waits its turn in the confirm queue (`Queued`) and
+  swallows every key. `--plain` holds its spawn (`App::plain_pending`)
+  until the profile's new manifests arrived (≤ 20 s) and their screens
+  closed. Drawn by `ui/plugin_setup.rs`.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -253,11 +277,18 @@ is idle (checked every 2 min).
   (`state.json`).
 - `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
 - `plugins.rs` — proxy plugins, pure: each profile's list (`plugins.json` at
-  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), the
-  registry's `Source::Plugin` rows, each `(host, plugin)` `Bundle` answer,
-  and what a spawn gets (`--plugin-dir` per ready bundle, the plugin env).
-  A spawn whose host has not answered for a bundle is deferred
-  (`Effect::SpawnWithProxy { bundles }`; `tui/mod.rs` waits ≤ 20 s).
+  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
+  plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
+  KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
+  each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
+  30 s while it lists `installing`, ≤ 10 min), and what a spawn gets
+  (`compose`: per answered plugin, ≤ 8, `--agents` then `--mcp-config`
+  after every other arg; env layers `[env]`, then the secrets, then the
+  profile env; the instructions in `SessionExtensions.instructions`, cut at
+  just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
+  A spawn whose host has not answered is deferred
+  (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
+  ≤ 20 s).
 - `notifications.rs` — debounce logic for attention notifications.
 - `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
   pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
@@ -297,8 +328,20 @@ is idle (checked every 2 min).
 - `login.rs` — the browser sign-in (`/v1/claudio/login/start|poll`, device
   style: the member types the code; `--token` pastes one instead).
 - `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (names, https, hash,
-  env keys a plugin may not set, caps), the `plugins.json` cache (0600, one
-  entry per profile; a 401/403 drops it). `Debug` never shows a value.
+  env keys a plugin may not set (`key_ok`), caps), the `plugins.json` cache
+  (0600, one entry per profile; a 401/403 drops it), `fetch_manifest`.
+  `Debug` never shows a value. `test_http_ok` lets plain http to
+  `127.0.0.1` through in a debug build run with
+  `CLAUDIO_TEST_LOOPBACK_HTTP=1` (the manager tests' fake proxy), never in
+  a release build.
+
+**`plugins/`** — `manifest.rs`, the one parser of a plugin manifest (TOML,
+≤ 256 KiB; marketplaces, plugins, MCP servers with their secret names,
+agents, instructions, env), shared by the client and the daemon: every cap,
+charset and `${NAME}` placeholder rule, item ids (`plugin:<name>@<market>`,
+`mcp:<name>`, `agent:<name>`, `instructions`, `env`), and the renderers
+(`mcp_json`, `agents_json`, checked against 64/32 KiB at parse time).
+Reasons name ids and fields, never values.
 - `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
   `/pool/health` and `/session` (which credential a claude session is on).
 
@@ -345,18 +388,25 @@ is idle (checked every 2 min).
   ambiguous — the VT parser may interpret it as two separate `ESC` sequences.
   Use the crossterm key-event encoding instead.
 - **Secrets never go in argv or state files.** Proxy tokens and plugin env
-  are passed only through `Spawn.env` over the Unix socket. The journal and
-  `state.json` never hold secrets (profile names only); `config.toml` and
+  are passed only through `Spawn.env` over the Unix socket; a `Manifest`
+  request carries secret names, never values. The journal and `state.json`
+  never hold secrets (profile names only); `config.toml` and
   `plugins.json` do, both mode 0600. Logs and notices name keys, never
-  values. `--plugin-dir` is added by claudio's spawn path only, never parsed
-  from the user's args.
+  values. The `--mcp-config` JSON on argv holds `${NAME}` placeholders
+  that claude expands from the env; `--agents`/`--mcp-config` are added by
+  claudio's spawn path only, never parsed from the user's args.
+- **Plugins are installed by the CLI, never with `-y`.** The daemon runs
+  `claude plugin … --json` and never writes `~/.claude` itself; a
+  marketplace-declared command (`shownCommand`) is left for a person.
 - **New request ops must fail safe on old daemons.** An old daemon answers an
   unknown op with `Error "unsupported op…"`; `App::older_daemon_notice` turns
   that into "run `claudio daemon restart`". Never add a field to an existing
   op that an old daemon would silently ignore into wrong behaviour (that is
-  why terminals are `SpawnShell`, not `Spawn{kind}`, and plugin bundles are
-  a `Bundle` op, not a `SpawnSpec` field: an old daemon's error becomes
-  `daemon too old` and the session starts without the bundle).
+  why terminals are `SpawnShell`, not `Spawn{kind}`, and plugin manifests
+  are a `Manifest` op, not a `SpawnSpec` field: an old daemon's error
+  becomes `daemon too old` and the session starts without the plugin;
+  `SessionExtensions.instructions` is `#[serde(default)]`, which an old
+  daemon ignores harmlessly).
 - **A daemon is replaced only by a newer build.** `freshness::compare` orders
   builds by version, then binary mtime; "different" is not enough, or two
   binaries (a release and a dev build) would replace each other's daemon

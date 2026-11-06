@@ -86,7 +86,7 @@ claudio                                         # new sessions now use the proxy
 
 `claudio proxy login` prints a page and a one-time code, opens the page in a browser when there is a display (`CLAUDIO_NO_BROWSER=1` only prints it), and waits while you sign in and type the code there. The proxy then hands claudio your own token, saved with your e-mail in the profile (`claudio proxy status` shows it). Without a URL it signs in again to the default profile's proxy. `--token`, or a proxy without browser sign-in, asks for a pasted token instead; a token is never an argument.
 
-The proxy can also serve **plugins**: a pinned bundle of skills, agents, hooks and MCP servers, plus the env (API keys) its servers need. Every session claudio opens with that proxy profile (manager, `--plain`, SSH hosts) loads each plugin with `--plugin-dir` and gets its env, unless you installed that plugin in Claude Code yourself. Nothing is installed into `~/.claude`. Each host's daemon downloads a bundle once per version into `~/.cache/claudio/plugins/` (https only, hash-checked, 64 MiB at most). The list and its env are cached in `~/.config/claudio/plugins.json` (mode 0600), so a session still gets them when the proxy is unreachable, and refreshed every 15 minutes. `claudio proxy logout` deletes them. Plugins are listed in the extensions screen (`Alt+i`), where you can turn one off for new sessions.
+The proxy can also serve **plugins**: a pinned manifest (a TOML file, hash-checked) that says what a member needs: marketplaces and the Claude Code plugins to install from them, MCP servers (with the secrets they need, which the proxy serves as env), subagents, instructions for every session and env. The first time claudio sees a manifest it shows every item in a setup screen, all on; you turn off what you don't want and press Enter (the choice is saved under `[plugins.<name>]` in `config.toml`; Esc asks again at the next start). Then each host's daemon installs the plugins in your user scope with `claude plugin install` (never with `-y`: a plugin whose marketplace runs a command is left for you to install by hand), and every session claudio opens with that proxy profile (manager, `--plain`, SSH hosts) gets the servers (`--mcp-config`, secrets only in its env), the agents (`--agents`) and the instructions. What you already have stays yours: an installed plugin, a marketplace, an MCP server or an agent of the same name is left alone. The list and its env are cached in `~/.config/claudio/plugins.json` (mode 0600), so a session still gets them when the proxy is unreachable, and refreshed every 15 minutes. `claudio proxy logout` deletes them. Plugins are listed in the extensions screen (`Alt+i`): `Space` turns one off for new sessions, `Enter` opens its setup screen again, and its details say, per host, what was installed, what was already there, what is still installing and what was skipped and why. Installed plugins stay until you remove them (`claude plugin uninstall <id>`).
 
 - `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
 - `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
@@ -219,7 +219,7 @@ In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such 
 
 `Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
 
-`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile and state on each host). `Space` or `Enter` turns it on or off; `r` fetches the plugin lists again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
+`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile, setup and state on each host). `Space` turns it on or off, and so does `Enter` except on a plugin's row, where it opens the plugin's setup screen; `r` fetches the plugin lists and manifests again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
 
 ### Keeping claude up to date
 
@@ -302,6 +302,12 @@ latex = true                    # ask claude to write math in <latex> tags, rend
 diagram = false                 # e.g. no Mermaid instruction or drawing
                                 # (Alt+i turns them on and off and writes this table;
                                 # proxy plugins too, by name)
+
+[plugins.vocdoni-internal]      # a proxy plugin's setup (written by its setup screen)
+disabled = ["mcp:jina-mcp-server"]  # item ids left out: plugin:<name>@<market>, mcp:<name>,
+                                #   agent:<name>, instructions, env
+reviewed = "1.0.0"              # the manifest version last reviewed
+seen = ["plugin:agentic-dev@vocdoni", "mcp:jina-mcp-server"]  # its ids: a newer id is new
 
 [keys]                          # rebind any manager key
 new_session = "alt+n"
