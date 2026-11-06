@@ -259,14 +259,12 @@ impl App {
                 self.notify(format!("plugin {} is refused: {why}", clean(&name)));
                 return;
             }
-            // Kept for a list that comes later; on: the hosts get its bundle.
+            // Kept for a list that comes later; on: the hosts get its
+            // manifest (unless they answered for it already).
             self.plugins.config.insert(name.clone(), on);
             self.extensions.extensions[index].enabled = on;
             if on {
-                let hosts: Vec<String> = self.plugins.hosts.iter().cloned().collect();
-                for host in hosts {
-                    self.request_bundles(&host);
-                }
+                self.request_all();
             }
             self.emit(Effect::SaveExtension { name, on });
             self.redraw = true;
@@ -547,38 +545,42 @@ mod tests {
             [
                 "1.4.0 · work",
                 "turning it on or off applies to new sessions",
-                "local: downloading",
+                "manifest: fetching",
             ]
         );
-        let ready = Msg::Bundled {
-            name: "kb".into(),
-            path: Some("/c/kb.zip".into()),
-            installed: false,
-        };
+        let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
+        let manifest = crate::plugins::manifest::Manifest::parse(src).unwrap();
         let sha = "a".repeat(64);
-        app.on_reply(
-            ReplyTo::Bundle {
-                host: "local".into(),
-                name: "kb".into(),
-                sha256: sha.clone(),
-            },
-            Ok(ready),
+        app.on_manifest("kb", &sha, Ok(manifest));
+        assert_eq!(details(&app, 5)[2..], ["KB", "local: applying"]);
+        let ready = Msg::Applied(crate::proto::Applied {
+            name: "kb".into(),
+            version: "1.4.0".into(),
+            ..Default::default()
+        });
+        let to = ReplyTo::Manifest {
+            host: "local".into(),
+            name: "kb".into(),
+            sha256: sha,
+        };
+        app.on_reply(to.clone(), Ok(ready));
+        assert_eq!(
+            details(&app, 5)[3],
+            "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
         );
-        assert_eq!(details(&app, 5)[2], "local: ready");
         app.on_reply(
-            ReplyTo::Bundle {
-                host: "local".into(),
-                name: "kb".into(),
-                sha256: sha,
-            },
+            to,
             Err(std::io::Error::other(
-                "bundle kb: download failed: HTTP 404",
+                "manifest kb: download failed: HTTP 404",
             )),
         );
-        assert_eq!(details(&app, 5)[2], "local: download failed: HTTP 404");
+        assert_eq!(
+            details(&app, 5)[3],
+            "local: failed: download failed: HTTP 404"
+        );
         assert!(
             app.notice.is_none(),
-            "a bundle error is shown here, not as a notice"
+            "a manifest error is shown here, not as a notice"
         );
         assert_eq!(
             details(&app, 6),
@@ -599,10 +601,10 @@ mod tests {
         }
         app.on_terminal(press(KeyCode::Char(' ')));
         assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), false)]);
-        assert!(app.plugin_env("work").is_empty());
+        assert!(app.plugin_parts("local", "work").0.is_empty());
         assert_eq!(app.plugins.config.get("kb"), Some(&false));
-        // Back on: saved, and the hosts are asked for its bundle again only
-        // when they have no answer at its hash.
+        // Back on: saved, and the hosts are asked for its manifest again
+        // only when they have no answer at its hash (here: no manifest).
         app.on_terminal(press(KeyCode::Char(' ')));
         assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), true)]);
         // A refused one does not toggle.

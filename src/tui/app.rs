@@ -132,21 +132,23 @@ pub enum Effect {
     },
     /// Spawn (or respawn) a session with proxy config: the effect runner
     /// fetches the proxy config (with a 5 s timeout) unless it is cached,
-    /// waits up to 20 s for `bundles` (asking `host` for each), builds the
-    /// env, then sends the request. This avoids silently using fallback
-    /// model defaults when the proxy-config cache is cold, and starting a
-    /// session without a plugin whose bundle is a moment away.
+    /// waits up to 20 s for `pending` (asking `host` for each), adds the
+    /// plugins' share ([`super::plugins::compose`]) and the proxy env, then
+    /// sends the request. This avoids silently using fallback model
+    /// defaults when the proxy-config cache is cold, and starting a session
+    /// without a plugin whose manifest a host has not answered for yet.
     SpawnWithProxy {
         host: String,
-        /// A `Spawn` or `Respawn` whose `env` holds the plugin env only;
-        /// the runner adds the proxy env, and the ready bundles' paths.
+        /// A `Spawn` or `Respawn` without the plugins' share or proxy env.
         msg: Msg,
         proxy_name: String,
         /// `--first-party` for this session (see `SessionView::first_party`).
         first_party: bool,
         to: ReplyTo,
-        /// The plugins whose bundle `host` has not answered for yet.
-        bundles: Vec<PendingBundle>,
+        /// The profile's enabled plugins, in registry order.
+        plugins: Vec<super::plugins::PluginPart>,
+        /// The `Manifest` requests of the plugins `host` has not answered.
+        pending: Vec<PendingManifest>,
     },
     /// Put this text on the outer terminal's clipboard (OSC 52).
     CopyToClipboard(String),
@@ -198,12 +200,19 @@ pub enum Effect {
     /// Fetch `profile`'s plugin list, then save it to (or drop it from)
     /// `plugins.json`; the outcome goes to [`App::on_plugins`].
     FetchPlugins { profile: String },
+    /// Fetch plugin `name`'s manifest (https, 256 KiB, hash checked) and
+    /// parse it; the outcome goes to [`App::on_manifest`].
+    FetchManifest {
+        name: String,
+        url: String,
+        sha256: String,
+    },
 }
 
-/// A plugin bundle a deferred spawn waits for: its `Bundle` request, and
-/// how the answer reaches [`App::on_reply`].
+/// A plugin manifest a deferred spawn waits for: its `Manifest` request,
+/// and how the answer reaches [`App::on_reply`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct PendingBundle {
+pub struct PendingManifest {
     pub name: String,
     pub msg: Msg,
     pub to: ReplyTo,
@@ -245,8 +254,8 @@ pub enum ReplyTo {
     Search { gen: u64, host: String },
     /// `LastPrompt` on `host`, for the snippet save started under `gen`.
     LastPrompt { gen: u64, host: String },
-    /// `Bundle` of plugin `name` at hash `sha256` on `host`.
-    Bundle {
+    /// `Manifest` of plugin `name` at hash `sha256` on `host`.
+    Manifest {
         host: String,
         name: String,
         sha256: String,
@@ -369,7 +378,8 @@ pub struct App {
     /// The external extensions the extension host disabled after
     /// failures (until claudio restarts), by name.
     pub failed_extensions: Vec<String>,
-    /// The proxy plugins: lists, saved choices, each host's bundles.
+    /// The proxy plugins: lists, saved choices, manifests, each host's
+    /// answers.
     pub plugins: super::plugins::Plugins,
 }
 
@@ -875,6 +885,7 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.now = crate::paths::unix_now();
         self.confirm_tick();
+        self.reask_installing();
         self.refresh_session_cred(SESSION_CRED_POLL_SECS);
         if let Some(n) = &mut self.notice {
             n.ticks_left = n.ticks_left.saturating_sub(1);

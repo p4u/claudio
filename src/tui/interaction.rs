@@ -1116,8 +1116,8 @@ impl App {
                 }
             }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
-            (ReplyTo::Bundle { host, name, sha256 }, reply) => {
-                self.on_bundled(&host, &name, &sha256, reply)
+            (ReplyTo::Manifest { host, name, sha256 }, reply) => {
+                self.on_applied(&host, &name, &sha256, reply)
             }
             // Typing a path that doesn't exist (yet) is not an error.
             (ReplyTo::DirEntries, Err(_)) => {}

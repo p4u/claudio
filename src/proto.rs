@@ -645,15 +645,26 @@ impl Msg {
         self.with_env(crate::proxy::env::merge(&plugin, proxy))
     }
 
-    /// `self` with `--plugin-dir <path>` added for each of `paths`, if it is
-    /// a `Spawn` (a `Respawn` keeps the journaled args).
-    pub fn with_plugin_dirs(mut self, paths: &[String]) -> Msg {
+    /// `self` with the plugins' flags (`--agents <json>`, `--mcp-config
+    /// <json>`…) after its args, if it is a `Spawn` (a `Respawn` keeps the
+    /// journaled args).
+    pub fn with_plugin_args(mut self, args: &[String]) -> Msg {
         if let Msg::Spawn(spec) = &mut self {
-            for path in paths {
-                spec.args.push("--plugin-dir".to_owned());
-                spec.args.push(path.clone());
-            }
+            spec.args.extend(args.iter().cloned());
         }
+        self
+    }
+
+    /// `self` with the plugins' instructions, if it is a `Spawn` or a
+    /// `Respawn` (which then carries extensions).
+    pub fn with_instructions(mut self, instructions: String) -> Msg {
+        let ext = match &mut self {
+            Msg::Spawn(spec) => &mut spec.extensions,
+            Msg::Respawn(spec) => &mut spec.extensions,
+            _ => return self,
+        };
+        ext.get_or_insert_with(SessionExtensions::default)
+            .instructions = instructions;
         self
     }
 }
@@ -1391,7 +1402,8 @@ mod tests {
         });
         let merged = spawn
             .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
-            .with_plugin_dirs(&["/c/kb.zip".to_owned()]);
+            .with_plugin_args(&["--agents".to_owned(), "{}".to_owned()])
+            .with_instructions("Rules.".to_owned());
         let Msg::Spawn(spec) = merged else {
             panic!("a spawn")
         };
@@ -1399,8 +1411,10 @@ mod tests {
             spec.env,
             [pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "30000")]
         );
-        assert_eq!(spec.args, ["--resume", "c1", "--plugin-dir", "/c/kb.zip"]);
+        assert_eq!(spec.args, ["--resume", "c1", "--agents", "{}"]);
+        assert_eq!(spec.extensions.unwrap().instructions, "Rules.");
         assert_eq!(Msg::Ping.merge_env(vec![pair("A", "b")]), Msg::Ping);
+        assert_eq!(Msg::Ping.with_instructions("x".into()), Msg::Ping);
     }
 
     #[test]

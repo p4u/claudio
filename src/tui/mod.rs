@@ -326,7 +326,11 @@ async fn main(launch: Launch) -> ExitCode {
         },
     });
     app.extensions = registry;
-    app.load_plugins(cached_plugins, config.extensions.clone());
+    app.load_plugins(
+        cached_plugins,
+        config.extensions.clone(),
+        config.plugins.clone(),
+    );
     app.set_host_features("local", &local_features);
     app.on_plugin_host("local");
     let start = match plain {
@@ -586,6 +590,13 @@ enum HostEvent {
     Plugins {
         profile: String,
         fetch: plugins::PluginsFetch,
+    },
+    /// Plugin `name`'s manifest at hash `sha256` was fetched and parsed, or
+    /// why not.
+    Manifest {
+        name: String,
+        sha256: String,
+        result: Result<crate::plugins::manifest::Manifest, String>,
     },
     /// A notice from a background task.
     Notice(String),
@@ -1233,6 +1244,9 @@ async fn event_loop(
                 }
                 Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
                 Some(HostEvent::Plugins { profile, fetch }) => app.on_plugins(&profile, fetch),
+                Some(HostEvent::Manifest { name, sha256, result }) => {
+                    app.on_manifest(&name, &sha256, result);
+                }
                 Some(HostEvent::Notice(text)) => app.notify(text),
                 None => return Ok(Default::default()),
             },
@@ -1447,6 +1461,21 @@ fn run_effect(
                 let _ = tx.send(HostEvent::Plugins { profile, fetch }).await;
             });
         }
+        Effect::FetchManifest { name, url, sha256 } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let fetched = crate::proxy::plugins::fetch_manifest(&url, &sha256).await;
+                let result = fetched
+                    .and_then(|text| crate::plugins::manifest::Manifest::parse_named(&text, &name));
+                let _ = tx
+                    .send(HostEvent::Manifest {
+                        name,
+                        sha256,
+                        result,
+                    })
+                    .await;
+            });
+        }
         Effect::FetchProxyConfig { profile_name } => {
             let tx = ev_tx.clone();
             let name = profile_name.clone();
@@ -1515,7 +1544,8 @@ fn run_effect(
             proxy_name,
             first_party,
             to,
-            bundles,
+            plugins: mut parts,
+            pending,
         } => {
             // Resolve the client now (synchronous, cheap) so we can move it
             // into the async task. Client is Clone + Send + 'static.
@@ -1526,7 +1556,7 @@ fn run_effect(
             tokio::spawn(async move {
                 // Fetch proxy config with a 5 s timeout so the first spawn
                 // uses the real model/rate-limit overrides, not fallback
-                // defaults; meanwhile, wait for the plugin bundles.
+                // defaults; meanwhile, wait for the plugin manifests.
                 let config = async {
                     match cached {
                         Some(cfg) => Some(cfg),
@@ -1539,11 +1569,20 @@ fn run_effect(
                         .flatten(),
                     }
                 };
-                let waits = wait_bundles(client.as_ref(), bundles, &tx);
-                let (cfg, (dirs, left_out)) = tokio::join!(config, waits);
+                let waits = wait_manifests(client.as_ref(), pending, &tx);
+                let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
                 if !left_out.is_empty() {
                     let names = left_out.join(", ");
                     let text = format!("plugin {names} left out: not ready on {host}");
+                    let _ = notices.send(HostEvent::Notice(text)).await;
+                }
+                for part in &mut parts {
+                    if part.applied.is_none() {
+                        part.applied = ready.remove(&part.name);
+                    }
+                }
+                let composed = plugins::compose(&parts);
+                for text in composed.notices.clone() {
                     let _ = notices.send(HostEvent::Notice(text)).await;
                 }
 
@@ -1563,7 +1602,7 @@ fn run_effect(
                     Ok(env) => {
                         match client {
                             Some(c) => {
-                                let msg = msg.with_plugin_dirs(&dirs).merge_env(env);
+                                let msg = plugins::with_plugins(msg, composed).merge_env(env);
                                 let reply = c.request(msg);
                                 let _ = tx.send((to, reply.await));
                             }
@@ -1584,53 +1623,53 @@ fn run_effect(
     }
 }
 
-/// How long a spawn waits for its plugin bundles.
-const BUNDLE_WAIT: Duration = Duration::from_secs(20);
+/// How long a spawn waits for a host to answer its plugin manifests.
+pub(super) const BUNDLE_WAIT: Duration = Duration::from_secs(20);
 
-/// Ask `client` for each of `bundles` and wait up to [`BUNDLE_WAIT`]: the
-/// paths of those that came back ready, and the names of those that did
-/// not (pending, failed, or no client). Every answer, even a late one, also
-/// goes to `App` through `tx`.
-async fn wait_bundles(
+/// Ask `client` for each of `pending` and wait up to [`BUNDLE_WAIT`]: the
+/// answers that came back (`Applied`, by plugin name), and the names of
+/// those that did not (late, failed, or no client). Every answer, even a
+/// late one, also goes to `App` through `tx`.
+async fn wait_manifests(
     client: Option<&Client>,
-    bundles: Vec<app::PendingBundle>,
+    pending: Vec<app::PendingManifest>,
     tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
-) -> (Vec<String>, Vec<String>) {
-    let mut dirs = Vec::new();
+) -> (
+    std::collections::HashMap<String, crate::proto::Applied>,
+    Vec<String>,
+) {
+    let mut ready = std::collections::HashMap::new();
     let mut left_out = Vec::new();
     let deadline = tokio::time::Instant::now() + BUNDLE_WAIT;
     let mut waiting = Vec::new();
-    for b in bundles {
+    for m in pending {
         let Some(client) = client else {
-            left_out.push(b.name);
+            left_out.push(m.name);
             continue;
         };
-        let reply = client.request(b.msg);
+        let reply = client.request(m.msg);
         let (done, answer) = tokio::sync::oneshot::channel();
         let tx = tx.clone();
         tokio::spawn(async move {
             let reply = reply.await;
-            // `Some(None)`: installed in Claude Code, no bundle needed.
-            let ready = match &reply {
-                Ok(Msg::Bundled {
-                    installed: true, ..
-                }) => Some(None),
-                Ok(Msg::Bundled { path: Some(p), .. }) => Some(Some(p.clone())),
+            let applied = match &reply {
+                Ok(Msg::Applied(a)) => Some(a.clone()),
                 _ => None,
             };
-            let _ = done.send(ready);
-            let _ = tx.send((b.to, reply));
+            let _ = done.send(applied);
+            let _ = tx.send((m.to, reply));
         });
-        waiting.push((b.name, answer));
+        waiting.push((m.name, answer));
     }
     for (name, answer) in waiting {
         match tokio::time::timeout_at(deadline, answer).await {
-            Ok(Ok(Some(Some(path)))) => dirs.push(path),
-            Ok(Ok(Some(None))) => {}
+            Ok(Ok(Some(applied))) => {
+                ready.insert(name, applied);
+            }
             _ => left_out.push(name),
         }
     }
-    (dirs, left_out)
+    (ready, left_out)
 }
 
 /// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list

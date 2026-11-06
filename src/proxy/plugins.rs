@@ -213,7 +213,8 @@ pub fn admit(p: &Plugin) -> Result<(), String> {
     if !(1..=64).contains(&p.version.len()) || !printable(&p.version) {
         return Err("bad version".to_owned());
     }
-    if !p.bundle_url.starts_with("https://") || !printable(&p.bundle_url) {
+    let https = p.bundle_url.starts_with("https://") || test_http_ok(&p.bundle_url);
+    if !https || !printable(&p.bundle_url) {
         return Err("bundle URL is not https".to_owned());
     }
     if !sha256_ok(&p.bundle_sha256) {
@@ -303,6 +304,65 @@ pub async fn fetch(name: &str, profile: &Profile) -> Result<PluginList, ApiError
     }
     let reply: Reply = resp.json().await?;
     Ok(list_of(reply, name, paths::unix_now()))
+}
+
+// ── Manifest ──────────────────────────────────────────────────────────────────
+
+/// How long a manifest fetch may take.
+const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Fetch a plugin's manifest: `url` (https, redirects to https only), at
+/// most 256 KiB, whose SHA-256 is `sha256`; its text. Kept in memory only.
+/// The reason names no value.
+pub async fn fetch_manifest(url: &str, sha256: &str) -> Result<String, String> {
+    use crate::plugins::manifest::MAX_BYTES;
+    use sha2::{Digest, Sha256};
+    let plain_ok = test_http_ok(url);
+    if !url.starts_with("https://") && !plain_ok {
+        return Err("not https".to_owned());
+    }
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 5 {
+            attempt.error("too many redirects")
+        } else if attempt.url().scheme() == "https" || plain_ok {
+            attempt.follow()
+        } else {
+            attempt.error("redirect to a non-https URL")
+        }
+    });
+    let client = reqwest::Client::builder()
+        .connect_timeout(MANIFEST_TIMEOUT)
+        .timeout(MANIFEST_TIMEOUT)
+        .redirect(policy)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("unreachable: {}", e.without_url()))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let over = || "over 256 KiB".to_owned();
+    if resp.content_length().is_some_and(|n| n > MAX_BYTES as u64) {
+        return Err(over());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("unreachable: {}", e.without_url()))?
+    {
+        if body.len() + chunk.len() > MAX_BYTES {
+            return Err(over());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if format!("{:x}", Sha256::digest(&body)) != sha256 {
+        return Err("hash mismatch".to_owned());
+    }
+    String::from_utf8(body).map_err(|_| "not UTF-8".to_owned())
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
