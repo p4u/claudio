@@ -1,6 +1,6 @@
 # Plugin manifests: design
 
-Status: audited   Class: architectural
+Status: approved (2026-11-06)   Class: architectural
 Owner decisions so far (2026-11-06):
 - A proxy plugin is a TOML manifest, not a zip: it declares marketplaces, plugins, MCP servers (with the secret each needs), subagents, instructions and env; claudio installs and configures all of it. Installing plugins into the member's `~/.claude` is wanted.
 - A member who already holds a proxy user token needs no browser login; the token alone grants the manifest and its secrets. The browser login stays for members without one.
