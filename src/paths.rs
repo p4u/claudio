@@ -88,7 +88,7 @@ pub fn plugins_cache() -> PathBuf {
 }
 
 /// `$XDG_CACHE_HOME/claudio`, else `~/.cache/claudio`: downloads this host
-/// keeps (the plugin bundles).
+/// keeps (the plugin manifests).
 pub fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())

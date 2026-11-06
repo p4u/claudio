@@ -84,14 +84,15 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    // `claudio __remote-bundle HOST CWD NAME SHA256` – ask HOST's daemon for a
-    // pre-seeded plugin bundle, spawn claude with it, print both.
+    // `claudio __remote-manifest HOST CWD NAME SHA256 SECRET` – ask HOST's
+    // daemon to apply a pre-seeded plugin manifest, spawn claude with what it
+    // applied, print both.
     #[cfg(feature = "diag")]
-    if argv.get(1).map(String::as_str) == Some("__remote-bundle") {
-        if let [_, _, host, cwd, name, sha256] = argv.as_slice() {
-            return remote::diag::remote_bundle_cmd(host, cwd, name, sha256);
+    if argv.get(1).map(String::as_str) == Some("__remote-manifest") {
+        if let [_, _, host, cwd, name, sha256, secret] = argv.as_slice() {
+            return remote::diag::remote_manifest_cmd(host, cwd, name, sha256, secret);
         }
-        eprintln!("usage: claudio __remote-bundle <host> <cwd> <name> <sha256>");
+        eprintln!("usage: claudio __remote-manifest <host> <cwd> <name> <sha256> <secret>");
         return std::process::ExitCode::FAILURE;
     }
 

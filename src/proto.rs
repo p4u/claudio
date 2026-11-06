@@ -207,18 +207,6 @@ pub enum Msg {
         #[serde(default)]
         limit: u32,
     },
-    /// Make plugin `name`'s bundle ready on this host: skipped when the
-    /// Claude Code plugin `installed_id` is installed here, else the cached
-    /// zip whose SHA-256 is `sha256`, downloaded from `url` (https) when
-    /// missing. Answered by `Bundled`, or `Error "bundle <name>: …"`. An
-    /// older daemon answers `Error "unsupported op…"`.
-    Bundle {
-        name: String,
-        url: String,
-        sha256: String,
-        #[serde(default)]
-        installed_id: String,
-    },
     /// Apply proxy plugin `name`'s manifest on this host: the TOML at `url`
     /// (https) whose SHA-256 is `sha256`, cached once downloaded. `secrets`
     /// are the names (never the values) of the plugin's proxy env, which
@@ -299,15 +287,6 @@ pub enum Msg {
         scanned: u32,
         total: u32,
         truncated: bool,
-    },
-    /// Reply to `Bundle`: the zip's path on this host (for `--plugin-dir`),
-    /// or `installed` (the plugin is installed in Claude Code; no bundle).
-    Bundled {
-        name: String,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        installed: bool,
     },
     /// Reply to `Manifest`.
     Applied(Applied),
@@ -1296,42 +1275,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<V02>(&json).unwrap(), V02::Unknown);
         let back: Envelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.msg, shell);
-    }
-
-    #[test]
-    fn bundle_and_bundled_roundtrip_and_are_unknown_to_older_peers() {
-        #[derive(Debug, PartialEq, Deserialize)]
-        #[serde(tag = "op", rename_all = "snake_case")]
-        enum Old {
-            Ping,
-            #[serde(other)]
-            Unknown,
-        }
-        let bundle = Msg::Bundle {
-            name: "kb".into(),
-            url: "https://e.org/kb.zip".into(),
-            sha256: "a".repeat(64),
-            installed_id: "kb@m".into(),
-        };
-        let reply = Msg::Bundled {
-            name: "kb".into(),
-            path: Some("/c/plugins/kb.zip".into()),
-            installed: false,
-        };
-        for msg in [bundle, reply] {
-            let json = serde_json::to_string(&Envelope::request(4, msg.clone())).unwrap();
-            assert_eq!(serde_json::from_str::<Old>(&json).unwrap(), Old::Unknown);
-            assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, msg);
-        }
-        let minimal = r#"{"op":"bundled","name":"kb"}"#;
-        assert_eq!(
-            serde_json::from_str::<Msg>(minimal).unwrap(),
-            Msg::Bundled {
-                name: "kb".into(),
-                path: None,
-                installed: false
-            }
-        );
     }
 
     #[test]

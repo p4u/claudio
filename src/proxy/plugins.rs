@@ -1,11 +1,12 @@
 //! Session plugins served by a proxy profile (`GET /v1/claudio/plugins`).
 //!
-//! A plugin is a pinned bundle (a zip claude loads with `--plugin-dir`) and
-//! the env its MCP servers and hooks need. The env holds secrets: the list
-//! is cached per profile in `~/.config/claudio/plugins.json` (mode 0600,
-//! like `config.toml`), so a session can get it when the proxy is
-//! unreachable, and never goes to argv, the journal, `state.json`, logs or
-//! notices. `Debug` prints names and key counts only.
+//! A plugin is a pinned manifest (`crate::plugins::manifest`: what its
+//! sessions get, and the plugins it installs) and the env its MCP servers
+//! need. The env holds secrets: the list is cached per profile in
+//! `~/.config/claudio/plugins.json` (mode 0600, like `config.toml`), so a
+//! session can get it when the proxy is unreachable, and never goes to
+//! argv, the journal, `state.json`, logs or notices. `Debug` prints names
+//! and key counts only.
 //!
 //! Everything a proxy sends is checked by [`admit`] before it is used.
 
@@ -68,8 +69,8 @@ pub struct Plugin {
     pub version: String,
     pub bundle_url: String,
     pub bundle_sha256: String,
-    /// The Claude Code plugin id (`<plugin>@<marketplace>`) that makes the
-    /// bundle redundant when installed; empty when none does.
+    /// Accepted and ignored (the zip bundles' installed-plugin check; a
+    /// manifest names its plugins itself).
     #[serde(default)]
     pub installed_id: String,
     /// Sorted by key.

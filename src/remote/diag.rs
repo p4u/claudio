@@ -205,15 +205,23 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
     })
 }
 
-/// `claudio __remote-bundle HOST CWD NAME SHA256`
+/// `claudio __remote-manifest HOST CWD NAME SHA256 SECRET`
 ///
-/// Asks `HOST`'s daemon for plugin `NAME`'s bundle with hash `SHA256` (from
-/// a URL nothing listens on, so only a pre-seeded cache answers), prints
-/// the reply as JSON, then spawns claude in `CWD` with `--plugin-dir
-/// <path>`, prints `pid=<pid>`, keeps the session 5 s (for the caller to
-/// look at its argv) and kills it.
-pub fn remote_bundle_cmd(host: &str, cwd: &str, name: &str, sha256: &str) -> ExitCode {
-    use crate::proto::{Msg, SpawnSpec};
+/// Asks `HOST`'s daemon to apply plugin `NAME`'s manifest with hash
+/// `SHA256` (from a URL nothing listens on, so only a pre-seeded cache
+/// answers), with `SECRET` the name of the one secret it is given; prints
+/// the `Applied` reply as JSON, then spawns claude in `CWD` with what it
+/// applied (its flags, its env, the secret set to `t9-secret`, its
+/// instructions), prints `pid=<pid>`, keeps the session 5 s (for the caller
+/// to look at its argv) and kills it.
+pub fn remote_manifest_cmd(
+    host: &str,
+    cwd: &str,
+    name: &str,
+    sha256: &str,
+    secret: &str,
+) -> ExitCode {
+    use crate::proto::{Msg, SessionExtensions, SpawnSpec};
     let rt = match make_runtime() {
         Ok(r) => r,
         Err(code) => return code,
@@ -231,43 +239,48 @@ pub fn remote_bundle_cmd(host: &str, cwd: &str, name: &str, sha256: &str) -> Exi
                 return ExitCode::FAILURE;
             }
         };
-        let bundle = Msg::Bundle {
+        let request = Msg::Manifest {
             name: name.to_owned(),
-            url: "https://127.0.0.1:9/never.zip".to_owned(),
+            url: "https://127.0.0.1:9/never.toml".to_owned(),
             sha256: sha256.to_owned(),
-            installed_id: String::new(),
+            secrets: vec![secret.to_owned()],
+            disabled: Vec::new(),
         };
-        let path = match client.request(bundle).await {
-            Ok(Msg::Bundled {
-                path, installed, ..
-            }) => {
-                let reply = serde_json::json!({ "path": path, "installed": installed });
-                println!("{reply}");
-                path
-            }
+        let applied = match client.request(request).await {
+            Ok(Msg::Applied(applied)) => applied,
             Ok(other) => {
-                eprintln!("unexpected Bundle reply: {other:?}");
+                eprintln!("unexpected Manifest reply: {other:?}");
                 return ExitCode::FAILURE;
             }
             Err(e) => {
-                eprintln!("Bundle request failed: {e}");
+                eprintln!("Manifest request failed: {e}");
                 return ExitCode::FAILURE;
             }
         };
-        let Some(path) = path else {
-            return ExitCode::SUCCESS;
-        };
+        println!("{}", serde_json::to_string(&applied).unwrap_or_default());
+        let mut args = Vec::new();
+        if let Some(agents) = &applied.agents {
+            args.extend(["--agents".to_owned(), agents.clone()]);
+        }
+        if let Some(mcp) = &applied.mcp_config {
+            args.extend(["--mcp-config".to_owned(), mcp.clone()]);
+        }
+        let mut env = applied.env.clone();
+        env.push((secret.to_owned(), "t9-secret".to_owned()));
         let id = uuid::Uuid::new_v4();
         let spec = SpawnSpec {
             id,
             cwd: cwd.to_owned(),
             name: None,
-            args: vec!["--plugin-dir".to_owned(), path],
-            env: vec![],
+            args,
+            env,
             rows: 24,
             cols: 80,
             ephemeral: true,
-            extensions: None,
+            extensions: Some(SessionExtensions {
+                instructions: applied.instructions.clone(),
+                ..Default::default()
+            }),
         };
         match client.request(Msg::Spawn(spec)).await {
             Ok(Msg::Spawned { pid, .. }) => {

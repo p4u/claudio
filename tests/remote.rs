@@ -404,13 +404,39 @@ fn t8_probe_roundtrip() {
     );
 }
 
-// ── t9: plugin bundle on the remote ─────────────────────────────────────────
+// ── t9: plugin manifest on the remote ──────────────────────────────────────
 
-/// A pre-seeded plugin bundle in the remote daemon's cache answers `Bundle`
-/// with its remote path, and a session spawned with it there has that path
-/// in its argv (when the remote claude knows `--plugin-dir`).
+/// The manifest t9 seeds: no plugin to install (the host's `~/.claude` is
+/// left alone), one http MCP server needing `T9_TOKEN`, one agent,
+/// instructions and env.
+const T9_MANIFEST: &str = r#"format = 1
+name = "claudio-t9"
+version = "1.0.0"
+instructions = "t9 instructions"
+
+[[mcp]]
+name = "t9-kb"
+type = "http"
+url = "https://t9.invalid/mcp"
+headers = { Authorization = "Bearer ${T9_TOKEN}" }
+secrets = ["T9_TOKEN"]
+
+[[agent]]
+name = "t9-agent"
+description = "t9"
+prompt = "t9 prompt"
+
+[env]
+T9_REGION = "eu"
+"#;
+
+/// A pre-seeded plugin manifest in the remote daemon's cache answers
+/// `Manifest` with the server (placeholders only), the agent, the
+/// instructions and the env, and a session spawned with them there has the
+/// flags in its argv (unless the remote claude lacks them: then `Applied`
+/// says so) and never the secret.
 #[test]
-fn t9_remote_plugin_bundle() {
+fn t9_remote_plugin_manifest() {
     let host = match test_host() {
         Some(h) => h,
         None => {
@@ -418,50 +444,69 @@ fn t9_remote_plugin_bundle() {
             return;
         }
     };
-    // The smallest valid zip: an empty end-of-central-directory record.
-    let zip: Vec<u8> = [b'P', b'K', 5, 6].into_iter().chain([0u8; 18]).collect();
     let sha = {
         use sha2::Digest;
-        format!("{:x}", sha2::Sha256::digest(&zip))
+        format!("{:x}", sha2::Sha256::digest(T9_MANIFEST.as_bytes()))
     };
-    let octal: String = zip.iter().map(|b| format!("\\{b:03o}")).collect();
+    let octal: String = T9_MANIFEST.bytes().map(|b| format!("\\{b:03o}")).collect();
     let seed = format!(
         "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/claudio/plugins\" && mkdir -p \"$d\" && chmod 700 \"$d\" \
-         && printf '{octal}' > \"$d/claudio-t9.zip\" && printf '{sha}\\n' > \"$d/claudio-t9.sha256\" \
-         && echo \"$d/claudio-t9.zip\""
+         && printf '{octal}' > \"$d/claudio-t9.toml\" && printf '{sha}\\n' > \"$d/claudio-t9.sha256\" \
+         && echo ok"
     );
-    let (remote_zip, ok) = ssh_run(&host, &seed);
-    assert!(ok, "could not seed the remote cache");
+    let (out, ok) = ssh_run(&host, &seed);
+    assert!(ok && out.contains("ok"), "could not seed the remote cache");
 
     let mut child = Command::new(BINARY)
-        .args(["__remote-bundle", &host, "/tmp", "claudio-t9", &sha])
+        .args([
+            "__remote-manifest",
+            &host,
+            "/tmp",
+            "claudio-t9",
+            &sha,
+            "T9_TOKEN",
+        ])
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .expect("run claudio __remote-bundle");
+        .expect("run claudio __remote-manifest");
     let stdout = child.stdout.take().expect("piped stdout");
     let mut lines = std::io::BufRead::lines(std::io::BufReader::new(stdout));
     let reply: serde_json::Value =
-        serde_json::from_str(&lines.next().expect("a Bundle reply").unwrap()).unwrap();
-    assert_eq!(reply["path"].as_str(), Some(remote_zip.as_str()), "{reply}");
-    assert_eq!(reply["installed"], false);
-    println!("[t9] Bundled {{ path: {remote_zip} }} ✓");
+        serde_json::from_str(&lines.next().expect("an Applied reply").unwrap()).unwrap();
+    let mcp = reply["mcp_config"].as_str().expect("an MCP config");
+    assert!(
+        mcp.contains("${T9_TOKEN}") && !mcp.contains("t9-secret"),
+        "{reply}"
+    );
+    assert!(
+        reply["agents"]
+            .as_str()
+            .is_some_and(|a| a.contains("t9-agent")),
+        "{reply}"
+    );
+    assert_eq!(reply["instructions"], "t9 instructions");
+    assert_eq!(reply["env"], serde_json::json!([["T9_REGION", "eu"]]));
+    println!("[t9] Applied {{ mcp_config, agents, instructions, env }} ✓");
 
     let pid = lines.next().expect("a pid").unwrap();
     let pid = pid.strip_prefix("pid=").expect("pid=<n>").to_owned();
     let (args, _) = ssh_run(&host, &format!("ps -o args= -p {pid}"));
-    let (help, _) = ssh_run(
-        &host,
-        "$HOME/.local/bin/claude --help 2>/dev/null || claude --help",
-    );
-    if help.contains("--plugin-dir") {
+    let dropped: Vec<&str> = reply["dropped"]
+        .as_array()
+        .map(|d| d.iter().filter_map(|f| f.as_str()).collect())
+        .unwrap_or_default();
+    assert!(!args.contains("t9-secret"), "argv: {args}");
+    if dropped.is_empty() {
         assert!(
-            args.contains(&format!("--plugin-dir {remote_zip}")),
+            args.contains("--agents") && args.contains("--mcp-config"),
             "argv: {args}"
         );
-        println!("[t9] the remote session's argv has the bundle ✓");
+        println!("[t9] the remote session's argv has --agents and --mcp-config ✓");
     } else {
-        assert!(!args.contains("--plugin-dir"), "argv: {args}");
-        println!("[t9] the remote claude has no --plugin-dir: left out ✓");
+        for flag in &dropped {
+            assert!(!args.contains(flag), "argv: {args}");
+        }
+        println!("[t9] the remote claude lacks {dropped:?}: left out ✓");
     }
     for _ in lines {}
     assert!(child.wait().expect("wait for claudio").success());
