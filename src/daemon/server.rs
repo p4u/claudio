@@ -26,7 +26,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use super::session::{ClientId, Cmd};
-use super::{git, host, update, Config, Daemon};
+use super::{bundle, git, host, update, Config, Daemon};
 use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
@@ -558,6 +558,23 @@ impl Client {
                 Ok(()) => return,
                 Err(refused) => refused,
             },
+            Msg::Bundle {
+                name,
+                url,
+                sha256,
+                installed_id,
+            } => {
+                // A download (up to minutes): reply from a task, like
+                // `UpdateClaude`.
+                let daemon = Arc::clone(&self.daemon);
+                let queue = self.queue.clone();
+                tokio::spawn(async move {
+                    let msg =
+                        bundle::handle(&daemon.bundles, name, url, sha256, installed_id).await;
+                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                });
+                return;
+            }
             other => Msg::Error {
                 message: format!("unsupported op: {}", op_name(&other)),
             },

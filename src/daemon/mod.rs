@@ -11,10 +11,13 @@
 //! - [`update`] — `claude update` (or the installer), on request.
 //! - [`git`] — the read-only git queries behind the TUI's git viewer.
 //! - [`login_path`] — the user's login-shell `PATH`, for claude and sessions.
+//! - [`bundle`] — proxy plugin bundles: the zips sessions load with
+//!   `--plugin-dir`.
 //!
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
 
+mod bundle;
 pub mod ctl;
 mod git;
 mod git_status;
@@ -348,6 +351,8 @@ pub(crate) struct Daemon {
     pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
     /// `Search`: one at a time, and the transcripts it reads.
     pub(crate) search: server::SearchSlot,
+    /// `Bundle`: where plugin zips go, one download per name at a time.
+    pub(crate) bundles: bundle::Bundles,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -389,6 +394,7 @@ impl Daemon {
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
             search: server::SearchSlot::new(),
+            bundles: bundle::Bundles::new(),
         }
     }
 

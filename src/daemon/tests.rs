@@ -2028,3 +2028,231 @@ async fn a_daemon_start_clears_old_context_files() {
     let _d = TestDaemon::start_in(dir).await;
     assert!(!context.join("old.txt").exists());
 }
+
+// ── Bundle ───────────────────────────────────────────────────────────────────
+
+/// A daemon whose bundles go to `<dir>/cache/plugins` and whose Claude Code
+/// config is `<dir>/claude` (http allowed, for the local test server).
+async fn bundle_daemon() -> (TestDaemon, PathBuf, PathBuf) {
+    let d = TestDaemon::start().await;
+    let cache = d.dir.join("cache/plugins");
+    let claude = d.dir.join("claude");
+    d.daemon.bundles.set_dirs(cache.clone(), claude.clone());
+    (d, cache, claude)
+}
+
+fn bundle(name: &str, url: &str, sha256: &str, installed_id: &str) -> Msg {
+    Msg::Bundle {
+        name: name.into(),
+        url: url.into(),
+        sha256: sha256.into(),
+        installed_id: installed_id.into(),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// Serve `body` at `/kb.zip` on loopback, counting the requests.
+async fn serve_zip(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    let router = axum::Router::new().route(
+        "/kb.zip",
+        axum::routing::get(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async move { body }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://127.0.0.1:{port}/kb.zip"), hits)
+}
+
+fn files_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bundle_refuses_a_bad_name_hash_or_url() {
+    let d = TestDaemon::start().await;
+    let cache = d.dir.join("cache/plugins");
+    // The real daemon: no http, even on loopback.
+    let mut c = d.client().await;
+    let good = "a".repeat(64);
+    for (msg, shown) in [
+        (bundle("../x", "https://e.org/x.zip", &good, ""), "?"),
+        (bundle("Kb", "https://e.org/x.zip", &good, ""), "?"),
+        (
+            bundle("kb", "https://e.org/x.zip", &"A".repeat(64), ""),
+            "kb",
+        ),
+        (bundle("kb", "https://e.org/x.zip", "abc", ""), "kb"),
+        (bundle("kb", "http://e.org/x.zip", &good, ""), "kb"),
+        (bundle("kb", "file:///etc/passwd", &good, ""), "kb"),
+    ] {
+        let reply = c.call(msg.clone()).await;
+        assert_eq!(
+            reply,
+            Msg::Error {
+                message: format!("bundle {shown}: bad request")
+            },
+            "{msg:?}"
+        );
+    }
+    assert!(!cache.exists(), "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bundle_is_skipped_when_claude_code_has_the_plugin_installed() {
+    let (d, cache, claude) = bundle_daemon().await;
+    std::fs::create_dir_all(claude.join("plugins")).unwrap();
+    std::fs::write(
+        claude.join("plugins/installed_plugins.json"),
+        r#"{"version":2,"plugins":{"kb@vocdoni":[{"scope":"user"}]}}"#,
+    )
+    .unwrap();
+    let mut c = d.client().await;
+    let url = "https://127.0.0.1:9/never.zip";
+    let reply = c
+        .call(bundle("kb", url, &"a".repeat(64), "kb@vocdoni"))
+        .await;
+    assert_eq!(
+        reply,
+        Msg::Bundled {
+            name: "kb".into(),
+            path: None,
+            installed: true
+        }
+    );
+    assert!(!cache.exists(), "no download");
+    // Another id is not installed: on to the cache and the download.
+    let reply = c.call(bundle("kb", url, &"a".repeat(64), "kb@other")).await;
+    assert!(
+        matches!(&reply, Msg::Error { message } if message.starts_with("bundle kb: download failed")),
+        "{reply:?}"
+    );
+    // A broken file counts as not installed.
+    std::fs::write(claude.join("plugins/installed_plugins.json"), "{").unwrap();
+    let reply = c
+        .call(bundle("kb", url, &"a".repeat(64), "kb@vocdoni"))
+        .await;
+    assert!(matches!(reply, Msg::Error { .. }), "{reply:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cached_zip_with_its_sidecar_is_reused() {
+    let (d, cache, _) = bundle_daemon().await;
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("kb.zip"), b"zip").unwrap();
+    let hash = sha256_hex(b"zip");
+    std::fs::write(cache.join("kb.sha256"), format!("{hash}\n")).unwrap();
+    let mut c = d.client().await;
+    // A URL the daemon never reaches.
+    let reply = c
+        .call(bundle("kb", "https://127.0.0.1:9/kb.zip", &hash, ""))
+        .await;
+    let path = cache.join("kb.zip").to_string_lossy().into_owned();
+    assert_eq!(
+        reply,
+        Msg::Bundled {
+            name: "kb".into(),
+            path: Some(path),
+            installed: false
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_is_verified_stored_privately_and_shared() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering;
+    let (d, cache, _) = bundle_daemon().await;
+    let (url, hits) = serve_zip(b"the bundle").await;
+    let hash = sha256_hex(b"the bundle");
+    let mut a = d.client().await;
+    let mut b = d.client().await;
+    let (ra, rb) = tokio::join!(
+        a.call(bundle("kb", &url, &hash, "")),
+        b.call(bundle("kb", &url, &hash, ""))
+    );
+    let path = cache.join("kb.zip").to_string_lossy().into_owned();
+    for reply in [ra, rb] {
+        assert_eq!(
+            reply,
+            Msg::Bundled {
+                name: "kb".into(),
+                path: Some(path.clone()),
+                installed: false
+            }
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "one download for both");
+    assert_eq!(std::fs::read(cache.join("kb.zip")).unwrap(), b"the bundle");
+    assert_eq!(
+        std::fs::read_to_string(cache.join("kb.sha256")).unwrap(),
+        format!("{hash}\n")
+    );
+    assert_eq!(files_in(&cache), ["kb.sha256", "kb.zip"]);
+    let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wrong_hash_is_an_error_and_leaves_no_file() {
+    let (d, cache, _) = bundle_daemon().await;
+    let (url, _) = serve_zip(b"tampered").await;
+    let mut c = d.client().await;
+    let reply = c.call(bundle("kb", &url, &"b".repeat(64), "")).await;
+    assert_eq!(
+        reply,
+        Msg::Error {
+            message: "bundle kb: hash mismatch".into()
+        }
+    );
+    assert!(files_in(&cache).is_empty(), "{:?}", files_in(&cache));
+
+    // A new version replaces the old zip in place, and its sidecar.
+    std::fs::write(cache.join("kb.zip"), b"old").unwrap();
+    std::fs::write(cache.join("kb.sha256"), sha256_hex(b"old")).unwrap();
+    let reply = c
+        .call(bundle("kb", &url, &sha256_hex(b"tampered"), ""))
+        .await;
+    assert!(
+        matches!(reply, Msg::Bundled { path: Some(_), .. }),
+        "{reply:?}"
+    );
+    assert_eq!(std::fs::read(cache.join("kb.zip")).unwrap(), b"tampered");
+    assert_eq!(files_in(&cache), ["kb.sha256", "kb.zip"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cache_keeps_at_most_32_bundles() {
+    let (d, cache, _) = bundle_daemon().await;
+    std::fs::create_dir_all(&cache).unwrap();
+    for i in 0..super::bundle::MAX_BUNDLES {
+        std::fs::write(cache.join(format!("p{i}.zip")), b"z").unwrap();
+    }
+    let (url, hits) = serve_zip(b"x").await;
+    let mut c = d.client().await;
+    let reply = c.call(bundle("kb", &url, &sha256_hex(b"x"), "")).await;
+    assert_eq!(
+        reply,
+        Msg::Error {
+            message: "bundle kb: cache holds 32 bundles already".into()
+        }
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
