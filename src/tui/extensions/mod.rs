@@ -17,6 +17,7 @@ pub mod protocol;
 use std::collections::BTreeMap;
 
 use crate::proto::{LensKind, LensSpec, SessionExtensions, MAX_INSTRUCTIONS, MAX_LENSES};
+use crate::proxy::plugins::PluginList;
 
 /// The diagram extension's instruction (spec §7).
 pub const DIAGRAM_CONTEXT: &str = "This terminal draws Mermaid diagrams. When a diagram \
@@ -81,6 +82,12 @@ pub enum Source {
     BuiltIn,
     /// A program the extension host runs.
     External(manifest::Program),
+    /// A proxy plugin of `profile`: a bundle claude loads, and env. No
+    /// lenses or actions. `refused` says why it is not used, if it is not.
+    Plugin {
+        profile: String,
+        refused: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +103,10 @@ pub struct Extension {
 impl Extension {
     pub fn is_external(&self) -> bool {
         matches!(self.source, Source::External(_))
+    }
+
+    pub fn is_plugin(&self) -> bool {
+        matches!(self.source, Source::Plugin { .. })
     }
 }
 
@@ -194,6 +205,32 @@ impl Registry {
             }
         }
         Registry { extensions }
+    }
+
+    /// Replace the proxy plugins with those of `lists`, after the built-ins
+    /// and the externals, with `[extensions]` (`enabled`) applied. A plugin
+    /// [`PluginList::checked`] refuses, or whose name another extension
+    /// (or an earlier list) has, is listed as refused and off.
+    pub fn set_plugins(&mut self, lists: &[&PluginList], enabled: &BTreeMap<String, bool>) {
+        self.extensions.retain(|e| !e.is_plugin());
+        for list in lists {
+            for (p, why) in list.checked() {
+                let taken = self.extensions.iter().any(|e| e.name == p.name);
+                let refused = why.or_else(|| taken.then(|| "name taken".to_owned()));
+                let on = refused.is_none() && enabled.get(&p.name).copied().unwrap_or(true);
+                self.extensions.push(Extension {
+                    name: p.name.clone(),
+                    description: format!("{} · {}", p.version, list.profile),
+                    enabled: on,
+                    lenses: Vec::new(),
+                    actions: Vec::new(),
+                    source: Source::Plugin {
+                        profile: list.profile.clone(),
+                        refused,
+                    },
+                });
+            }
+        }
     }
 
     /// Turn extension `name` on or off; whether there is one.
@@ -414,6 +451,53 @@ mod tests {
         assert_eq!(keys, ['s', 'p', 'P', 'k']);
         assert!(r.external_lens("keys").is_some());
         assert!(!r.set_enabled("nope", true));
+    }
+
+    #[test]
+    fn plugins_follow_the_others_and_a_taken_name_is_refused() {
+        use crate::proxy::plugins::sample;
+        let ext = vec![external("keys", "keys", 'k')];
+        let mut r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
+        let work = PluginList {
+            profile: "work".into(),
+            fetched_at: 1,
+            plugins: vec![sample("kb"), sample("keys"), sample("latex"), sample("off")],
+        };
+        let mut bad = sample("evil");
+        bad.bundle_url = "http://e.org/x.zip".into();
+        let home = PluginList {
+            profile: "home".into(),
+            fetched_at: 1,
+            plugins: vec![sample("kb"), bad],
+        };
+        let enabled = BTreeMap::from([("off".to_owned(), false)]);
+        r.set_plugins(&[&work, &home], &enabled);
+        let plugins: Vec<(&str, bool, Option<&str>)> = r
+            .extensions
+            .iter()
+            .filter_map(|e| match &e.source {
+                Source::Plugin { refused, .. } => {
+                    Some((e.name.as_str(), e.enabled, refused.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            plugins,
+            [
+                ("kb", true, None),
+                ("keys", false, Some("name taken")),
+                ("latex", false, Some("name taken")),
+                ("off", false, None),
+                ("kb", false, Some("name taken")),
+                ("evil", false, Some("bundle URL is not https")),
+            ]
+        );
+        assert_eq!(r.extensions[5].description, "1.4.0 · work");
+        // Plugins bring no lenses or actions; a new list replaces the old.
+        assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
+        r.set_plugins(&[], &enabled);
+        assert_eq!(r.extensions.len(), 5);
     }
 
     #[test]

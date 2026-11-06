@@ -1,7 +1,9 @@
 //! The extensions screen (Alt+i, or `e` in the leader popup): one row per
-//! extension (built-ins first, then the external ones that loaded, on or
-//! off) with its kind, keys and lenses; below the list, the selected one's
-//! description, actions and lenses. Space or Enter turns it on or off.
+//! extension (built-ins first, then the external ones that loaded, then the
+//! proxy plugins, on or off) with its kind, keys and lenses; below the list,
+//! the selected one's description, actions and lenses (for a plugin, its
+//! state on each host). Space or Enter turns it on or off; `r` fetches the
+//! plugin lists again.
 //!
 //! Pure, like `app.rs`: a toggle changes the registry at once and returns
 //! [`Effect::SaveExtension`] (the event loop writes `config.toml`) and, for
@@ -11,14 +13,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::app::{App, Effect, Mode};
-use super::extensions::{ActionDecl, Extension};
+use super::extensions::{ActionDecl, Extension, Source};
 use super::interaction::Modal;
 use super::keymap::Action;
 use crate::claude::latex::sanitize;
 use crate::proto::LensKind;
 
 /// The screen's title.
-pub const TITLE: &str = "Extensions (Space toggle · Esc close)";
+pub const TITLE: &str = "Extensions (Space toggle · r refresh · Esc close)";
 /// The screen's last line.
 pub const FOOTER: &str =
     "changes apply now; claude's instructions change for new sessions (Alt+e restarts one)";
@@ -38,6 +40,8 @@ pub struct ExtensionsView {
 enum Outcome {
     Stay,
     Toggle(usize),
+    /// `r`: fetch the plugin lists again.
+    Refresh,
     Close,
 }
 
@@ -50,6 +54,7 @@ impl ExtensionsView {
             KeyCode::Char(' ') | KeyCode::Enter if count > 0 => {
                 return Outcome::Toggle(self.selected.min(last))
             }
+            KeyCode::Char('r') => return Outcome::Refresh,
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(last),
             KeyCode::PageUp => self.selected = self.selected.saturating_sub(PAGE),
@@ -77,7 +82,8 @@ impl ExtensionsView {
 pub struct Row {
     pub name: String,
     pub enabled: bool,
-    pub external: bool,
+    /// `built-in`, `external` or `plugin`.
+    pub kind: &'static str,
     /// Its actions' keys (`Alt+z p/P`), or `—`.
     pub shortcuts: String,
     /// Its lenses (`<latex> · ```mermaid`), or `—`.
@@ -108,14 +114,14 @@ pub fn row_lines(rows: &[Row]) -> Vec<String> {
     rows.iter()
         .map(|r| {
             let mark = if r.enabled { 'x' } else { ' ' };
-            let kind = if r.external { "external" } else { "built-in" };
+            let kind = r.kind;
             let failed = if r.failed {
                 "  (disabled after failures)"
             } else {
                 ""
             };
             let line = format!(
-                "[{mark}] {:name_width$}  {kind}  {:keys_width$}  {}{failed}",
+                "[{mark}] {:name_width$}  {kind:8}  {:keys_width$}  {}{failed}",
                 r.name, r.shortcuts, r.lenses
             );
             line.trim_end().to_owned()
@@ -173,10 +179,15 @@ impl App {
                 } else {
                     lenses.join(" · ")
                 };
+                let kind = match ext.source {
+                    Source::BuiltIn => "built-in",
+                    Source::External(_) => "external",
+                    Source::Plugin { .. } => "plugin",
+                };
                 Row {
                     name: clean(&ext.name),
                     enabled: ext.enabled,
-                    external: ext.is_external(),
+                    kind,
                     shortcuts,
                     lenses,
                     failed: self.failed_extensions.contains(&ext.name),
@@ -213,6 +224,10 @@ impl App {
         if ext.name == "latex" && !self.claude_policy.latex {
             lines.push("also off by [claude] latex = false".to_owned());
         }
+        if let Source::Plugin { profile, refused } = &ext.source {
+            let details = self.plugin_details(&ext.name, profile, refused.as_deref());
+            lines.extend(details.iter().map(|l| clean(l)));
+        }
         lines
     }
 
@@ -226,6 +241,7 @@ impl App {
             Outcome::Stay => {}
             Outcome::Close => self.modal = None,
             Outcome::Toggle(index) => self.toggle_extension(index),
+            Outcome::Refresh => self.refresh_plugins(),
         }
         self.redraw = true;
     }
@@ -238,6 +254,24 @@ impl App {
             return;
         };
         let (name, on, external) = (ext.name.clone(), !ext.enabled, ext.is_external());
+        if let Source::Plugin { refused, .. } = &ext.source {
+            if let Some(why) = refused {
+                self.notify(format!("plugin {} is refused: {why}", clean(&name)));
+                return;
+            }
+            // Kept for a list that comes later; on: the hosts get its bundle.
+            self.plugins.config.insert(name.clone(), on);
+            self.extensions.extensions[index].enabled = on;
+            if on {
+                let hosts: Vec<String> = self.plugins.hosts.iter().cloned().collect();
+                for host in hosts {
+                    self.request_bundles(&host);
+                }
+            }
+            self.emit(Effect::SaveExtension { name, on });
+            self.redraw = true;
+            return;
+        }
         self.extensions.set_enabled(&name, on);
         if external {
             self.emit(Effect::SetExtension {
@@ -253,7 +287,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::extensions::{manifest::Program, Lens, Registry, Source};
+    use crate::proto::Msg;
+    use crate::tui::app::ReplyTo;
+    use crate::tui::extensions::{manifest::Program, Lens, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
     /// An app with one session and an external extension `fake` (a tag
@@ -480,6 +516,119 @@ mod tests {
         }
         assert!(details[0].starts_with("evil"), "{details:?}");
         assert!(details[0].contains("next"), "on one line: {details:?}");
+    }
+
+    /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
+    /// and `latex` (a taken name), and `local` connected.
+    fn app_with_plugins() -> App {
+        use crate::proxy::plugins::{sample, PluginList};
+        use crate::tui::plugins::PluginsFetch;
+        let mut app = app_with_fake("");
+        app.on_plugin_host("local");
+        let list = PluginList {
+            profile: "work".into(),
+            fetched_at: 1,
+            plugins: vec![sample("kb"), sample("latex")],
+        };
+        app.on_plugins("work", PluginsFetch::Listed(list));
+        app.take_effects();
+        app
+    }
+
+    #[test]
+    fn plugins_are_listed_with_their_state_on_each_host() {
+        let mut app = app_with_plugins();
+        let lines = row_lines(&app.extension_rows());
+        assert_eq!(lines[5], "[x] kb        plugin    —          —");
+        assert_eq!(lines[6], "[ ] latex     plugin    —          —");
+        let details = |app: &App, i| app.extension_details(i);
+        assert_eq!(
+            details(&app, 5),
+            [
+                "1.4.0 · work",
+                "turning it on or off applies to new sessions",
+                "local: downloading",
+            ]
+        );
+        let ready = Msg::Bundled {
+            name: "kb".into(),
+            path: Some("/c/kb.zip".into()),
+            installed: false,
+        };
+        let sha = "a".repeat(64);
+        app.on_reply(
+            ReplyTo::Bundle {
+                host: "local".into(),
+                name: "kb".into(),
+                sha256: sha.clone(),
+            },
+            Ok(ready),
+        );
+        assert_eq!(details(&app, 5)[2], "local: ready");
+        app.on_reply(
+            ReplyTo::Bundle {
+                host: "local".into(),
+                name: "kb".into(),
+                sha256: sha,
+            },
+            Err(std::io::Error::other(
+                "bundle kb: download failed: HTTP 404",
+            )),
+        );
+        assert_eq!(details(&app, 5)[2], "local: download failed: HTTP 404");
+        assert!(
+            app.notice.is_none(),
+            "a bundle error is shown here, not as a notice"
+        );
+        assert_eq!(
+            details(&app, 6),
+            [
+                "1.4.0 · work",
+                "turning it on or off applies to new sessions",
+                "refused: name taken",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plugin_toggle_is_saved_and_kept_for_later_lists() {
+        let mut app = app_with_plugins();
+        app.on_terminal(alt('i'));
+        for _ in 0..5 {
+            app.on_terminal(press(KeyCode::Down));
+        }
+        app.on_terminal(press(KeyCode::Char(' ')));
+        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), false)]);
+        assert!(app.plugin_env("work").is_empty());
+        assert_eq!(app.plugins.config.get("kb"), Some(&false));
+        // Back on: saved, and the hosts are asked for its bundle again only
+        // when they have no answer at its hash.
+        app.on_terminal(press(KeyCode::Char(' ')));
+        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), true)]);
+        // A refused one does not toggle.
+        app.on_terminal(press(KeyCode::Down));
+        app.on_terminal(press(KeyCode::Char(' ')));
+        assert!(app.take_effects().is_empty());
+        let notice = app.notice.as_ref().unwrap().text.clone();
+        assert_eq!(notice, "plugin latex is refused: name taken");
+    }
+
+    #[test]
+    fn r_fetches_the_plugin_lists_again() {
+        let mut app = app_with_plugins();
+        app.proxy_default = Some("home".into());
+        app.on_terminal(alt('i'));
+        app.on_terminal(press(KeyCode::Char('r')));
+        let fetched: Vec<String> = app
+            .take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::FetchPlugins { profile } => Some(profile),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fetched, ["home", "work"]);
+        assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
     }
 
     #[test]

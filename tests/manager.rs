@@ -2698,7 +2698,11 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     wizard_pick_dir(&mut tui, &h.dirs[0]);
 
     tui.send_keys(ALT_I);
-    tui.wait_for("Extensions (Space toggle · Esc close)", Region::Screen, WAIT);
+    tui.wait_for(
+        "Extensions (Space toggle · r refresh · Esc close)",
+        Region::Screen,
+        WAIT,
+    );
     let shown = tui.screen_text(Region::Screen);
     for row in [
         "[x] latex     built-in  —              <latex>",
@@ -2743,7 +2747,11 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
 
     // `e` opens the screen too.
     tui.send_keys(b"e");
-    tui.wait_for("Extensions (Space toggle · Esc close)", Region::Screen, WAIT);
+    tui.wait_for(
+        "Extensions (Space toggle · r refresh · Esc close)",
+        Region::Screen,
+        WAIT,
+    );
     tui.send_keys(ALT_I);
     tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
     tui.send_keys(ALT_Q);

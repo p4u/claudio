@@ -22,6 +22,7 @@ mod latex;
 mod leader;
 mod notifications;
 mod plain;
+mod plugins;
 mod proxy_state;
 mod reader;
 mod selection;
@@ -555,6 +556,13 @@ enum HostEvent {
         gen: u64,
         result: Result<extensions::ActionResult, String>,
     },
+    /// A profile's plugin list was fetched (and the cache updated), or not.
+    Plugins {
+        profile: String,
+        fetch: plugins::PluginsFetch,
+    },
+    /// A notice from a background task.
+    Notice(String),
 }
 
 // ── Formula rendering ─────────────────────────────────────────────────────────
@@ -1193,6 +1201,8 @@ async fn event_loop(
                     app.on_snippets(gen, &dir, result);
                 }
                 Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
+                Some(HostEvent::Plugins { profile, fetch }) => app.on_plugins(&profile, fetch),
+                Some(HostEvent::Notice(text)) => app.notify(text),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
@@ -1398,6 +1408,13 @@ fn run_effect(
                 app.notify(format!("could not save state: {e}"));
             }
         }
+        Effect::FetchPlugins { profile } => {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let fetch = fetch_plugins(&profile, &tx).await;
+                let _ = tx.send(HostEvent::Plugins { profile, fetch }).await;
+            });
+        }
         Effect::FetchProxyConfig { profile_name } => {
             let tx = ev_tx.clone();
             let name = profile_name.clone();
@@ -1516,6 +1533,39 @@ fn run_effect(
             });
         }
     }
+}
+
+/// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list
+/// is saved, a 401/403 drops the profile's entry (its secrets), anything
+/// else leaves it. A failed write is a notice.
+async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugins::PluginsFetch {
+    use crate::proxy::api::ApiError;
+    use crate::proxy::plugins as cache;
+    use plugins::PluginsFetch;
+    let Some(p) = crate::proxy::resolve::find_profile(profile) else {
+        return PluginsFetch::Unreachable;
+    };
+    let (fetch, write) = match cache::fetch(profile, &p).await {
+        Ok(list) => {
+            let saved = list.clone();
+            let write = tokio::task::spawn_blocking(move || cache::save_cache(&saved));
+            (PluginsFetch::Listed(list), Some(write))
+        }
+        Err(ApiError::Http(s)) if s.as_u16() == 401 || s.as_u16() == 403 => {
+            let name = profile.to_owned();
+            let write = tokio::task::spawn_blocking(move || cache::remove_cache(&name));
+            (PluginsFetch::SignedOut, Some(write))
+        }
+        Err(_) => (PluginsFetch::Unreachable, None),
+    };
+    if let Some(write) = write {
+        if let Ok(Err(e)) = write.await {
+            let _ = tx
+                .send(HostEvent::Notice(format!("could not save plugins: {e}")))
+                .await;
+        }
+    }
+    fetch
 }
 
 /// Fetch proxy config for a named profile. Returns `None` on any error.

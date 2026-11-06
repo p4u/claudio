@@ -190,6 +190,9 @@ pub enum Effect {
         id: SessionId,
         answers: Vec<crate::proto::Answer>,
     },
+    /// Fetch `profile`'s plugin list, then save it to (or drop it from)
+    /// `plugins.json`; the outcome goes to [`App::on_plugins`].
+    FetchPlugins { profile: String },
 }
 
 /// What a request's reply is for.
@@ -228,6 +231,12 @@ pub enum ReplyTo {
     Search { gen: u64, host: String },
     /// `LastPrompt` on `host`, for the snippet save started under `gen`.
     LastPrompt { gen: u64, host: String },
+    /// `Bundle` of plugin `name` at hash `sha256` on `host`.
+    Bundle {
+        host: String,
+        name: String,
+        sha256: String,
+    },
 }
 
 impl ReplyTo {
@@ -346,6 +355,8 @@ pub struct App {
     /// The external extensions the extension host disabled after
     /// failures (until claudio restarts), by name.
     pub failed_extensions: Vec<String>,
+    /// The proxy plugins: lists, saved choices, each host's bundles.
+    pub plugins: super::plugins::Plugins,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -438,6 +449,7 @@ impl App {
             lens_hosts: HashSet::new(),
             pending_action: None,
             failed_extensions: Vec::new(),
+            plugins: Default::default(),
         }
     }
 
