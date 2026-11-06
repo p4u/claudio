@@ -1,6 +1,6 @@
 # Session plugins and browser login: design
 
-Status: audited   Class: architectural
+Status: approved (2026-11-06)   Class: architectural
 Owner decisions so far (2026-11-06):
 - Plugin content lives in a git repo, released as a zip; the proxy serves the pinned bundle reference and the secret env (proxy spec: `claude-proxy/docs/specs/2026-11-06-claudio-plugins-design.md`).
 - `claudio proxy login` uses a device-style flow (one-time code, browser sign-in at the proxy, polling).
