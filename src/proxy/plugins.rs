@@ -167,7 +167,7 @@ pub fn sha256_ok(hash: &str) -> bool {
 }
 
 /// `[A-Z_][A-Z0-9_]{0,63}`, and not one a plugin may not set.
-fn key_ok(key: &str) -> Result<(), String> {
+pub fn key_ok(key: &str) -> Result<(), String> {
     let mut bytes = key.bytes();
     let shape = key.len() <= 64
         && bytes

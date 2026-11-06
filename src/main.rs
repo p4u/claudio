@@ -19,6 +19,7 @@ mod daemon;
 mod freshness;
 mod msglog;
 mod paths;
+mod plugins;
 mod plain;
 mod print;
 mod proto;
