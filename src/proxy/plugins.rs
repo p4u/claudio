@@ -258,12 +258,7 @@ struct ReplyBundle {
     sha256: String,
 }
 
-/// The list in a `/v1/claudio/plugins` body, for profile `profile` at `now`.
-pub fn parse(body: &[u8], profile: &str, now: u64) -> Result<PluginList, String> {
-    let reply: Reply = serde_json::from_slice(body).map_err(|_| "bad plugins reply".to_owned())?;
-    Ok(list_of(reply, profile, now))
-}
-
+/// The list in a `/v1/claudio/plugins` reply, for profile `profile` at `now`.
 fn list_of(reply: Reply, profile: &str, now: u64) -> PluginList {
     let plugins = reply
         .plugins
@@ -543,7 +538,8 @@ mod tests {
             "bundle":{"url":"https://e.org/v.zip","sha256":"ab"},
             "installed_id":"vocdoni-internal@vocdoni",
             "env":{"ZED":"z","KB_TOKEN":"k"}}]}"#;
-        let list = parse(body, "work", 7).unwrap();
+        let parse = |body: &[u8]| serde_json::from_slice(body).map(|r| list_of(r, "work", 7));
+        let list = parse(body).unwrap();
         assert_eq!(list.profile, "work");
         assert_eq!(list.fetched_at, 7);
         let p = &list.plugins[0];
@@ -556,8 +552,8 @@ mod tests {
                 ("ZED".to_owned(), "z".to_owned())
             ]
         );
-        assert!(parse(b"not json", "work", 7).is_err());
-        assert!(parse(b"{}", "work", 7).unwrap().plugins.is_empty());
+        assert!(parse(b"not json").is_err());
+        assert!(parse(b"{}").unwrap().plugins.is_empty());
     }
 
     #[tokio::test]

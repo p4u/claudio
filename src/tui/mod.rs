@@ -264,10 +264,27 @@ async fn main(launch: Launch) -> ExitCode {
         }
     };
     let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
+    // The plugin lists cached for the profiles there are; fetched again
+    // once the loop runs.
+    let cached_plugins: Vec<_> = crate::proxy::plugins::load_all()
+        .into_iter()
+        .filter(|l| proxy_profiles.contains(&l.profile))
+        .collect();
     // External extensions are read once, at start.
     let external = extensions::manifest::load(&extensions::manifest::dir(), &mut key_notices);
+    // A plugin's saved choice is no unknown name: the plugins come later.
+    let builtin_choices: std::collections::BTreeMap<String, bool> = config
+        .extensions
+        .iter()
+        .filter(|(name, _)| {
+            !cached_plugins
+                .iter()
+                .any(|l| l.plugins.iter().any(|p| &p.name == *name))
+        })
+        .map(|(name, on)| (name.clone(), *on))
+        .collect();
     let registry = extensions::Registry::new(
-        &config.extensions,
+        &builtin_choices,
         config.claude.latex,
         external,
         &mut key_notices,
@@ -302,7 +319,9 @@ async fn main(launch: Launch) -> ExitCode {
         },
     });
     app.extensions = registry;
+    app.load_plugins(cached_plugins, config.extensions.clone());
     app.set_host_features("local", &local_features);
+    app.on_plugin_host("local");
     let start = match plain {
         Some(start) => Start::Plain(start),
         None => Start::Manager { saved, live },
@@ -1006,6 +1025,9 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The plugin lists: now, then every 15 minutes.
+    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugins::REFRESH_SECS));
+    plugins_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 60-second proxy stats refresh.
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
     proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1088,6 +1110,7 @@ async fn event_loop(
                     crate::remote::hosts::touch(&host);
                     app.on_ssh_hosts(crate::remote::hosts::candidates());
                     app.on_host_connected(&host, &home);
+                    app.on_plugin_host(&host);
                     // Recover this host's sessions only.
                     app.recover_host(&host, &sessions);
                     app.subscribe_host_stats(&host);
@@ -1121,6 +1144,7 @@ async fn event_loop(
                     app.set_local_claude(client_claude(&client));
                     app.set_host_features("local", &client.welcome().features);
                     conns.connected("local", client);
+                    app.on_plugin_host("local");
                     app.on_reconnected_local(&sessions, home);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
@@ -1215,6 +1239,7 @@ async fn event_loop(
                     app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
                 }
             }
+            _ = plugins_tick.tick() => app.fetch_plugin_lists(),
             _ = outdated_tick.tick() => {
                 for (host, conn) in &conns.map {
                     if let Some(client) = conn.client.as_ref().filter(|c| c.daemon_outdated()) {

@@ -22,6 +22,8 @@ pub const REFRESH_SECS: u64 = 15 * 60;
 /// How a profile's list was last fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListState {
+    /// Read from `plugins.json` at start; the first fetch is under way.
+    Cached,
     /// From the proxy, this run.
     Fresh,
     /// From the cache; the proxy did not answer (or is too old).
@@ -262,12 +264,30 @@ impl App {
 
     /// `r` on the extensions screen: fetch every known profile's list again.
     pub(super) fn refresh_plugins(&mut self) {
+        self.fetch_plugin_lists();
+        self.notify("refreshing plugins…");
+    }
+
+    /// Fetch the list of every profile in use or listed (at start, then
+    /// every [`REFRESH_SECS`]).
+    pub fn fetch_plugin_lists(&mut self) {
         let mut profiles: BTreeSet<String> = self.plugins.lists.keys().cloned().collect();
         profiles.extend(self.plugin_profiles());
         for profile in profiles {
             self.emit(Effect::FetchPlugins { profile });
         }
-        self.notify("refreshing plugins…");
+    }
+
+    /// The lists read from `plugins.json` at start, and `[extensions]`.
+    pub fn load_plugins(&mut self, cached: Vec<PluginList>, config: BTreeMap<String, bool>) {
+        self.plugins.config = config;
+        for list in cached {
+            let profile = list.profile.clone();
+            self.plugins
+                .lists
+                .insert(profile, (list, ListState::Cached));
+        }
+        self.list_plugins();
     }
 
     /// The profiles sessions use: the one new sessions get, and every open
@@ -441,6 +461,39 @@ mod tests {
         app.plugins.config.insert("kb".into(), false);
         app.list_plugins();
         assert_eq!(app.plugin_env("work"), [pair("OTHER_TOKEN", "o")]);
+    }
+
+    #[test]
+    fn cached_lists_are_listed_at_start_and_every_profile_in_use_is_fetched() {
+        let mut app = app_with(&[]);
+        app.proxy_default = Some("work".into());
+        let choices = BTreeMap::from([("kb".to_owned(), false)]);
+        app.load_plugins(
+            vec![list("home", vec![sample("kb"), sample("mine")])],
+            choices,
+        );
+        let rows: Vec<(&str, bool)> = app
+            .extensions
+            .extensions
+            .iter()
+            .filter(|e| e.is_plugin())
+            .map(|e| (e.name.as_str(), e.enabled))
+            .collect();
+        assert_eq!(rows, [("kb", false), ("mine", true)]);
+        // Read from the cache, the first fetch under way: no "unreachable".
+        app.now = 1000;
+        assert_eq!(app.plugin_details("mine", "home", None).len(), 1);
+        app.take_effects();
+        app.fetch_plugin_lists();
+        let fetched: Vec<String> = app
+            .take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::FetchPlugins { profile } => Some(profile),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fetched, ["home", "work"]);
     }
 
     #[test]
