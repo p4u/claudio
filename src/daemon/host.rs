@@ -99,10 +99,26 @@ fn run_version(claude: &Path, path: Option<&OsStr>) -> Option<String> {
 /// in it.
 pub const ALLOW_SKIP_PERMISSIONS: &str = "--allow-dangerously-skip-permissions";
 
-/// Whether `<claude> --help` mentions `flag`. Blocking (≤ 3 s); `false` on
-/// failure or timeout, so an old or broken claude never gets the flag.
-pub fn claude_supports(claude: &Path, flag: &str, path: Option<&OsStr>) -> bool {
-    run_capture(claude, "--help", path).is_some_and(|help| help.contains(flag))
+/// Loads a plugin for one session, uninstalled (a directory or a zip).
+pub const PLUGIN_DIR: &str = "--plugin-dir";
+
+/// The optional flags this claude knows, from one `--help` run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaudeFlags {
+    /// [`ALLOW_SKIP_PERMISSIONS`].
+    pub skip_permissions: bool,
+    /// [`PLUGIN_DIR`].
+    pub plugin_dir: bool,
+}
+
+/// [`ClaudeFlags`] of `<claude> --help`. Blocking (≤ 3 s); all `false` on
+/// failure or timeout, so an old or broken claude never gets a flag.
+pub fn claude_flags(claude: &Path, path: Option<&OsStr>) -> ClaudeFlags {
+    let help = run_capture(claude, "--help", path).unwrap_or_default();
+    ClaudeFlags {
+        skip_permissions: help.contains(ALLOW_SKIP_PERMISSIONS),
+        plugin_dir: help.contains(PLUGIN_DIR),
+    }
 }
 
 /// Stdout of `<claude> <arg>` when it exits 0 within [`VERSION_TIMEOUT`].
@@ -229,7 +245,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_supports_reads_help() {
+    fn claude_flags_read_long_help() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("claudio-help-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -241,13 +257,38 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(claude_supports(&bin, ALLOW_SKIP_PERMISSIONS, None));
-        assert!(!claude_supports(&bin, "--no-such-flag", None));
-        assert!(!claude_supports(
-            Path::new("/nonexistent/claude"),
-            ALLOW_SKIP_PERMISSIONS,
-            None
-        ));
+        let flags = claude_flags(&bin, None);
+        assert!(flags.skip_permissions);
+        assert!(!flags.plugin_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_flags_come_from_one_help_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claudio-flags-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let help = |text: &str| {
+            let script = format!("#!/bin/sh\n[ \"$1\" = --help ] && printf '%s\\n' '{text}'\n");
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            claude_flags(&bin, None)
+        };
+        let both = help("  --plugin-dir <paths...>  --allow-dangerously-skip-permissions");
+        assert_eq!(
+            both,
+            ClaudeFlags {
+                skip_permissions: true,
+                plugin_dir: true
+            }
+        );
+        let plugins = help("  --plugin-dir <paths...>");
+        assert!(plugins.plugin_dir && !plugins.skip_permissions);
+        assert_eq!(help(""), ClaudeFlags::default());
+        let missing = claude_flags(Path::new("/nonexistent/claude"), None);
+        assert_eq!(missing, ClaudeFlags::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

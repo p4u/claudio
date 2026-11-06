@@ -2256,3 +2256,23 @@ async fn the_cache_keeps_at_most_32_bundles() {
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// A claude that does not know `--plugin-dir` (the fake's `--help` is
+/// empty) still starts: the daemon leaves the pairs out of its argv, and
+/// the journal keeps them for a claude that does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_dirs_are_dropped_for_an_old_claude_but_journaled() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let mut spec = d.spec(id);
+    spec.args = vec!["--plugin-dir".into(), "/c/plugins/kb.zip".into()];
+    c.spawn(spec).await;
+    c.attach_until(id, BANNER).await;
+    assert!(!d.daemon.plugin_dir());
+    let entry = &d.journal()["sessions"][0];
+    assert_eq!(
+        entry["args"],
+        serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip"])
+    );
+}

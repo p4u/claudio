@@ -102,7 +102,7 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
         warm.host().await;
     });
     let warm = Arc::clone(&daemon);
-    tokio::task::spawn_blocking(move || warm.skip_permissions());
+    tokio::task::spawn_blocking(move || warm.claude_flags());
     Ok(Some(Listening {
         daemon,
         listener,

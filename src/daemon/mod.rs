@@ -341,10 +341,10 @@ pub(crate) struct Daemon {
     host: tokio::sync::Mutex<Option<HostInfo>>,
     /// Held while `claude update` runs: one at a time.
     updating: tokio::sync::Mutex<()>,
-    /// Whether this claude knows `--allow-dangerously-skip-permissions`
-    /// (it runs `claude --help`). Probed on first use, and again after a
-    /// claude update or install, like `host`.
-    skip_permissions_supported: Mutex<Option<bool>>,
+    /// Which optional flags this claude knows (`--allow-dangerously-skip-
+    /// permissions`, `--plugin-dir`; it runs `claude --help`). Probed on
+    /// first use, and again after a claude update or install, like `host`.
+    claude_flags: Mutex<Option<host::ClaudeFlags>>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
@@ -390,7 +390,7 @@ impl Daemon {
             events,
             host: tokio::sync::Mutex::new(None),
             updating: tokio::sync::Mutex::new(()),
-            skip_permissions_supported: Mutex::new(None),
+            claude_flags: Mutex::new(None),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
             search: server::SearchSlot::new(),
@@ -418,10 +418,7 @@ impl Daemon {
     /// The flag check is redone on the next spawn: a claude that was missing
     /// or old before may know the flag now.
     async fn refresh_host(&self) -> HostInfo {
-        *self
-            .skip_permissions_supported
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self.claude_flags.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let host = self.probe_host().await;
         *self.host.lock().await = Some(host.clone());
         host
@@ -447,20 +444,22 @@ impl Daemon {
     /// enabled in the config and supported by this claude. Blocking the first
     /// time (it runs `claude --help`); call it off the async runtime.
     pub(crate) fn skip_permissions(&self) -> bool {
-        if !self.config.skip_permissions {
-            return false;
-        }
+        self.config.skip_permissions && self.claude_flags().skip_permissions
+    }
+
+    /// Whether this claude takes `--plugin-dir`. Blocking the first time,
+    /// like [`Daemon::skip_permissions`].
+    pub(crate) fn plugin_dir(&self) -> bool {
+        self.claude_flags().plugin_dir
+    }
+
+    /// The optional flags this claude knows: probed once (`claude --help`),
+    /// until the next claude update. Blocking the first time.
+    pub(crate) fn claude_flags(&self) -> host::ClaudeFlags {
         // Held while probing, so concurrent spawns wait for one probe.
-        let mut supported = self
-            .skip_permissions_supported
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *supported.get_or_insert_with(|| {
-            host::claude_supports(
-                &self.config.claude_bin(),
-                host::ALLOW_SKIP_PERMISSIONS,
-                self.config.path.as_deref(),
-            )
+        let mut flags = self.claude_flags.lock().unwrap_or_else(|e| e.into_inner());
+        *flags.get_or_insert_with(|| {
+            host::claude_flags(&self.config.claude_bin(), self.config.path.as_deref())
         })
     }
 

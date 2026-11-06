@@ -182,6 +182,7 @@ pub fn spawn(
                 &cwd,
                 &token,
                 daemon.skip_permissions(),
+                daemon.plugin_dir(),
                 context.as_deref(),
             );
             let program = PathBuf::from(cmd.get_argv()[0].clone());
@@ -316,12 +317,17 @@ pub(super) fn clear_contexts(socket: &Path) {
 /// The skip-permissions flag is added here, on every launch path (new spawn,
 /// `--resume`, resume-retry), rather than in `spec.args`, so the journal never
 /// stores it. It is left out when the args already choose a permissions flag.
+///
+/// Without `plugin_dir` (this claude does not know `--plugin-dir`) every
+/// `--plugin-dir <path>` pair of the args is dropped, so an old claude still
+/// starts; the journal keeps them for a newer one.
 fn command(
     cfg: &super::Config,
     spec: &SpawnSpec,
     cwd: &Path,
     token: &str,
     skip_permissions: bool,
+    plugin_dir: bool,
     context: Option<&Path>,
 ) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, context);
@@ -336,7 +342,15 @@ fn command(
     {
         cmd.arg(host::ALLOW_SKIP_PERMISSIONS);
     }
-    for a in &spec.args {
+    let mut args = spec.args.iter();
+    while let Some(a) = args.next() {
+        if !plugin_dir && a == host::PLUGIN_DIR {
+            args.next();
+            continue;
+        }
+        if !plugin_dir && a.starts_with("--plugin-dir=") {
+            continue;
+        }
         cmd.arg(a);
     }
     if let Some(name) = &spec.name {
@@ -1276,7 +1290,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
         };
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, None);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, true, None);
         let argv = argv_of(&cmd);
         assert_eq!(argv[0], "/bin/claude");
         assert_eq!(argv[1], "--settings");
@@ -1289,7 +1303,7 @@ mod tests {
 
         // With skip-permissions on, the flag follows --settings, ahead of
         // the spec args (which are what the journal stores).
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, None);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, true, None);
         assert_eq!(
             &argv_of(&cmd)[3..],
             [ALLOW, "--resume", "abc", "-n", "work"]
@@ -1298,7 +1312,15 @@ mod tests {
 
         // A context file adds its hook to SessionStart: the path, not the text.
         let start = |context: Option<&Path>| {
-            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", false, context));
+            let argv = argv_of(&command(
+                &cfg,
+                &spec,
+                Path::new("/"),
+                "t",
+                false,
+                true,
+                context,
+            ));
             let settings: Value = serde_json::from_str(&argv[2]).unwrap();
             settings["hooks"]["SessionStart"][0]["hooks"].clone()
         };
@@ -1461,8 +1483,54 @@ mod tests {
                 ephemeral: false,
                 extensions: None,
             };
-            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true, None));
+            let argv = argv_of(&command(&cfg, &spec, Path::new("/"), "t", true, true, None));
             assert_eq!(&argv[3..], [given]);
         }
+    }
+
+    #[test]
+    fn plugin_dirs_are_dropped_for_a_claude_without_the_flag() {
+        let cfg = super::super::Config {
+            socket: "/run/d.sock".into(),
+            lock: "/run/d.lock".into(),
+            journal: "/j.json".into(),
+            claude: "/bin/claude".into(),
+            claudio: "/bin/claudio".into(),
+            skip_permissions: false,
+            latex: false,
+            build: None,
+            path: None,
+        };
+        let spec = SpawnSpec {
+            id: uuid::Uuid::nil(),
+            cwd: "/".into(),
+            name: None,
+            args: vec![
+                "--plugin-dir".into(),
+                "/c/kb.zip".into(),
+                "--resume".into(),
+                "abc".into(),
+                "--plugin-dir=/c/x.zip".into(),
+                "--plugin-dir".into(),
+            ],
+            env: vec![],
+            rows: 24,
+            cols: 80,
+            ephemeral: false,
+            extensions: None,
+        };
+        let argv = |plugin_dir| {
+            argv_of(&command(
+                &cfg,
+                &spec,
+                Path::new("/"),
+                "t",
+                false,
+                plugin_dir,
+                None,
+            ))
+        };
+        assert_eq!(&argv(false)[3..], ["--resume", "abc"]);
+        assert_eq!(&argv(true)[3..], &spec.args[..]);
     }
 }
