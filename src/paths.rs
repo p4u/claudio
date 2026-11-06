@@ -82,6 +82,21 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// The proxy plugins of each profile, with their env (secrets: 0600).
+pub fn plugins_cache() -> PathBuf {
+    config_dir().join("plugins.json")
+}
+
+/// `$XDG_CACHE_HOME/claudio`, else `~/.cache/claudio`: downloads this host
+/// keeps (the plugin bundles).
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".cache"))
+        .join("claudio")
+}
+
 /// Create `dir` (mode 0700) if needed and verify it is a real directory owned
 /// by us and private — the runtime dir may live in a shared `/tmp`.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
