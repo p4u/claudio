@@ -219,6 +219,22 @@ pub enum Msg {
         #[serde(default)]
         installed_id: String,
     },
+    /// Apply proxy plugin `name`'s manifest on this host: the TOML at `url`
+    /// (https) whose SHA-256 is `sha256`, cached once downloaded. `secrets`
+    /// are the names (never the values) of the plugin's proxy env, which
+    /// the sessions get; `disabled` the item ids the member turned off.
+    /// Answered by `Applied` as soon as the manifest is parsed (plugin
+    /// installs run after the reply), or `Error "manifest <name>: …"`. An
+    /// older daemon answers `Error "unsupported op…"`.
+    Manifest {
+        name: String,
+        url: String,
+        sha256: String,
+        #[serde(default)]
+        secrets: Vec<String>,
+        #[serde(default)]
+        disabled: Vec<String>,
+    },
 
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
@@ -293,6 +309,8 @@ pub enum Msg {
         #[serde(default)]
         installed: bool,
     },
+    /// Reply to `Manifest`.
+    Applied(Applied),
     Ok,
     Error {
         message: String,
@@ -427,14 +445,56 @@ pub struct RespawnSpec {
     pub extensions: Option<SessionExtensions>,
 }
 
-/// The lenses of a claude session, in the client's registry order. The
-/// daemon checks the caps ([`SessionExtensions::validate`]), writes the
-/// instructions to the session's context file and extracts the tag lenses'
-/// tags from the transcript.
+/// What a host made of a proxy plugin's manifest ([`Msg::Manifest`]): what
+/// every new session there gets from it, and each item's outcome by item id
+/// (`plugin:<name>@<marketplace>`, `mcp:<name>`, `agent:<name>`…). A
+/// disabled id is in no list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Applied {
+    pub name: String,
+    pub version: String,
+    /// `{"mcpServers": {...}}` for `--mcp-config` (≤ 64 KiB): `${NAME}`
+    /// placeholders, never a secret.
+    #[serde(default)]
+    pub mcp_config: Option<String>,
+    /// The `--agents` JSON (≤ 32 KiB).
+    #[serde(default)]
+    pub agents: Option<String>,
+    /// For the session context: sanitized, ≤ 8 KiB, empty when none.
+    #[serde(default)]
+    pub instructions: String,
+    /// The manifest's `[env]`.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Plugin ids this daemon installed (under this manifest's hash).
+    #[serde(default)]
+    pub installed: Vec<String>,
+    /// Plugin ids Claude Code had installed already.
+    #[serde(default)]
+    pub present: Vec<String>,
+    /// `(id, reason)`: `installing`, `yours`, `missing secret X`, a
+    /// failure…
+    #[serde(default)]
+    pub skipped: Vec<(String, String)>,
+    /// `--mcp-config` and/or `--agents` when this host's claude lacks them.
+    #[serde(default)]
+    pub dropped: Vec<String>,
+}
+
+/// The lenses of a claude session, in the client's registry order, and
+/// the proxy plugins' instructions. The daemon checks the caps
+/// ([`SessionExtensions::validate`]), writes the instructions to the
+/// session's context file and extracts the tag lenses' tags from the
+/// transcript.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionExtensions {
     #[serde(default)]
     pub lenses: Vec<LensSpec>,
+    /// The enabled proxy plugins' instructions, joined by a blank line:
+    /// at most [`MAX_PLUGIN_INSTRUCTIONS`] bytes after `sanitize`, counted
+    /// apart from the lenses. An old daemon ignores it.
+    #[serde(default)]
+    pub instructions: String,
 }
 
 /// One lens: its name (the tag, or the fence's info word), its kind, and
@@ -465,11 +525,16 @@ pub const MAX_LENSES: usize = 16;
 pub const MAX_INSTRUCTION: usize = 2048;
 /// All instructions together, in bytes after `sanitize`.
 pub const MAX_INSTRUCTIONS: usize = 8192;
+/// The plugins' instructions, in bytes after `sanitize`. With the lenses'
+/// and the blank lines `context()` puts between the parts, they always fit
+/// the context hook's 16 KiB read.
+pub const MAX_PLUGIN_INSTRUCTIONS: usize = 8192 - 2 * (MAX_LENSES + 1);
 
 impl SessionExtensions {
     /// Why this value breaks the caps: more than [`MAX_LENSES`] lenses, a
     /// name that is not `^[a-z][a-z0-9-]{0,23}$` or is repeated, or
-    /// instructions over [`MAX_INSTRUCTION`] / [`MAX_INSTRUCTIONS`].
+    /// instructions over [`MAX_INSTRUCTION`] / [`MAX_INSTRUCTIONS`], or
+    /// plugin instructions over [`MAX_PLUGIN_INSTRUCTIONS`].
     pub fn validate(&self) -> Result<(), String> {
         if self.lenses.len() > MAX_LENSES {
             return Err(format!("more than {MAX_LENSES} lenses"));
@@ -491,6 +556,11 @@ impl SessionExtensions {
         if total > MAX_INSTRUCTIONS {
             return Err(format!("instructions over {MAX_INSTRUCTIONS} bytes"));
         }
+        if crate::claude::latex::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
+            return Err(format!(
+                "plugin instructions over {MAX_PLUGIN_INSTRUCTIONS} bytes"
+            ));
+        }
         Ok(())
     }
 
@@ -504,12 +574,14 @@ impl SessionExtensions {
     }
 
     /// What claude is told: the non-empty instructions, sanitized, joined
-    /// by a blank line.
+    /// by a blank line; the plugins' after the lenses'.
     pub fn context(&self) -> String {
         let parts: Vec<String> = self
             .lenses
             .iter()
-            .map(|l| crate::claude::latex::sanitize(&l.instruction).trim().to_owned())
+            .map(|l| l.instruction.as_str())
+            .chain([self.instructions.as_str()])
+            .map(|i| crate::claude::latex::sanitize(i).trim().to_owned())
             .filter(|i| !i.is_empty())
             .collect();
         parts.join("\n\n")
@@ -1252,6 +1324,58 @@ mod tests {
     }
 
     #[test]
+    fn manifest_and_applied_roundtrip_and_are_unknown_to_older_peers() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum Old {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let request = Msg::Manifest {
+            name: "team".into(),
+            url: "https://e.org/team.toml".into(),
+            sha256: "a".repeat(64),
+            secrets: vec!["KB_TOKEN".into()],
+            disabled: vec!["mcp:jina".into()],
+        };
+        let reply = Msg::Applied(Applied {
+            name: "team".into(),
+            version: "1.0.0".into(),
+            mcp_config: Some(r#"{"mcpServers":{}}"#.into()),
+            agents: None,
+            instructions: "Rules.".into(),
+            env: vec![("REGION".into(), "eu".into())],
+            installed: vec!["plugin:a@m".into()],
+            present: vec!["plugin:b@m".into()],
+            skipped: vec![("plugin:c@m".into(), "installing".into())],
+            dropped: vec!["--agents".into()],
+        });
+        for msg in [request, reply] {
+            let json = serde_json::to_string(&Envelope::request(4, msg.clone())).unwrap();
+            assert_eq!(serde_json::from_str::<Old>(&json).unwrap(), Old::Unknown);
+            assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, msg);
+        }
+        let json = serde_json::to_value(Msg::Applied(Applied::default())).unwrap();
+        assert_eq!(json["op"], "applied");
+        // Every list may be left out; so may a request's secrets and ids.
+        let minimal = r#"{"op":"applied","name":"team","version":"1"}"#;
+        assert_eq!(
+            serde_json::from_str::<Msg>(minimal).unwrap(),
+            Msg::Applied(Applied {
+                name: "team".into(),
+                version: "1".into(),
+                ..Applied::default()
+            })
+        );
+        let minimal = r#"{"op":"manifest","name":"t","url":"https://e.org","sha256":"x"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Msg>(minimal).unwrap(),
+            Msg::Manifest { secrets, disabled, .. } if secrets.is_empty() && disabled.is_empty()
+        ));
+    }
+
+    #[test]
     fn merge_env_keeps_plugin_keys_the_proxy_does_not_set() {
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
         let spawn = Msg::Spawn(SpawnSpec {
@@ -1790,7 +1914,13 @@ mod tests {
 
     #[test]
     fn extension_caps() {
-        let ok = |lenses: Vec<LensSpec>| SessionExtensions { lenses }.validate();
+        let ok = |lenses: Vec<LensSpec>| {
+            SessionExtensions {
+                lenses,
+                ..Default::default()
+            }
+            .validate()
+        };
         assert_eq!(ok(vec![lens("latex", "x"), lens("a-1", "")]), Ok(()));
         assert!(ok((0..17).map(|i| lens(&format!("l{i}"), "")).collect()).is_err());
         assert!(ok(vec![lens("keys", ""), lens("keys", "")]).is_err());
@@ -1811,11 +1941,54 @@ mod tests {
     }
 
     #[test]
+    fn plugin_instructions_have_their_own_cap_and_are_optional() {
+        let with = |instructions: &str| SessionExtensions {
+            lenses: (0..4)
+                .map(|i| lens(&format!("l{i}"), &"i".repeat(2048)))
+                .collect(),
+            instructions: instructions.into(),
+        };
+        // Full lenses and full plugin instructions: both fit.
+        let at_cap = format!("{}\u{7}", "p".repeat(MAX_PLUGIN_INSTRUCTIONS));
+        assert_eq!(with(&at_cap).validate(), Ok(()));
+        assert_eq!(
+            with(&"p".repeat(MAX_PLUGIN_INSTRUCTIONS + 1)).validate(),
+            Err(format!(
+                "plugin instructions over {MAX_PLUGIN_INSTRUCTIONS} bytes"
+            ))
+        );
+        // An old client's (or journal's) extensions have none.
+        let old: SessionExtensions = serde_json::from_str(r#"{"lenses":[]}"#).unwrap();
+        assert_eq!(old.instructions, "");
+        let only = SessionExtensions {
+            instructions: "Rules.".into(),
+            ..Default::default()
+        };
+        assert_eq!(only.context(), "Rules.");
+    }
+
+    #[test]
+    fn context_at_every_cap_fits_the_hook_read() {
+        // 16 lenses, 8192 bytes of lens instructions, full plugin instructions.
+        let ext = SessionExtensions {
+            lenses: (0..MAX_LENSES)
+                .map(|i| lens(&format!("l{i}"), &"i".repeat(MAX_INSTRUCTIONS / MAX_LENSES)))
+                .collect(),
+            instructions: "p".repeat(MAX_PLUGIN_INSTRUCTIONS),
+        };
+        assert_eq!(ext.validate(), Ok(()));
+        let context = ext.context();
+        assert!(context.ends_with('p'));
+        assert!(context.len() as u64 <= crate::claude::hooks::MAX_CONTEXT);
+    }
+
+    #[test]
     fn extension_context_and_debug_never_show_instructions() {
         let ext = SessionExtensions {
             lenses: vec![lens("latex", " Math.\u{1b} "), lens("abc", ""), lens("keys", "Keys.")],
+            instructions: "\nTeam rules.\u{202e}\n".into(),
         };
-        assert_eq!(ext.context(), "Math.\n\nKeys.");
+        assert_eq!(ext.context(), "Math.\n\nKeys.\n\nTeam rules.");
         let spec = SpawnSpec {
             id: Uuid::nil(),
             cwd: "/".into(),
@@ -1829,6 +2002,7 @@ mod tests {
         };
         let shown = format!("{spec:?}");
         assert!(shown.contains("\"latex\"") && !shown.contains("Math"), "{shown}");
+        assert!(!shown.contains("Team rules"), "{shown}");
         let respawn = RespawnSpec {
             id: Uuid::nil(),
             fresh: false,

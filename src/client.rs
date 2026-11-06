@@ -70,9 +70,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 /// `UpdateClaude` runs up to 300 s on the daemon, plus the re-probe.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(330);
-/// A `Bundle` download may take the daemon's 120 s, after waiting for one
-/// already running.
-const BUNDLE_TIMEOUT: Duration = Duration::from_secs(250);
+/// A `Bundle` or `Manifest` download may take the daemon's 120 s, after
+/// waiting for one already running.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(250);
 
 /// Something the daemon sent without being asked.
 #[derive(Debug, PartialEq)]
@@ -402,7 +402,7 @@ impl Client {
         let timeout = match msg {
             Msg::Spawn(_) | Msg::SpawnShell(_) => SPAWN_TIMEOUT,
             Msg::UpdateClaude { .. } => UPDATE_TIMEOUT,
-            Msg::Bundle { .. } => BUNDLE_TIMEOUT,
+            Msg::Bundle { .. } | Msg::Manifest { .. } => DOWNLOAD_TIMEOUT,
             _ => REQUEST_TIMEOUT,
         };
         let queued = self.enqueue(msg);

@@ -1896,6 +1896,7 @@ fn lens(name: &str, instruction: &str) -> proto::LensSpec {
 fn extensions(lenses: &[(&str, &str)]) -> proto::SessionExtensions {
     proto::SessionExtensions {
         lenses: lenses.iter().map(|(n, i)| lens(n, i)).collect(),
+        ..Default::default()
     }
 }
 

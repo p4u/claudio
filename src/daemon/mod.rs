@@ -1040,6 +1040,7 @@ fn effective_extensions(
             kind: LensKind::Tag,
             instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
         }],
+        ..Default::default()
     });
     ext.lenses
         .retain(|l| l.kind != LensKind::Unknown && (latex || l.name != "latex"));

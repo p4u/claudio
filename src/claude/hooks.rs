@@ -43,7 +43,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PAYLOAD: usize = 1 << 20;
 
 /// The most of a context file `__context file` reads.
-const MAX_CONTEXT: u64 = 16 * 1024;
+pub(crate) const MAX_CONTEXT: u64 = 16 * 1024;
 
 /// What `claudio __context latex` adds to every conversation's context when
 /// `[claude] latex` is on: the manager renders `<latex>` tags in the pane.

@@ -487,6 +487,7 @@ mod tests {
                 kind: LensKind::Tag,
                 instruction: "Write <keys>.".into(),
             }],
+            ..Default::default()
         };
         let mut s = spec(id);
         s.extensions = Some(ext.clone());

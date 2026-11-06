@@ -308,7 +308,11 @@ impl Registry {
                 instruction: lens.instruction.clone(),
             });
         }
-        (SessionExtensions { lenses }, dropped)
+        let ext = SessionExtensions {
+            lenses,
+            ..Default::default()
+        };
+        (ext, dropped)
     }
 
     /// The leader's actions: each enabled extension's, in order.
