@@ -2757,3 +2757,321 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
+
+// ── Proxy plugins ────────────────────────────────────────────────────────────
+
+/// The fake plugin and the secret its proxy env carries.
+const PLUGIN: &str = "vocdoni-test";
+const PLUGIN_KEY: &str = "VOCDONI_TEST_TOKEN";
+
+/// The manifest the fake proxy serves: plugins `tool` (to install) and
+/// `have` (installed already), servers `kb` (needs the secret) and
+/// `extra`, agents `reviewer` and `mine` (the member's own), instructions.
+const PLUGIN_MANIFEST: &str = r#"format = 1
+name = "vocdoni-test"
+version = "1.0.0"
+description = "Test setup"
+instructions = "Manifest instructions for the test."
+
+[[marketplace]]
+name = "market"
+source = "github:acme/market"
+
+[[plugin]]
+name = "tool"
+marketplace = "market"
+
+[[plugin]]
+name = "have"
+marketplace = "market"
+
+[[mcp]]
+name = "kb"
+type = "http"
+url = "https://kb.example.org/mcp"
+headers = { Authorization = "Bearer ${VOCDONI_TEST_TOKEN}" }
+secrets = ["VOCDONI_TEST_TOKEN"]
+
+[[mcp]]
+name = "extra"
+type = "sse"
+url = "https://extra.example.org/sse"
+
+[[agent]]
+name = "reviewer"
+description = "Reviews"
+prompt = "Review the change."
+
+[[agent]]
+name = "mine"
+description = "Mine"
+prompt = "Mine."
+"#;
+
+/// A fake claude-proxy on loopback: `GET /v1/claudio/plugins` lists
+/// [`PLUGIN`] with its manifest at `GET /vocdoni-test.toml` (plain http on
+/// loopback, which a debug build takes with `CLAUDIO_TEST_LOOPBACK_HTTP`);
+/// every other path is a 404. Returns its `host:port`.
+fn fake_plugin_proxy() -> String {
+    use sha2::Digest;
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake proxy");
+    let addr = listener.local_addr().unwrap().to_string();
+    let sha = format!("{:x}", sha2::Sha256::digest(PLUGIN_MANIFEST.as_bytes()));
+    let list = serde_json::json!({"plugins": [{
+        "name": PLUGIN, "version": "1.0.0",
+        "bundle": {"url": format!("http://{addr}/{PLUGIN}.toml"), "sha256": sha},
+        "env": {PLUGIN_KEY: "s3cret"}}]})
+    .to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&head);
+            let (status, reply) = if line.starts_with("GET /v1/claudio/plugins ") {
+                ("200 OK", list.as_str())
+            } else if line.starts_with(&format!("GET /{PLUGIN}.toml ")) {
+                ("200 OK", PLUGIN_MANIFEST)
+            } else {
+                ("404 Not Found", "{}")
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    addr
+}
+
+/// A fake claude whose `--help` lists `--agents` and `--mcp-config`. Its
+/// `plugin …` runs are logged to `<dumps>/plugin.log` and act on
+/// `$CLAUDE_CONFIG_DIR` as Claude Code would (the marketplace is added, the
+/// plugin installed beside `have@market`). Every other launch is recorded
+/// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`) before the
+/// usual banner and `cat`.
+fn write_plugin_claude(h: &ManagerHarness, dumps: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dumps.join("launches")).unwrap();
+    let dumps = dumps.display();
+    let script = format!(
+        r#"#!/bin/sh
+[ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
+if [ "$1" = "--help" ]; then
+  printf '  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n'
+  exit 0
+fi
+if [ "$1" = "plugin" ]; then
+  echo "$*" >> "{dumps}/plugin.log"
+  p="$CLAUDE_CONFIG_DIR/plugins"
+  mkdir -p "$p"
+  [ "$2" = "marketplace" ] && printf '{{"market":{{}}}}\n' > "$p/known_marketplaces.json"
+  [ "$2" = "install" ] && printf '{{"version":2,"plugins":{{"have@market":[{{"scope":"user"}}],"%s":[{{"scope":"user"}}]}}}}\n' "$3" > "$p/installed_plugins.json"
+  echo '{{"ok":true}}'
+  exit 0
+fi
+d="{dumps}/launches/$(ls "{dumps}/launches" | wc -l | tr -d ' ')"
+mkdir -p "$d"
+printf '%s\n' "$@" > "$d/argv"
+env > "$d/env"
+echo "FAKE_CLAUDE_BANNER pid=$$"
+exec cat
+"#
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Launch `n`'s recorded argv and env, once both are written.
+fn launch_dump(dumps: &std::path::Path, n: usize) -> (Vec<String>, String) {
+    let dir = dumps.join("launches").join(n.to_string());
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let argv = fs::read_to_string(dir.join("argv"));
+        let env = fs::read_to_string(dir.join("env"));
+        if let (Ok(argv), Ok(env)) = (argv, env) {
+            if !env.is_empty() {
+                return (argv.lines().map(str::to_owned).collect(), env);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "launch {n} not recorded in {dir:?}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The value after `flag` in `argv`.
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = argv.iter().position(|a| a == flag)?;
+    argv.get(at + 1).map(String::as_str)
+}
+
+/// The text of every session context file the daemon wrote.
+fn context_files(h: &ManagerHarness) -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.parent().is_some_and(|p| p.ends_with("context")) {
+                out.push_str(&fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&h.runtime_dir, &mut out);
+    out
+}
+
+/// A proxy plugin's manifest: the setup screen comes first and nothing is
+/// applied before it closes; after Enter a new session gets the agents and
+/// the MCP servers it kept (placeholders on argv, the secret in the env),
+/// the instructions in its context, and the plugin is installed through
+/// the CLI; the extensions screen shows each item's outcome; turned off,
+/// the next session has none of it.
+#[test]
+fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude(&h, &dumps);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(claude_config.join("agents")).unwrap();
+    fs::create_dir_all(claude_config.join("plugins")).unwrap();
+    fs::write(claude_config.join("agents/mine.md"), "my own agent").unwrap();
+    fs::write(
+        claude_config.join("plugins/installed_plugins.json"),
+        r#"{"version":2,"plugins":{"have@market":[{"scope":"user"}]}}"#,
+    )
+    .unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+        cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+        cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+
+    // The wizard is open at start; the setup screen waits its turn.
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    tui.wait_for(
+        "[x] kb (http https://kb.example.org/mcp)",
+        Region::Screen,
+        WAIT,
+    );
+    tui.wait_for("[x] reviewer: Reviews", Region::Screen, WAIT);
+    assert!(
+        !fs::read_to_string(dumps.join("plugin.log")).is_ok_and(|l| !l.is_empty()),
+        "nothing applied before the setup closes"
+    );
+    // Past the arming; `extra` (the fourth item) off, then Enter.
+    thread::sleep(Duration::from_millis(1200));
+    for _ in 0..3 {
+        tui.send_keys(DOWN_ARROW);
+    }
+    tui.send_keys(b" ");
+    tui.wait_for(
+        "[ ] extra (sse https://extra.example.org/sse)",
+        Region::Screen,
+        WAIT,
+    );
+    tui.send_keys(ENTER);
+    tui.wait_for(
+        &format!("plugin {PLUGIN} set up (saved)"),
+        Region::StatusBar,
+        WAIT,
+    );
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(
+        config.contains(&format!(
+            "[plugins.{PLUGIN}]\ndisabled = [\"mcp:extra\"]\nreviewed = \"1.0.0\""
+        )),
+        "{config}"
+    );
+
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    let (argv, env) = launch_dump(&dumps, 0);
+    let agents = flag_value(&argv, "--agents").expect("--agents");
+    assert!(
+        agents.contains("\"reviewer\"") && !agents.contains("\"mine\""),
+        "{agents}"
+    );
+    let mcp = flag_value(&argv, "--mcp-config").expect("--mcp-config");
+    assert!(mcp.contains("Bearer ${VOCDONI_TEST_TOKEN}"), "{mcp}");
+    assert!(!mcp.contains("extra"), "a server turned off: {mcp}");
+    assert!(
+        !argv.iter().any(|a| a.contains("s3cret")),
+        "no secret in argv"
+    );
+    assert!(env.contains(&format!("{PLUGIN_KEY}=s3cret")), "{env}");
+    let context = context_files(&h);
+    assert!(
+        context.contains("Manifest instructions for the test."),
+        "{context}"
+    );
+
+    // The plugin is installed in the background, never with -y.
+    let deadline = Instant::now() + WAIT;
+    let log = loop {
+        let log = fs::read_to_string(dumps.join("plugin.log")).unwrap_or_default();
+        if log.contains("plugin install tool@market --scope user --json") {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "no install: {log}");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        log.contains("plugin marketplace add acme/market --scope user --json"),
+        "{log}"
+    );
+    assert!(
+        !log.contains("have@market") && !log.contains(" -y"),
+        "{log}"
+    );
+    let installed = claude_config.join("plugins/installed_plugins.json");
+    while !fs::read_to_string(&installed).is_ok_and(|s| s.contains("tool@market")) {
+        assert!(Instant::now() < deadline, "the install never finished");
+        thread::sleep(Duration::from_millis(100));
+    }
+    // The daemon notes the outcome once the CLI exits.
+    thread::sleep(Duration::from_millis(500));
+
+    // The extensions screen: `r` asks again, and each outcome shows.
+    tui.send_keys(ALT_I);
+    tui.wait_for(&format!("[x] {PLUGIN}"), Region::Screen, WAIT);
+    for _ in 0..4 {
+        tui.send_keys(DOWN_ARROW);
+    }
+    tui.wait_for("1 items disabled (Enter to change)", Region::Screen, WAIT);
+    tui.send_keys(b"r");
+    tui.wait_for(
+        "local: ready · 1 installed, 1 present, 0 installing, 1 skipped",
+        Region::Screen,
+        WAIT,
+    );
+    tui.wait_for("agent:mine: yours", Region::Screen, WAIT);
+    // Turned off: the next session has none of it.
+    tui.send_keys(b" ");
+    tui.wait_for(&format!("[ ] {PLUGIN}"), Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[1]);
+    let (argv, env) = launch_dump(&dumps, 1);
+    assert!(
+        !argv.iter().any(|a| a == "--agents" || a == "--mcp-config"),
+        "{argv:?}"
+    );
+    assert!(!env.contains(PLUGIN_KEY), "{env}");
+    tui.quit(WAIT);
+}
