@@ -219,6 +219,11 @@ pub fn remote_bundle_cmd(host: &str, cwd: &str, name: &str, sha256: &str) -> Exi
         Err(code) => return code,
     };
     rt.block_on(async move {
+        // As the TUI does: the branch binary on the host, its daemon current.
+        if let Err(e) = super::bootstrap::ensure_remote(host).await {
+            eprintln!("ensure_remote({host}) failed: {e}");
+            return ExitCode::FAILURE;
+        }
         let client = match crate::client::connect_ssh(host).await {
             Ok(c) => c,
             Err(e) => {

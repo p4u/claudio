@@ -1817,7 +1817,7 @@ async fn a_fresh_reset_forgets_the_old_conversation() {
 }
 
 /// The `--allow-dangerously-skip-permissions` check is redone after a claude
-/// update: a claude missing at startup is not stuck without it.
+/// update, and a claude missing at startup is not stuck without it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skip_permissions_support_is_rechecked_after_an_update() {
     let dir = TestDaemon::new_dir();
@@ -1836,9 +1836,15 @@ async fn skip_permissions_support_is_rechecked_after_an_update() {
     std::fs::write(&claude, script).unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .unwrap();
-    assert!(!check(&d.daemon).await.unwrap(), "cached until a refresh");
+    assert!(
+        check(&d.daemon).await.unwrap(),
+        "a probe that did not run is not remembered"
+    );
+    // A probe that ran is cached until a refresh.
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    assert!(check(&d.daemon).await.unwrap(), "cached until a refresh");
     d.daemon.refresh_host().await;
-    assert!(check(&d.daemon).await.unwrap());
+    assert!(!check(&d.daemon).await.unwrap());
 }
 
 /// A session started in a repository announces its git status (branch,

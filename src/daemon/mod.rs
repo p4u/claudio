@@ -458,9 +458,10 @@ impl Daemon {
     pub(crate) fn claude_flags(&self) -> host::ClaudeFlags {
         // Held while probing, so concurrent spawns wait for one probe.
         let mut flags = self.claude_flags.lock().unwrap_or_else(|e| e.into_inner());
-        *flags.get_or_insert_with(|| {
-            host::claude_flags(&self.config.claude_bin(), self.config.path.as_deref())
-        })
+        if flags.is_none() {
+            *flags = host::claude_flags(&self.config.claude_bin(), self.config.path.as_deref());
+        }
+        flags.unwrap_or_default()
     }
 
     /// Send a session event to every connected client.

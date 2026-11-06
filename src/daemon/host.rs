@@ -111,14 +111,15 @@ pub struct ClaudeFlags {
     pub plugin_dir: bool,
 }
 
-/// [`ClaudeFlags`] of `<claude> --help`. Blocking (≤ 3 s); all `false` on
-/// failure or timeout, so an old or broken claude never gets a flag.
-pub fn claude_flags(claude: &Path, path: Option<&OsStr>) -> ClaudeFlags {
-    let help = run_capture(claude, "--help", path).unwrap_or_default();
-    ClaudeFlags {
+/// [`ClaudeFlags`] of `<claude> --help`, or `None` when it did not run
+/// (missing, failing or over 3 s), so a failed probe is not remembered.
+/// Blocking (≤ 3 s).
+pub fn claude_flags(claude: &Path, path: Option<&OsStr>) -> Option<ClaudeFlags> {
+    let help = run_capture(claude, "--help", path)?;
+    Some(ClaudeFlags {
         skip_permissions: help.contains(ALLOW_SKIP_PERMISSIONS),
         plugin_dir: help.contains(PLUGIN_DIR),
-    }
+    })
 }
 
 /// Stdout of `<claude> <arg>` when it exits 0 within [`VERSION_TIMEOUT`].
@@ -257,7 +258,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let flags = claude_flags(&bin, None);
+        let flags = claude_flags(&bin, None).unwrap();
         assert!(flags.skip_permissions);
         assert!(!flags.plugin_dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -274,7 +275,7 @@ mod tests {
             let script = format!("#!/bin/sh\n[ \"$1\" = --help ] && printf '%s\\n' '{text}'\n");
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-            claude_flags(&bin, None)
+            claude_flags(&bin, None).unwrap()
         };
         let both = help("  --plugin-dir <paths...>  --allow-dangerously-skip-permissions");
         assert_eq!(
@@ -287,8 +288,7 @@ mod tests {
         let plugins = help("  --plugin-dir <paths...>");
         assert!(plugins.plugin_dir && !plugins.skip_permissions);
         assert_eq!(help(""), ClaudeFlags::default());
-        let missing = claude_flags(Path::new("/nonexistent/claude"), None);
-        assert_eq!(missing, ClaudeFlags::default());
+        assert_eq!(claude_flags(Path::new("/nonexistent/claude"), None), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

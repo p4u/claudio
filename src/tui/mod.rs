@@ -272,14 +272,21 @@ async fn main(launch: Launch) -> ExitCode {
         .collect();
     // External extensions are read once, at start.
     let external = extensions::manifest::load(&extensions::manifest::dir(), &mut key_notices);
-    // A plugin's saved choice is no unknown name: the plugins come later.
+    // A plugin's saved choice is no unknown name: the plugins come later. A
+    // built-in's or external's choice stays, whatever a plugin is named.
+    let builtins = extensions::Registry::default();
+    let known = |name: &str| {
+        builtins.extensions.iter().any(|e| e.name == name)
+            || external.iter().any(|e| e.name == name)
+    };
     let builtin_choices: std::collections::BTreeMap<String, bool> = config
         .extensions
         .iter()
         .filter(|(name, _)| {
-            !cached_plugins
-                .iter()
-                .any(|l| l.plugins.iter().any(|p| &p.name == *name))
+            known(name)
+                || !cached_plugins
+                    .iter()
+                    .any(|l| l.plugins.iter().any(|p| &p.name == *name))
         })
         .map(|(name, on)| (name.clone(), *on))
         .collect();

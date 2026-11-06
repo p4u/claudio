@@ -143,6 +143,7 @@ pub async fn poll(base_url: &str, start: &Start, unit: Duration) -> Result<Grant
             429 => interval *= 2,
             403 => return Err(LoginError::Denied),
             404 | 410 => return Err(LoginError::Expired),
+            500..=599 => {}
             other => return Err(LoginError::Http(other)),
         }
     }
@@ -258,6 +259,7 @@ mod tests {
                 StatusCode::PRECONDITION_REQUIRED,
                 error("authorization_pending"),
             ),
+            (StatusCode::INTERNAL_SERVER_ERROR, error("server_error")),
             (StatusCode::OK, granted),
         ])
         .await;
@@ -267,7 +269,7 @@ mod tests {
             ("tok-1", "pau@vocdoni.org")
         );
         assert!(!format!("{granted:?}").contains("tok-1"));
-        assert_eq!(polls, 3);
+        assert_eq!(polls, 4);
     }
 
     #[tokio::test]
@@ -292,9 +294,9 @@ mod tests {
             (StatusCode::NOT_FOUND, "unknown_code", LoginError::Expired),
             (StatusCode::FORBIDDEN, "denied", LoginError::Denied),
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "x",
-                LoginError::Http(500),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                LoginError::Http(400),
             ),
         ] {
             let (result, polls) = run(vec![(status, error(code))]).await;
