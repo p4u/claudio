@@ -330,7 +330,8 @@ enabled plugin whose state on the host is `Ready`:
   arrived or failed, at most `BUNDLE_WAIT` (20 s), shows the setup screens
   (queued, as above), and spawns when the last closes; Esc there defers like
   the manager (the session starts without that plugin). Without a proxy
-  profile, or with every table present, it spawns at once as today.
+  profile, with every table present, or with no plugin list at all yet (no
+  cache, nothing fetched), it spawns at once as today.
 
 ### 5. Extensions screen
 
