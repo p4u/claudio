@@ -99,8 +99,8 @@ URL. Without `--token`, when `POST <url>/v1/claudio/login/start` answers
 
 ```
 $ claudio proxy login
-Open this page and approve the sign-in:
-  https://claude.vocdoni.net/claudio/login?code=K7PQ-3WXM
+Open this page, sign in, and type your code:
+  https://claude.vocdoni.net/claudio/login
 Your code: K7PQ-3WXM
 Waiting… (Ctrl+C to cancel)
 Signed in as pau@vocdoni.org. Profile "claude" saved as default.
@@ -111,9 +111,12 @@ Signed in as pau@vocdoni.org. Profile "claude" saved as default.
   `CLAUDIO_NO_BROWSER` is unset; it is always printed.
 - Polling: `POST /v1/claudio/login/poll {device_code}` every `interval_s`
   (3 s; a 429 `slow_down` doubles it) until 200, or until `expires_in_s`
-  (then "login expired, run again"). 403 → "sign-in denied". 404 on
-  `login/start` → "this proxy has no browser login; paste a token" and the
-  paste flow runs.
+  (then "login expired, run again"; a 404 `unknown_code` or a 410 on
+  `poll` ends the same way). 403 → "sign-in denied". 429 `too_many_pending`
+  on `login/start` → "too many pending logins from this address, try again
+  in a minute". 404 on `login/start` → "this proxy has no browser login;
+  paste a token" and the paste flow runs. The URL carries no code: the
+  member types it on the page (the proxy spec's phishing mitigation).
 - On 200 the token is verified as today (`check_root`, unless
   `--unverified`) and the profile is stored with a new optional field
   `email` (shown by `claudio proxy status`). The profile name defaults as
