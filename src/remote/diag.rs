@@ -130,6 +130,7 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
             rows: 24,
             cols: 80,
             ephemeral: false,
+            extensions: None,
         };
 
         // Spawn the session.
@@ -200,6 +201,82 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
 
         // Clean up.
         let _ = client.request(Msg::Kill { id: session_id }).await;
+        ExitCode::SUCCESS
+    })
+}
+
+/// `claudio __remote-bundle HOST CWD NAME SHA256`
+///
+/// Asks `HOST`'s daemon for plugin `NAME`'s bundle with hash `SHA256` (from
+/// a URL nothing listens on, so only a pre-seeded cache answers), prints
+/// the reply as JSON, then spawns claude in `CWD` with `--plugin-dir
+/// <path>`, prints `pid=<pid>`, keeps the session 5 s (for the caller to
+/// look at its argv) and kills it.
+pub fn remote_bundle_cmd(host: &str, cwd: &str, name: &str, sha256: &str) -> ExitCode {
+    use crate::proto::{Msg, SpawnSpec};
+    let rt = match make_runtime() {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    rt.block_on(async move {
+        let client = match crate::client::connect_ssh(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("connect_ssh({host}) failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let bundle = Msg::Bundle {
+            name: name.to_owned(),
+            url: "https://127.0.0.1:9/never.zip".to_owned(),
+            sha256: sha256.to_owned(),
+            installed_id: String::new(),
+        };
+        let path = match client.request(bundle).await {
+            Ok(Msg::Bundled {
+                path, installed, ..
+            }) => {
+                let reply = serde_json::json!({ "path": path, "installed": installed });
+                println!("{reply}");
+                path
+            }
+            Ok(other) => {
+                eprintln!("unexpected Bundle reply: {other:?}");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("Bundle request failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let Some(path) = path else {
+            return ExitCode::SUCCESS;
+        };
+        let id = uuid::Uuid::new_v4();
+        let spec = SpawnSpec {
+            id,
+            cwd: cwd.to_owned(),
+            name: None,
+            args: vec!["--plugin-dir".to_owned(), path],
+            env: vec![],
+            rows: 24,
+            cols: 80,
+            ephemeral: true,
+            extensions: None,
+        };
+        match client.request(Msg::Spawn(spec)).await {
+            Ok(Msg::Spawned { pid, .. }) => {
+                println!("pid={}", pid.unwrap_or(0));
+            }
+            other => {
+                eprintln!("Spawn failed: {other:?}");
+                return ExitCode::FAILURE;
+            }
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _ = client.request(Msg::Kill { id }).await;
         ExitCode::SUCCESS
     })
 }

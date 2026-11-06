@@ -83,6 +83,17 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
+    // `claudio __remote-bundle HOST CWD NAME SHA256` – ask HOST's daemon for a
+    // pre-seeded plugin bundle, spawn claude with it, print both.
+    #[cfg(feature = "diag")]
+    if argv.get(1).map(String::as_str) == Some("__remote-bundle") {
+        if let [_, _, host, cwd, name, sha256] = argv.as_slice() {
+            return remote::diag::remote_bundle_cmd(host, cwd, name, sha256);
+        }
+        eprintln!("usage: claudio __remote-bundle <host> <cwd> <name> <sha256>");
+        return std::process::ExitCode::FAILURE;
+    }
+
     // `claudio __ssh-hosts` – print all known SSH host aliases, one per line.
     #[cfg(feature = "diag")]
     if argv.get(1).map(String::as_str) == Some("__ssh-hosts") {

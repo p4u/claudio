@@ -8,7 +8,7 @@
 //! ```
 //!
 //! Tests `t1`, `t7`, and `t8` are pure unit-style tests (no SSH) and always
-//! run.  Tests `t2`–`t6` require a real SSH host.
+//! run.  Tests `t2`–`t6` and `t9` require a real SSH host.
 //!
 //! **Note on `__` diag commands:** `t2`–`t4` use `claudio __bootstrap`,
 //! `__connect-check`, and `__remote-session`.  These may later be gated
@@ -401,5 +401,72 @@ fn t8_probe_roundtrip() {
         "[t8] probe round-trip ✓ build={}…{}",
         &build[..4],
         &build[60..]
+    );
+}
+
+// ── t9: plugin bundle on the remote ─────────────────────────────────────────
+
+/// A pre-seeded plugin bundle in the remote daemon's cache answers `Bundle`
+/// with its remote path, and a session spawned with it there has that path
+/// in its argv (when the remote claude knows `--plugin-dir`).
+#[test]
+fn t9_remote_plugin_bundle() {
+    let host = match test_host() {
+        Some(h) => h,
+        None => {
+            println!("SKIP t9: set CLAUDIO_SSH_TEST_HOST to run SSH tests");
+            return;
+        }
+    };
+    // The smallest valid zip: an empty end-of-central-directory record.
+    let zip: Vec<u8> = [b'P', b'K', 5, 6].into_iter().chain([0u8; 18]).collect();
+    let sha = {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(&zip))
+    };
+    let octal: String = zip.iter().map(|b| format!("\\{b:03o}")).collect();
+    let seed = format!(
+        "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/claudio/plugins\" && mkdir -p \"$d\" && chmod 700 \"$d\" \
+         && printf '{octal}' > \"$d/claudio-t9.zip\" && printf '{sha}\\n' > \"$d/claudio-t9.sha256\" \
+         && echo \"$d/claudio-t9.zip\""
+    );
+    let (remote_zip, ok) = ssh_run(&host, &seed);
+    assert!(ok, "could not seed the remote cache");
+
+    let mut child = Command::new(BINARY)
+        .args(["__remote-bundle", &host, "/tmp", "claudio-t9", &sha])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run claudio __remote-bundle");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(stdout));
+    let reply: serde_json::Value =
+        serde_json::from_str(&lines.next().expect("a Bundle reply").unwrap()).unwrap();
+    assert_eq!(reply["path"].as_str(), Some(remote_zip.as_str()), "{reply}");
+    assert_eq!(reply["installed"], false);
+    println!("[t9] Bundled {{ path: {remote_zip} }} ✓");
+
+    let pid = lines.next().expect("a pid").unwrap();
+    let pid = pid.strip_prefix("pid=").expect("pid=<n>").to_owned();
+    let (args, _) = ssh_run(&host, &format!("ps -o args= -p {pid}"));
+    let (help, _) = ssh_run(
+        &host,
+        "$HOME/.local/bin/claude --help 2>/dev/null || claude --help",
+    );
+    if help.contains("--plugin-dir") {
+        assert!(
+            args.contains(&format!("--plugin-dir {remote_zip}")),
+            "argv: {args}"
+        );
+        println!("[t9] the remote session's argv has the bundle ✓");
+    } else {
+        assert!(!args.contains("--plugin-dir"), "argv: {args}");
+        println!("[t9] the remote claude has no --plugin-dir: left out ✓");
+    }
+    for _ in lines {}
+    assert!(child.wait().expect("wait for claudio").success());
+    let _ = ssh_run(
+        &host,
+        "rm -f \"${XDG_CACHE_HOME:-$HOME/.cache}/claudio/plugins/claudio-t9.\"*",
     );
 }
