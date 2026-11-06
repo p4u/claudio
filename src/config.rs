@@ -143,6 +143,27 @@ pub type KeysSection = BTreeMap<String, String>;
 /// (every extension is on unless listed as `false`).
 pub type ExtensionsSection = BTreeMap<String, bool>;
 
+/// `[plugins.<name>]`: what the member chose for proxy plugin `<name>`'s
+/// manifest. Written by [`save_plugin_choices`] when the setup screen
+/// closes with Enter.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PluginChoices {
+    /// The item ids turned off (`mcp:jina`, `plugin:x@m`…), including ids
+    /// the manifest no longer has, so one that comes back stays off.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    /// The manifest version last reviewed.
+    #[serde(default)]
+    pub reviewed: String,
+    /// Every id of the reviewed version (and the disabled ids it lacks): an
+    /// id of a newer version not in here is new.
+    #[serde(default)]
+    pub seen: Vec<String>,
+}
+
+/// The `[plugins]` tables of `config.toml`, by plugin name.
+pub type PluginsSection = BTreeMap<String, PluginChoices>;
+
 /// The subset of `config.toml` that this module owns. Other sections (e.g.
 /// `[proxy]`) are preserved via `extra` on round-trip.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -157,6 +178,8 @@ struct ConfigFile {
     pub claude: Option<ClaudeSection>,
     #[serde(default)]
     pub extensions: Option<ExtensionsSection>,
+    #[serde(default)]
+    pub plugins: Option<PluginsSection>,
     /// All other TOML keys — preserved on write.
     #[serde(flatten)]
     extra: toml::Table,
@@ -172,6 +195,7 @@ pub struct Config {
     pub update: UpdateSection,
     pub claude: ClaudeSection,
     pub extensions: ExtensionsSection,
+    pub plugins: PluginsSection,
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -226,6 +250,7 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
         update: file.update.unwrap_or_default(),
         claude: file.claude.unwrap_or_default(),
         extensions: file.extensions.unwrap_or_default(),
+        plugins: file.plugins.unwrap_or_default(),
     })
 }
 
@@ -239,7 +264,10 @@ pub enum SaveError {
     /// The file is valid TOML but laid out so the line edit cannot set the
     /// key (a dotted `extensions.x`, an inline table, `[[extensions]]`…).
     Unsupported(String),
-    /// The name is not an extension's (`^[a-z][a-z0-9-]{0,31}$`).
+    /// Like `Unsupported`, for table `[plugins.<name>]`.
+    UnsupportedPlugin(String),
+    /// The name is not an extension's (`^[a-z][a-z0-9-]{0,31}$`) or a
+    /// plugin's (`[a-z0-9-]{1,40}`).
     BadName,
     Io(io::Error),
 }
@@ -251,6 +279,10 @@ impl std::fmt::Display for SaveError {
             SaveError::Unsupported(name) => write!(
                 f,
                 "config.toml layout not understood; set [extensions] {name} = … by hand"
+            ),
+            SaveError::UnsupportedPlugin(name) => write!(
+                f,
+                "config.toml layout not understood; edit [plugins.{name}] by hand"
             ),
             SaveError::BadName => write!(f, "not an extension name"),
             SaveError::Io(e) => write!(f, "{e}"),
@@ -458,6 +490,128 @@ pub fn save_extension(path: &Path, name: &str, on: bool) -> Result<(), SaveError
             e.remove(name);
             if e.is_empty() {
                 t.remove("extensions");
+            }
+        }
+    }
+    if before != after {
+        return Err(unsupported());
+    }
+    paths::write_atomic(&path, edited.as_bytes())?;
+    if let Some(mode) = mode.filter(|m| *m != 0o600) {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+/// `[plugins.<name>]` with `choices`, as lines ending in `eol`.
+fn plugin_table(name: &str, choices: &PluginChoices, eol: &str) -> String {
+    let string = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    let list = |items: &[String]| {
+        let items: Vec<String> = items.iter().map(|i| string(i)).collect();
+        format!("[{}]", items.join(", "))
+    };
+    format!(
+        "[plugins.{name}]{eol}disabled = {}{eol}reviewed = {}{eol}seen = {}{eol}",
+        list(&choices.disabled),
+        string(&choices.reviewed),
+        list(&choices.seen),
+    )
+}
+
+/// `text` (a `config.toml`) with table `[plugins.<name>]` set to
+/// `choices`, edited minimally: the table's header and key lines are
+/// replaced (the blank lines and comments after its last key stay), else
+/// the table is appended. Every other byte stays as it was; the line
+/// ending follows the file's. `name` must be a plugin name
+/// (`[a-z0-9-]{1,40}`, no quoting needed).
+pub fn set_plugin_choices(text: &str, name: &str, choices: &PluginChoices) -> String {
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let table = plugin_table(name, choices, eol);
+    let wanted = format!("plugins.{name}");
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut multiline: Option<&'static str> = None;
+    // The table's header line, and the line after its last key.
+    let mut found: Option<(usize, usize)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let (content, _) = split_eol(line);
+        let continued = multiline.is_some();
+        track_multiline(content, &mut multiline);
+        if let Some((_, end)) = &mut found {
+            if !continued && header(content).is_some() {
+                break;
+            }
+            let t = content.trim_start();
+            if continued || !(t.is_empty() || t.starts_with('#')) {
+                *end = i + 1;
+            }
+            continue;
+        }
+        if !continued && header(content).as_deref() == Some(wanted.as_str()) {
+            found = Some((i, i + 1));
+        }
+    }
+    match found {
+        Some((start, end)) => {
+            let mut out = lines[..start].concat();
+            out.push_str(&table);
+            out.push_str(&lines[end..].concat());
+            out
+        }
+        None => {
+            let mut out = text.to_owned();
+            if !out.is_empty() {
+                if !out.ends_with('\n') {
+                    out.push_str(eol);
+                }
+                out.push_str(eol);
+            }
+            out.push_str(&table);
+            out
+        }
+    }
+}
+
+/// Set `[plugins.<name>]` to `choices` in the config file at `path`
+/// (through a symlink, to its target) with [`set_plugin_choices`]; written
+/// atomically, keeping the file's mode (0600 when it is created). Nothing
+/// is written when the file does not parse as TOML, before or after the
+/// edit, or when anything but that table would change.
+pub fn save_plugin_choices(
+    path: &Path,
+    name: &str,
+    choices: &PluginChoices,
+) -> Result<(), SaveError> {
+    use std::os::unix::fs::PermissionsExt;
+    if !crate::proxy::plugins::name_ok(name) {
+        return Err(SaveError::BadName);
+    }
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (text, mode) = match std::fs::read(&path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|_| SaveError::InvalidToml)?;
+            let mode = std::fs::metadata(&path)?.permissions().mode() & 0o7777;
+            (text, Some(mode))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (String::new(), None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut before: toml::Table = toml::from_str(&text).map_err(|_| SaveError::InvalidToml)?;
+    let edited = set_plugin_choices(&text, name, choices);
+    let unsupported = || SaveError::UnsupportedPlugin(name.to_owned());
+    let mut after: toml::Table = toml::from_str(&edited).map_err(|_| unsupported())?;
+    let set: Option<PluginChoices> = after
+        .get("plugins")
+        .and_then(|p| p.get(name))
+        .and_then(|t| t.clone().try_into().ok());
+    if set.as_ref() != Some(choices) {
+        return Err(unsupported());
+    }
+    // Only `plugins.<name>` may differ.
+    for t in [&mut before, &mut after] {
+        if let Some(toml::Value::Table(p)) = t.get_mut("plugins") {
+            p.remove(name);
+            if p.is_empty() {
+                t.remove("plugins");
             }
         }
     }
@@ -756,6 +910,97 @@ default = "x"
             set_extension(text, "diagram", false),
             "x = 'has \"\"\" inside'\n[extensions]\ndiagram = false\n"
         );
+    }
+
+    fn choices(disabled: &[&str], reviewed: &str, seen: &[&str]) -> PluginChoices {
+        let own = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        PluginChoices {
+            disabled: own(disabled),
+            reviewed: reviewed.into(),
+            seen: own(seen),
+        }
+    }
+
+    #[test]
+    fn plugin_choices_append_the_table_when_missing() {
+        let c = choices(&["mcp:jina"], "1.0.0", &["mcp:jina", "plugin:a@m"]);
+        assert_eq!(
+            set_plugin_choices("[ui]\nnotify = false", "team", &c),
+            "[ui]\nnotify = false\n\n[plugins.team]\ndisabled = [\"mcp:jina\"]\n\
+             reviewed = \"1.0.0\"\nseen = [\"mcp:jina\", \"plugin:a@m\"]\n"
+        );
+        let none = choices(&[], "2", &[]);
+        assert_eq!(
+            set_plugin_choices("", "team", &none),
+            "[plugins.team]\ndisabled = []\nreviewed = \"2\"\nseen = []\n"
+        );
+        // A version with quotes and backslashes is escaped.
+        let odd = choices(&[], "1.0 \"rc\" \\", &[]);
+        let out = set_plugin_choices("", "team", &odd);
+        let table: toml::Table = out.parse().unwrap();
+        assert_eq!(
+            table["plugins"]["team"]["reviewed"].as_str(),
+            Some("1.0 \"rc\" \\")
+        );
+    }
+
+    #[test]
+    fn plugin_choices_replace_the_table_and_leave_the_rest_untouched() {
+        let text = "# mine\r\n[plugins.team]\r\ndisabled = []\r\nreviewed = \"0.9\"\r\n\
+                    seen = [\r\n  \"mcp:kb\",\r\n]\r\n\r\n# next\r\n[plugins.other]\r\n\
+                    reviewed = \"1\"\r\n[ui]\r\nnotify = true\r\n";
+        let c = choices(&["mcp:kb"], "1.0", &["mcp:kb"]);
+        assert_eq!(
+            set_plugin_choices(text, "team", &c),
+            "# mine\r\n[plugins.team]\r\ndisabled = [\"mcp:kb\"]\r\nreviewed = \"1.0\"\r\n\
+             seen = [\"mcp:kb\"]\r\n\r\n# next\r\n[plugins.other]\r\nreviewed = \"1\"\r\n\
+             [ui]\r\nnotify = true\r\n"
+        );
+        // The last table of the file.
+        let text = "[ui]\nnotify = true\n\n[plugins.team]\nreviewed = \"1\"\n";
+        let out = set_plugin_choices(text, "team", &c);
+        assert_eq!(
+            out,
+            "[ui]\nnotify = true\n\n[plugins.team]\ndisabled = [\"mcp:kb\"]\n\
+             reviewed = \"1.0\"\nseen = [\"mcp:kb\"]\n"
+        );
+    }
+
+    #[test]
+    fn save_plugin_choices_writes_only_its_table() {
+        use std::os::unix::fs::PermissionsExt;
+        let text = "[proxy]\ndefault = \"work\"\n\n[extensions]\nkb = false\n";
+        let (dir, path) = scratch_config(Some(text));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let c = choices(&["env"], "1.0.0", &["env", "mcp:kb"]);
+        save_plugin_choices(&path, "team", &c).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with(text), "{saved}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        let cfg = load_from(&path);
+        assert_eq!(cfg.plugins.get("team"), Some(&c));
+        assert_eq!(cfg.extensions.get("kb"), Some(&false));
+        // Saved again with other choices: replaced, not appended.
+        let c2 = choices(&[], "1.1.0", &["env", "mcp:kb", "agent:x"]);
+        save_plugin_choices(&path, "team", &c2).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved.matches("[plugins.team]").count(), 1, "{saved}");
+        assert_eq!(load_from(&path).plugins.get("team"), Some(&c2));
+        // A layout the edit cannot handle is refused, and nothing is written.
+        let dotted = "plugins.team.reviewed = \"1\"\n";
+        std::fs::write(&path, dotted).unwrap();
+        let err = save_plugin_choices(&path, "team", &c).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config.toml layout not understood; edit [plugins.team] by hand"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), dotted);
+        assert!(matches!(
+            save_plugin_choices(&path, "Bad", &c),
+            Err(SaveError::BadName)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
