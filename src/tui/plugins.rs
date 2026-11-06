@@ -496,6 +496,146 @@ mod tests {
         assert_eq!(fetched, ["home", "work"]);
     }
 
+    /// An app with `local` connected and profile `work` serving `kb`,
+    /// whose bundle `local` answered with `answer` (`None`: not yet).
+    fn app_with_kb(answer: Option<Msg>) -> App {
+        let mut app = app_with(&[]);
+        app.modal = None;
+        app.on_plugin_host("local");
+        app.on_plugins(
+            "work",
+            PluginsFetch::Listed(list("work", vec![sample("kb")])),
+        );
+        if let Some(msg) = answer {
+            app.on_bundled("local", "kb", &"a".repeat(64), Ok(msg));
+        }
+        app.take_effects();
+        app
+    }
+
+    fn ready() -> Msg {
+        Msg::Bundled {
+            name: "kb".into(),
+            path: Some("/c/plugins/kb.zip".into()),
+            installed: false,
+        }
+    }
+
+    /// Start a claude session in `/w` on `local` with `proxy`; the deferred
+    /// spawn it queues: its args, env and the bundles it waits for.
+    fn spawn_with(
+        app: &mut App,
+        proxy: Option<&str>,
+    ) -> (Vec<String>, Vec<(String, String)>, Vec<String>) {
+        let id = uuid::Uuid::new_v4();
+        let kind = crate::proto::SessionKind::Claude;
+        let proxy = proxy.map(str::to_owned);
+        app.start(
+            id,
+            "local".into(),
+            "/w".into(),
+            kind,
+            vec!["-c".into()],
+            proxy,
+            0,
+        )
+        .unwrap();
+        let effects = app.take_effects();
+        for e in effects {
+            match e {
+                Effect::SpawnWithProxy {
+                    msg: Msg::Spawn(spec),
+                    bundles,
+                    to,
+                    ..
+                } => {
+                    assert_eq!(to, ReplyTo::SpawnedDeferred(id));
+                    let names = bundles.into_iter().map(|b| b.name).collect();
+                    return (spec.args, spec.env, names);
+                }
+                Effect::Request {
+                    msg: Msg::Spawn(spec),
+                    ..
+                } => return (spec.args, spec.env, Vec::new()),
+                _ => {}
+            }
+        }
+        panic!("no spawn")
+    }
+
+    #[test]
+    fn a_spawn_gets_the_ready_bundle_and_the_plugin_env() {
+        let mut app = app_with_kb(Some(ready()));
+        let (args, env, waits) = spawn_with(&mut app, Some("work"));
+        assert_eq!(args, ["-c", "--plugin-dir", "/c/plugins/kb.zip"]);
+        assert_eq!(env, [("KB_TOKEN".to_owned(), "s3cret".to_owned())]);
+        assert!(waits.is_empty());
+        // Without a proxy: no plugin, no env.
+        let (args, env, waits) = spawn_with(&mut app, None);
+        assert_eq!(
+            (args, env.len(), waits.len()),
+            (vec!["-c".to_owned()], 0, 0)
+        );
+    }
+
+    #[test]
+    fn a_spawn_waits_for_a_bundle_not_answered_yet() {
+        let mut app = app_with_kb(None);
+        let (args, env, waits) = spawn_with(&mut app, Some("work"));
+        assert_eq!(args, ["-c"]);
+        assert_eq!(env.len(), 1);
+        assert_eq!(waits, ["kb"]);
+        let notice = app.notice.as_ref().unwrap().text.clone();
+        assert_eq!(notice, "fetching plugin kb…");
+    }
+
+    #[test]
+    fn installed_failed_or_off_plugins_bring_no_bundle() {
+        let installed = Msg::Bundled {
+            name: "kb".into(),
+            path: None,
+            installed: true,
+        };
+        let mut app = app_with_kb(Some(installed));
+        let (args, env, waits) = spawn_with(&mut app, Some("work"));
+        assert_eq!(
+            (args.len(), env.len(), waits.len()),
+            (1, 1, 0),
+            "env still applies"
+        );
+
+        let mut app = app_with_kb(None);
+        let failed = std::io::Error::other("bundle kb: hash mismatch");
+        app.on_bundled("local", "kb", &"a".repeat(64), Err(failed));
+        let (args, _, waits) = spawn_with(&mut app, Some("work"));
+        assert_eq!((args.len(), waits.len()), (1, 0));
+
+        let mut app = app_with_kb(Some(ready()));
+        app.plugins.config.insert("kb".into(), false);
+        app.list_plugins();
+        let (args, env, waits) = spawn_with(&mut app, Some("work"));
+        assert_eq!((args.len(), env.len(), waits.len()), (1, 0, 0));
+    }
+
+    #[test]
+    fn a_reset_sends_the_current_plugin_env_and_no_args() {
+        let mut app = app_with_kb(Some(ready()));
+        spawn_with(&mut app, Some("work"));
+        let id = app.sessions[0].id;
+        app.reset_session(id, false);
+        let respawn = app.take_effects().into_iter().find_map(|e| match e {
+            Effect::SpawnWithProxy {
+                msg: Msg::Respawn(spec),
+                bundles,
+                ..
+            } => Some((spec, bundles)),
+            _ => None,
+        });
+        let (spec, bundles) = respawn.expect("a respawn");
+        assert_eq!(spec.env, [("KB_TOKEN".to_owned(), "s3cret".to_owned())]);
+        assert!(bundles.is_empty());
+    }
+
     #[test]
     fn signed_out_drops_the_list_and_unreachable_keeps_it() {
         let mut app = app_with(&[]);

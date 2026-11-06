@@ -131,17 +131,22 @@ pub enum Effect {
         claude_session_id: String,
     },
     /// Spawn (or respawn) a session with proxy config: the effect runner
-    /// fetches the proxy config (with a 5 s timeout), builds the env, then
-    /// sends the request. This avoids silently using fallback model defaults
-    /// when the proxy-config cache is cold.
+    /// fetches the proxy config (with a 5 s timeout) unless it is cached,
+    /// waits up to 20 s for `bundles` (asking `host` for each), builds the
+    /// env, then sends the request. This avoids silently using fallback
+    /// model defaults when the proxy-config cache is cold, and starting a
+    /// session without a plugin whose bundle is a moment away.
     SpawnWithProxy {
         host: String,
-        /// A `Spawn` or `Respawn` whose `env` is empty; the runner fills it.
+        /// A `Spawn` or `Respawn` whose `env` holds the plugin env only;
+        /// the runner adds the proxy env, and the ready bundles' paths.
         msg: Msg,
         proxy_name: String,
         /// `--first-party` for this session (see `SessionView::first_party`).
         first_party: bool,
         to: ReplyTo,
+        /// The plugins whose bundle `host` has not answered for yet.
+        bundles: Vec<PendingBundle>,
     },
     /// Put this text on the outer terminal's clipboard (OSC 52).
     CopyToClipboard(String),
@@ -193,6 +198,15 @@ pub enum Effect {
     /// Fetch `profile`'s plugin list, then save it to (or drop it from)
     /// `plugins.json`; the outcome goes to [`App::on_plugins`].
     FetchPlugins { profile: String },
+}
+
+/// A plugin bundle a deferred spawn waits for: its `Bundle` request, and
+/// how the answer reaches [`App::on_reply`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingBundle {
+    pub name: String,
+    pub msg: Msg,
+    pub to: ReplyTo,
 }
 
 /// What a request's reply is for.

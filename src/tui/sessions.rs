@@ -12,10 +12,11 @@ use crate::proto::{
 };
 use crate::term::screen::Screen;
 
-use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, PendingBundle, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
 use super::latex::Formula;
+use super::plugins::{bundle_msg, BundleState};
 use super::state::{self, ClientState, KillTombstone, SavedSession};
 use super::wizard::{self, Wizard};
 
@@ -424,30 +425,56 @@ impl App {
             self.request(host, Msg::SpawnShell(shell), ReplyTo::Spawned(id));
             return Ok(());
         }
+        // The profile's plugins: their env now, their bundles' paths when
+        // this host has them (else the spawn waits for them).
+        let (dirs, bundles) = match proxy {
+            Some(profile) => self.plugin_bundles(host, profile),
+            None => (Vec::new(), Vec::new()),
+        };
         let spec = SpawnSpec {
             id,
             cwd,
             name,
             args,
-            env: vec![], // filled by `send_with_proxy`
+            env: proxy.map(|p| self.plugin_env(p)).unwrap_or_default(),
             rows,
             cols,
             // `--plain`'s session is not one for a manager to show.
             ephemeral: self.mode == Mode::Plain,
             extensions: Some(self.extensions.session_extensions()),
         };
-        self.send_with_proxy(
-            host,
-            Msg::Spawn(spec),
-            proxy,
-            first_party,
-            ReplyTo::Spawned(id),
-        )
+        let msg = Msg::Spawn(spec).with_plugin_dirs(&dirs);
+        self.send_with_proxy(host, msg, proxy, first_party, ReplyTo::Spawned(id), bundles)
     }
 
-    /// Send `msg` (a `Spawn` or `Respawn` with an empty env) to `host` with
-    /// the env of `proxy`. A cold proxy-config cache goes through the effect
-    /// runner, which fetches the config first and answers with
+    /// The bundles of `profile`'s enabled plugins on `host`: the paths of
+    /// those ready there, and those it has not answered for (installed in
+    /// Claude Code, failed or too old: neither).
+    fn plugin_bundles(&self, host: &str, profile: &str) -> (Vec<String>, Vec<PendingBundle>) {
+        let mut dirs = Vec::new();
+        let mut pending = Vec::new();
+        for p in self.enabled_plugins(profile) {
+            match self.bundle_state(host, &p.name) {
+                Some(BundleState::Ready(path)) => dirs.push(path.clone()),
+                Some(BundleState::Pending) | None => pending.push(PendingBundle {
+                    name: p.name.clone(),
+                    msg: bundle_msg(p),
+                    to: ReplyTo::Bundle {
+                        host: host.to_owned(),
+                        name: p.name.clone(),
+                        sha256: p.bundle_sha256.clone(),
+                    },
+                }),
+                Some(_) => {}
+            }
+        }
+        (dirs, pending)
+    }
+
+    /// Send `msg` (a `Spawn` or `Respawn` carrying only the plugin env) to
+    /// `host` with the env of `proxy` added. A cold proxy-config cache, or
+    /// `bundles` still to come, go through the effect runner, which fetches
+    /// the config and waits for the bundles first and answers with
     /// [`ReplyTo::deferred`]. Fails when the profile cannot be resolved.
     fn send_with_proxy(
         &mut self,
@@ -456,19 +483,25 @@ impl App {
         proxy: Option<&str>,
         first_party: bool,
         to: ReplyTo,
+        bundles: Vec<PendingBundle>,
     ) -> Result<(), String> {
         match proxy {
-            Some(name) if self.proxy_config_cached(name).is_none() => {
+            Some(name) if self.proxy_config_cached(name).is_none() || !bundles.is_empty() => {
+                if !bundles.is_empty() {
+                    let names: Vec<&str> = bundles.iter().map(|b| b.name.as_str()).collect();
+                    self.notify(format!("fetching plugin {}…", names.join(", ")));
+                }
                 self.emit(Effect::SpawnWithProxy {
                     host: host.to_owned(),
                     msg,
                     proxy_name: name.to_owned(),
                     first_party,
                     to: to.deferred(),
+                    bundles,
                 });
             }
             _ => {
-                let msg = msg.with_env(self.proxy_env_for(proxy, first_party)?);
+                let msg = msg.merge_env(self.proxy_env_for(proxy, first_party)?);
                 self.request(host, msg, to);
             }
         }
@@ -554,7 +587,11 @@ impl App {
         let msg = Msg::Respawn(RespawnSpec {
             id,
             fresh,
-            env: vec![], // filled by `send_with_proxy`
+            // The plugin env now; the journaled args keep their bundles.
+            env: proxy
+                .as_deref()
+                .map(|p| self.plugin_env(p))
+                .unwrap_or_default(),
             rows,
             cols,
             extensions: Some(self.extensions.session_extensions()),
@@ -565,6 +602,7 @@ impl App {
             proxy.as_deref(),
             first_party,
             ReplyTo::Respawned(id),
+            Vec::new(),
         ) {
             Ok(()) => {
                 // Keep the effective choice, so a later restart keeps the env.

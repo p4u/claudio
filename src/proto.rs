@@ -561,6 +561,29 @@ impl Msg {
         }
         self
     }
+
+    /// `self` with the proxy env added after the plugin env it carries
+    /// ([`crate::proxy::env::merge`]: the proxy wins, no key twice).
+    pub fn merge_env(self, proxy: Vec<(String, String)>) -> Msg {
+        let plugin = match &self {
+            Msg::Spawn(spec) => spec.env.clone(),
+            Msg::Respawn(spec) => spec.env.clone(),
+            _ => return self,
+        };
+        self.with_env(crate::proxy::env::merge(&plugin, proxy))
+    }
+
+    /// `self` with `--plugin-dir <path>` added for each of `paths`, if it is
+    /// a `Spawn` (a `Respawn` keeps the journaled args).
+    pub fn with_plugin_dirs(mut self, paths: &[String]) -> Msg {
+        if let Msg::Spawn(spec) = &mut self {
+            for path in paths {
+                spec.args.push("--plugin-dir".to_owned());
+                spec.args.push(path.clone());
+            }
+        }
+        self
+    }
 }
 
 impl std::fmt::Debug for RespawnSpec {
@@ -1226,6 +1249,34 @@ mod tests {
                 installed: false
             }
         );
+    }
+
+    #[test]
+    fn merge_env_keeps_plugin_keys_the_proxy_does_not_set() {
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let spawn = Msg::Spawn(SpawnSpec {
+            id: Uuid::nil(),
+            cwd: "/w".into(),
+            name: None,
+            args: vec!["--resume".into(), "c1".into()],
+            env: vec![pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "1")],
+            rows: 24,
+            cols: 80,
+            ephemeral: false,
+            extensions: None,
+        });
+        let merged = spawn
+            .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
+            .with_plugin_dirs(&["/c/kb.zip".to_owned()]);
+        let Msg::Spawn(spec) = merged else {
+            panic!("a spawn")
+        };
+        assert_eq!(
+            spec.env,
+            [pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "30000")]
+        );
+        assert_eq!(spec.args, ["--resume", "c1", "--plugin-dir", "/c/kb.zip"]);
+        assert_eq!(Msg::Ping.merge_env(vec![pair("A", "b")]), Msg::Ping);
     }
 
     #[test]

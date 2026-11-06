@@ -1508,21 +1508,37 @@ fn run_effect(
             proxy_name,
             first_party,
             to,
+            bundles,
         } => {
             // Resolve the client now (synchronous, cheap) so we can move it
             // into the async task. Client is Clone + Send + 'static.
             let client = conns.client(&host).cloned();
+            let cached = app.proxy_config_cached(&proxy_name).cloned();
             let tx = reply_tx.clone();
+            let notices = ev_tx.clone();
             tokio::spawn(async move {
                 // Fetch proxy config with a 5 s timeout so the first spawn
-                // uses the real model/rate-limit overrides, not fallback defaults.
-                let cfg = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    fetch_proxy_config(&proxy_name),
-                )
-                .await
-                .ok()
-                .flatten();
+                // uses the real model/rate-limit overrides, not fallback
+                // defaults; meanwhile, wait for the plugin bundles.
+                let config = async {
+                    match cached {
+                        Some(cfg) => Some(cfg),
+                        None => tokio::time::timeout(
+                            Duration::from_secs(5),
+                            fetch_proxy_config(&proxy_name),
+                        )
+                        .await
+                        .ok()
+                        .flatten(),
+                    }
+                };
+                let waits = wait_bundles(client.as_ref(), bundles, &tx);
+                let (cfg, (dirs, left_out)) = tokio::join!(config, waits);
+                if !left_out.is_empty() {
+                    let names = left_out.join(", ");
+                    let text = format!("plugin {names} left out: not ready on {host}");
+                    let _ = notices.send(HostEvent::Notice(text)).await;
+                }
 
                 // Build env from profile + (possibly fresh) config.
                 let env = crate::proxy::resolve::proxy_env_for(
@@ -1540,7 +1556,8 @@ fn run_effect(
                     Ok(env) => {
                         match client {
                             Some(c) => {
-                                let reply = c.request(msg.with_env(env));
+                                let msg = msg.with_plugin_dirs(&dirs).merge_env(env);
+                                let reply = c.request(msg);
                                 let _ = tx.send((to, reply.await));
                             }
                             None => {
@@ -1558,6 +1575,55 @@ fn run_effect(
             });
         }
     }
+}
+
+/// How long a spawn waits for its plugin bundles.
+const BUNDLE_WAIT: Duration = Duration::from_secs(20);
+
+/// Ask `client` for each of `bundles` and wait up to [`BUNDLE_WAIT`]: the
+/// paths of those that came back ready, and the names of those that did
+/// not (pending, failed, or no client). Every answer, even a late one, also
+/// goes to `App` through `tx`.
+async fn wait_bundles(
+    client: Option<&Client>,
+    bundles: Vec<app::PendingBundle>,
+    tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
+) -> (Vec<String>, Vec<String>) {
+    let mut dirs = Vec::new();
+    let mut left_out = Vec::new();
+    let deadline = tokio::time::Instant::now() + BUNDLE_WAIT;
+    let mut waiting = Vec::new();
+    for b in bundles {
+        let Some(client) = client else {
+            left_out.push(b.name);
+            continue;
+        };
+        let reply = client.request(b.msg);
+        let (done, answer) = tokio::sync::oneshot::channel();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let reply = reply.await;
+            // `Some(None)`: installed in Claude Code, no bundle needed.
+            let ready = match &reply {
+                Ok(Msg::Bundled {
+                    installed: true, ..
+                }) => Some(None),
+                Ok(Msg::Bundled { path: Some(p), .. }) => Some(Some(p.clone())),
+                _ => None,
+            };
+            let _ = done.send(ready);
+            let _ = tx.send((b.to, reply));
+        });
+        waiting.push((b.name, answer));
+    }
+    for (name, answer) in waiting {
+        match tokio::time::timeout_at(deadline, answer).await {
+            Ok(Ok(Some(Some(path)))) => dirs.push(path),
+            Ok(Ok(Some(None))) => {}
+            _ => left_out.push(name),
+        }
+    }
+    (dirs, left_out)
 }
 
 /// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list

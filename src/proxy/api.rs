@@ -31,7 +31,7 @@ pub enum ApiError {
 // ── Response types ────────────────────────────────────────────────────────────
 
 /// `GET /v1/claudio/config` — recommended env vars for spawning claude.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ConfigResponse {
     pub version: u32,
