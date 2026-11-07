@@ -143,11 +143,13 @@ Code does not know (`claude plugin marketplace add --scope user`) and
 installs the plugins in your user scope (`claude plugin install --scope
 user`), in the background, one at a time, never with `-y`: a plugin whose
 marketplace declares a command to run is `needs manual install` with the
-command to type. A failed install is tried again after 10 minutes. What you
-already have is left alone: an installed plugin is `present`, an MCP server
-in your `~/.claude.json` or an agent in `~/.claude/agents/` of the same name
-is skipped as `yours`. A server whose secret the proxy does not serve is
-skipped too.
+command to type. A failed install is tried again after 15 seconds, then
+after twice as long each time it fails again, up to every 5 minutes (its
+reason says `retrying in N s`), and at once when claude has just been
+installed on that host. What you already have is left alone: an installed
+plugin is `present`, an MCP server in your `~/.claude.json` or an agent in
+`~/.claude/agents/` of the same name is skipped as `yours`. A server whose
+secret the proxy does not serve is skipped too.
 
 Every session started with that profile then gets, per plugin that is on,
 `--agents` and `--mcp-config` (the server definitions with `${NAME}`

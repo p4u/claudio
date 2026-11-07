@@ -3075,3 +3075,92 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     assert!(!env.contains(PLUGIN_KEY), "{env}");
     tui.quit(WAIT);
 }
+
+// ── Installing a missing claude ──────────────────────────────────────────────
+
+/// A machine without claude gets it from the official installer at start
+/// (`[claude] install = "auto"`), and its sessions use it. The installer is
+/// faked and nothing real is reachable: `PATH` is one directory of the
+/// test's, with a fake `curl` (its script puts a fake claude in
+/// `~/.local/bin`, where the real installer puts claude) and links to the
+/// few system tools the run needs, and the login shell is a stand-in that
+/// only prints that `PATH`.
+#[test]
+fn test_missing_claude_is_installed_at_start() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::Path;
+    // The daemon also looks for claude in these: one there means this
+    // machine cannot play one without claude.
+    for dir in ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"] {
+        if Path::new(dir).join("claude").exists() {
+            eprintln!("skipped: {dir}/claude exists");
+            return;
+        }
+    }
+    let h = ManagerHarness::new();
+    fs::write(
+        h.config_home.join("claudio/config.toml"),
+        "[claude]\nupdate_check = \"off\"\nremote_check = \"off\"\ninstall = \"auto\"\n",
+    )
+    .unwrap();
+    let script = |path: &Path, text: &str| {
+        fs::write(path, text).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let bin = h.root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for tool in ["sh", "bash", "cat", "cp", "mkdir"] {
+        let real = ["/usr/bin", "/bin"]
+            .iter()
+            .map(|d| Path::new(d).join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("no {tool} in /usr/bin or /bin"));
+        symlink(real, bin.join(tool)).unwrap();
+    }
+    let fake = h.root.join("installed-claude");
+    script(
+        &fake,
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"--version\" ]; then echo '2.1.296 (Claude Code)'; exit 0; fi\n\
+         if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
+         echo \"FAKE_CLAUDE_BANNER args=$*\"\n\
+         exec cat\n",
+    );
+    let log = h.root.join("curl.log");
+    script(
+        &bin.join("curl"),
+        &format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{}'\n\
+             echo 'mkdir -p \"$HOME/.local/bin\" && cp \"{}\" \"$HOME/.local/bin/claude\"'\n\
+             echo 'echo claude installed'\n",
+            log.display(),
+            fake.display()
+        ),
+    );
+    // Run as `$SHELL -l -i -c <script>`: the script, without rc files.
+    let shell = h.root.join("login-shell");
+    script(
+        &shell,
+        "#!/bin/sh\nfor arg; do script=$arg; done\nexec /bin/sh -c \"$script\"\n",
+    );
+
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env_remove("CLAUDIO_CLAUDE_PATH");
+        cmd.env("PATH", &bin);
+        cmd.env("SHELL", &shell);
+    });
+    tui.wait_for(
+        "claude 2.1.296 installed on local; new sessions use it",
+        Region::Screen,
+        WAIT,
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "-fsSL https://claude.ai/install.sh\n"
+    );
+    assert!(h.home.join(".local/bin/claude").is_file());
+    // The wizard is open (no sessions yet); the session runs the new claude.
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    tui.quit(WAIT);
+}

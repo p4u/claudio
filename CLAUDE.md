@@ -141,7 +141,10 @@ daemons coexist.
 - `git.rs` — read-only git queries for the git viewer (log, commit, diff):
   bounded output, sanitized text, no textconv/ext-diff, repo env scrubbed.
 - `update.rs` — `claude update` (or the official installer) on request, in its
-  own process group, killed as a group on timeout.
+  own process group, killed as a group on timeout. The installer needs
+  `curl` and `bash` on `Config::path` and is refused when
+  `CLAUDIO_CLAUDE_PATH` names a path (the reply's tail says why, nothing
+  runs); a successful install calls `Manifests::forget_failures`.
 - `manifest.rs` — `Manifest` (a proxy plugin's manifest, parsed by
   `crate::plugins::manifest`): checks the op itself (name `[a-z0-9-]{1,40}`,
   64-hex hash, https, ≤ 64 secret names by `key_ok`, ≤ 256 disabled item
@@ -160,7 +163,11 @@ daemons coexist.
   each holding `Daemon::updating` (shared with `claude update`), stdin null,
   output capped, markers scrubbed, `GIT_TERMINAL_PROMPT=0`, own process
   group, 120 s. Outcomes are remembered per (hash, id): installed (daemon's
-  life), `needs manual install` (daemon's life), a failure (10 min).
+  life), `needs manual install` (daemon's life), a failure (retried after
+  15 s, doubling per failure in a row up to 300 s, reset by a success;
+  `forget_failures` drops them all; meanwhile the reason ends `(retrying
+  in N s)`, `proto::retrying`). Without a claude, `run_claude` fails at
+  once (`claude is not installed`), never taking the lock.
   `Daemon::claude_flags` (one `claude --help`) says whether claude knows
   `--plugin-dir`, `--agents`, `--mcp-config`; `command()` drops such a pair
   when it does not, and `Applied.dropped` names them. Stale zips of a
@@ -258,7 +265,12 @@ is idle (checked every 2 min).
   actions: search (`Msg::Search`, resume or switch) and snippets
   (`Effect::LoadSnippets`/`SaveSnippet`, `Msg::LastPrompt`).
 - `confirm.rs` — the generic confirm prompt (kill, reset, claude update).
-- `claude_update.rs` — local/remote claude version checks and updates.
+- `claude_update.rs` — local/remote claude version checks and updates, and
+  `[claude] install` (`auto` by default, `ask`, `off`): a host whose
+  `Welcome` has no claude, `local` included (`check_local_install`, also in
+  `--plain`, whose session waits for it), gets the installer once per run
+  (`claude_checked`). A successful install asks that host again for every
+  manifest (`reapply_host`).
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
   `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
@@ -281,7 +293,8 @@ is idle (checked every 2 min).
   plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
   KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
   each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
-  30 s while it lists `installing`, ≤ 10 min), and what a spawn gets
+  30 s while it lists `installing`, and a second after a `(retrying in N
+  s)` retry is due, no sooner than 30 s), and what a spawn gets
   (`compose`: per answered plugin, ≤ 8, `--agents` then `--mcp-config`
   after every other arg; env layers `[env]`, then the secrets, then the
   profile env; the instructions in `SessionExtensions.instructions`, cut at
@@ -415,8 +428,10 @@ Reasons name ids and fields, never values.
 - **Test fakes and the test config.** The daemon runs `claude --help` once to
   probe for flags, so fake claudes must ignore `--help` (and `--version`)
   without side effects. Every test claudio starts with `[claude]
-  update_check/remote_check = "off"`: the update prompts are modal and would
-  swallow the keys a test types.
+  update_check/remote_check/install = "off"`: the update prompts are modal
+  and would swallow the keys a test types, and an install would run the
+  installer (`test_missing_claude_is_installed_at_start` turns it on with a
+  fake `curl` and a `PATH` that reaches no real one).
 - **`app.rs` is pure; I/O is only in `tui/mod.rs`.** `App::update` takes
   events and returns `Effect` values. `mod.rs` drives the effects. Don't add
   I/O to `app.rs`.
