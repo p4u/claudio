@@ -203,6 +203,7 @@ impl App {
                 self.queue_setup(setup);
             }
             None => {}
+            Some(_) if !self.plugin_enabled(name) => {}
             Some(choices) => {
                 let new: Vec<String> = m
                     .ids()
@@ -658,6 +659,24 @@ prompt = "Review."
         app.notice = None;
         app.on_manifest("team", &sha(), Ok(team()));
         assert!(app.notice.is_none(), "once per manifest");
+    }
+
+    #[test]
+    fn a_plugin_turned_off_gets_no_new_items_notice() {
+        let mut app = app_serving(&["team"]);
+        app.plugins.choices.insert(
+            "team".into(),
+            PluginChoices {
+                disabled: vec![],
+                reviewed: "0.9".into(),
+                seen: vec!["plugin:a@m".to_owned()],
+            },
+        );
+        app.plugins.config.insert("team".into(), false);
+        app.list_plugins();
+        app.on_manifest("team", &sha(), Ok(team()));
+        assert!(app.notice.is_none(), "off: nothing to review");
+        assert!(app.modal.is_none(), "off: no screen");
     }
 
     #[test]

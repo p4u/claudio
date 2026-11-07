@@ -82,7 +82,7 @@ pub enum Source {
     BuiltIn,
     /// A program the extension host runs.
     External(manifest::Program),
-    /// A proxy plugin of `profile`: a bundle claude loads, and env. No
+    /// A proxy plugin of `profile`: a manifest its sessions get, and env. No
     /// lenses or actions. `refused` says why it is not used, if it is not.
     Plugin {
         profile: String,

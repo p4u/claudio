@@ -1631,9 +1631,9 @@ fn run_effect(
 }
 
 /// How long a spawn waits for a host to answer its plugin manifests.
-pub(super) const BUNDLE_WAIT: Duration = Duration::from_secs(20);
+pub(super) const MANIFEST_WAIT: Duration = Duration::from_secs(20);
 
-/// Ask `client` for each of `pending` and wait up to [`BUNDLE_WAIT`]: the
+/// Ask `client` for each of `pending` and wait up to [`MANIFEST_WAIT`]: the
 /// answers that came back (`Applied`, by plugin name), and the names of
 /// those that did not (late, failed, or no client). Every answer, even a
 /// late one, also goes to `App` through `tx`.
@@ -1647,7 +1647,7 @@ async fn wait_manifests(
 ) {
     let mut ready = std::collections::HashMap::new();
     let mut left_out = Vec::new();
-    let deadline = tokio::time::Instant::now() + BUNDLE_WAIT;
+    let deadline = tokio::time::Instant::now() + MANIFEST_WAIT;
     let mut waiting = Vec::new();
     for m in pending {
         let Some(client) = client else {

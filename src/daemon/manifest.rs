@@ -599,7 +599,7 @@ async fn run_claude(daemon: &Daemon, args: &[&str]) -> Outcome {
         cmd.env("PATH", path);
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "/bin/true");
+        .env("GIT_ASKPASS", "/usr/bin/true");
     let spawned = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

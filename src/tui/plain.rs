@@ -57,7 +57,7 @@ impl App {
             .proxy_override
             .pick(self.proxy_default.as_deref())
             .map(str::to_owned);
-        let deadline = self.now + super::BUNDLE_WAIT.as_secs();
+        let deadline = self.now + super::MANIFEST_WAIT.as_secs();
         self.plain_pending = Some((start, proxy, deadline));
         self.plain_try_start();
     }

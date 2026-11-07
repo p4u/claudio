@@ -284,7 +284,7 @@ marketplace add <source> --scope user --json` or `claude plugin install
 <name>@<marketplace> --scope user --json`, the daemon's claude on
 `Config::path`, stdin `/dev/null`, stdout and stderr piped and capped at 64
 KiB each, env: the daemon's with the session markers scrubbed,
-`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/bin/true`; own process group, 120 s,
+`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/usr/bin/true`; own process group, 120 s,
 killed as a group on timeout. The outcome is the last stdout line parsed as
 JSON: a `shownCommand` → `needs manual install: claude plugin install <id>`;
 a non-zero exit or an `error` field → that message (first 200 chars); after a
