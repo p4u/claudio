@@ -259,6 +259,14 @@ mod tests {
         );
         assert_eq!(spawns(&mut app), 0);
 
+        let mut app = new(UpdatePolicy::Auto);
+        let busy = std::io::Error::other(crate::proto::UPDATE_BUSY);
+        app.on_reply(ReplyTo::ClaudeUpdate("local".into()), Err(busy));
+        assert!(!app.quit, "another client is installing");
+        assert!(app.claude_install_pending("local"));
+        app.on_tick();
+        assert_eq!(spawns(&mut app), 0, "still installing");
+
         let mut app = new(UpdatePolicy::Ask);
         assert!(matches!(app.modal, Some(Modal::Confirm(_))));
         for _ in 0..4 {

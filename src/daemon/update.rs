@@ -3,8 +3,9 @@
 //!
 //! The installer needs `curl` and `bash` on the daemon's `PATH` (Linux and
 //! macOS have both as a rule); without one, or with `CLAUDIO_CLAUDE_PATH`
-//! naming a path (the installer does not write there), the reply says why
-//! and nothing runs. After an install, the plugin installs that failed are
+//! naming a path (the installer does not write there), or with a claude
+//! already there that did not answer `--version`, the reply says why and
+//! nothing runs. After an install, the plugin installs that failed are
 //! tried again at once (`Manifests::forget_failures`).
 //!
 //! The command runs as a task of its own, never inline in a client loop (the
@@ -23,7 +24,7 @@ use tokio::process::{Child, Command};
 
 use super::Daemon;
 use crate::claude::SESSION_MARKERS;
-use crate::proto::Msg;
+use crate::proto::{Msg, UPDATE_BUSY};
 use crate::term::strip_escapes;
 
 /// How long the update may run.
@@ -56,10 +57,23 @@ pub async fn run(daemon: &Daemon, install: bool) -> Msg {
                 tail: why,
             };
         }
+        // `Welcome` says "no claude" also when one is there but `--version`
+        // failed or timed out: never install over it.
+        let bin = daemon.config.claude_bin();
+        if bin.is_file() {
+            return Msg::ClaudeUpdated {
+                version: None,
+                ok: false,
+                tail: format!(
+                    "claude is at {} but did not answer --version: not installing over it",
+                    bin.display()
+                ),
+            };
+        }
     }
     let Ok(_running) = daemon.updating.try_lock() else {
         return Msg::Error {
-            message: "a claude update or plugin install is already running on this host".into(),
+            message: UPDATE_BUSY.into(),
         };
     };
     let claude = daemon.config.claude_bin();

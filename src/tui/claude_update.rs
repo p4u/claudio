@@ -12,7 +12,7 @@ use std::io;
 
 use crate::claude::update::{decide, needs_update, short, Decision};
 use crate::config::UpdatePolicy;
-use crate::proto::Msg;
+use crate::proto::{Msg, UPDATE_BUSY};
 
 use super::app::{App, ReplyTo};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt, Queued, Skip};
@@ -128,6 +128,13 @@ impl App {
     /// The outcome of [`App::start_claude_update`].
     pub(super) fn on_claude_updated(&mut self, host: &str, reply: io::Result<Msg>) {
         let install = self.claude_installing.remove(host);
+        // Another client of this host is installing: ours is not a failure,
+        // and a later reply or re-check settles the host.
+        if install && matches!(&reply, Err(e) if e.to_string() == UPDATE_BUSY) {
+            self.claude_installing.insert(host.to_owned());
+            self.notify(format!("claude install already running on {host}"));
+            return;
+        }
         let what = if install { "install" } else { "update" };
         let failure = match reply {
             Ok(Msg::ClaudeUpdated {
@@ -608,5 +615,16 @@ mod tests {
             "claude install failed on devbox: claude installer needs curl"
         );
         assert!(!app.quit, "only --plain leaves");
+    }
+
+    #[test]
+    fn a_running_install_is_not_a_failure() {
+        let mut app = App::new(test_support::config());
+        app.check_remote_claude("devbox", None);
+        let busy = io::Error::other(UPDATE_BUSY);
+        app.on_reply(ReplyTo::ClaudeUpdate("devbox".into()), Err(busy));
+        assert_eq!(notice(&app), "claude install already running on devbox");
+        assert!(app.claude_install_pending("devbox"));
+        assert!(!app.quit);
     }
 }

@@ -2751,6 +2751,33 @@ async fn install_says_why_it_cannot_run() {
     }
 }
 
+/// A claude that is there but does not answer `--version` (as `Welcome`
+/// sees on a slow box) is never installed over: no `curl` runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_never_runs_over_a_present_claude() {
+    let tools = fake_installer_dir();
+    let h = PluginHost::start_with(|ctl| {
+        let present = ctl.parent().unwrap().join("present");
+        std::fs::create_dir_all(&present).unwrap();
+        let bin = present.join(LATE_CLAUDE);
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let exec = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&bin, exec).unwrap();
+        let (c, t, p) = (ctl.display(), tools.display(), present.display());
+        let path = format!("{c}:{t}:{p}");
+        (PathBuf::from(LATE_CLAUDE), path)
+    })
+    .await;
+    let mut c = h.d.client().await;
+    match c.call(Msg::UpdateClaude { install: true }).await {
+        Msg::ClaudeUpdated {
+            ok: false, tail, ..
+        } => assert!(tail.starts_with("claude is at "), "{tail}"),
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
+    assert!(h.log().is_empty(), "{:?}", h.log());
+}
+
 /// The fake's `--help` lists the flags: nothing is dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn applied_names_the_flags_this_claude_lacks() {

@@ -460,6 +460,10 @@ pub struct Applied {
     pub dropped: Vec<String>,
 }
 
+/// The daemon's error for a claude update or install asked while another
+/// (or a plugin install) runs on the host.
+pub const UPDATE_BUSY: &str = "a claude update or plugin install is already running on this host";
+
 /// The reason in [`Applied::skipped`] of a failed plugin install the daemon
 /// tries again in `secs` seconds.
 pub fn retrying(why: &str, secs: u64) -> String {
