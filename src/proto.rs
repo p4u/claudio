@@ -466,6 +466,12 @@ pub fn retrying(why: &str, secs: u64) -> String {
     format!("{why} (retrying in {secs} s)")
 }
 
+/// The seconds of a [`retrying`] reason.
+pub fn retry_secs(reason: &str) -> Option<u64> {
+    let (_, secs) = reason.strip_suffix(" s)")?.rsplit_once(" (retrying in ")?;
+    secs.parse().ok()
+}
+
 /// The lenses of a claude session, in the client's registry order, and
 /// the proxy plugins' instructions. The daemon checks the caps
 /// ([`SessionExtensions::validate`]), writes the instructions to the
@@ -1223,6 +1229,21 @@ mod tests {
         let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         assert_eq!(len, bytes.len() - 4);
         Frame::decode(&bytes[4..]).unwrap()
+    }
+
+    #[test]
+    fn a_retrying_reason_carries_its_seconds() {
+        let why = retrying("marketplace m: down (503)", 15);
+        assert_eq!(why, "marketplace m: down (503) (retrying in 15 s)");
+        assert_eq!(retry_secs(&why), Some(15));
+        for other in [
+            "installing",
+            "network down",
+            "x (retrying in s)",
+            "(retrying in 5 s",
+        ] {
+            assert_eq!(retry_secs(other), None, "{other}");
+        }
     }
 
     #[test]

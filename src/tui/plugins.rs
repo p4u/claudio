@@ -8,14 +8,15 @@
 //! runs. The registry lists the plugins (`Source::Plugin`) so the
 //! extensions screen shows and toggles them; turning one off is saved as
 //! `[extensions] <name> = false` and applies to new sessions only. A host
-//! is asked on connect, when the list's hash changes, on `r`, and every
-//! 30 s while it still installs.
+//! is asked on connect, when the list's hash changes, on `r`, once claude
+//! is installed there, every 30 s while it still installs, and when a
+//! failed install's retry is due.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
-use crate::proto::{Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
+use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
 use crate::proxy::env::merge;
 use crate::proxy::plugins::{Plugin, PluginList};
 
@@ -82,9 +83,8 @@ pub struct Apply {
     /// The manifest hash asked for.
     pub sha: String,
     pub state: ApplyState,
-    /// When it was last asked, and first asked at this hash (Unix seconds).
+    /// When it was last asked (Unix seconds).
     pub asked: u64,
-    pub since: u64,
 }
 
 /// The client's plugin state.
@@ -161,9 +161,9 @@ impl std::fmt::Debug for Composed {
 pub const MAX_SPAWN_PLUGINS: usize = 8;
 
 /// While a host still installs a manifest's plugins it is asked again this
-/// often (seconds), for at most [`REASK_FOR`] after the first ask.
+/// often (seconds); while it waits to retry one, when that is due (and no
+/// sooner than this).
 pub const REASK_EVERY: u64 = 30;
-pub const REASK_FOR: u64 = 10 * 60;
 
 /// The plugins' share of a spawn, from `parts` in registry order: for each
 /// plugin the host answered for (at most [`MAX_SPAWN_PLUGINS`]), its
@@ -424,7 +424,6 @@ impl App {
                 sha: p.bundle_sha256.clone(),
                 state: ApplyState::Pending,
                 asked: now,
-                since: now,
             },
         };
         self.plugins.applies.insert(key, apply);
@@ -455,8 +454,9 @@ impl App {
         }
     }
 
-    /// Ask again, every [`REASK_EVERY`] s, a host whose answer still lists
-    /// an install under way, for [`REASK_FOR`] after the first ask.
+    /// Ask again a host whose answer still lists an install under way
+    /// (every [`REASK_EVERY`] s) or a failed one to retry (once it is due).
+    /// The daemon's backoff, up to 5 min, paces a lasting failure.
     pub(super) fn reask_installing(&mut self) {
         let now = self.now;
         let due: Vec<(String, String)> = self
@@ -464,15 +464,11 @@ impl App {
             .applies
             .iter()
             .filter(|(_, a)| {
-                let installing = match &a.state {
-                    ApplyState::Ready(applied) => {
-                        applied.skipped.iter().any(|(_, why)| why == INSTALLING)
-                    }
-                    _ => false,
+                let after = match &a.state {
+                    ApplyState::Ready(applied) => reask_after(applied),
+                    _ => None,
                 };
-                installing
-                    && now.saturating_sub(a.asked) >= REASK_EVERY
-                    && now.saturating_sub(a.since) <= REASK_FOR
+                after.is_some_and(|after| now.saturating_sub(a.asked) >= after)
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -485,6 +481,23 @@ impl App {
             if let Some(p) = plugin.filter(|p| self.requestable(p)) {
                 self.ask(&host, &p);
             }
+        }
+    }
+
+    /// Claude was just installed on `host`: ask it again for every enabled
+    /// manifest, answered or not, so the installs that failed without it
+    /// run now. An answer stays until the new one comes.
+    pub(super) fn reapply_host(&mut self, host: &str) {
+        if !self.plugins.hosts.contains(host) {
+            return;
+        }
+        let names: Vec<String> = self
+            .all_enabled_plugins()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for name in names {
+            self.request_manifests(host, Some(&name));
         }
     }
 
@@ -673,6 +686,20 @@ impl App {
         }
         profiles
     }
+}
+
+/// How long after its last ask a host that answered `a` is asked again, if
+/// it is: [`REASK_EVERY`] while a plugin installs, else a second after the
+/// soonest retry (no sooner than [`REASK_EVERY`]).
+fn reask_after(a: &Applied) -> Option<u64> {
+    a.skipped
+        .iter()
+        .filter_map(|(_, why)| match why.as_str() {
+            INSTALLING => Some(0),
+            why => retry_secs(why).map(|secs| secs + 1),
+        })
+        .min()
+        .map(|secs| secs.max(REASK_EVERY))
 }
 
 /// The extensions screen's lines for `host`'s answer `a`: the counts, one
@@ -927,9 +954,13 @@ KB_REGION = "eu"
     }
 
     #[test]
-    fn a_host_still_installing_is_asked_again_every_30_s_for_10_minutes() {
-        let mut installing = applied("kb");
-        installing.skipped = vec![("plugin:p@m".into(), "installing".into())];
+    fn a_host_is_asked_again_while_it_installs_or_until_a_retry_is_due() {
+        let answer = |why: &str| {
+            let mut a = applied("kb");
+            a.skipped = vec![("plugin:p@m".into(), why.into())];
+            a
+        };
+        let installing = answer("installing");
         let mut app = app_with(&[]);
         app.now = 1000;
         app.plugins
@@ -954,15 +985,83 @@ KB_REGION = "eu"
             app.apply_state("local", "kb"),
             Some(&ApplyState::Ready(Box::new(installing.clone())))
         );
+        // As long as it installs.
         app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(installing)));
-        app.now = 1000 + 601;
+        app.now = 1030 + 30 * 60;
         app.reask_installing();
-        assert!(asked(&mut app).is_empty(), "10 minutes at most");
-        // Done installing: no more asking.
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(applied("kb"))));
-        app.now = 1030;
+        assert_eq!(asked(&mut app), [pair("local", "kb")]);
+
+        // A failed install: a second after its retry is due...
+        let asked_at = app.now;
+        let later = answer("network down (retrying in 120 s)");
+        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(later)));
+        app.now = asked_at + 120;
         app.reask_installing();
         assert!(asked(&mut app).is_empty());
+        app.now = asked_at + 121;
+        app.reask_installing();
+        assert_eq!(asked(&mut app), [pair("local", "kb")]);
+        // ...and no sooner than 30 s.
+        let asked_at = app.now;
+        let soon = answer("network down (retrying in 5 s)");
+        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(soon)));
+        app.now = asked_at + 29;
+        app.reask_installing();
+        assert!(asked(&mut app).is_empty());
+        app.now = asked_at + 30;
+        app.reask_installing();
+        assert_eq!(asked(&mut app), [pair("local", "kb")]);
+
+        // Installed, or waiting for a person: no more asking.
+        for settled in [
+            applied("kb"),
+            answer("needs manual install: claude plugin install p@m"),
+        ] {
+            app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(settled)));
+            app.now += 3600;
+            app.reask_installing();
+            assert!(asked(&mut app).is_empty());
+        }
+    }
+
+    #[test]
+    fn claude_installed_on_a_host_asks_it_again_for_every_manifest() {
+        let mut app = app_with(&[]);
+        app.plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
+        app.on_plugin_host("local");
+        app.on_plugin_host("devbox");
+        app.on_plugins(
+            "work",
+            PluginsFetch::Listed(list("work", vec![sample("kb")])),
+        );
+        app.on_manifest("kb", &sha(), Ok(manifest_of("kb")));
+        for host in ["local", "devbox"] {
+            app.on_applied(host, "kb", &sha(), Ok(Msg::Applied(applied("kb"))));
+        }
+        app.take_effects();
+        let reply = |app: &mut App, install: bool, ok: bool| {
+            app.start_claude_update("devbox", install);
+            let msg = Msg::ClaudeUpdated {
+                version: ok.then(|| "2.1.296 (Claude Code)".to_owned()),
+                ok,
+                tail: "claude installer needs curl".into(),
+            };
+            app.on_reply(ReplyTo::ClaudeUpdate("devbox".into()), Ok(msg));
+        };
+
+        reply(&mut app, true, false);
+        assert!(asked(&mut app).is_empty(), "the install failed");
+        reply(&mut app, true, true);
+        assert_eq!(asked(&mut app), [pair("devbox", "kb")]);
+        assert_eq!(
+            app.apply_state("devbox", "kb"),
+            Some(&ApplyState::Ready(Box::new(applied("kb")))),
+            "the answer stays until the new one comes"
+        );
+        reply(&mut app, false, true);
+        assert!(asked(&mut app).is_empty(), "an update is not an install");
     }
 
     fn part(name: &str, ready: bool, secrets: &[(&str, &str)]) -> PluginPart {

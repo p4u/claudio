@@ -144,6 +144,9 @@ impl App {
                 if host == "local" {
                     self.local_claude = Some(version);
                 }
+                if install {
+                    self.reapply_host(host);
+                }
                 return;
             }
             Ok(Msg::ClaudeUpdated { tail, .. }) => {
