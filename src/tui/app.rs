@@ -355,6 +355,8 @@ pub struct App {
     pub claude_skipped: HashMap<String, String>,
     /// Hosts whose claude was already checked in this run.
     pub(super) claude_checked: HashSet<String>,
+    /// Hosts where an install of claude is under way.
+    pub(super) claude_installing: HashSet<String>,
     /// Prompts and plugin setup screens waiting for the open modal to close.
     pub(super) confirms: VecDeque<super::confirm::Queued>,
     /// The SSH hosts the wizard offers: recently used ones, then
@@ -466,6 +468,7 @@ impl App {
             local_claude: cfg.local_claude,
             claude_skipped: cfg.claude_skipped,
             claude_checked: HashSet::new(),
+            claude_installing: HashSet::new(),
             confirms: VecDeque::new(),
             ssh_hosts: cfg.ssh_hosts,
             modal_gen: 0,

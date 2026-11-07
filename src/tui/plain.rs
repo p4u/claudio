@@ -194,6 +194,82 @@ mod tests {
         assert!(app.modal.is_none(), "no wizard");
     }
 
+    /// No claude here: the session waits for its install (or the answer to
+    /// the question), and a failed install ends the UI with the reason.
+    #[test]
+    fn waits_for_the_claude_install_and_leaves_if_it_fails() {
+        use crate::config::UpdatePolicy;
+        use crate::tui::test_support::press;
+        use crossterm::event::KeyCode;
+        let new = |install: UpdatePolicy| {
+            let mut notices = Vec::new();
+            let mut app = App::new(AppConfig {
+                mode: Mode::Plain,
+                keymap: Keymap::build_plain(&Default::default(), &mut notices),
+                notify: false,
+                proxy_override: ProxyChoice::Direct,
+                ..test_support::config()
+            });
+            app.claude_policy.install = install;
+            app.check_local_install();
+            app.start_plain(PlainStart {
+                id: Uuid::new_v4(),
+                args: Vec::new(),
+                cwd: "/work".into(),
+            });
+            app
+        };
+        let spawns = |app: &mut App| {
+            app.take_effects()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::Request {
+                            msg: Msg::Spawn(_),
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        let reply = |app: &mut App, ok: bool, tail: &str| {
+            let msg = Msg::ClaudeUpdated {
+                version: ok.then(|| "2.1.296 (Claude Code)".to_owned()),
+                ok,
+                tail: tail.to_owned(),
+            };
+            app.on_reply(ReplyTo::ClaudeUpdate("local".into()), Ok(msg));
+        };
+
+        let mut app = new(UpdatePolicy::Auto);
+        assert_eq!(spawns(&mut app), 0);
+        app.on_tick();
+        assert_eq!(spawns(&mut app), 0, "still installing");
+        reply(&mut app, true, "");
+        app.on_tick();
+        assert_eq!(spawns(&mut app), 1);
+
+        let mut app = new(UpdatePolicy::Auto);
+        reply(&mut app, false, "claude installer needs curl");
+        assert!(app.quit);
+        assert_eq!(
+            app.exit.message.as_deref(),
+            Some("claude install failed on local: claude installer needs curl")
+        );
+        assert_eq!(spawns(&mut app), 0);
+
+        let mut app = new(UpdatePolicy::Ask);
+        assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+        for _ in 0..4 {
+            app.on_tick();
+        }
+        assert_eq!(spawns(&mut app), 0, "the question waits");
+        app.on_terminal(press(KeyCode::Char('n')));
+        app.on_tick();
+        assert_eq!(spawns(&mut app), 1);
+    }
+
     #[test]
     fn renders_the_pane_full_screen_without_tab_or_status_bar() {
         let (mut app, id) = plain_app(&[]);

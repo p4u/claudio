@@ -58,15 +58,14 @@ pub enum Decision {
     Run,
 }
 
-/// Apply `policy`. `skipped` is the user's "skip this version" for this host.
-/// Installing claude where it is missing always needs a `y`, even under
-/// `auto`.
-pub fn decide(policy: UpdatePolicy, install: bool, skipped: bool) -> Decision {
+/// Apply `policy` (`update_check`, `remote_check` or `install`). `skipped`
+/// is the user's "skip this version" for this host; an install has none.
+pub fn decide(policy: UpdatePolicy, skipped: bool) -> Decision {
     match policy {
         UpdatePolicy::Off => Decision::Nothing,
-        UpdatePolicy::Auto if !install => Decision::Run,
-        UpdatePolicy::Auto | UpdatePolicy::Ask if skipped => Decision::Nothing,
-        UpdatePolicy::Auto | UpdatePolicy::Ask => Decision::Ask,
+        UpdatePolicy::Auto => Decision::Run,
+        UpdatePolicy::Ask if skipped => Decision::Nothing,
+        UpdatePolicy::Ask => Decision::Ask,
     }
 }
 
@@ -203,16 +202,12 @@ mod tests {
     fn policy_decides_prompt_update_or_nothing() {
         use Decision as D;
         use UpdatePolicy as P;
-        assert_eq!(decide(P::Ask, false, false), D::Ask);
-        assert_eq!(decide(P::Ask, false, true), D::Nothing, "skipped version");
-        assert_eq!(decide(P::Auto, false, false), D::Run);
-        assert_eq!(decide(P::Auto, false, true), D::Run, "auto ignores skips");
-        assert_eq!(decide(P::Off, false, false), D::Nothing);
-        assert_eq!(decide(P::Off, true, false), D::Nothing);
-        // Installing needs consent even under auto.
-        assert_eq!(decide(P::Auto, true, false), D::Ask);
-        assert_eq!(decide(P::Auto, true, true), D::Nothing);
-        assert_eq!(decide(P::Ask, true, false), D::Ask);
+        assert_eq!(decide(P::Ask, false), D::Ask);
+        assert_eq!(decide(P::Ask, true), D::Nothing, "skipped version");
+        assert_eq!(decide(P::Auto, false), D::Run);
+        assert_eq!(decide(P::Auto, true), D::Run, "auto ignores skips");
+        assert_eq!(decide(P::Off, false), D::Nothing);
+        assert_eq!(decide(P::Off, true), D::Nothing);
     }
 
     #[test]

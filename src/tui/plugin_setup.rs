@@ -373,6 +373,10 @@ impl App {
         if self.mode != Mode::Plain {
             return;
         }
+        // No claude here: its install (or the question) comes first.
+        if self.claude_install_pending("local") {
+            return;
+        }
         if let Some(profile) = profile {
             if self.plain_waits(&profile, deadline) {
                 return;

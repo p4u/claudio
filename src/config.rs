@@ -13,6 +13,7 @@
 //! allow_skip_permissions = true   # pass --allow-dangerously-skip-permissions
 //! update_check = "ask"            # local claude vs its release channel
 //! remote_check = "ask"            # remote claude vs the local version
+//! install = "auto"                # claude where a host has none
 //! latex = true                    # ask claude to wrap math in <latex> tags
 //!                                 # (read at daemon start: `claudio daemon restart`)
 //!
@@ -83,7 +84,8 @@ impl Default for UpdateSection {
     }
 }
 
-/// What to do when a claude install is out of date.
+/// What to do about a claude that is out of date (or, for `install`,
+/// missing).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdatePolicy {
@@ -110,6 +112,11 @@ pub struct ClaudeSection {
     /// Compare a remote host's claude with the local version on connect.
     #[serde(default)]
     pub remote_check: UpdatePolicy,
+    /// Install claude with the official installer on a host that has none
+    /// (this machine or an SSH host): without asking (`auto`, the default),
+    /// after a `y` (`ask`), or never (`off`).
+    #[serde(default = "default_install")]
+    pub install: UpdatePolicy,
     /// Tell every claude session this host's daemon starts to wrap math in
     /// `<latex>…</latex>`, which the manager renders. On unless turned off.
     /// Read when the daemon starts, from the config of the host that runs
@@ -122,12 +129,17 @@ fn default_true() -> bool {
     true
 }
 
+fn default_install() -> UpdatePolicy {
+    UpdatePolicy::Auto
+}
+
 impl Default for ClaudeSection {
     fn default() -> Self {
         ClaudeSection {
             allow_skip_permissions: true,
             update_check: UpdatePolicy::Ask,
             remote_check: UpdatePolicy::Ask,
+            install: UpdatePolicy::Auto,
             latex: true,
         }
     }
@@ -643,6 +655,7 @@ mod tests {
         assert!(cfg.keys.is_empty());
         assert!(cfg.claude.allow_skip_permissions);
         assert_eq!(cfg.claude.update_check, UpdatePolicy::Ask);
+        assert_eq!(cfg.claude.install, UpdatePolicy::Auto);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -653,13 +666,14 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[claude]\nallow_skip_permissions = false\nupdate_check = \"auto\"\nremote_check = \"off\"\n",
+            "[claude]\nallow_skip_permissions = false\nupdate_check = \"auto\"\nremote_check = \"off\"\ninstall = \"ask\"\n",
         )
         .unwrap();
         let cfg = load_from(&path);
         assert!(!cfg.claude.allow_skip_permissions);
         assert_eq!(cfg.claude.update_check, UpdatePolicy::Auto);
         assert_eq!(cfg.claude.remote_check, UpdatePolicy::Off);
+        assert_eq!(cfg.claude.install, UpdatePolicy::Ask);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -674,6 +688,7 @@ mod tests {
         // The other keys keep their defaults.
         assert!(claude.allow_skip_permissions);
         assert_eq!(claude.update_check, UpdatePolicy::Ask);
+        assert_eq!(claude.install, UpdatePolicy::Auto);
     }
 
     #[test]

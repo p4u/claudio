@@ -334,6 +334,7 @@ async fn main(launch: Launch) -> ExitCode {
     );
     app.set_host_features("local", &local_features);
     app.on_plugin_host("local");
+    app.check_local_install();
     let start = match plain {
         Some(start) => Start::Plain(start),
         None => Start::Manager { saved, live },
@@ -1164,6 +1165,7 @@ async fn event_loop(
                     app.set_host_features("local", &client.welcome().features);
                     conns.connected("local", client);
                     app.on_plugin_host("local");
+                    app.check_local_install();
                     app.on_reconnected_local(&sessions, home);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
