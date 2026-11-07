@@ -208,6 +208,12 @@ impl Manifests {
         !self.memory().queues.is_empty()
     }
 
+    /// Forget every failed install, so the next request tries each at once:
+    /// claude was just installed on this host. Manual installs stay.
+    pub(crate) fn forget_failures(&self) {
+        self.memory().failed.clear();
+    }
+
     /// Move this daemon's clock forward by `by`.
     #[cfg(test)]
     pub(crate) fn advance(&self, by: Duration) {
@@ -620,9 +626,15 @@ async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
 /// Run `claude <args>` while holding `Daemon::updating`: the daemon's
 /// claude on its `PATH`, stdin `/dev/null`, the session markers scrubbed,
 /// git never prompting, in a process group of its own killed on timeout.
+/// Without a claude it fails at once, never holding the lock the install
+/// of claude takes.
 async fn run_claude(daemon: &Daemon, args: &[&str]) -> Outcome {
+    let claude = daemon.config.claude_bin();
+    if !claude.is_file() {
+        return Outcome::Failed("claude is not installed".to_owned());
+    }
     let _held = daemon.updating.lock().await;
-    let mut cmd = Command::new(daemon.config.claude_bin());
+    let mut cmd = Command::new(claude);
     cmd.args(args);
     for marker in SESSION_MARKERS {
         cmd.env_remove(marker);

@@ -1,12 +1,19 @@
 //! `UpdateClaude`: run `claude update` (or the official installer when claude
 //! is missing) on this host, then re-probe `claude --version`.
 //!
+//! The installer needs `curl` and `bash` on the daemon's `PATH` (Linux and
+//! macOS have both as a rule); without one, or with `CLAUDIO_CLAUDE_PATH`
+//! naming a path (the installer does not write there), the reply says why
+//! and nothing runs. After an install, the plugin installs that failed are
+//! tried again at once (`Manifests::forget_failures`).
+//!
 //! The command runs as a task of its own, never inline in a client loop (the
 //! reply is queued like `Attach`'s), under a deadline and with its output
 //! bounded to the last few KiB. Running sessions are never touched: they keep
 //! the binary they started with, new ones pick up the new one.
 
 use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -28,13 +35,28 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Output kept, counted from the end.
 const TAIL_BYTES: usize = 4096;
 
-/// Anthropic's official installer. Only ever run after an explicit `y`.
+/// Anthropic's official installer, run where claude is missing (as
+/// `[claude] install` says: at once, after a `y`, or never).
 const INSTALLER: &str = "{ curl -fsSL https://claude.ai/install.sh | bash; } 2>&1";
 
 /// Run the update (or the install) and answer `ClaudeUpdated`. Only one runs
 /// at a time per daemon, and never beside a plugin install (which waits
 /// for the same lock).
 pub async fn run(daemon: &Daemon, install: bool) -> Msg {
+    if install {
+        let path = daemon
+            .config
+            .path
+            .clone()
+            .or_else(|| std::env::var_os("PATH"));
+        if let Some(why) = cannot_install(&daemon.config.claude, path.as_deref()) {
+            return Msg::ClaudeUpdated {
+                version: None,
+                ok: false,
+                tail: why,
+            };
+        }
+    }
     let Ok(_running) = daemon.updating.try_lock() else {
         return Msg::Error {
             message: "a claude update or plugin install is already running on this host".into(),
@@ -46,11 +68,37 @@ pub async fn run(daemon: &Daemon, install: bool) -> Msg {
         Ok(done) => done,
         Err(e) => (false, e),
     };
-    Msg::ClaudeUpdated {
-        version: daemon.refresh_host().await.claude.map(|c| c.version),
-        ok,
-        tail,
+    let version = daemon.refresh_host().await.claude.map(|c| c.version);
+    if install && ok && version.is_some() {
+        // Plugin installs that failed for want of claude go at once.
+        daemon.manifests.forget_failures();
     }
+    Msg::ClaudeUpdated { version, ok, tail }
+}
+
+/// Why the installer cannot run on this host: `claude` (the daemon's
+/// setting) is a path, so `CLAUDIO_CLAUDE_PATH` pins one the installer
+/// does not write; or `curl` or `bash` is not on `path`.
+fn cannot_install(claude: &Path, path: Option<&OsStr>) -> Option<String> {
+    if claude.components().count() > 1 {
+        return Some(format!(
+            "CLAUDIO_CLAUDE_PATH is {}, which the installer does not write: install claude there",
+            claude.display()
+        ));
+    }
+    ["curl", "bash"]
+        .into_iter()
+        .find(|tool| !on_path(tool, path))
+        .map(|tool| format!("claude installer needs {tool}"))
+}
+
+/// Whether an executable `name` is in one of `path`'s directories.
+fn on_path(name: &str, path: Option<&OsStr>) -> bool {
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .filter_map(|dir| std::fs::metadata(dir.join(name)).ok())
+        .any(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// `(succeeded, output tail)`, or a description of why it could not run.
@@ -147,6 +195,47 @@ fn printable(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_installer_needs_curl_and_bash_and_no_pinned_claude() {
+        let dir = std::env::temp_dir().join(format!("claudio-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = |name: &str, mode: u32| {
+            std::fs::write(dir.join(name), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+        let claude = Path::new("claude");
+        let path = std::env::join_paths([Path::new("relative"), &dir]).unwrap();
+        tool("bash", 0o755);
+        assert_eq!(
+            cannot_install(claude, Some(&path)).as_deref(),
+            Some("claude installer needs curl")
+        );
+        tool("curl", 0o644);
+        assert_eq!(
+            cannot_install(claude, Some(&path)).as_deref(),
+            Some("claude installer needs curl"),
+            "not executable"
+        );
+        tool("curl", 0o755);
+        assert_eq!(cannot_install(claude, Some(&path)), None);
+        std::fs::remove_file(dir.join("bash")).unwrap();
+        assert_eq!(
+            cannot_install(claude, Some(&path)).as_deref(),
+            Some("claude installer needs bash")
+        );
+        assert_eq!(
+            cannot_install(claude, None).as_deref(),
+            Some("claude installer needs curl")
+        );
+        let pinned = cannot_install(Path::new("/opt/claude/bin/claude"), Some(&path));
+        assert_eq!(
+            pinned.as_deref(),
+            Some("CLAUDIO_CLAUDE_PATH is /opt/claude/bin/claude, which the installer does not write: install claude there")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn output_is_stripped_of_escapes_and_control_characters() {

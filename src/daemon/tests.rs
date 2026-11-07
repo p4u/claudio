@@ -2152,6 +2152,47 @@ echo '{"ok":true}'
     })
 }
 
+/// The name of a claude that is installed only during the test (never a
+/// real one: no such file in any directory claude is looked up in).
+const LATE_CLAUDE: &str = "claude-late";
+
+/// A directory for a `PATH` with claude's official installer faked, shared
+/// (written once): `sh`, `bash`, `cat`, `cp`, `mkdir` and `sleep` link to
+/// the system's, and `curl` logs its arguments to `<ctl>/log` (`<ctl>`:
+/// the `PATH`'s first entry) and prints a script that copies the fake
+/// plugin claude to `<ctl>/claude-late`. No real `curl` is on such a
+/// `PATH`, so the real installer can never run.
+fn fake_installer_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("claudio-fake-installer-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["sh", "bash", "cat", "cp", "mkdir", "sleep"] {
+            let real = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|d| Path::new(d).join(tool))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| panic!("no {tool} in /usr/bin or /bin"));
+            std::os::unix::fs::symlink(real, dir.join(tool)).unwrap();
+        }
+        let script = format!(
+            "#!/bin/sh\n\
+             ctl=\"${{PATH%%:*}}\"\n\
+             echo \"curl $*\" >> \"$ctl/log\"\n\
+             echo \"cp '{}' '$ctl/{LATE_CLAUDE}'\"\n\
+             echo 'echo claude installed'\n",
+            fake_plugin_claude().display()
+        );
+        std::fs::write(dir.join("curl"), script).unwrap();
+        std::fs::set_permissions(
+            dir.join("curl"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        dir
+    })
+}
+
 /// A `Manifest` test's daemon: the fake plugin claude, manifests cached in
 /// `<dir>/cache/plugins` (TEAM there already), Claude Code's config in
 /// `<dir>/claude`, and the fake's control dir `<dir>/ctl`.
@@ -2164,6 +2205,15 @@ struct PluginHost {
 
 impl PluginHost {
     async fn start() -> PluginHost {
+        Self::start_with(|ctl| {
+            let path = format!("{}:/usr/bin:/bin", ctl.display());
+            (fake_plugin_claude().to_path_buf(), path)
+        })
+        .await
+    }
+
+    /// With the claude and `PATH` that `setup` gives for the control dir.
+    async fn start_with(setup: impl FnOnce(&Path) -> (PathBuf, String)) -> PluginHost {
         let dir = TestDaemon::new_dir();
         let (cache, claude, ctl) = (
             dir.join("cache/plugins"),
@@ -2179,9 +2229,10 @@ impl PluginHost {
             format!("{}\n", sha256_hex(TEAM.as_bytes())),
         )
         .unwrap();
+        let (bin, path) = setup(&ctl);
         let config = Config {
-            claude: fake_plugin_claude().to_path_buf(),
-            path: Some(format!("{}:/usr/bin:/bin", ctl.display()).into()),
+            claude: bin,
+            path: Some(path.into()),
             ..TestDaemon::config(&dir)
         };
         let d = TestDaemon::start_with_config(dir, config);
@@ -2597,6 +2648,107 @@ async fn installs_and_claude_update_take_turns() {
         c.call(Msg::UpdateClaude { install: false }).await,
         Msg::ClaudeUpdated { ok: true, .. }
     ));
+}
+
+/// Claude installed on the host: the failures are forgotten, so the next
+/// request queues those installs at once; a manual one still waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forgotten_failures_install_on_the_next_request() {
+    let h = PluginHost::start().await;
+    h.set("fail-a@market", true);
+    h.set("manual-b@market", true);
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
+    h.set("fail-a@market", false);
+    h.d.daemon.manifests.forget_failures();
+    let a = applied(c.call(team(&[], &[])).await);
+    let manual = "needs manual install: claude plugin install b@market";
+    assert_eq!(
+        &a.skipped[..2],
+        &pairs(&[
+            ("plugin:a@market", "installing"),
+            ("plugin:b@market", manual)
+        ])[..]
+    );
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.installed, ["plugin:a@market"]);
+}
+
+/// A claude installed after the plugins' first request: until then each
+/// plugin install fails at once (`claude is not installed`, never holding
+/// the lock the installer takes). The installer (a fake `curl`: no real
+/// one is on this `PATH`) puts claude in place, the failures are
+/// forgotten, and the next request installs the plugins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installing_claude_forgets_the_plugin_failures() {
+    let tools = fake_installer_dir();
+    let h = PluginHost::start_with(|ctl| {
+        let path = format!("{}:{}", ctl.display(), tools.display());
+        (PathBuf::from(LATE_CLAUDE), path)
+    })
+    .await;
+    let mut c = h.d.client().await;
+    c.call(team(&[], &[])).await;
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    let why = "marketplace market: claude is not installed";
+    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
+    assert_retrying(&a.skipped[1], "plugin:b@market", why, 15);
+    assert!(h.log().is_empty(), "{:?}", h.log());
+
+    match c.call(Msg::UpdateClaude { install: true }).await {
+        Msg::ClaudeUpdated { version, ok, tail } => {
+            assert!(ok, "{tail}");
+            assert_eq!(version.as_deref(), Some("9.9.9 (Claude Code)"));
+            assert_eq!(tail, "claude installed");
+        }
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
+    assert_eq!(h.log(), ["curl -fsSL https://claude.ai/install.sh"]);
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.skipped[0].1, "installing");
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.installed, ["plugin:a@market", "plugin:b@market"]);
+}
+
+/// The installer does not run without `curl` on the daemon's `PATH`, nor
+/// for a claude that `CLAUDIO_CLAUDE_PATH` pins: the reply says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_says_why_it_cannot_run() {
+    let dir = TestDaemon::new_dir();
+    let empty = dir.join("bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let config = Config {
+        claude: PathBuf::from(LATE_CLAUDE),
+        path: Some(empty.into_os_string()),
+        ..TestDaemon::config(&dir)
+    };
+    let d = TestDaemon::start_with_config(dir, config);
+    let mut c = d.client().await;
+    assert_eq!(
+        c.call(Msg::UpdateClaude { install: true }).await,
+        Msg::ClaudeUpdated {
+            version: None,
+            ok: false,
+            tail: "claude installer needs curl".into()
+        }
+    );
+
+    let pinned = TestDaemon::start_in(TestDaemon::new_dir()).await;
+    let mut c = pinned.client().await;
+    match c.call(Msg::UpdateClaude { install: true }).await {
+        Msg::ClaudeUpdated {
+            ok: false, tail, ..
+        } => {
+            assert!(tail.starts_with("CLAUDIO_CLAUDE_PATH is /"), "{tail}");
+        }
+        other => panic!("expected ClaudeUpdated, got {other:?}"),
+    }
 }
 
 /// The fake's `--help` lists the flags: nothing is dropped.
