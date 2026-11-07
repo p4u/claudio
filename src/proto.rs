@@ -460,6 +460,12 @@ pub struct Applied {
     pub dropped: Vec<String>,
 }
 
+/// The reason in [`Applied::skipped`] of a failed plugin install the daemon
+/// tries again in `secs` seconds.
+pub fn retrying(why: &str, secs: u64) -> String {
+    format!("{why} (retrying in {secs} s)")
+}
+
 /// The lenses of a claude session, in the client's registry order, and
 /// the proxy plugins' instructions. The daemon checks the caps
 /// ([`SessionExtensions::validate`]), writes the instructions to the

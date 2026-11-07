@@ -2258,6 +2258,13 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `item` is `id` skipped for `why`, tried again in `secs` s (or one less:
+/// the clock moved on since the failure).
+fn assert_retrying(item: &(String, String), id: &str, why: &str, secs: u64) {
+    let due = (secs.saturating_sub(1)..=secs).any(|s| item.1 == proto::retrying(why, s));
+    assert!(item.0 == id && due, "{item:?}: want {id}, {why}, {secs} s");
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     format!("{:x}", sha2::Sha256::digest(bytes))
@@ -2399,50 +2406,67 @@ async fn manifest_leaves_the_members_own_alone_and_honours_disabled() {
     assert_eq!(unreadable.len(), 3, "{:?}", a.skipped);
 }
 
-/// A failed install is skipped with the CLI's reason and tried again only
-/// after 10 minutes; one that needs a person stays `needs manual install`
-/// for the daemon's life.
+/// A failed install is skipped with the CLI's reason and the seconds to
+/// its retry: 15 s after the first failure, doubling with each one in a
+/// row, and 15 s again after a success. One that needs a person stays
+/// `needs manual install` for the daemon's life.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_installs_retry_after_the_window_and_manual_ones_never() {
+async fn failed_installs_back_off_and_manual_ones_never_retry() {
     let h = PluginHost::start().await;
     h.set("fail-a@market", true);
     h.set("manual-b@market", true);
     let mut c = h.d.client().await;
     c.call(team(&[], &[])).await;
     h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
     let manual = "needs manual install: claude plugin install b@market";
-    let failed = pairs(&[
-        ("plugin:a@market", "network down"),
-        ("plugin:b@market", manual),
-    ]);
-    assert_eq!(&a.skipped[..2], &failed[..]);
-    let runs = h.log().len();
-
-    // Within the window: nothing runs again.
-    h.d.daemon.manifests.advance(Duration::from_secs(9 * 60));
     let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(&a.skipped[..2], &failed[..]);
+    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
+    assert_eq!(a.skipped[1], pairs(&[("plugin:b@market", manual)])[0]);
+    let installs = |h: &PluginHost, spec: &str| {
+        let line = format!("plugin install {spec} --scope user --json");
+        h.log().iter().filter(|l| **l == line).count()
+    };
+    assert_eq!(installs(&h, "a@market"), 1);
+
+    // Within the backoff nothing runs again; after it, one more run, and
+    // the next wait is twice as long.
+    h.d.daemon.manifests.advance(Duration::from_secs(14));
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 1);
     h.idle().await;
-    assert_eq!(h.log().len(), runs);
-
-    // After it: the failure is tried again (and now works); the manual one
-    // still waits for a person.
-    h.set("fail-a@market", false);
-    h.d.daemon.manifests.advance(Duration::from_secs(2 * 60));
+    assert_eq!(installs(&h, "a@market"), 1);
+    h.d.daemon.manifests.advance(Duration::from_secs(1));
     let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0], pairs(&[("plugin:a@market", "installing")])[0]);
-    assert_eq!(a.skipped[1].1, manual);
+    assert_eq!(a.skipped[0].1, "installing");
+    h.idle().await;
+    assert_eq!(installs(&h, "a@market"), 2);
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 30);
+
+    // Then it works; the manual one still waits for a person.
+    h.set("fail-a@market", false);
+    h.d.daemon.manifests.advance(Duration::from_secs(30));
+    c.call(team(&[], &[])).await;
     h.idle().await;
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.installed, ["plugin:a@market"]);
     assert_eq!(a.skipped[0], pairs(&[("plugin:b@market", manual)])[0]);
-    let installs = h
-        .log()
-        .iter()
-        .filter(|l| l.contains("install b@market"))
-        .count();
-    assert_eq!(installs, 1);
+    assert_eq!(installs(&h, "b@market"), 1);
+
+    // Uninstalled and failing again: the backoff starts over at 15 s.
+    std::fs::remove_file(h.ctl.join("installed")).unwrap();
+    std::fs::write(
+        h.claude.join("plugins/installed_plugins.json"),
+        r#"{"version":2,"plugins":{}}"#,
+    )
+    .unwrap();
+    h.set("fail-a@market", true);
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_eq!(a.skipped[0].1, "installing");
+    h.idle().await;
+    let a = applied(c.call(team(&[], &[])).await);
+    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
+    assert_eq!(installs(&h, "a@market"), 4);
 }
 
 /// A marketplace Claude Code files under another name than the manifest's
@@ -2456,10 +2480,8 @@ async fn a_marketplace_added_under_another_name_skips_its_plugins() {
     h.idle().await;
     let a = applied(c.call(team(&[], &[])).await);
     let why = "marketplace market: added under another name";
-    assert_eq!(
-        &a.skipped[..2],
-        &pairs(&[("plugin:a@market", why), ("plugin:b@market", why)])[..]
-    );
+    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
+    assert_retrying(&a.skipped[1], "plugin:b@market", why, 15);
     assert_eq!(
         h.log(),
         ["plugin marketplace add acme/market --scope user --json"]
@@ -2467,8 +2489,8 @@ async fn a_marketplace_added_under_another_name_skips_its_plugins() {
 }
 
 /// An install that exits 0 but leaves the plugin out of
-/// `installed_plugins.json` is remembered as a failure for the window, not
-/// run again on every re-ask.
+/// `installed_plugins.json` is remembered as a failure for its backoff,
+/// not run again on every re-ask.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_install_claude_does_not_list_is_remembered_as_failed() {
     let h = PluginHost::start().await;
@@ -2478,15 +2500,13 @@ async fn an_install_claude_does_not_list_is_remembered_as_failed() {
     h.idle().await;
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.installed, ["plugin:b@market"]);
-    assert_eq!(
-        a.skipped[0],
-        pairs(&[("plugin:a@market", "installed but not listed")])[0]
-    );
+    let why = "installed but not listed";
+    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
 
-    // Within the window: not run again.
-    h.d.daemon.manifests.advance(Duration::from_secs(9 * 60));
+    // Within the backoff: not run again.
+    h.d.daemon.manifests.advance(Duration::from_secs(10));
     let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0].1, "installed but not listed");
+    assert_retrying(&a.skipped[0], "plugin:a@market", why, 5);
     h.idle().await;
     let installs = |h: &PluginHost| {
         h.log()
@@ -2497,7 +2517,7 @@ async fn an_install_claude_does_not_list_is_remembered_as_failed() {
     assert_eq!(installs(&h), 1);
 
     // After it: tried again.
-    h.d.daemon.manifests.advance(Duration::from_secs(2 * 60));
+    h.d.daemon.manifests.advance(Duration::from_secs(5));
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.skipped[0].1, "installing");
     h.idle().await;

@@ -18,7 +18,10 @@
 //!
 //! What the installs did is remembered per (manifest hash, id): installed
 //! by this daemon (for its life), needing a manual install (for its life:
-//! a person has to act), or failed (retried after [`RETRY_AFTER`]).
+//! a person has to act), or failed: tried again once its backoff is over
+//! ([`RETRY_FIRST`], doubling with each failure in a row up to
+//! [`RETRY_MAX`]; a success starts it over). Meanwhile its reason says
+//! when (`proto::retrying`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -38,7 +41,7 @@ use crate::claude::latex::sanitize;
 use crate::claude::SESSION_MARKERS;
 use crate::paths;
 use crate::plugins::manifest::{self, Manifest, Marketplace, PluginRef};
-use crate::proto::{Applied, Msg};
+use crate::proto::{retrying, Applied, Msg};
 use crate::proxy::plugins::{key_ok, name_ok, sha256_ok, test_http_ok};
 
 /// A manifest's size cap.
@@ -52,8 +55,10 @@ const MAX_CONFIG: u64 = 16 << 20;
 /// A request's caps: secret names and disabled ids.
 const MAX_SECRETS: usize = 64;
 const MAX_DISABLED: usize = 256;
-/// A failed install is tried again after this long.
-pub const RETRY_AFTER: Duration = Duration::from_secs(600);
+/// A failed install is tried again after this long, the wait doubling with
+/// each failure in a row up to [`RETRY_MAX`].
+const RETRY_FIRST: Duration = Duration::from_secs(15);
+const RETRY_MAX: Duration = Duration::from_secs(300);
 /// One `claude plugin …` run's deadline.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Each output stream of a run is kept up to this size.
@@ -90,27 +95,51 @@ struct Dirs {
 struct Memory {
     installed: HashSet<(String, String)>,
     manual: HashMap<(String, String), String>,
-    failed: HashMap<(String, String), (String, Instant)>,
+    failed: HashMap<(String, String), Failure>,
     /// Plugin installs queued or running.
     busy: HashSet<(String, String)>,
     /// Per manifest hash, the installs left; present while its task runs.
     queues: HashMap<String, VecDeque<Job>>,
 }
 
+/// A failed install: why, when, and how many failures in a row.
+struct Failure {
+    why: String,
+    at: Instant,
+    count: u32,
+}
+
+/// The wait after the `count`-th failure in a row.
+fn retry_after(count: u32) -> Duration {
+    let doublings = count.saturating_sub(1).min(8);
+    (RETRY_FIRST * (1 << doublings)).min(RETRY_MAX)
+}
+
+/// `left` in whole seconds, rounded up.
+fn ceil_secs(left: Duration) -> u64 {
+    left.as_secs() + u64::from(left.subsec_nanos() > 0)
+}
+
 impl Memory {
-    /// The failure of `key` under `sha`, while it is recent.
-    fn failure(&mut self, sha: &str, key: &str, now: Instant) -> Option<String> {
-        let k = (sha.to_owned(), key.to_owned());
-        match self.failed.get(&k) {
-            Some((why, at)) if now.saturating_duration_since(*at) < RETRY_AFTER => {
-                Some(why.clone())
-            }
-            Some(_) => {
-                self.failed.remove(&k);
-                None
-            }
-            None => None,
-        }
+    /// The failure of `key` under `sha` and the time left until it is tried
+    /// again, while its backoff is not over.
+    fn failure(&self, sha: &str, key: &str, now: Instant) -> Option<(String, Duration)> {
+        let f = self.failed.get(&(sha.to_owned(), key.to_owned()))?;
+        let left = retry_after(f.count).checked_sub(now.saturating_duration_since(f.at))?;
+        (!left.is_zero()).then(|| (f.why.clone(), left))
+    }
+
+    /// `key` failed (again) at `now`, for `why`.
+    fn fail(&mut self, key: (String, String), why: String, now: Instant) {
+        let count = self.failed.get(&key).map_or(0, |f| f.count) + 1;
+        self.failed.insert(
+            key,
+            Failure {
+                why,
+                at: now,
+                count,
+            },
+        );
     }
 }
 
@@ -224,8 +253,8 @@ impl Manifests {
                 applied.skipped.push((id, why.clone()));
                 continue;
             }
-            if let Some(why) = mem.failure(sha, &id, now) {
-                applied.skipped.push((id, why));
+            if let Some((why, left)) = mem.failure(sha, &id, now) {
+                applied.skipped.push((id, retrying(&why, ceil_secs(left))));
                 continue;
             }
             applied.skipped.push((id, INSTALLING.to_owned()));
@@ -497,8 +526,8 @@ async fn run_queue(daemon: &Daemon, sha: &str) {
         };
         let id = job.plugin.id();
         let outcome = match install(daemon, sha, &job).await {
-            // Claude Code said yes but does not list it: remembered as a
-            // failure for the window, not run again on every re-ask.
+            // Claude Code said yes but does not list it: a failure, not run
+            // again on every re-ask.
             Outcome::Done
                 if !installed_plugins(&manifests.dirs().claude_config)
                     .contains(&job.plugin.spec()) =>
@@ -514,6 +543,7 @@ async fn run_queue(daemon: &Daemon, sha: &str) {
         mem.busy.remove(&key);
         match outcome {
             Outcome::Done => {
+                mem.failed.remove(&key);
                 mem.installed.insert(key);
             }
             Outcome::Manual => {
@@ -521,11 +551,10 @@ async fn run_queue(daemon: &Daemon, sha: &str) {
                     "needs manual install: claude plugin install {}",
                     job.plugin.spec()
                 );
+                mem.failed.remove(&key);
                 mem.manual.insert(key, why);
             }
-            Outcome::Failed(why) => {
-                mem.failed.insert(key, (why, now));
-            }
+            Outcome::Failed(why) => mem.fail(key, why, now),
         }
     }
 }
@@ -540,7 +569,7 @@ async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
     let remembered = manifests
         .memory()
         .failure(sha, &market_key, manifests.now());
-    if let Some(why) = remembered {
+    if let Some((why, _)) = remembered {
         return Outcome::Failed(why);
     }
     if !known_marketplaces(&config).contains(market) {
@@ -570,13 +599,16 @@ async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
         if let Some(why) = failed {
             let why = format!("marketplace {market}: {why}");
             let key = (sha.to_owned(), market_key);
-            manifests
-                .memory()
-                .failed
-                .insert(key, (why.clone(), manifests.now()));
+            let now = manifests.now();
+            manifests.memory().fail(key, why.clone(), now);
             return Outcome::Failed(why);
         }
     }
+    // Known: a failure to add it is over.
+    manifests
+        .memory()
+        .failed
+        .remove(&(sha.to_owned(), market_key));
     let spec = job.plugin.spec();
     run_claude(
         daemon,
@@ -865,6 +897,38 @@ mod tests {
             panic!("a failure")
         };
         assert_eq!(why, "two");
+    }
+
+    #[test]
+    fn the_backoff_doubles_from_15_s_up_to_300_s() {
+        let secs: Vec<u64> = (1..=8).map(|n| retry_after(n).as_secs()).collect();
+        assert_eq!(secs, [15, 30, 60, 120, 240, 300, 300, 300]);
+        assert_eq!(retry_after(u32::MAX), RETRY_MAX);
+        assert_eq!(ceil_secs(Duration::from_millis(14_001)), 15);
+        assert_eq!(ceil_secs(Duration::from_secs(1)), 1);
+    }
+
+    #[test]
+    fn a_failure_waits_out_its_backoff_per_hash() {
+        let mut mem = Memory::default();
+        let key = |sha: &str| (sha.to_owned(), "plugin:a@m".to_owned());
+        let t0 = Instant::now();
+        let secs = Duration::from_secs;
+        mem.fail(key("h1"), "down".into(), t0);
+        assert_eq!(
+            mem.failure("h1", "plugin:a@m", t0 + secs(14)),
+            Some(("down".to_owned(), secs(1)))
+        );
+        assert_eq!(mem.failure("h1", "plugin:a@m", t0 + secs(15)), None);
+        assert_eq!(mem.failure("h2", "plugin:a@m", t0), None, "another hash");
+        // Failing again doubles the wait.
+        let t1 = t0 + secs(15);
+        mem.fail(key("h1"), "still down".into(), t1);
+        assert_eq!(
+            mem.failure("h1", "plugin:a@m", t1 + secs(29)),
+            Some(("still down".to_owned(), secs(1)))
+        );
+        assert_eq!(mem.failure("h1", "plugin:a@m", t1 + secs(30)), None);
     }
 
     #[test]
