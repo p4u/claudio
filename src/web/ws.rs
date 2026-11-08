@@ -29,9 +29,8 @@ use crate::proto::{Msg, SearchHit, SessionId};
 pub(crate) const MAX_TEXT: usize = 128 * 1024;
 /// The largest input payload of a client binary frame (17 header bytes more).
 pub(crate) const MAX_INPUT: usize = 64 * 1024;
-/// Binary frame kinds: server → client PTY output, client → server input.
-#[allow(dead_code)] // the hub builds output frames itself
-pub(crate) const KIND_OUTPUT: u8 = 0x01;
+/// Binary frame kind: client → server input (output frames, `hub::KIND_OUTPUT`,
+/// are built by the hub).
 pub(crate) const KIND_INPUT: u8 = 0x02;
 /// Kind byte and session uuid.
 const HEADER: usize = 17;
@@ -996,7 +995,7 @@ mod tests {
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(
-            binary_frame(&[KIND_OUTPUT; HEADER]),
+            binary_frame(&[hub::KIND_OUTPUT; HEADER]),
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(

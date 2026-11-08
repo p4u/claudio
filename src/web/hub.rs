@@ -52,8 +52,8 @@ const SAVE_EVERY: Duration = Duration::from_millis(500);
 /// The size a session with subscribers is re-attached at after a
 /// reconnect when no `Attached` told its size yet.
 const DEFAULT_SIZE: (u16, u16) = (24, 80);
-/// Binary frame kind: PTY output.
-const KIND_OUTPUT: u8 = 0x01;
+/// Binary frame kind: server → client PTY output.
+pub(crate) const KIND_OUTPUT: u8 = 0x01;
 /// The longest error text the browser gets.
 const ERROR_MAX: usize = 300;
 /// The longest `claude` event tail, in bytes.

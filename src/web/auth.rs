@@ -214,11 +214,6 @@ impl Auth {
         read_hex(&mut *urandom, n)
     }
 
-    #[allow(dead_code)] // for the hub (Task 4)
-    pub(crate) fn allowed(&self) -> &Allowed {
-        &self.allowed
-    }
-
     /// Check a login: `Ok` for the right token; `429` while
     /// [`MAX_FAILURES`] failures are under [`FAILURE_WINDOW`] old (the
     /// token is not even compared then); else `401`, which counts.
