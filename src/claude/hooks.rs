@@ -29,11 +29,16 @@ pub const EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
+    "PostToolUse",
     "Notification",
     "Stop",
     "StopFailure",
     "SessionEnd",
 ];
+
+/// The tools whose `PostToolUse` is relayed: the ones that wait for the user,
+/// so an ordinary tool call costs no extra hook process.
+pub const ASKING_TOOLS: &str = "AskUserQuestion|ExitPlanMode";
 
 /// Write timeout for the relay's socket. A local Unix-socket connect never
 /// blocks for long, but a wedged daemon must not stall claude's hook.
@@ -83,7 +88,7 @@ pub fn settings(
             hooks.push(serde_json::json!({"type": "command", "command": context}));
         }
         let entry = serde_json::json!([{
-            "matcher": "*",
+            "matcher": if *event == "PostToolUse" { ASKING_TOOLS } else { "*" },
             "timeout": 5,
             "hooks": hooks
         }]);
@@ -259,6 +264,15 @@ mod tests {
         let hooks = v["hooks"].as_object().unwrap();
         for event in EVENTS {
             assert!(hooks.contains_key(*event), "missing event: {event}");
+        }
+    }
+
+    #[test]
+    fn post_tool_use_matches_only_the_asking_tools() {
+        let v = settings(Path::new("/b"), Path::new("/s"), "tok", None);
+        for event in EVENTS {
+            let want = if *event == "PostToolUse" { "AskUserQuestion|ExitPlanMode" } else { "*" };
+            assert_eq!(v["hooks"][event][0]["matcher"], want, "{event}");
         }
     }
 

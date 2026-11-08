@@ -765,8 +765,11 @@ pub struct Attention {
     pub seq: u64,
     /// The Notification's `notification_type` (`permission_prompt`,
     /// `worker_permission_prompt`, `elicitation_dialog`,
-    /// `elicitation_url_dialog`, `idle_prompt`, `agent_needs_input`), or
-    /// `session_start`; at most 64 bytes.
+    /// `elicitation_url_dialog`, `idle_prompt`, `agent_needs_input`),
+    /// `session_start`, `ask_user_question` (state needs_input: claude asks a
+    /// question; `message` is it, `detail` its options) or `plan_approval`
+    /// (state needs_approval: claude asks to approve its plan); at most 64
+    /// bytes.
     pub kind: String,
     /// The Notification's `message`; at most 512 bytes.
     #[serde(default)]

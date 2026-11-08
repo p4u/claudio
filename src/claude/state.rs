@@ -73,11 +73,9 @@ impl Tracker {
     pub fn apply(&mut self, event: &str, payload: &Value) -> Vec<SessionEvent> {
         match event {
             "SessionStart" => self.handle_session_start(payload),
-            "PreToolUse" => {
-                self.last_tool = tool_summary(payload);
-                self.attention = None;
-                self.transition(SessionState::Working)
-            }
+            "PreToolUse" => self.handle_pre_tool(payload),
+            // Only the asking tools are subscribed: the user answered.
+            "PostToolUse" => self.end_wait(SessionState::Working),
             "UserPromptSubmit" => self.end_wait(SessionState::Working),
             "Notification" => self.handle_notification(payload),
             "Stop" => self.end_wait(SessionState::Idle),
@@ -95,6 +93,60 @@ impl Tracker {
         self.last_tool = None;
         self.attention = None;
         self.transition(next)
+    }
+
+    fn handle_pre_tool(&mut self, payload: &Value) -> Vec<SessionEvent> {
+        let tool = payload.get("tool_name").and_then(Value::as_str);
+        let input = payload.get("tool_input");
+        let (next, kind, message, detail) = match tool {
+            Some("AskUserQuestion") => {
+                let first = input
+                    .and_then(|i| i.get("questions"))
+                    .and_then(|q| q.get(0));
+                let message = first
+                    .and_then(|q| q.get("question"))
+                    .or_else(|| input.and_then(|i| i.get("question")))
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or("Claude asks a question");
+                let labels: Vec<&str> = first
+                    .and_then(|q| q.get("options"))
+                    .and_then(Value::as_array)
+                    .map(|o| {
+                        o.iter()
+                            .filter_map(|o| o.get("label").and_then(Value::as_str))
+                            .filter(|l| !l.trim().is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let detail = (!labels.is_empty()).then(|| labels.join(" \u{b7} "));
+                (SessionState::NeedsInput, "ask_user_question", message, detail)
+            }
+            Some("ExitPlanMode") => (
+                SessionState::NeedsApproval,
+                "plan_approval",
+                "Claude asks to approve its plan",
+                None,
+            ),
+            _ => {
+                self.last_tool = tool_summary(payload);
+                self.attention = None;
+                return self.transition(SessionState::Working);
+            }
+        };
+        self.last_tool = None;
+        let mut events = self.transition(next);
+        self.seq += 1;
+        let attention = Attention {
+            seq: self.seq,
+            kind: kind.into(),
+            message: one_line(message, MAX_MESSAGE),
+            tool: tool.map(|t| one_line(t, MAX_TOOL)),
+            detail: detail.map(|d| one_line(&d, MAX_DETAIL)).filter(|d| !d.is_empty()),
+        };
+        self.attention = Some(attention.clone());
+        events.push(SessionEvent::Attention { attention });
+        events
     }
 
     fn handle_session_start(&mut self, payload: &Value) -> Vec<SessionEvent> {
@@ -538,5 +590,73 @@ mod tests {
         assert_eq!(t.attention.as_ref().map(|a| a.seq), Some(1));
         let evs = t.apply("Notification", &json!({"notification_type": "idle_prompt"}));
         assert_eq!(attention(&evs).unwrap().seq, 2);
+    }
+
+    #[test]
+    fn ask_user_question_needs_input_with_the_options() {
+        let mut t = Tracker::new();
+        t.apply("UserPromptSubmit", &json!({}));
+        let evs = t.apply(
+            "PreToolUse",
+            &json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [
+                {"question": "Which db?\nreally", "options": [{"label": "Postgres"}, {"label": "SQLite", "description": "x"}]},
+                {"question": "second", "options": [{"label": "no"}]}]}}),
+        );
+        assert_eq!(evs[0], state_event(SessionState::NeedsInput));
+        let a = attention(&evs).unwrap();
+        assert_eq!(a.kind, "ask_user_question");
+        assert_eq!(a.message, "Which db? really");
+        assert_eq!(a.tool.as_deref(), Some("AskUserQuestion"));
+        assert_eq!(a.detail.as_deref(), Some("Postgres \u{b7} SQLite"));
+        assert_eq!(a.seq, 1);
+        assert_eq!(t.attention.as_ref(), Some(a));
+        // The answer arrives as a PostToolUse: back to work, nothing asked.
+        let evs = t.apply("PostToolUse", &json!({"tool_name": "AskUserQuestion"}));
+        assert_eq!(evs, vec![state_event(SessionState::Working)]);
+        assert_eq!(t.attention, None);
+    }
+
+    #[test]
+    fn plan_approval_needs_approval() {
+        let mut t = Tracker::new();
+        t.apply("UserPromptSubmit", &json!({}));
+        let evs = t.apply("PreToolUse", &json!({"tool_name": "ExitPlanMode", "tool_input": {"plan": "do x"}}));
+        assert_eq!(evs[0], state_event(SessionState::NeedsApproval));
+        let a = attention(&evs).unwrap();
+        assert_eq!(a.kind, "plan_approval");
+        assert_eq!(a.message, "Claude asks to approve its plan");
+        assert_eq!((a.tool.as_deref(), a.detail.as_deref()), (Some("ExitPlanMode"), None));
+        let evs = t.apply("PostToolUse", &json!({"tool_name": "ExitPlanMode"}));
+        assert_eq!(evs, vec![state_event(SessionState::Working)]);
+        assert_eq!(t.attention, None);
+    }
+
+    #[test]
+    fn ask_user_question_falls_back_on_malformed_input() {
+        let cases = [
+            (json!({"tool_name": "AskUserQuestion"}), "Claude asks a question", None),
+            (json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}), "Claude asks a question", None),
+            (json!({"tool_name": "AskUserQuestion", "tool_input": {"question": "flat?"}}), "flat?", None),
+            (
+                json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": 5, "options": [{"label": 1}, "x", {"label": "ok"}]}]}}),
+                "Claude asks a question",
+                Some("ok"),
+            ),
+            (json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": "bad"}}), "Claude asks a question", None),
+        ];
+        for (pre, message, detail) in cases {
+            let mut t = Tracker::new();
+            let evs = t.apply("PreToolUse", &pre);
+            let a = attention(&evs).unwrap_or_else(|| panic!("{pre}"));
+            assert_eq!((a.message.as_str(), a.detail.as_deref()), (message, detail), "{pre}");
+        }
+    }
+
+    #[test]
+    fn ordinary_pre_tool_use_is_unchanged() {
+        let mut t = Tracker::new();
+        let evs = t.apply("PreToolUse", &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
+        assert_eq!(evs, vec![state_event(SessionState::Working)]);
+        assert_eq!(t.attention, None);
     }
 }

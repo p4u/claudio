@@ -141,6 +141,8 @@ mod tests {
             "elicitation_url_dialog",
             "idle_prompt",
             "session_start",
+            "plan_approval",
+            "ask_user_question",
         ] {
             let a = attention(7, kind);
             assert_eq!(
