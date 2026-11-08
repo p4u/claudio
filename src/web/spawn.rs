@@ -96,13 +96,14 @@ pub(crate) fn check_name(name: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(clean).filter(|n| !n.trim().is_empty()))
 }
 
-/// Checks shared with Task 5: cwd 1..=4096 bytes; rows/cols 1..=1000; name ≤ 200 chars after `sanitize_label`; resume `[A-Za-z0-9-]{1,64}`; prompt ≤ 64 KiB.
+/// Checks shared with Task 5: cwd 1..=4096 bytes; rows/cols 1..=1000; name ≤ 200 chars after `sanitize_label`; resume `[A-Za-z0-9-]{1,64}`, not starting with `-`; prompt ≤ 64 KiB.
 pub(crate) fn check_spawn(req: &SpawnReq) -> Result<(), String> {
     check_cwd(&req.cwd)?;
     check_size(req.rows, req.cols)?;
     check_name(req.name.as_deref())?;
     if let Some(resume) = &req.resume {
         let ok = (1..=64).contains(&resume.len())
+            && resume.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
             && resume
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-');
@@ -364,6 +365,7 @@ mod tests {
             (Box::new(|r| r.name = Some("n".repeat(201))), "name"),
             (Box::new(|r| r.resume = Some("../x".into())), "resume"),
             (Box::new(|r| r.resume = Some("a".repeat(65))), "resume"),
+            (Box::new(|r| r.resume = Some("-x".into())), "resume"),
             (
                 Box::new(|r| r.prompt = Some("p".repeat(64 * 1024 + 1))),
                 "prompt",
