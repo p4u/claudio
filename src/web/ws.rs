@@ -126,7 +126,7 @@ async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
     let hello = json!({
         "t": "hello",
         "v": 1,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": super::version(),
         "features": [],
     });
     tx.send(Out::Text(hello.to_string()));

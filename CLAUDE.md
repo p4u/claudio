@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make                 # release build → target/release/claudio
 make static          # static musl binary → dist/claudio (ARCH=aarch64 for cross)
+make dev             # install this checkout to ~/.local/bin for testing, no release (make dev-undo reverts)
 make test-unit       # unit tests only: cargo test --locked --bin claudio (no claude needed)
 make test-manager    # manager integration tests (fake claude, no API key required)
 make test            # unit + E2E (E2E needs an authenticated `claude` on PATH, ~5 min)

@@ -24,6 +24,15 @@ const STUB_INDEX: &str = "<!doctype html>\n<html lang=\"en\"><head><meta charset
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // A local build's label (`make dev` sets it, e.g. `+dev.20f0b49`); releases leave it empty.
+    println!("cargo:rerun-if-env-changed=CLAUDIO_BUILD_LABEL");
+    let label: String = std::env::var("CLAUDIO_BUILD_LABEL")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+        .take(64)
+        .collect();
+    println!("cargo:rustc-env=CLAUDIO_BUILD_LABEL={label}");
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let gz_dir = out.join("web");
     let _ = fs::remove_dir_all(&gz_dir);

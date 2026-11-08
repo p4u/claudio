@@ -28,6 +28,12 @@ use tracing_subscriber::EnvFilter;
 
 pub(crate) const DEFAULT_PORT: u16 = 7337;
 
+/// This build's version as the page shows it: the release version, plus the
+/// label of a local build (`make dev`: `0.8.0+dev.20f0b49`).
+pub(crate) fn version() -> String {
+    format!("{}{}", env!("CARGO_PKG_VERSION"), env!("CLAUDIO_BUILD_LABEL"))
+}
+
 const USAGE: &str = "usage: claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... \
 [--no-open] [--print-url] [--rotate-token]";
 
@@ -264,6 +270,9 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         ctx,
     };
 
+    if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
+        eprintln!("claudio web: local build {}", version());
+    }
     // The one line on stdout (the tests read it).
     let mut out = io::stdout();
     let _ = writeln!(out, "claudio web: {url}");

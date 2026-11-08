@@ -15,6 +15,7 @@
 #   make evidence   → run the PoC against real claude and capture artifacts
 #   make docker     → build the Docker image (docker compose)
 #   make install    → install the static binary to $(PREFIX)/bin
+#   make dev        → install a local test build (no release, daemons replaced once idle)
 #   make clean
 
 CARGO       ?= cargo
@@ -25,7 +26,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker test test-unit test-web e2e fmt clean install uninstall docker evidence help
+.PHONY: all build static static-docker test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
 
 all: build
 
@@ -113,6 +114,30 @@ install: static
 	@if $(PREFIX)/bin/$(BIN) daemon status >/dev/null 2>&1; then \
 		$(PREFIX)/bin/$(BIN) daemon restart; \
 	fi
+
+## Install a build of this checkout for testing on this host, without a release.
+## The page's footer then reads e.g. `claudio 0.8.0+dev.20f0b49` (`.dirty` with
+## uncommitted changes). The previous binary is kept as $(BIN).prev (undo:
+## `make dev-undo`). Running daemons are NOT restarted: each is replaced by this
+## build once it is idle, when a claudio client (TUI or `claudio web`) connects.
+## Restart a running `claudio web` yourself (Ctrl+C, run it again, reload the page).
+## Remote hosts get this build too when the TUI or `claudio web` connects to them.
+dev:
+	CLAUDIO_BUILD_LABEL="+dev.$$(git rev-parse --short HEAD)$$(git diff --quiet HEAD -- 2>/dev/null || echo .dirty)" \
+		$(MAKE) --no-print-directory static
+	@mkdir -p $(PREFIX)/bin
+	@if [ -f $(PREFIX)/bin/$(BIN) ]; then cp -p $(PREFIX)/bin/$(BIN) $(PREFIX)/bin/$(BIN).prev; fi
+	@install -m755 $(DIST)/$(BIN) $(PREFIX)/bin/.$(BIN).new
+	@mv -f $(PREFIX)/bin/.$(BIN).new $(PREFIX)/bin/$(BIN)
+	@echo "installed $(PREFIX)/bin/$(BIN) (local build; previous one in $(BIN).prev)"
+	@echo "next: restart \`claudio web\` (Ctrl+C, run it again) and reload the page"
+
+## Put back the binary `make dev` replaced.
+dev-undo:
+	@test -f $(PREFIX)/bin/$(BIN).prev || { echo "no $(PREFIX)/bin/$(BIN).prev"; exit 1; }
+	@mv -f $(PREFIX)/bin/$(BIN).prev $(PREFIX)/bin/$(BIN)
+	@echo "restored $(PREFIX)/bin/$(BIN); a daemon already on the test build keeps it"
+	@echo "(only newer builds replace a daemon): run \`claudio daemon restart\` to switch it back"
 
 uninstall:
 	@rm -f $(PREFIX)/bin/$(BIN)
