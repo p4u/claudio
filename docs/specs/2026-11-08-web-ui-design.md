@@ -477,7 +477,7 @@ previous release; the additions are inert to old clients.
       queue ordering, the keymap/focus model, the markdown/latex/mermaid preprocessing and the
       notification debounce.
 - [ ] AC10: existing suites unchanged and green: `make test-unit`, `make test-manager`.
-- [ ] AC11: release binary grows by at most 4 MiB (measured and reported).
+- [ ] AC11: release binary grows by at most 4.5 MiB (measured and reported; amended from 4 MiB by ruling R22 after measuring: +4.39 MiB with mermaid's optional elk and label-math chunks dropped).
 - [ ] AC13: parity table in `docs/web.md`: one row per Goal-2 capability with the TUI key,
       the web action, the WS op(s) and the test (e2e name or Rust test). Every row has a test
       or a one-line manual check recorded in `.delivery/2026-11-08-web-ui/parity.md`.
