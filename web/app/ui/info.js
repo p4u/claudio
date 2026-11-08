@@ -7,6 +7,7 @@ import { model } from '../store.js';
 import { stateClass } from '../queue.js';
 import { infoRows, placeTip, INFO_DELAY_MS } from '../info.js';
 import { now } from './glyph.js';
+import { contextWindow } from '../gauge.js';
 
 const tip = signal(null); // {sid, rect, vertical}
 let timer = null;
@@ -55,7 +56,7 @@ export function InfoPopover() {
     setPos(placeTip(t.rect, { w: b.width, h: b.height }, { w: window.innerWidth, h: window.innerHeight }, 8, t.vertical));
   }, [t]);
   if (!t || !s) return null;
-  const win = /\[1m\]/i.test(String(s.model ?? '')) ? 1_000_000 : 200_000;
+  const win = contextWindow(s.model, s.context_tokens);
   const rows = infoRows(s, stateClass(s), now.value / 1000, win);
   return html`<div class="info-pop popover" data-testid="session-info" data-sid=${s.id} role="tooltip" ref=${ref}
     style=${pos ? `left:${pos.left}px;top:${pos.top}px` : 'left:0;top:0;visibility:hidden'}>

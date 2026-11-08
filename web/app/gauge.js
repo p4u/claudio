@@ -9,11 +9,23 @@ export function level(fraction) {
   return fraction >= 0.85 ? 'hot' : fraction >= 0.6 ? 'warn' : 'ok';
 }
 
-// context_tokens over the model's window: 1M when the name says [1m], else 200k.
+// The window claude compacts against (the same rule as src/tui/ui/status.rs context_window):
+// claude has two windows, 200k and 1M, and the transcript never says which one a session has.
+// 1M for a model id with a `1m` token ([1m], -1m), for Opus 5.x (Claude Code runs it at 1M by
+// default), and whenever the context used is already past 200k (so the gauge never reads over
+// 100 %); else 200k.
+export const SMALL_WINDOW = 200_000;
+export const LARGE_WINDOW = 1_000_000;
+export function contextWindow(model, used = 0) {
+  const name = String(model ?? '');
+  const oneM = name.split(/[^A-Za-z0-9]/).some((p) => p.toLowerCase() === '1m');
+  const opus5 = name.toLowerCase().startsWith('claude-opus-5');
+  return oneM || opus5 || (Number.isFinite(used) && used > SMALL_WINDOW) ? LARGE_WINDOW : SMALL_WINDOW;
+}
+
+// context_tokens over the session's window.
 export function ctxFraction(session, model) {
   const tokens = session?.context_tokens;
   if (!Number.isFinite(tokens)) return null;
-  const name = String(model ?? session.model ?? '');
-  const window = /\[1m\]/i.test(name) ? 1_000_000 : 200_000;
-  return Math.min(1, tokens / window);
+  return Math.min(1, tokens / contextWindow(model ?? session.model, tokens));
 }

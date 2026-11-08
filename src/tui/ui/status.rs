@@ -306,7 +306,7 @@ fn metric_spans(name: &str, history: &[f32], value: String) -> Vec<Span<'static>
 /// window, colored by how full it is. Nothing until a turn has happened.
 fn context_segment(used: Option<u64>, model: Option<&str>) -> Option<Segment> {
     let used = used?;
-    let window = context_window(model.unwrap_or_default());
+    let window = context_window(model.unwrap_or_default(), used);
     let pct = used as f32 / window.max(1) as f32 * 100.0;
     let color = level_color(pct);
     let mut spans = vec![label("ctx"), text(" ")];
@@ -324,19 +324,29 @@ fn context_segment(used: Option<u64>, model: Option<&str>) -> Option<Segment> {
     })
 }
 
-/// The window claude compacts against: 1M for a model id with a `1m` token
-/// (`claude-opus-5-5[1m]`), else [`DEFAULT_CONTEXT_WINDOW`]. The proxy's
-/// catalogue is not consulted: claude ignores the context sizes in
-/// `/v1/models`, so a larger catalogue window is one it never fills.
-pub fn context_window(model: &str) -> u64 {
+/// The window claude compacts against, given the model id and the context
+/// last used. Claude has two windows, 200k and 1M, and the transcript never
+/// says which one a session has, so: 1M for a model id with a `1m` token
+/// (`claude-opus-5-5[1m]`), for a model Claude Code runs at 1M by default
+/// ([`defaults_to_1m`]), and whenever `used` is already past 200k (it cannot
+/// be the small window then, so the gauge never reads over 100 %); else
+/// [`DEFAULT_CONTEXT_WINDOW`]. The proxy's catalogue is not consulted: claude
+/// ignores the context sizes in `/v1/models`.
+pub fn context_window(model: &str, used: u64) -> u64 {
     let one_million = model
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("1m"));
-    if one_million {
+    if one_million || defaults_to_1m(model) || used > DEFAULT_CONTEXT_WINDOW {
         1_000_000
     } else {
         DEFAULT_CONTEXT_WINDOW
     }
+}
+
+/// Models Claude Code gives a 1M window without the `[1m]` suffix: Opus 5.x
+/// (`claude-opus-5-5` reports 1M in `/context`).
+fn defaults_to_1m(model: &str) -> bool {
+    model.to_ascii_lowercase().starts_with("claude-opus-5")
 }
 
 /// `⎇ main ↑2 ↓1 ●1 ✚3 …2`: the branch, how it stands against its upstream,
@@ -791,16 +801,33 @@ mod tests {
 
     #[test]
     fn context_window_is_1m_for_a_1m_token_else_200k() {
-        assert_eq!(context_window("claude-opus-5-5[1m]"), 1_000_000);
-        assert_eq!(context_window("claude-sonnet-4-5-1m"), 1_000_000);
-        assert_eq!(context_window("CLAUDE-X-1M"), 1_000_000);
-        // Without the suffix claude assumes 200k, whatever the upstream allows.
-        assert_eq!(context_window("claude-opus-5-5"), 200_000);
-        assert_eq!(context_window("claude-openai-qwen38-27b"), 200_000);
+        assert_eq!(context_window("claude-opus-5-5[1m]", 0), 1_000_000);
+        assert_eq!(context_window("claude-sonnet-4-5-1m", 0), 1_000_000);
+        assert_eq!(context_window("CLAUDE-X-1M", 0), 1_000_000);
+        assert_eq!(context_window("claude-openai-qwen38-27b", 0), 200_000);
         // `1m` has to be a whole token: a date is not a window.
-        assert_eq!(context_window("claude-opus-4-1-20250805"), 200_000);
-        assert_eq!(context_window("claude-haiku-4-5"), 200_000);
-        assert_eq!(context_window(""), 200_000);
+        assert_eq!(context_window("claude-opus-4-1-20250805", 0), 200_000);
+        assert_eq!(context_window("claude-haiku-4-5", 0), 200_000);
+        assert_eq!(context_window("", 0), 200_000);
+    }
+
+    // Changed 2026-11-08: this used to say `claude-opus-5-5` (no suffix) is
+    // 200k, but Claude Code runs Opus 5.5 at 1M by default (its `/context`
+    // shows 1M), so the gauge read over 100 %.
+    #[test]
+    fn opus_5_runs_at_1m_without_the_suffix() {
+        assert_eq!(context_window("claude-opus-5-5", 0), 1_000_000);
+        assert_eq!(context_window("Claude-Opus-5-1", 10), 1_000_000);
+        assert_eq!(context_window("claude-sonnet-5-5", 0), 200_000);
+    }
+
+    #[test]
+    fn a_context_past_200k_means_the_1m_window() {
+        assert_eq!(context_window("claude-sonnet-5-5", 200_000), 200_000);
+        assert_eq!(context_window("claude-sonnet-5-5", 200_001), 1_000_000);
+        assert_eq!(context_window("some-proxy-model", 765_000), 1_000_000);
+        let seg = context_segment(Some(260_000), Some("claude-sonnet-5-5")).unwrap();
+        assert_eq!(segment_text(&seg).split(' ').nth(2), Some("26%"));
     }
 
     #[test]
@@ -822,9 +849,10 @@ mod tests {
         assert_eq!(segment_text(&seg), "ctx █████████▌ 95% 190k/200k");
         assert_eq!(find(&seg.spans, "95%").style.fg, Some(RED));
 
-        // Over the window: the gauge is capped, the percentage is not.
+        // Past 200k the window is the 1M one (changed 2026-11-08: this used
+        // to read "150% 300k/200k", an impossible context).
         let seg = context_segment(Some(300_000), Some("x")).unwrap();
-        assert_eq!(segment_text(&seg), "ctx ██████████ 150% 300k/200k");
+        assert_eq!(segment_text(&seg), "ctx ███░░░░░░░ 30% 300k/1M");
         assert!(context_segment(None, Some("x")).is_none());
     }
 
