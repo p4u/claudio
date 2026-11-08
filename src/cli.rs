@@ -380,14 +380,15 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n\
 \n\
 \x20Web UI:\n\
-\x20  claudio web [--listen 127.0.0.1:7337] [--allow-host NAME]... [--no-open] [--print-url] [--rotate-token]\n\
+\x20  claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]\n\
 \x20                              Serve the session manager to a browser on this machine (loopback only).\n\
 \x20                              Prints http://127.0.0.1:7337/#t=<token> and opens it. The token (in\n\
 \x20                              ~/.config/claudio/web-token, 0600) is as sensitive as an SSH key: it\n\
 \x20                              reaches every session on every connected host. From another machine:\n\
 \x20                              ssh -L 7337:127.0.0.1:7337 HOST. Behind a TLS reverse proxy on this\n\
-\x20                              host: --allow-host NAME. --print-url prints the URL and exits;\n\
-\x20                              --rotate-token makes a new token. See docs/web.md.\n\
+\x20                              host: --allow-host NAME[:PORT] (repeatable; the port when it is not\n\
+\x20                              443). --print-url prints the URL and exits; --rotate-token makes a\n\
+\x20                              new token. See docs/web.md.\n\
 \x20  CLAUDIO_WEB_DIR=<dir>             (debug builds only) serve the browser app from <dir>, not the binary.\n\
 \n\
 \x20Daemon commands:\n\

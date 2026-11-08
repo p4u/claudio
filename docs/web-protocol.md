@@ -21,9 +21,10 @@ Checks run in this order on every request: `Host` not accepted → `421`; a meth
 `GET`/`HEAD`, or any WebSocket upgrade, without an accepted `Origin` → `403`; `/ws` or
 `/api/*` (but `/api/login`) without a live session cookie → `401`.
 
-- Accepted `Host` values: `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>` (also without
-  the port when it is 80), and every `--allow-host NAME` as `NAME` or `NAME:<port>`, compared
-  case-insensitively.
+- Accepted `Host` values: the `--listen` address itself (e.g. `127.0.0.2:<port>`),
+  `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>` (each also without the port when it
+  is 80), every `--allow-host NAME` as `NAME` or `NAME:<port>`, and every
+  `--allow-host NAME:PORT` as exactly that, compared case-insensitively.
 - Accepted `Origin`: `http://` or `https://` followed by an accepted Host value, nothing after
   it. `null` is refused.
 - Cookie: `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `; Secure` when the

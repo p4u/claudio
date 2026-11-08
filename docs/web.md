@@ -20,7 +20,7 @@ page posts the token to `/api/login`, gets a cookie and removes the token from t
 Later visits need no token while the cookie lives (24 h idle).
 
 Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
-`127.0.0.1:7337`), `--allow-host NAME` (repeatable), `--no-open`, `--print-url`,
+`127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
 `--rotate-token`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
 
 ### From another machine
@@ -32,7 +32,8 @@ The server never listens on a non-loopback address. Two ways to reach it:
 - **A TLS reverse proxy** on the same host (Caddy, nginx) that forwards to the loopback port.
   Tell the server the name the browser uses: `claudio web --allow-host claudio.example.org`. That
   name is then accepted in `Host` and `Origin`, and the cookie gets `Secure`. The proxy must pass
-  WebSocket upgrades on `/ws` and keep the `Host` header.
+  WebSocket upgrades on `/ws` and keep the `Host` header. If the proxy is not on 443, name its
+  port: `--allow-host claudio.example.org:8443`.
 
 **Installed window.** Chromium and Safari can install the page as an app (Install, or Add to
 Dock). An app window has no tab strip, so `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and friends stay with
@@ -50,8 +51,8 @@ the terminal in it, and the page's own keys are not fighting the browser's.
 - **Cookie.** `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
   `--allow-host` is set. Sessions are kept in the server's memory: 24 h idle expiry, at most 64.
   Five failed logins in 60 s lock the login for the rest of that minute (`429`).
-- **Host and Origin.** Every request needs an accepted `Host` (loopback names with the port,
-  plus `--allow-host` names), else `421`. A `POST` or a WebSocket upgrade also needs an
+- **Host and Origin.** Every request needs an accepted `Host` (the listen address and the
+  loopback names with the port, plus `--allow-host` names), else `421`. A `POST` or a WebSocket upgrade also needs an
   accepted `Origin`, else `403`. `/ws` and `/api/*` need the cookie, else `401`. This stops DNS
   rebinding and cross-site requests.
 - **CSP.** `default-src 'self'; script-src 'self' 'sha256-<import map>'; …`, with
@@ -154,3 +155,7 @@ make test-web                      # node tests, then Playwright against a debug
 A debug build run with `CLAUDIO_WEB_DIR=web` serves the files from disk, so edits show on
 reload; every build embeds them gzipped (`build.rs`). `make test-web` needs the Playwright browsers in `~/.cache/ms-playwright`
 (`npx playwright install chromium` once, in `web/e2e`).
+
+A file added or removed directly under `web/` is not noticed by cargo until another embedded
+file changes or `build.rs` is touched (`web/` itself is not watched because of
+`web/e2e/node_modules`).
