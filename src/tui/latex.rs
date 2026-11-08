@@ -383,9 +383,15 @@ fn overlay_row(
     let line = Row::read(screen, row, area.width);
     let found = line.tags(tags);
     match found.as_slice() {
-        [Tag { open, close: None }] => {
-            overlay_span(buf, area, screen, formulas, (row, rows), &line, *open, tags)
-        }
+        [Tag { open, close: None }] => overlay_span(
+            buf,
+            area,
+            screen,
+            formulas,
+            (row, rows),
+            (&line, *open),
+            tags,
+        ),
         _ => {
             rebuild_row(buf, area, row, &line, &found, formulas, tags);
             row + 1
@@ -455,8 +461,7 @@ fn overlay_span(
     screen: &Screen,
     formulas: &[Formula],
     (row, rows): (u16, u16),
-    first: &Row,
-    open: usize,
+    (first, open): (&Row, usize),
     tags: &Tags,
 ) -> u16 {
     let mut text = first.text(open + tags.open.len(), first.glyphs.len());

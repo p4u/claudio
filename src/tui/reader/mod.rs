@@ -75,6 +75,9 @@ pub enum Content {
     Ready(Vec<RenderedAnswer>),
 }
 
+/// The width the answers were laid out for, and each answer's lines.
+type LayoutCache = (usize, HashMap<usize, Rc<Vec<Line>>>);
+
 /// The reader's state: whose answers, which one, and how far down.
 pub struct ReaderView {
     pub session: SessionId,
@@ -94,7 +97,7 @@ pub struct ReaderView {
     /// The largest useful scroll, known once drawn (see `ui/reader.rs`).
     max_scroll: Cell<u16>,
     /// The answers laid out for one width (a resize starts over).
-    layouts: RefCell<(usize, HashMap<usize, Rc<Vec<Line>>>)>,
+    layouts: RefCell<LayoutCache>,
 }
 
 impl ReaderView {

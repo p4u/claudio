@@ -75,6 +75,8 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(330);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(250);
 
 /// Something the daemon sent without being asked.
+// large_enum_variant: events are moved once, from the reader to the loop; boxing every `SessionEvent` would only add an allocation per event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum Incoming {
     /// Terminal output for an attached session.
@@ -523,7 +525,7 @@ impl Client {
                 session: id,
                 bytes: chunk.to_vec(),
             };
-            if let Err(_) = self.shared.input_fwd.try_send(frame) {
+            if self.shared.input_fwd.try_send(frame).is_err() {
                 tracing::warn!(%id, "input dropped: connection congested");
                 // Surface a notice in the incoming stream so the TUI can show it.
                 let _ = self.shared.in_tx.try_send(Incoming::Event {

@@ -9,7 +9,7 @@
 //! Sibling modules extend `App` with one concern each:
 //! - `sessions`      – SessionView; spawning, activation and recovery
 //! - `interaction`   – Modal; terminal input, wizard routing, daemon events
-//!                     and request replies
+//!   and request replies
 //! - `confirm`       – the generic multiple-choice prompt
 //! - `claude_update` – keeping claude up to date on every host
 //! - `stats_view`    – the proxy stats popup (Alt+s)
@@ -18,7 +18,7 @@
 //! - `proxy_state`   – ProxyStatus and session credentials
 //! - `notifications` – Notice and attention notifications
 //! - `selection`     – copy-on-select in the pane (its glue is in
-//!                     `interaction`)
+//!   `interaction`)
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;

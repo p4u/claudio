@@ -29,6 +29,8 @@ pub const MESSAGE_ROWS_MAX: usize = 8;
 const COMMIT_HEAD_ROWS: usize = 4;
 
 /// What the caller must do after feeding the view an input.
+// large_enum_variant: one short-lived value per key press; the `Request` variant is the one that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum GitOutcome {
     None,

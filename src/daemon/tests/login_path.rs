@@ -69,7 +69,7 @@ async fn sessions_run_the_login_shells_claude_with_its_path() {
     let mut lines = ran.lines();
     assert_eq!(lines.next(), Some(claude.to_str().unwrap()));
     assert_eq!(lines.next(), path.to_str(), "the session's PATH");
-    let session_path = std::ffi::OsString::from(path);
+    let session_path = path;
     let mut dirs = std::env::split_paths(&session_path);
     assert_eq!(dirs.next().as_deref(), Some(login_bin.as_path()));
     assert!(std::env::split_paths(&session_path).any(|d| d == Path::new("/usr/bin")));

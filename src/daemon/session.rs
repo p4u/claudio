@@ -853,11 +853,10 @@ impl Actor {
                     // forever if another process holds the PTY slave open.
                     let drain_deadline =
                         tokio::time::Instant::now() + EXIT_DRAIN_TIMEOUT;
-                    loop {
-                        match tokio::time::timeout_at(drain_deadline, output.recv()).await {
-                            Ok(Some(bytes)) => self.on_output(&bytes),
-                            Ok(None) | Err(_) => break,
-                        }
+                    while let Ok(Some(bytes)) =
+                        tokio::time::timeout_at(drain_deadline, output.recv()).await
+                    {
+                        self.on_output(&bytes);
                     }
                     // §Race fix: wait for Daemon::spawn Phase 3 to commit the
                     // handle to registry.live before running on_exit. Without

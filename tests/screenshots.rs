@@ -19,7 +19,12 @@
 
 mod common;
 
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use common::{Region, TuiProcess, DAEMON_WAIT, ENTER, WAIT};
 use portable_pty::CommandBuilder;
@@ -495,7 +500,7 @@ impl Drop for DemoEnv {
 
 // ── Demo project setup ────────────────────────────────────────────────────────
 
-fn setup_demo_projects(home: &PathBuf) {
+fn setup_demo_projects(home: &Path) {
     // webapp — a small React app with a believable history (see below).
     let webapp = home.join("projects/webapp");
     setup_webapp_history(&webapp);
@@ -743,7 +748,7 @@ fn git_init(dir: &PathBuf, branch: &str) {
         .ok();
 }
 
-fn git_commit(dir: &PathBuf, msg: &str) {
+fn git_commit(dir: &Path, msg: &str) {
     std::process::Command::new("git")
         .args(["-C", dir.to_str().unwrap(), "add", "-A"])
         .output()
@@ -757,7 +762,7 @@ fn git_commit(dir: &PathBuf, msg: &str) {
 // ── Claude config pre-seeding ─────────────────────────────────────────────────
 
 /// Write a minimal `.claude.json` to skip onboarding and trust dialogs.
-fn preseed_claude_config(home: &PathBuf) {
+fn preseed_claude_config(home: &Path) {
     // Build the projects map with hasTrustDialogAccepted for all demo dirs.
     let home_str = home.to_str().unwrap_or("/tmp/claudio-demo/home");
     let projects_json = format!(
@@ -826,7 +831,7 @@ fn preseed_claude_config(home: &PathBuf) {
 /// pastes the directory path and confirms with Enter.
 ///
 /// Waits until the session's directory name appears in the tab bar.
-fn wizard_navigate_to_dir(tui: &mut TuiProcess, dir: &PathBuf) {
+fn wizard_navigate_to_dir(tui: &mut TuiProcess, dir: &Path) {
     let path = dir.to_str().expect("UTF-8 path");
     let dir_name = dir
         .file_name()
@@ -851,21 +856,6 @@ fn wizard_navigate_to_dir(tui: &mut TuiProcess, dir: &PathBuf) {
 
     // Wait for the session tab to appear in the tab bar.
     tui.wait_for(dir_name, Region::TabBar, DAEMON_WAIT);
-}
-
-/// If a claude trust/permission dialog is visible, accept it.
-///
-/// Checks once after a short settle delay; non-blocking.
-fn maybe_accept_trust_dialog(tui: &mut TuiProcess) {
-    thread::sleep(Duration::from_millis(600));
-    let screen = tui.screen_text(Region::Screen);
-    let low = screen.to_lowercase();
-    if low.contains("trust") || low.contains("(y)") || low.contains("y/n") {
-        eprintln!("[screenshots] accepting trust dialog");
-        tui.send_keys(b"y");
-        tui.send_keys(ENTER);
-        thread::sleep(Duration::from_millis(300));
-    }
 }
 
 /// Wait for the claude session to be fully ready and dismiss any onboarding
@@ -1072,7 +1062,7 @@ fn redact_emails(text: &str) -> String {
 }
 
 /// Export the current screen as SVG, run a privacy check, convert to PNG.
-fn save_shot(tui: &TuiProcess, demo: &DemoEnv, png_path: &PathBuf, name: &str) {
+fn save_shot(tui: &TuiProcess, demo: &DemoEnv, png_path: &Path, name: &str) {
     eprintln!("[screenshots] capturing {name}...");
 
     let screen = redact(&tui.screen_text(Region::Screen));
@@ -1102,7 +1092,7 @@ fn save_shot(tui: &TuiProcess, demo: &DemoEnv, png_path: &PathBuf, name: &str) {
 }
 
 /// Try inkscape first, fall back to ImageMagick `magick`.
-fn convert_svg_to_png(svg: &PathBuf, png: &PathBuf) {
+fn convert_svg_to_png(svg: &Path, png: &Path) {
     let svg_s = svg.to_str().unwrap();
     let png_s = png.to_str().unwrap();
 

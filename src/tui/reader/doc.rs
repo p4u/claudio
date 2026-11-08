@@ -214,8 +214,11 @@ struct Builder<'a> {
     heading: Option<u8>,
     code: Option<String>,
     /// The table being read: its rows, and the row being read.
-    table: Option<(Vec<Vec<Vec<Span>>>, Vec<Vec<Span>>)>,
+    table: Option<TableRows>,
 }
+
+/// A table being read: the finished rows (cells of spans) and the row in progress.
+type TableRows = (Vec<Vec<Vec<Span>>>, Vec<Vec<Span>>);
 
 impl<'a> Builder<'a> {
     fn new(tags: &'a [FormulaTag], fences: &'a [String]) -> Builder<'a> {

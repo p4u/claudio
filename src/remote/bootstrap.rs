@@ -71,7 +71,7 @@ pub struct RemoteInfo {
 /// and returns [`RemoteInfo`]. Errors are returned as a human-readable string
 /// for display in the TUI.
 pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
-    validate_host(host).map_err(|e| e)?;
+    validate_host(host)?;
 
     let local = Probe::current().map_err(|e| format!("cannot read local binary: {e}"))?;
 

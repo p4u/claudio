@@ -135,12 +135,10 @@ impl Perform for Inner {
             // We report every mode as "permanently reset" (param 4 in the reply)
             // unless it is one a real xterm would report as set (e.g. 1000
             // mouse tracking is off by default).  Mode=2 means "reset".
-            'p' => {
-                if private == Some(b'?') {
-                    // Reply: CSI ? <mode> ; <state> $ y  (state 2 = permanently reset)
-                    let s = format!("\x1b[?{first};2$y");
-                    self.out.extend_from_slice(s.as_bytes());
-                }
+            'p' if private == Some(b'?') => {
+                // Reply: CSI ? <mode> ; <state> $ y  (state 2 = permanently reset)
+                let s = format!("\x1b[?{first};2$y");
+                self.out.extend_from_slice(s.as_bytes());
             }
 
             _ => {}

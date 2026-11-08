@@ -404,7 +404,7 @@ mod tests {
         // Restore so cleanup works.
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::set_permissions(
-            &dir.join("j.json.unreadable"),
+            dir.join("j.json.unreadable"),
             std::fs::Permissions::from_mode(0o644),
         );
         std::fs::remove_dir_all(&dir).unwrap();

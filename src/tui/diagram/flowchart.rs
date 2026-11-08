@@ -274,12 +274,10 @@ impl Parser<'_> {
     }
 
     fn starts_with(&self, i: usize, pat: &str) -> bool {
-        let mut j = i;
-        for c in pat.chars() {
+        for (j, c) in (i..).zip(pat.chars()) {
             if self.at(j) != Some(c) {
                 return false;
             }
-            j += 1;
         }
         true
     }
@@ -455,6 +453,9 @@ enum LNode {
     Real(usize),
     Dummy,
 }
+
+/// Segments leaving one port: `(port, leftmost x, rightmost x, segment indices)`.
+type Net = ((usize, i64), i64, i64, Vec<usize>);
 
 /// One layer-to-next-layer piece of an edge.
 struct Seg {
@@ -910,9 +911,9 @@ impl Layout {
         let mut tracks = vec![1i64; gaps];
         let mut src_band = vec![0i64; gaps];
         let mut dst_band = vec![0i64; gaps];
-        for g in 0..gaps {
+        for (g, gap_tracks) in tracks.iter_mut().enumerate() {
             // Nets: segments that leave the same port share a track.
-            let mut nets: Vec<((usize, i64), i64, i64, Vec<usize>)> = Vec::new();
+            let mut nets: Vec<Net> = Vec::new();
             for (i, s) in self.segs.iter().enumerate() {
                 if self.layer_of[s.from] != g {
                     continue;
@@ -930,8 +931,7 @@ impl Layout {
                 }
             }
             // Reversed edges first, so they get the top tracks.
-            let reversed =
-                |n: &(_, _, _, Vec<usize>)| n.3.iter().any(|&i| self.reversed[self.segs[i].edge]);
+            let reversed = |n: &Net| n.3.iter().any(|&i| self.reversed[self.segs[i].edge]);
             nets.sort_by_key(|n| (!reversed(n), n.1, n.2));
             let mut ends: Vec<i64> = Vec::new();
             for (_, lo, hi, members) in &nets {
@@ -950,7 +950,7 @@ impl Layout {
                     track[i] = t as i64;
                 }
             }
-            tracks[g] = (ends.len() as i64).max(1);
+            *gap_tracks = (ends.len() as i64).max(1);
         }
         for (&e, place) in &self.labels {
             let (_, main) = self.label_size(&self.edges[e].label);

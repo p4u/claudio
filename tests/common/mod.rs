@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, os::unix::fs::PermissionsExt, thread};
@@ -951,7 +951,7 @@ impl Drop for ManagerHarness {
 ///
 /// Waits for the wizard to close (the fake claude banner to appear in the pane)
 /// before returning, so callers don't need a sleep.
-pub fn wizard_pick_dir(tui: &mut TuiProcess, dir: &PathBuf) {
+pub fn wizard_pick_dir(tui: &mut TuiProcess, dir: &Path) {
     let path = dir.to_str().expect("non-UTF-8 dir");
     // Host step: confirm "local" (pre-selected).
     tui.send_keys(ENTER);

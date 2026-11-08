@@ -2,10 +2,10 @@
 //!
 //! **Transport layer** — how the relay subprocess reports back to the parent:
 //!   * `tcp`  — relay connects to 127.0.0.1:<port>. Port is embedded in the
-//!              relay command as an argv token, never in an env var, so claude's
-//!              own `process.env` stays clean.
+//!     relay command as an argv token, never in an env var, so claude's
+//!     own `process.env` stays clean.
 //!   * `file` — relay drops a file into a watched directory (fallback when
-//!              loopback TCP is blocked).
+//!     loopback TCP is blocked).
 //!
 //! **Relay concealment (§4.9.2)** — for TCP transport, `Relay::setup` copies
 //! the wrapper binary to a temp dir under a random hex name (e.g.

@@ -33,6 +33,8 @@ const TAG_DATA: u8 = b'D';
 pub type SessionId = Uuid;
 
 /// One protocol frame.
+// large_enum_variant: `Envelope` is the common case on the control path; boxing it would touch every `Frame::Control` site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Control(Envelope),
@@ -1076,7 +1078,7 @@ pub struct Answer {
 /// the cap is on the encoded size, not on the text's.
 pub fn answers_reply(id: SessionId, answers: Vec<Answer>) -> Msg {
     let mut msg = Msg::AnswersReply { id, answers };
-    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > ANSWERS_REPLY_MAX) {
+    while serde_json::to_vec(&msg).is_ok_and(|json| json.len() > ANSWERS_REPLY_MAX) {
         match &mut msg {
             Msg::AnswersReply { answers, .. } if !answers.is_empty() => {
                 answers.remove(0);
@@ -1122,7 +1124,7 @@ pub fn search_reply(
         total,
         truncated,
     };
-    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > SEARCH_REPLY_MAX) {
+    while serde_json::to_vec(&msg).is_ok_and(|json| json.len() > SEARCH_REPLY_MAX) {
         match &mut msg {
             Msg::SearchReply {
                 hits, truncated, ..

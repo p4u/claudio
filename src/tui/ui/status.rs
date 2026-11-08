@@ -1187,7 +1187,7 @@ mod tests {
 
     #[test]
     fn hint_stays_visible_when_narrow() {
-        let left = vec![text(&"x".repeat(100))];
+        let left = vec![text("x".repeat(100))];
         for width in [60, 30, 17] {
             let line = plain(&layout_line(
                 left.clone(),

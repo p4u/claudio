@@ -179,10 +179,11 @@ fn expand_glob(pattern: &Path) -> Vec<PathBuf> {
     let file_pattern = match pattern.file_name().and_then(|n| n.to_str()) {
         Some(f) => f,
         None => {
-            return pattern
-                .exists()
-                .then(|| vec![pattern.to_path_buf()])
-                .unwrap_or_default()
+            return if pattern.exists() {
+                vec![pattern.to_path_buf()]
+            } else {
+                Default::default()
+            }
         }
     };
     if !pattern_str.contains('*') && !pattern_str.contains('?') {
@@ -296,11 +297,7 @@ mod tests {
         fs::write(subdir.join("10-work.conf"), "Host work1\nHost work2\n").unwrap();
         fs::write(subdir.join("20-home.conf"), "Host home1\n").unwrap();
         let main_config = dir.join("config");
-        fs::write(
-            &main_config,
-            format!("Include conf.d/*.conf\nHost direct\n"),
-        )
-        .unwrap();
+        fs::write(&main_config, "Include conf.d/*.conf\nHost direct\n").unwrap();
 
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -322,7 +319,7 @@ mod tests {
         let dir = scratch();
         let config = dir.join("config");
         // A config that includes itself.
-        fs::write(&config, format!("Include config\nHost loop\n")).unwrap();
+        fs::write(&config, "Include config\nHost loop\n").unwrap();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         parse_file(&config, 0, &dir, &mut seen, &mut out);

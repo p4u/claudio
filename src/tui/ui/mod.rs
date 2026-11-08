@@ -696,7 +696,7 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
 fn dir_row(w: &Wizard, path: &str, is_selected: bool, width: usize, now: u64) -> Line<'static> {
     let meta = w.meta.get(path);
     let display = w.display(path);
-    let is_hidden = meta.map_or(false, |m| m.hidden);
+    let is_hidden = meta.is_some_and(|m| m.hidden);
 
     // Build badge text pieces (right-aligned).
     let mut badges: Vec<(String, Style)> = Vec::new();

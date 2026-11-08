@@ -368,10 +368,11 @@ impl TranscriptCursor {
                 }
                 self.last_message_id = message_id;
             }
-            Some("user") => {
-                if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true) && is_real_prompt(&v) {
-                    totals.turns = totals.turns.saturating_add(1);
-                }
+            Some("user")
+                if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true)
+                    && is_real_prompt(&v) =>
+            {
+                totals.turns = totals.turns.saturating_add(1);
             }
             _ => {}
         }
@@ -674,10 +675,10 @@ pub fn recent_answers(bytes: &[u8]) -> Vec<Answer> {
                     push_texts(texts, content);
                 }
             }
-            Some("system") => {
-                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") {
-                    finish(&mut answers, current.take());
-                }
+            Some("system")
+                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") =>
+            {
+                finish(&mut answers, current.take());
             }
             _ => {}
         }
@@ -860,7 +861,7 @@ pub fn recent_project_dirs(limit: usize) -> Vec<(PathBuf, u64)> {
         }
     }
 
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
     dirs.truncate(limit);
     dirs.into_iter().map(|(mtime, p)| (p, mtime)).collect()
 }

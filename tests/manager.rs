@@ -98,7 +98,7 @@ fn test_2b_alt_shift_digit_goes_to_session() {
     tui.send_keys(ALT_N);
     wizard_pick_dir(&mut tui, &harness.dirs[1]);
     tui.wait_until(
-        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != nonce1),
+        |s| extract_nonce(&s.region_text(Region::Pane)).is_some_and(|n| n != nonce1),
         WAIT,
     );
     let nonce2 = current_nonce(&tui);
@@ -214,7 +214,7 @@ fn test_5_daemon_restart() {
     tui.wait_until(
         |screen| {
             let text = screen.region_text(Region::Pane);
-            extract_nonce(&text).map_or(false, |n| n != old_nonce)
+            extract_nonce(&text).is_some_and(|n| n != old_nonce)
         },
         RECONNECT_WAIT,
     );
@@ -264,7 +264,7 @@ fn test_5b_outdated_daemon_is_replaced() {
     tui.wait_until(
         |screen| {
             let text = screen.region_text(Region::Pane);
-            extract_nonce(&text).map_or(false, |n| n != old_nonce)
+            extract_nonce(&text).is_some_and(|n| n != old_nonce)
         },
         DAEMON_WAIT,
     );
@@ -659,7 +659,7 @@ fn test_daemon_stop_and_restart_cmd() {
     tui.wait_until(
         |screen| {
             let text = screen.region_text(Region::Pane);
-            extract_nonce(&text).map_or(false, |n| n != old_nonce)
+            extract_nonce(&text).is_some_and(|n| n != old_nonce)
         },
         RECONNECT_WAIT,
     );
@@ -973,6 +973,7 @@ fn test_proxy_env_injection() {
     let proxy_tmp_guard = proxy_tmp.clone();
     let _proxy_guard = scopeguard(move || {
         proxy_proc.kill().ok();
+        proxy_proc.wait().ok();
         let _ = fs::remove_dir_all(&proxy_tmp_guard);
     });
 
@@ -1161,7 +1162,7 @@ fn test_proxy_env_injection() {
     tui2.wait_until(
         |screen| {
             let text = screen.region_text(Region::Pane);
-            extract_nonce(&text).map_or(false, |n| n != old_nonce)
+            extract_nonce(&text).is_some_and(|n| n != old_nonce)
         },
         RECONNECT_WAIT,
     );
@@ -1701,7 +1702,7 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     tui.wait_for("new conversation", Region::Screen, WAIT);
     tui.send_keys(b"n");
     tui.wait_until(
-        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != before),
+        |s| extract_nonce(&s.region_text(Region::Pane)).is_some_and(|n| n != before),
         WAIT,
     );
     let after_new = current_nonce(&tui);
@@ -1711,7 +1712,7 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     tui.wait_for("restart & resume", Region::Screen, WAIT);
     tui.send_keys(b"r");
     tui.wait_until(
-        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != after_new),
+        |s| extract_nonce(&s.region_text(Region::Pane)).is_some_and(|n| n != after_new),
         WAIT,
     );
 
@@ -1722,7 +1723,7 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     assert!(tabs.find(n0) < tabs.find(n1), "{tabs:?}");
     tui.send_keys(ALT_LEFT);
     tui.wait_until(
-        |s| extract_nonce(&s.region_text(Region::Pane)).map_or(false, |n| n != before),
+        |s| extract_nonce(&s.region_text(Region::Pane)).is_some_and(|n| n != before),
         WAIT,
     );
 
@@ -1912,7 +1913,7 @@ fn test_plain_keeps_proxy_stats_and_reset() {
     tui.wait_for("new conversation", Region::Screen, WAIT);
     tui.send_keys(b"n");
     tui.wait_until(
-        |s| extract_nonce(&s.region_text(Region::Screen)).map_or(false, |n| n != before),
+        |s| extract_nonce(&s.region_text(Region::Screen)).is_some_and(|n| n != before),
         WAIT,
     );
     // Still the same single, full-screen session.

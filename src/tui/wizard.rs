@@ -186,7 +186,7 @@ impl HostStep {
                     HostSection::Remote => {
                         if self.selected > 0 {
                             self.selected -= 1;
-                        } else if !self.local_items.is_empty() || true {
+                        } else {
                             // Cross edge: go to bottom of LOCAL section.
                             self.focus = HostSection::Local;
                             self.local_selected = self.local_len().saturating_sub(1);
@@ -293,7 +293,7 @@ impl HostStep {
             .iter()
             .filter_map(|h| Some((fuzzy_score(&input, h)?, h.clone())))
             .collect();
-        scored_remote.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_remote.sort_by_key(|s| std::cmp::Reverse(s.0));
         self.items = scored_remote.iter().map(|(_, h)| h.clone()).collect();
 
         // ── Filter local dirs (scored, best first). ────────────────────────────
@@ -302,7 +302,7 @@ impl HostStep {
             .iter()
             .filter_map(|d| Some((fuzzy_score(&input, d)?, d.clone())))
             .collect();
-        scored_local.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_local.sort_by_key(|s| std::cmp::Reverse(s.0));
         self.local_items = scored_local.iter().map(|(_, d)| d.clone()).collect();
 
         // ── Score the "Explore local dirs…" pseudo-entry. ─────────────────────
@@ -707,7 +707,7 @@ impl Wizard {
                 proxy: self.selected_proxy().map(str::to_owned),
             };
         }
-        sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         self.resume = Some(ResumeStep {
             cwd: cwd.to_owned(),
             sessions,
@@ -1104,7 +1104,7 @@ impl Wizard {
             })
             .collect();
         // Stable: equal scores keep seed (recency) order.
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         for (_, s) in scored {
             if !items.contains(s) {
                 items.push(s.clone());
@@ -1515,11 +1515,11 @@ mod tests {
         let recent = strings(&["/b"]);
         let w = Wizard::new(seeds, &recent, "/h".into(), "local", &[], &[], None);
         assert!(
-            w.meta.get("/b").map_or(false, |m| m.recently_used),
+            w.meta.get("/b").is_some_and(|m| m.recently_used),
             "/b should be marked recently_used"
         );
         assert!(
-            !w.meta.get("/a").map_or(false, |m| m.recently_used),
+            !w.meta.get("/a").is_some_and(|m| m.recently_used),
             "/a should not be recently_used"
         );
     }

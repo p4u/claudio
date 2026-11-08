@@ -87,7 +87,7 @@ pub fn fmt_count(n: i64) -> String {
     let digits = n.abs().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -100,7 +100,7 @@ pub fn fmt_count(n: i64) -> String {
 
 /// A context window: `1M`, `200k`, `32k`. Round figures stay round.
 pub fn fmt_window(n: u64) -> String {
-    if n >= 1_000_000 && n % 1_000_000 == 0 {
+    if n >= 1_000_000 && n.is_multiple_of(1_000_000) {
         format!("{}M", n / 1_000_000)
     } else {
         fmt_tokens(n.min(i64::MAX as u64) as i64)

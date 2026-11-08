@@ -139,7 +139,7 @@ impl Allowed {
 
     pub(crate) fn host_ok(&self, host: &str) -> bool {
         let host = host.trim().to_ascii_lowercase();
-        !host.is_empty() && self.hosts.iter().any(|h| *h == host)
+        !host.is_empty() && self.hosts.contains(&host)
     }
 
     /// `http://` or `https://` and an accepted host, nothing after it.

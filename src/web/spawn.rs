@@ -360,7 +360,9 @@ mod tests {
     #[test]
     fn spawn_checks_answer_bad_request_with_the_field() {
         assert!(check_spawn(&req()).is_ok());
-        let cases: Vec<(Box<dyn Fn(&mut SpawnReq)>, &str)> = vec![
+        // A mutation of a valid request and the field the check must name.
+        type Case = (Box<dyn Fn(&mut SpawnReq)>, &'static str);
+        let cases: Vec<Case> = vec![
             (Box::new(|r| r.cwd.clear()), "cwd"),
             (Box::new(|r| r.cwd = "/".repeat(4097)), "cwd"),
             (Box::new(|r| r.rows = 0), "rows"),

@@ -590,7 +590,8 @@ async fn hooks_update_state_and_journal() {
     send_hook(&d.config.socket, &token, "SessionStart", payload).await;
     c.event(id, |e| match e {
         SessionEvent::ClaudeSession { claude_session_id } => {
-            Some(assert_eq!(claude_session_id, "conv-42"))
+            let _: () = assert_eq!(claude_session_id, "conv-42");
+            Some(())
         }
         _ => None,
     })

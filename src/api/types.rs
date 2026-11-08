@@ -33,6 +33,7 @@ pub struct ChatRequest {
     /// Any other OpenAI fields (temperature, top_p, …) are accepted and ignored
     /// rather than rejected. Captured only to keep deserialization lenient.
     #[serde(flatten)]
+    // dead_code: kept so unknown request fields still deserialize; nothing reads them yet.
     #[allow(dead_code)]
     pub extra: Map<String, Value>,
 }
@@ -121,6 +122,7 @@ impl Content {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContentPart {
     #[serde(default)]
+    // dead_code: the part's `type` is parsed for validity of the wire shape but not read.
     #[allow(dead_code)]
     pub r#type: String,
     #[serde(default)]
@@ -135,6 +137,7 @@ pub struct ContentPart {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tool {
     #[serde(default)]
+    // dead_code: the tool's `type` ("function") is parsed but not read.
     #[allow(dead_code)]
     pub r#type: String, // "function"
     pub function: FunctionDef,
