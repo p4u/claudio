@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claudio</title>
+<link rel="stylesheet" href="/styles/tokens.css">
+<link rel="stylesheet" href="/styles/base.css">
+<link rel="stylesheet" href="/styles/layout.css">
+<link rel="stylesheet" href="/styles/components.css">
+<link rel="stylesheet" href="/vendor/xterm/xterm.css">
 <script type="importmap">
 {"imports": {
   "preact": "/vendor/preact/preact.mjs",
@@ -23,5 +28,8 @@
 }}
 </script>
 </head>
-<body></body>
+<body>
+<div id="app"></div>
+<script type="module" src="/app/boot.js"></script>
+</body>
 </html>
