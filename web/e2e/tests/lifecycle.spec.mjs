@@ -68,12 +68,12 @@ test('the close icon empties the pane and the stop icon kills the session', asyn
 test('the text size setting scales the interface', async ({ page }) => {
   await page.goto(srv.url);
   const size = () => page.evaluate(() => getComputedStyle(document.body).fontSize);
-  expect(await size()).toBe('15px');
+  expect(await size()).toBe('17px');
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByTestId('text-size-select').selectOption('small');
-  expect(await size()).toBe('13px');
+  expect(await size()).toBe('15px');
   await page.getByTestId('text-size-select').selectOption('large');
-  expect(await size()).toBe('17px');
+  expect(await size()).toBe('19px');
 });
 
 test('search finds a fixture conversation', async ({ page }) => {
@@ -118,7 +118,8 @@ test('toggling an extension rewrites its config.toml line', async ({ page }) => 
 
 test('claude update shows progress and completion', async ({ page }) => {
   await page.goto(srv.url);
-  await page.locator('[data-testid="host-chip"][data-host="local"]').click();
+  await page.getByTestId('hosts-btn').click();
+  await page.getByTestId('hosts-menu').locator('[data-testid="host-chip"][data-host="local"]').click();
   await page.getByTestId('host-claude-btn').click();
   await expect(page.getByTestId('claude-toast').first()).toHaveAttribute('data-phase', 'updating');
   await expect(page.locator('[data-testid="claude-toast"][data-phase="done"]')).toContainText('0.0.1-fake');

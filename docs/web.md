@@ -138,7 +138,7 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 
 | Capability | TUI key | Web action | WS op(s) | Test |
 |---|---|---|---|---|
-| Sessions on many hosts | wizard host list | host chips in the top bar, host panel (`+`) | `hosts.list`, `hosts.candidates`, `hosts.connect`, `hosts.disconnect` | `web_hosts_report_daemon_features`; ssh hosts: manual check on a real host |
+| Sessions on many hosts | wizard host list | the top bar's Hosts menu (one row per host), host panel, Add host… | `hosts.list`, `hosts.candidates`, `hosts.connect`, `hosts.disconnect` | `web_hosts_report_daemon_features`; ssh hosts: manual check on a real host |
 | Terminal panes (1, 2, 4) | `Alt+←/→` | pane grid buttons, `1`-`4`, drag a card | `session.attach`, `session.detach`, `session.resize`, `layout.save` | `a pane shows the terminal and typed keys echo`; `web_attach_snapshot_input_and_resize`; `web_two_tabs_share_one_attach` |
 | Terminal tabs | `Alt+c` | `t`, "Terminal beside" in a pane | `session.shell` | `a terminal tab runs echo ok`; `web_session_lifecycle_shell_rename_kill` |
 | New-session wizard: dirs | `Alt+n` | `n`: folder field, recent folders, browser | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir` |
@@ -160,7 +160,7 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Snippets | `Alt+z` `p` / `P` | palette: Insert snippet, Save last prompt | `snippets.list`, `snippets.save`, `reader.last_prompt` | `save and insert a snippet`; `web_snippets_save_and_list` |
 | Extensions screen | `Alt+i` | Settings → Manage… | `extensions.list`, `extensions.toggle`, `extensions.action` | `toggling an extension rewrites its config.toml line`; `web_extension_toggle_edits_config_and_is_reread`; `web_external_extension_action_runs_its_program` |
 | Plugin setup | first spawn, extensions screen | setup step before the spawn, Enter on a plugin row | `plugins.list`, `plugins.items`, `plugins.save`, `plugins.status` | `a plugin without choices opens setup before spawn and Skip spawns without it`; `web_plugin_without_choices_is_left_out_until_saved` |
-| claude install / update | update prompt | host chip → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
+| claude install / update | update prompt | Hosts menu → host row → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
 | Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
 | Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |
 | Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
@@ -203,4 +203,5 @@ file changes or `build.rs` is touched (`web/` itself is not watched because of
 - **Pane header**: `✕` closes the pane (the session keeps running, stays in the rail); `⏻` stops
   the session (asks).
 - **Text size** (Settings): Small, Normal (default), Large scale the interface through the
-  `--fs-*` tokens; the terminal font size (default 15 px) is a separate setting.
+  `--fs-*` tokens (the rail keeps its own, smaller scale); the terminal font size (default 15 px) is a
+  separate setting.

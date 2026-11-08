@@ -13,7 +13,7 @@
 /* ---- buttons ---- */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 12px; min-height: 28px;
+  padding: 4px 14px; min-height: 34px;
   background: var(--panel-2); color: var(--text);
   border: var(--bw) solid var(--border-strong); border-radius: var(--radius);
   box-shadow: 0 var(--btn-edge) 0 0 var(--border-strong);
@@ -24,11 +24,11 @@
 .btn:active { transform: translateY(var(--btn-edge)); box-shadow: none; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: 0 var(--btn-edge) 0 0 color-mix(in srgb, var(--accent) 55%, black); }
 .btn-primary:hover { background: color-mix(in srgb, var(--accent) 88%, white); }
-.btn-sm { min-height: 22px; padding: 1px 8px; font-size: var(--fs-2xs); }
-.btn-icon { padding: 1px 8px; min-width: 28px; justify-content: center; }
+.btn-sm { min-height: 32px; padding: 2px 12px; font-size: var(--fs-2xs); }
+.btn-icon { padding: 2px 8px; min-width: 32px; justify-content: center; }
 .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .icon-btn {
-  background: none; border: 0; color: var(--muted); padding: 0 6px; font-size: var(--fs-xl); line-height: 1;
+  background: none; border: 0; color: var(--muted); padding: 0 6px; min-width: 32px; min-height: 32px; font-size: var(--fs-xl); line-height: 1;
   border-radius: var(--radius);
 }
 .icon-btn:hover { color: var(--text); background: var(--hover); }
@@ -138,7 +138,7 @@ kbd {
 .palette-list { list-style: none; margin: 0; padding: var(--space-1); max-height: 52vh; overflow-y: auto; }
 .palette-item {
   display: flex; align-items: center; gap: var(--space-3);
-  padding: 7px var(--space-3); border-radius: var(--radius); cursor: pointer;
+  padding: 9px var(--space-3); border-radius: var(--radius); cursor: pointer; font-size: var(--fs-lg);
 }
 .palette-item[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); }
 .palette-item[aria-selected="true"] .muted { color: inherit; }
@@ -186,7 +186,7 @@ kbd {
 .git-counts { color: var(--st-input); }
 .strip {
   display: flex; align-items: center; gap: var(--space-4); flex: none;
-  padding: 3px var(--space-3); min-height: 26px;
+  padding: 3px var(--space-3); min-height: 32px;
   border-top: var(--bw) solid var(--border); background: var(--panel-2);
   color: var(--muted); font-size: var(--fs-sm); overflow: hidden; white-space: nowrap;
 }
@@ -196,7 +196,7 @@ kbd {
 
 /* ---- session actions ---- */
 .session-actions { display: flex; align-items: center; gap: 2px; flex: none; }
-.session-actions .icon-btn { font-size: var(--fs-lg); min-width: 26px; height: 24px; }
+.session-actions .icon-btn { font-size: var(--fs-xl); min-width: 32px; height: 32px; }
 .session-actions .danger:hover { color: var(--st-error); background: color-mix(in srgb, var(--st-error) 14%, transparent); }
 
 /* ---- composer ---- */
@@ -285,7 +285,7 @@ kbd {
 .reader-prompt .prompt-mark { font-family: var(--font-head); font-size: var(--fs-xs); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); flex: none; }
 .reader-prompt pre { margin: 6px 0 0; padding: 8px 10px; white-space: pre-wrap; font-family: var(--font-prose); color: var(--muted); background: var(--panel-2); border-radius: var(--radius); }
 
-.prose { font-family: var(--font-prose); font-size: var(--fs-xl); line-height: 1.72; color: var(--text); overflow-wrap: anywhere; font-feature-settings: "cv11", "ss03"; }
+.prose { font-family: var(--font-prose); font-size: calc(13px + var(--fs-add)); line-height: 1.72; color: var(--text); overflow-wrap: anywhere; font-feature-settings: "cv11", "ss03"; }
 .prose > :first-child { margin-top: 0; }
 .prose p { margin: 0 0 1em; }
 .prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; line-height: 1.3; margin: 1.6em 0 0.55em; letter-spacing: -0.01em; }
@@ -582,7 +582,7 @@ kbd {
 .act-gap { margin: 3px 10px; }
 .act-sep { width: 1px; align-self: stretch; margin: 3px 4px; background: var(--border-strong); }
 @container pane (max-width: 419px) {
-  .session-actions .more-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 24px; }
+  .session-actions .more-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; }
   .session-actions .act-row {
     display: none; position: absolute; top: 36px; right: 6px; z-index: 40; min-width: 210px;
     flex-direction: column; align-items: stretch; gap: 0; padding: 4px;
@@ -606,3 +606,16 @@ kbd {
 .info-row { display: grid; grid-template-columns: 8.5em minmax(0, 1fr); gap: var(--space-2); }
 .info-row dt { color: var(--muted); }
 .info-row dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ---- the hosts dropdown (a popover under the top bar's button: no layout shift) ---- */
+.hosts-btn { display: inline-flex; align-items: center; gap: 6px; }
+.hosts-sum { color: var(--muted); font-variant-numeric: tabular-nums; }
+.hosts-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; min-width: 320px; max-width: 460px; padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+.hosts-row { display: flex; align-items: center; gap: var(--space-3); width: 100%; padding: 6px 10px; min-height: 34px; background: none; border: var(--bw) solid transparent; border-radius: var(--radius); color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+.hosts-row:hover, .hosts-row:focus-visible { background: var(--hover); border-color: var(--border-strong); outline: none; }
+.hosts-row[data-conn="up"] .hosts-glyph { color: var(--st-idle); }
+.hosts-row[data-conn="connecting"] .hosts-glyph { color: var(--st-input); }
+.hosts-row[data-conn="down"] .hosts-glyph, .hosts-row[data-conn="down"] .hosts-name { color: var(--st-error); }
+.hosts-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosts-ver { color: var(--muted); font-size: var(--fs-xs); min-width: 3.5em; text-align: right; }
+.hosts-add { color: var(--accent); border-top: var(--bw) solid var(--border); border-radius: 0 0 var(--radius) var(--radius); margin-top: 2px; }
