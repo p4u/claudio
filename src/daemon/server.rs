@@ -484,7 +484,11 @@ impl Client {
                     }
                 }
             }
-            Msg::GitLog { .. } | Msg::GitCommit { .. } | Msg::GitDiff { .. } => {
+            Msg::GitLog { .. }
+            | Msg::GitCommit { .. }
+            | Msg::GitDiff { .. }
+            | Msg::GitWorktree { .. }
+            | Msg::GitWorktreeDiff { .. } => {
                 // The task replies itself, so the loop never waits on git.
                 match self.spawn_git(req, msg) {
                     Ok(()) => return,

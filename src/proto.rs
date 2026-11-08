@@ -197,6 +197,24 @@ pub enum Msg {
         #[serde(default)]
         old_path: Option<String>,
     },
+    /// The working tree of the repository `cwd` is in: every changed path,
+    /// staged and unstaged, with line counts. Answered by
+    /// `GitWorktreeStatus`. An older daemon answers `Error "unsupported
+    /// op…"` (clients check the `worktree` feature first).
+    GitWorktree {
+        cwd: String,
+    },
+    /// One working-tree file's patch: the index against HEAD when `staged`,
+    /// else the working tree against the index; an untracked file against
+    /// /dev/null. `path` must be an entry of the daemon's own status,
+    /// exactly; anything else answers `Error "no such path"`. Answered by
+    /// `GitPatch` (`id` is `"index"` or `"worktree"`).
+    GitWorktreeDiff {
+        cwd: String,
+        path: String,
+        #[serde(default)]
+        staged: bool,
+    },
     /// Search this host's claude conversations (prompts and answers) for
     /// every word of `query`; at most `limit` hits (0: the default, see
     /// [`crate::claude::search`]). Answered by `SearchReply`, or `Error
@@ -278,6 +296,7 @@ pub enum Msg {
     GitLogPage(GitLogPage),
     GitCommitInfo(GitCommitInfo),
     GitPatch(GitPatch),
+    GitWorktreeStatus(GitWorktreeStatus),
     /// Reply to `Search`, built by [`search_reply`]: one hit per
     /// conversation, newest first. `scanned` of `total` transcripts were
     /// read to their end; `truncated` when the search stopped early.
@@ -351,8 +370,9 @@ pub struct Welcome {
 /// `lens` — it takes [`SpawnSpec::extensions`] and sends
 /// [`SessionEvent::Lens`]; `search` — it answers [`Msg::Search`];
 /// `last_prompt` — it answers [`Msg::LastPrompt`]; `attention` — it sends
-/// [`SessionEvent::Attention`] and fills [`SessionInfo::attention`].
-pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt", "attention"];
+/// [`SessionEvent::Attention`] and fills [`SessionInfo::attention`];
+/// `worktree` — it answers [`Msg::GitWorktree`] and [`Msg::GitWorktreeDiff`].
+pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt", "attention", "worktree"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Colors {
@@ -1184,6 +1204,43 @@ pub struct GitPatch {
     pub truncated: bool,
 }
 
+/// The most files a `GitWorktreeStatus` lists.
+pub const GIT_WORKTREE_MAX: usize = 2000;
+
+/// Reply to `GitWorktree`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitWorktreeStatus {
+    /// The repository's top-level directory.
+    pub root: String,
+    /// The checked-out branch; `None` for a detached HEAD.
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub files: Vec<GitWorktreeFile>,
+    /// More than [`GIT_WORKTREE_MAX`] files, or git's output was cut.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// A changed path of the working tree, relative to the root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitWorktreeFile {
+    pub path: String,
+    /// The name before a rename in the index.
+    #[serde(default)]
+    pub old_path: Option<String>,
+    /// One status letter for the index: `.` unchanged, `M`, `T`, `A`, `D`,
+    /// `R`, `C`, `U` (unmerged), `?` (untracked).
+    pub index: String,
+    /// The same for the working tree.
+    pub worktree: String,
+    /// Lines added, staged and unstaged together; `None` for a binary or
+    /// untracked file.
+    #[serde(default)]
+    pub added: Option<u32>,
+    #[serde(default)]
+    pub removed: Option<u32>,
+}
+
 impl Frame {
     /// Serialize into `[len][tag][payload]`.
     pub fn encode(&self) -> Vec<u8> {
@@ -1934,7 +1991,52 @@ mod tests {
         });
         let welcome: Welcome = serde_json::from_value(welcome).unwrap();
         assert!(welcome.features.is_empty());
-        assert_eq!(DAEMON_FEATURES, ["lens", "search", "last_prompt", "attention"]);
+        assert_eq!(
+            DAEMON_FEATURES,
+            ["lens", "search", "last_prompt", "attention", "worktree"]
+        );
+    }
+
+    #[test]
+    fn worktree_ops_are_unknown_to_older_peers() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "op", rename_all = "snake_case")]
+        enum Old {
+            Ping,
+            #[serde(other)]
+            Unknown,
+        }
+        let status = GitWorktreeStatus {
+            root: "/w".into(),
+            branch: Some("main".into()),
+            files: vec![GitWorktreeFile {
+                path: "a b.txt".into(),
+                old_path: None,
+                index: ".".into(),
+                worktree: "M".into(),
+                added: Some(1),
+                removed: Some(0),
+            }],
+            truncated: false,
+        };
+        for msg in [
+            Msg::GitWorktree { cwd: "/w".into() },
+            Msg::GitWorktreeDiff {
+                cwd: "/w".into(),
+                path: "a b.txt".into(),
+                staged: true,
+            },
+            Msg::GitWorktreeStatus(status),
+        ] {
+            let json = serde_json::to_string(&Envelope::request(1, msg.clone())).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Old>(&json).unwrap(),
+                Old::Unknown,
+                "{json}"
+            );
+            assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, msg);
+        }
+        assert!(DAEMON_FEATURES.contains(&"worktree"));
     }
 
     #[test]

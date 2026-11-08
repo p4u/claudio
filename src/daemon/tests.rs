@@ -3025,3 +3025,217 @@ async fn plugin_dirs_are_dropped_for_an_old_claude_but_journaled() {
         serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip"])
     );
 }
+
+// ── Working tree (the web's Changes view) ────────────────────────────────────
+
+/// A repo on `main` with: `a.txt` modified (unstaged), `b.txt` staged then
+/// modified again, `c.txt` added, `old.txt` renamed to `new.txt`, `u.txt`
+/// untracked, `link` an untracked symlink to /etc/passwd, `clean.txt`
+/// unchanged. It lives in the daemon's test dir.
+fn worktree_repo(d: &TestDaemon) -> PathBuf {
+    let dir = d.dir.join(format!("repo-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.org")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.org")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    for (name, text) in [
+        ("a.txt", "a\n"),
+        ("b.txt", "b\n"),
+        ("old.txt", "old\n"),
+        ("clean.txt", "clean\n"),
+    ] {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "base"]);
+    std::fs::write(dir.join("a.txt"), "a\nchanged\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b\nstaged\n").unwrap();
+    git(&["add", "b.txt"]);
+    std::fs::write(dir.join("b.txt"), "b\nstaged\nagain\n").unwrap();
+    std::fs::write(dir.join("c.txt"), "c\n").unwrap();
+    git(&["add", "c.txt"]);
+    git(&["mv", "old.txt", "new.txt"]);
+    std::fs::write(dir.join("u.txt"), "u\n").unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", dir.join("link")).unwrap();
+    dir
+}
+
+async fn worktree_patch(c: &mut Client, cwd: &str, path: &str, staged: bool) -> Msg {
+    c.call(Msg::GitWorktreeDiff {
+        cwd: cwd.to_owned(),
+        path: path.to_owned(),
+        staged,
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_status_lists_staged_unstaged_untracked_and_renamed() {
+    let d = TestDaemon::start().await;
+    let repo = worktree_repo(&d);
+    let mut c = d.client().await;
+    let cwd = repo.to_string_lossy().into_owned();
+    let Msg::GitWorktreeStatus(s) = c.call(Msg::GitWorktree { cwd }).await else {
+        panic!("not a status");
+    };
+    assert_eq!(s.branch.as_deref(), Some("main"));
+    assert_eq!(Path::new(&s.root), std::fs::canonicalize(&repo).unwrap());
+    assert!(!s.truncated);
+    let f = |p: &str| {
+        s.files
+            .iter()
+            .find(|f| f.path == p)
+            .unwrap_or_else(|| panic!("{p} not in {:?}", s.files))
+    };
+    let a = f("a.txt");
+    assert_eq!(
+        (a.index.as_str(), a.worktree.as_str(), a.added, a.removed),
+        (".", "M", Some(1), Some(0))
+    );
+    let b = f("b.txt");
+    assert_eq!(
+        (b.index.as_str(), b.worktree.as_str(), b.added, b.removed),
+        ("M", "M", Some(2), Some(0))
+    );
+    let c_txt = f("c.txt");
+    assert_eq!((c_txt.index.as_str(), c_txt.worktree.as_str()), ("A", "."));
+    let renamed = f("new.txt");
+    assert_eq!(
+        (renamed.index.as_str(), renamed.old_path.as_deref()),
+        ("R", Some("old.txt"))
+    );
+    let u = f("u.txt");
+    assert_eq!(
+        (u.index.as_str(), u.worktree.as_str(), u.added),
+        ("?", "?", None)
+    );
+    assert!(s.files.iter().all(|f| f.path != "clean.txt"));
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_status_caps_the_file_count() {
+    let d = TestDaemon::start().await;
+    // The full fixture (it has a commit), plus more untracked files than fit.
+    let repo = worktree_repo(&d);
+    for i in 0..=proto::GIT_WORKTREE_MAX {
+        std::fs::write(repo.join(format!("f{i:04}")), "x").unwrap();
+    }
+    let mut c = d.client().await;
+    let cwd = repo.to_string_lossy().into_owned();
+    let Msg::GitWorktreeStatus(s) = c.call(Msg::GitWorktree { cwd }).await else {
+        panic!("not a status");
+    };
+    assert_eq!(s.files.len(), proto::GIT_WORKTREE_MAX);
+    assert!(s.truncated);
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_diff_shows_staged_unstaged_untracked_and_renamed() {
+    let d = TestDaemon::start().await;
+    let repo = worktree_repo(&d);
+    let cwd = repo.to_string_lossy().into_owned();
+    let mut c = d.client().await;
+    let patch = |reply: Msg| match reply {
+        Msg::GitPatch(p) => p,
+        other => panic!("{other:?}"),
+    };
+    let a = patch(worktree_patch(&mut c, &cwd, "a.txt", false).await);
+    assert!(a.patch.contains("+changed"), "{}", a.patch);
+    assert_eq!(
+        (a.id.as_str(), a.path.as_deref()),
+        ("worktree", Some("a.txt"))
+    );
+    let b_staged = patch(worktree_patch(&mut c, &cwd, "b.txt", true).await);
+    assert!(
+        b_staged.patch.contains("+staged") && !b_staged.patch.contains("+again"),
+        "{}",
+        b_staged.patch
+    );
+    assert_eq!(b_staged.id, "index");
+    let b_work = patch(worktree_patch(&mut c, &cwd, "b.txt", false).await);
+    assert!(b_work.patch.contains("+again"), "{}", b_work.patch);
+    let added = patch(worktree_patch(&mut c, &cwd, "c.txt", true).await);
+    assert!(added.patch.contains("+c"), "{}", added.patch);
+    let renamed = patch(worktree_patch(&mut c, &cwd, "new.txt", true).await);
+    assert!(
+        renamed.patch.contains("rename from old.txt"),
+        "{}",
+        renamed.patch
+    );
+    let untracked = patch(worktree_patch(&mut c, &cwd, "u.txt", false).await);
+    assert!(
+        untracked.patch.contains("/dev/null") && untracked.patch.contains("+u"),
+        "{}",
+        untracked.patch
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_diff_refuses_anything_but_a_listed_path() {
+    let d = TestDaemon::start().await;
+    let repo = worktree_repo(&d);
+    let cwd = repo.to_string_lossy().into_owned();
+    let mut c = d.client().await;
+    for path in [
+        "../x",
+        "/etc/passwd",
+        "sub/../a.txt",
+        "a.txt\0",
+        "",
+        "link",
+        "nothere.txt",
+        "clean.txt",
+    ] {
+        let reply = worktree_patch(&mut c, &cwd, path, false).await;
+        assert_eq!(
+            reply,
+            Msg::Error {
+                message: "no such path".into()
+            },
+            "{path:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// AC6: a git that never answers holds its own request only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_git_does_not_block_other_requests() {
+    let d = TestDaemon::start().await;
+    let stuck = d.dir.join("stuck");
+    std::fs::create_dir_all(&stuck).unwrap();
+    let fake = d.dir.join("fake-git");
+    // `exec`, so the kill on drop reaches the sleep itself.
+    std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    super::git::use_git_for(&stuck, &fake);
+    let mut c = d.client().await;
+    let _pending = c
+        .request(Msg::GitWorktree {
+            cwd: stuck.to_string_lossy().into_owned(),
+        })
+        .await;
+    let started = std::time::Instant::now();
+    let reply = c.call(Msg::ListSessions).await;
+    assert!(matches!(reply, Msg::Sessions { .. }), "{reply:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "ListSessions waited on git"
+    );
+}

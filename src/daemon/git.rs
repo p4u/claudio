@@ -1,9 +1,17 @@
 //! Read-only git queries for the TUI's git viewer, run on the session's host.
 //!
-//! Three requests: [`Msg::GitLog`] (a page of history), [`Msg::GitCommit`] (one
-//! commit's metadata and file list) and [`Msg::GitDiff`] (a patch). [`handle`]
+//! Five requests: [`Msg::GitLog`] (a page of history), [`Msg::GitCommit`] (one
+//! commit's metadata and file list), [`Msg::GitDiff`] (a patch),
+//! [`Msg::GitWorktree`] (the working tree's changed files) and
+//! [`Msg::GitWorktreeDiff`] (one working-tree file's patch). [`handle`]
 //! executes one of them and always returns the reply `Msg`, an `Error`
 //! included.
+//!
+//! A working-tree path comes from the client, so it is checked
+//! ([`check_worktree_path`]) and must also be an entry of the daemon's own
+//! `status`, byte for byte; an untracked one must be a regular file
+//! (`lstat`). Anything else is `no such path`: the daemon never reads a
+//! file the repository does not list as changed.
 //!
 //! The repository is untrusted input (a commit subject can carry escape
 //! sequences, a repo config can name a diff driver), so:
@@ -32,7 +40,8 @@ use tokio::sync::OnceCell;
 
 use super::host::expand_tilde;
 use crate::proto::{
-    self, GitCommitInfo, GitFile, GitLogEntry, GitLogPage, GitPatch, Msg, GIT_LOG_MAX,
+    self, GitCommitInfo, GitFile, GitLogEntry, GitLogPage, GitPatch, GitWorktreeFile,
+    GitWorktreeStatus, Msg, GIT_LOG_MAX,
 };
 
 /// Deadline for one whole request (all its git processes).
@@ -102,6 +111,19 @@ const BASE_ARGS: [&str; 16] = [
 /// Arguments for subcommands that print diffs.
 const DIFF_ARGS: [&str; 3] = ["--no-ext-diff", "--no-textconv", "-M"];
 
+/// The error for any working-tree path the daemon will not diff.
+const NO_SUCH_PATH: &str = "no such path";
+
+/// `status` for the working tree: NUL-separated, every untracked file
+/// listed (not its directory), branch header included.
+const WORKTREE_STATUS: [&str; 5] = [
+    "status",
+    "--porcelain=v2",
+    "-z",
+    "--branch",
+    "--untracked-files=all",
+];
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Execute a git request and return its reply (`Msg::Error` on failure).
@@ -125,6 +147,8 @@ pub async fn handle<T>(request: Msg, turn: impl Future<Output = T>) -> Msg {
                 old_path,
                 file,
             } => diff(&cwd, &id, file, path, old_path).await,
+            Msg::GitWorktree { cwd } => worktree(&cwd).await,
+            Msg::GitWorktreeDiff { cwd, path, staged } => worktree_diff(&cwd, &path, staged).await,
             _ => Err("not a git request".to_owned()),
         }
     };
@@ -230,7 +254,12 @@ async fn diff(
         args.extend(pathspecs);
     }
     let out = run(&root, &args, PATCH_CAP).await?;
+    Ok(Msg::GitPatch(patch_reply(id, label, out)))
+}
 
+/// A patch reply from git's output: sanitized, a line cut by the capture
+/// dropped, trimmed at a line boundary to fit one frame.
+fn patch_reply(id: &str, path: Option<String>, out: Captured) -> GitPatch {
     let mut text = sanitize(&String::from_utf8_lossy(&out.stdout), true);
     let mut truncated = out.truncated;
     if truncated {
@@ -239,7 +268,7 @@ async fn diff(
     }
     let mut reply = GitPatch {
         id: id.to_owned(),
-        path: label,
+        path,
         patch: String::new(),
         truncated: true,
     };
@@ -248,7 +277,133 @@ async fn diff(
     truncated |= fitted.len() < text.len();
     reply.patch = fitted.to_owned();
     reply.truncated = truncated;
-    Ok(Msg::GitPatch(reply))
+    reply
+}
+
+// ── Working tree ──────────────────────────────────────────────────────────────
+
+async fn worktree(cwd: &str) -> Result<Msg, String> {
+    let cwd = work_dir(cwd).await?;
+    let root = repo_root(&cwd).await?;
+    let unstaged = ["diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv"];
+    let staged = [
+        "diff",
+        "--cached",
+        "--numstat",
+        "-z",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-M",
+    ];
+    let (status, unstaged, staged) = tokio::try_join!(
+        run(&root, &WORKTREE_STATUS, META_CAP),
+        run(&root, &unstaged, META_CAP),
+        run(&root, &staged, META_CAP),
+    )?;
+    let parsed = parse_worktree(&status.stdout);
+    // Staged and unstaged counts per path, summed; binary in either: none.
+    let mut counts: std::collections::HashMap<Vec<u8>, (Option<u32>, Option<u32>)> =
+        std::collections::HashMap::new();
+    let entries = parse_stat_entries(&unstaged.stdout)
+        .into_iter()
+        .chain(parse_stat_entries(&staged.stdout));
+    for e in entries {
+        let sum = counts.entry(e.path).or_insert((Some(0), Some(0)));
+        sum.0 = sum.0.zip(e.added).map(|(a, b)| a.saturating_add(b));
+        sum.1 = sum.1.zip(e.removed).map(|(a, b)| a.saturating_add(b));
+    }
+    let files = parsed
+        .entries
+        .iter()
+        .map(|e| {
+            let (added, removed) = match e.index {
+                b'?' => (None, None),
+                _ => counts.get(&e.path).copied().unwrap_or((None, None)),
+            };
+            GitWorktreeFile {
+                path: clean_line(&e.path, MAX_PATH),
+                old_path: e.old_path.as_deref().map(|p| clean_line(p, MAX_PATH)),
+                index: letter(e.index),
+                worktree: letter(e.worktree),
+                added,
+                removed,
+            }
+        })
+        .collect();
+    Ok(Msg::GitWorktreeStatus(GitWorktreeStatus {
+        root: clean_line(root.as_os_str().as_encoded_bytes(), MAX_PATH),
+        branch: parsed.branch,
+        files,
+        truncated: parsed.truncated || status.truncated,
+    }))
+}
+
+/// A working-tree path as a client may name it: relative, without a `..`
+/// component or NUL, at most [`MAX_PATH`] bytes. Passing this is not
+/// enough: [`worktree_diff`] also requires the daemon's own status to list
+/// it, byte for byte.
+fn check_worktree_path(path: &str) -> Result<(), String> {
+    let plain = !path.is_empty()
+        && path.len() <= MAX_PATH
+        && !path.contains('\0')
+        && !path.starts_with('/')
+        && !path.split('/').any(|part| part == "..");
+    if plain {
+        Ok(())
+    } else {
+        Err(NO_SUCH_PATH.to_owned())
+    }
+}
+
+async fn worktree_diff(cwd: &str, path: &str, staged: bool) -> Result<Msg, String> {
+    check_worktree_path(path)?;
+    let cwd = work_dir(cwd).await?;
+    let root = repo_root(&cwd).await?;
+    // Only a path this daemon's own status lists, byte for byte.
+    let status = run(&root, &WORKTREE_STATUS, META_CAP).await?;
+    let entry = parse_worktree(&status.stdout)
+        .entries
+        .into_iter()
+        .find(|e| e.path == path.as_bytes())
+        .ok_or_else(|| NO_SUCH_PATH.to_owned())?;
+    let out = if entry.index == b'?' {
+        // Untracked: a regular file only; `lstat`, so a symlink is refused.
+        let meta = tokio::fs::symlink_metadata(root.join(path))
+            .await
+            .map_err(|_| NO_SUCH_PATH.to_owned())?;
+        if !meta.file_type().is_file() {
+            return Err(NO_SUCH_PATH.to_owned());
+        }
+        let args = [
+            "diff",
+            "--no-index",
+            "--patch",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            "/dev/null",
+            path,
+        ];
+        // `--no-index` exits 1 when the two differ, which they do.
+        run_codes(&root, &args, PATCH_CAP, &[0, 1]).await?
+    } else {
+        let mut args: Vec<OsString> = ["diff", "--patch", "--no-ext-diff", "--no-textconv", "-M"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        if staged {
+            args.push("--cached".into());
+        }
+        args.push("--".into());
+        args.push(os_string(entry.path));
+        if let Some(old) = entry.old_path {
+            args.push(os_string(old));
+        }
+        run(&root, &args, PATCH_CAP).await?
+    };
+    let id = if staged { "index" } else { "worktree" };
+    let label = Some(clean_line(path.as_bytes(), MAX_PATH));
+    Ok(Msg::GitPatch(patch_reply(id, label, out)))
 }
 
 /// The label and pathspecs for a request that names its file by text, as
@@ -357,10 +512,37 @@ fn os_string(bytes: Vec<u8>) -> OsString {
     }
 }
 
+/// Test hook: run `program` instead of git for directories under `dir`.
+#[cfg(test)]
+static GIT_FOR: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(in crate::daemon) fn use_git_for(dir: &Path, program: &Path) {
+    GIT_FOR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((dir.to_path_buf(), program.to_path_buf()));
+}
+
+/// The git to run in `cwd`: always `git` outside tests.
+fn git_program(cwd: &Path) -> PathBuf {
+    #[cfg(test)]
+    if let Some((_, program)) = GIT_FOR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(dir, _)| cwd.starts_with(dir))
+    {
+        return program.clone();
+    }
+    let _ = cwd;
+    PathBuf::from("git")
+}
+
 /// A `git` process in `cwd` with the scrubbed environment and base flags;
 /// shared with [`super::git_status`].
 pub(super) fn command(cwd: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(git_program(cwd));
     for var in SCRUBBED_ENV {
         cmd.env_remove(var);
     }
@@ -378,6 +560,16 @@ pub(super) fn command(cwd: &Path) -> Command {
 
 /// Run `git <args>` in `cwd`, keeping at most `cap` bytes of stdout.
 async fn run<S: AsRef<OsStr>>(cwd: &Path, args: &[S], cap: usize) -> Result<Captured, String> {
+    run_codes(cwd, args, cap, &[0]).await
+}
+
+/// [`run`], where any exit code in `ok` counts as success.
+async fn run_codes<S: AsRef<OsStr>>(
+    cwd: &Path,
+    args: &[S],
+    cap: usize,
+    ok: &[i32],
+) -> Result<Captured, String> {
     let mut child = command(cwd)
         .args(args)
         .spawn()
@@ -399,7 +591,7 @@ async fn run<S: AsRef<OsStr>>(cwd: &Path, args: &[S], cap: usize) -> Result<Capt
         let _ = child.start_kill();
     }
     let status = child.wait().await.map_err(|e| format!("git failed: {e}"))?;
-    if !truncated && !status.success() {
+    if !truncated && !status.code().is_some_and(|c| ok.contains(&c)) {
         let stderr = stderr.await.ok().and_then(Result::ok).unwrap_or_default();
         return Err(error_line(&stderr, &status.to_string()));
     }
@@ -700,6 +892,90 @@ fn stat_entry_of<'a>(
     })
 }
 
+/// One record of `status --porcelain=v2 -z`, its names exactly as git
+/// printed them.
+struct WorktreeEntry {
+    path: Vec<u8>,
+    old_path: Option<Vec<u8>>,
+    index: u8,
+    worktree: u8,
+}
+
+struct ParsedWorktree {
+    branch: Option<String>,
+    entries: Vec<WorktreeEntry>,
+    truncated: bool,
+}
+
+/// Parse `status --porcelain=v2 -z --branch`: `# ` headers, then `1 XY` +
+/// 6 fields + path, `2 XY` + 7 fields + path followed by the original path
+/// as a field of its own, `u XY` + 8 fields + path, `? path`. Ignored (`!`)
+/// and unknown records are skipped; a record cut by the capture is dropped
+/// ([`nul_fields`]). At most [`proto::GIT_WORKTREE_MAX`] entries.
+fn parse_worktree(data: &[u8]) -> ParsedWorktree {
+    let mut out = ParsedWorktree {
+        branch: None,
+        entries: Vec::new(),
+        truncated: false,
+    };
+    let mut fields = nul_fields(data).into_iter();
+    while let Some(record) = fields.next() {
+        let entry = match record.first() {
+            Some(b'#') => {
+                if let Some(head) = record.strip_prefix(b"# branch.head ") {
+                    if head != b"(detached)" {
+                        out.branch = Some(clean_line(head, MAX_NAME));
+                    }
+                }
+                continue;
+            }
+            Some(b'1') => changed(record, 9),
+            Some(b'2') => changed(record, 10).map(|mut e| {
+                e.old_path = fields.next().map(<[u8]>::to_vec);
+                e
+            }),
+            Some(b'u') => changed(record, 11),
+            Some(b'?') => record.strip_prefix(b"? ").map(|p| WorktreeEntry {
+                path: p.to_vec(),
+                old_path: None,
+                index: b'?',
+                worktree: b'?',
+            }),
+            _ => None,
+        };
+        let Some(entry) = entry.filter(|e| !e.path.is_empty()) else {
+            continue;
+        };
+        if out.entries.len() == proto::GIT_WORKTREE_MAX {
+            out.truncated = true;
+            break;
+        }
+        out.entries.push(entry);
+    }
+    out
+}
+
+/// A `1`/`2`/`u` record of `n` space-separated fields, the last one the
+/// path (which may hold spaces).
+fn changed(record: &[u8], n: usize) -> Option<WorktreeEntry> {
+    let parts: Vec<&[u8]> = record.splitn(n, |&b| b == b' ').collect();
+    let (xy, path) = (*parts.get(1)?, *parts.get(n - 1)?);
+    let &[index, worktree] = xy else {
+        return None;
+    };
+    Some(WorktreeEntry {
+        path: path.to_vec(),
+        old_path: None,
+        index,
+        worktree,
+    })
+}
+
+/// A status letter for the client.
+fn letter(b: u8) -> String {
+    char::from(if b.is_ascii_graphic() { b } else { b'?' }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,6 +1146,76 @@ mod tests {
         assert!(check_path("").is_err());
         assert!(check_path("a\0b").is_err());
         assert!(check_path(&"x".repeat(MAX_PATH + 1)).is_err());
+    }
+
+    #[test]
+    fn worktree_paths_must_be_relative_and_plain() {
+        for ok in [
+            "a.txt",
+            "src/main.rs",
+            "dir with space/f",
+            ".hidden",
+            "a..b",
+        ] {
+            assert_eq!(check_worktree_path(ok), Ok(()), "{ok}");
+        }
+        for bad in ["", "/etc/passwd", "../x", "a/../b", "a/..", "..", "a\0b"] {
+            assert_eq!(
+                check_worktree_path(bad),
+                Err(NO_SUCH_PATH.to_owned()),
+                "{bad:?}"
+            );
+        }
+        assert!(check_worktree_path(&"x".repeat(MAX_PATH + 1)).is_err());
+    }
+
+    #[test]
+    fn porcelain_v2_records_parse_with_renames_unmerged_and_untracked() {
+        let data = b"# branch.oid 0123456789012345678901234567890123456789\0\
+# branch.head main\0\
+1 .M N... 100644 100644 100644 aaaa bbbb a file.txt\0\
+2 R. N... 100644 100644 100644 aaaa bbbb R100 new.txt\0old.txt\0\
+u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.rs\0\
+? untracked dir/u.txt\0\
+! ignored.log\0\
+1 M. N... 100644 100644 100644 aaaa bbbb cut-off";
+        let parsed = parse_worktree(data);
+        assert_eq!(parsed.branch.as_deref(), Some("main"));
+        assert!(!parsed.truncated);
+        let got: Vec<(&[u8], Option<&[u8]>, u8, u8)> = parsed
+            .entries
+            .iter()
+            .map(|e| {
+                (
+                    e.path.as_slice(),
+                    e.old_path.as_deref(),
+                    e.index,
+                    e.worktree,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (&b"a file.txt"[..], None, b'.', b'M'),
+                (&b"new.txt"[..], Some(&b"old.txt"[..]), b'R', b'.'),
+                (&b"conflict.rs"[..], None, b'U', b'U'),
+                (&b"untracked dir/u.txt"[..], None, b'?', b'?'),
+            ]
+        );
+        let detached = parse_worktree(b"# branch.head (detached)\0");
+        assert_eq!(detached.branch, None);
+    }
+
+    #[test]
+    fn worktree_entries_are_capped() {
+        let mut data = Vec::new();
+        for i in 0..=proto::GIT_WORKTREE_MAX {
+            data.extend_from_slice(format!("? f{i}\0").as_bytes());
+        }
+        let parsed = parse_worktree(&data);
+        assert_eq!(parsed.entries.len(), proto::GIT_WORKTREE_MAX);
+        assert!(parsed.truncated);
     }
 
     #[test]
