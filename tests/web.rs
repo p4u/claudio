@@ -1404,7 +1404,8 @@ fn fake_proxy() -> String {
         "limit": null})
     .to_string();
     let config = json!({"version": 1, "env": {}}).to_string();
-    let pool = json!({"version": 1, "providers": [{"name": "anthropic", "status": "ok"}]}).to_string();
+    let pool =
+        json!({"version": 1, "providers": [{"name": "anthropic", "status": "ok"}]}).to_string();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
@@ -1550,9 +1551,12 @@ async fn web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser() {
     );
 
     // Everything a browser can see about this session and its plugins.
-    tab.req("session.attach", json!({"sid": sid, "rows": 24, "cols": 80}))
-        .await
-        .unwrap();
+    tab.req(
+        "session.attach",
+        json!({"sid": sid, "rows": 24, "cols": 80}),
+    )
+    .await
+    .unwrap();
     tab.output_until(&sid, "FAKE_CLAUDE_BANNER").await;
     for (op, args) in [
         ("hosts.list", json!({})),
@@ -1613,7 +1617,10 @@ async fn web_respawn_without_a_known_proxy_asks() {
     let err = loop {
         match tab.req("session.respawn", ask.clone()).await {
             Err(e) if e == "no such session" => {
-                assert!(std::time::Instant::now() < deadline, "the session never came back");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the session never came back"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             other => break other,
@@ -1787,13 +1794,19 @@ async fn web_snippets_save_named_list_delete() {
     let mut tab = Tab::open(&web, &cookie).await;
     let dir = web.h().config_home.join("claudio/snippets");
     let saved = tab
-        .req("snippets.save", json!({"text": "v1", "name": "Release Notes"}))
+        .req(
+            "snippets.save",
+            json!({"text": "v1", "name": "Release Notes"}),
+        )
         .await
         .expect("save named");
     assert_eq!(saved["name"], "release-notes");
-    tab.req("snippets.save", json!({"text": "v2", "name": "release notes"}))
-        .await
-        .expect("replace");
+    tab.req(
+        "snippets.save",
+        json!({"text": "v2", "name": "release notes"}),
+    )
+    .await
+    .expect("replace");
     let list = tab.req("snippets.list", json!({})).await.unwrap();
     let mine: Vec<&Value> = list["snippets"]
         .as_array()
@@ -1810,12 +1823,14 @@ async fn web_snippets_save_named_list_delete() {
     for bad in ["../x", "a/b", ".hidden", "nope", ""] {
         let r = tab.req("snippets.delete", json!({ "name": bad })).await;
         assert!(
-            r.as_ref().is_err_and(|e| e.starts_with("bad request: name:")),
+            r.as_ref()
+                .is_err_and(|e| e.starts_with("bad request: name:")),
             "{bad}: {r:?}"
         );
     }
     assert_eq!(
-        tab.req("snippets.save", json!({"text": "x", "name": " "})).await,
+        tab.req("snippets.save", json!({"text": "x", "name": " "}))
+            .await,
         Err("bad request: name: empty".to_owned())
     );
     tab.req("snippets.delete", json!({"name": "release-notes"}))
@@ -1868,13 +1883,19 @@ id = "greet"
     assert_eq!(hello["source"], "external");
     assert_eq!(hello["actions"][0]["id"], "greet");
     let reply = tab
-        .req("extensions.action", json!({"ext": "hello", "action": "greet"}))
+        .req(
+            "extensions.action",
+            json!({"ext": "hello", "action": "greet"}),
+        )
         .await
         .expect("action");
     assert_eq!(reply["result"], json!({"kind": "notice", "text": "hi"}));
     assert_eq!(
-        tab.req("extensions.action", json!({"ext": "search", "action": "search"}))
-            .await,
+        tab.req(
+            "extensions.action",
+            json!({"ext": "search", "action": "search"})
+        )
+        .await,
         Err("not an external extension".to_owned())
     );
 }

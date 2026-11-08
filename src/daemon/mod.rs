@@ -27,9 +27,9 @@ mod manifest;
 mod server;
 mod session;
 mod stats;
-mod update;
 #[cfg(test)]
 mod tests;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -514,7 +514,8 @@ impl Daemon {
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
         if let Some(ext) = &spec.extensions {
-            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+            ext.validate()
+                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
         }
         // Phase 1: idempotency check and reservation (fast, no I/O).
         let kind = {
@@ -554,7 +555,11 @@ impl Daemon {
                 entry.and_then(|e| e.extensions.clone())
             };
             let requested = spec.extensions.take();
-            spec.extensions = Some(effective_extensions(requested, journaled, self.config.latex));
+            spec.extensions = Some(effective_extensions(
+                requested,
+                journaled,
+                self.config.latex,
+            ));
         }
 
         // Phase 2: PTY open + process spawn + thread creation (blocking,
@@ -886,7 +891,8 @@ impl Daemon {
     /// `to_kill` and wins, so a killed session is never brought back.
     async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
         if let Some(ext) = &req.extensions {
-            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+            ext.validate()
+                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
         }
         let id = req.id;
         let (entry, old) = {
@@ -955,7 +961,12 @@ impl Daemon {
             (Ok(_), None) => {}
             (Err(_), _) => {
                 // The old process is gone: the tab is dormant until the next try.
-                self.broadcast(id, SessionEvent::State { state: SessionState::Exited });
+                self.broadcast(
+                    id,
+                    SessionEvent::State {
+                        state: SessionState::Exited,
+                    },
+                );
                 self.broadcast(id, SessionEvent::Exited { code: None });
             }
         }
@@ -1039,14 +1050,16 @@ fn effective_extensions(
     journaled: Option<SessionExtensions>,
     latex: bool,
 ) -> SessionExtensions {
-    let mut ext = requested.or(journaled).unwrap_or_else(|| SessionExtensions {
-        lenses: vec![LensSpec {
-            name: "latex".to_owned(),
-            kind: LensKind::Tag,
-            instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
-        }],
-        ..Default::default()
-    });
+    let mut ext = requested
+        .or(journaled)
+        .unwrap_or_else(|| SessionExtensions {
+            lenses: vec![LensSpec {
+                name: "latex".to_owned(),
+                kind: LensKind::Tag,
+                instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
+            }],
+            ..Default::default()
+        });
     ext.lenses
         .retain(|l| l.kind != LensKind::Unknown && (latex || l.name != "latex"));
     ext

@@ -388,8 +388,8 @@ pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<
         None => snippets::save(&snippets::dir(), &text),
     })
     .await
-        .map_err(|_| "cannot save the snippet".to_owned())?
-        .map_err(|e| format!("cannot save the snippet: {e}"))?;
+    .map_err(|_| "cannot save the snippet".to_owned())?
+    .map_err(|e| format!("cannot save the snippet: {e}"))?;
     Ok(json!({ "name": name }))
 }
 
@@ -401,7 +401,12 @@ pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
         .map_err(|_| "cannot delete the snippet".to_owned())?;
     match r {
         Ok(()) => Ok(json!({})),
-        Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound) => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+            ) =>
+        {
             Err(format!("bad request: name: {e}"))
         }
         Err(e) => Err(format!("cannot delete the snippet: {e}")),

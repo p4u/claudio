@@ -504,11 +504,21 @@ mod tests {
     #[test]
     fn the_listen_address_itself_is_accepted() {
         let a = Allowed::new("127.0.0.2:7337".parse().unwrap(), &[]);
-        for ok in ["127.0.0.2:7337", "127.0.0.1:7337", "localhost:7337", "[::1]:7337"] {
+        for ok in [
+            "127.0.0.2:7337",
+            "127.0.0.1:7337",
+            "localhost:7337",
+            "[::1]:7337",
+        ] {
             assert!(a.host_ok(ok), "{ok}");
         }
         assert!(a.origin_ok("http://127.0.0.2:7337"));
-        for bad in ["127.0.0.2:7338", "127.0.0.2", "127.0.0.3:7337", "evil.example:7337"] {
+        for bad in [
+            "127.0.0.2:7338",
+            "127.0.0.2",
+            "127.0.0.3:7337",
+            "evil.example:7337",
+        ] {
             assert!(!a.host_ok(bad), "{bad}");
         }
         assert!(!a.origin_ok("http://127.0.0.3:7337"));

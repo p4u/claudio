@@ -773,9 +773,7 @@ mod tests {
         for code in [429u16, 401] {
             let router = Router::new().route(
                 "/v1/claudio/session",
-                get(move || async move {
-                    (axum::http::StatusCode::from_u16(code).unwrap(), "no")
-                }),
+                get(move || async move { (axum::http::StatusCode::from_u16(code).unwrap(), "no") }),
             );
             let base = serve(router).await;
             assert!(matches!(
@@ -848,7 +846,9 @@ mod tests {
             switch_session(&base, "tok", "0a1b").await.unwrap_err()
         };
         assert!(matches!(e(404).await, SwitchError::UnknownSession));
-        assert!(matches!(e(409).await, SwitchError::NoAlternative(r) if r == "no other subscription available"));
+        assert!(
+            matches!(e(409).await, SwitchError::NoAlternative(r) if r == "no other subscription available")
+        );
         assert!(matches!(e(405).await, SwitchError::TooOld));
         for code in [400u16, 401, 429] {
             assert!(matches!(
@@ -889,10 +889,19 @@ mod tests {
     fn rfc3339_parses_to_unix_seconds() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-09T10:07:02Z"), Some(1_791_540_422));
-        assert_eq!(parse_rfc3339("2026-10-09T10:07:02.123456Z"), Some(1_791_540_422));
+        assert_eq!(
+            parse_rfc3339("2026-10-09T10:07:02.123456Z"),
+            Some(1_791_540_422)
+        );
         // +02:00 is two hours ahead of UTC.
-        assert_eq!(parse_rfc3339("2026-10-09T12:07:02+02:00"), Some(1_791_540_422));
-        assert_eq!(parse_rfc3339("2026-10-09T05:37:02-04:30"), Some(1_791_540_422));
+        assert_eq!(
+            parse_rfc3339("2026-10-09T12:07:02+02:00"),
+            Some(1_791_540_422)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-09T05:37:02-04:30"),
+            Some(1_791_540_422)
+        );
         assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
         assert_eq!(parse_rfc3339("soon"), None);
         assert_eq!(parse_rfc3339("2026-13-09T10:07:02Z"), None);

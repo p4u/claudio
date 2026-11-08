@@ -279,7 +279,10 @@ impl Client {
         };
         match tokio::time::timeout(READ_TIMEOUT, wait).await {
             Ok(v) => v,
-            Err(_) => panic!("timed out; last frames seen:\n{}", Vec::from(seen).join("\n")),
+            Err(_) => panic!(
+                "timed out; last frames seen:\n{}",
+                Vec::from(seen).join("\n")
+            ),
         }
     }
 
@@ -539,9 +542,17 @@ async fn session_info_carries_the_attention_while_waiting() {
     assert_eq!(info.state, SessionState::NeedsApproval);
     assert_eq!(info.attention, Some(attention));
 
-    send_hook(socket, &token, "PreToolUse", serde_json::json!({"tool_name": "Bash"})).await;
+    send_hook(
+        socket,
+        &token,
+        "PreToolUse",
+        serde_json::json!({"tool_name": "Bash"}),
+    )
+    .await;
     c.event(id, |e| match e {
-        SessionEvent::State { state: SessionState::Working } => Some(()),
+        SessionEvent::State {
+            state: SessionState::Working,
+        } => Some(()),
         _ => None,
     })
     .await;
@@ -650,7 +661,6 @@ async fn last_prompt_is_none_without_a_transcript_and_refused_for_unknown_sessio
         other => panic!("expected an error, got {other:?}"),
     }
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_removes_session_everywhere() {
@@ -1180,9 +1190,15 @@ async fn update_claude_runs_claude_update_and_refreshes_the_host() {
         Msg::ClaudeUpdated { version, ok, tail } => {
             assert!(ok, "update failed: {tail}");
             assert_eq!(version.as_deref(), Some("2.0.0 (Claude Code)"));
-            assert!(tail.contains("Checking for updates"), "stdout in tail: {tail:?}");
+            assert!(
+                tail.contains("Checking for updates"),
+                "stdout in tail: {tail:?}"
+            );
             assert!(tail.contains("permission note"), "stderr in tail: {tail:?}");
-            assert!(tail.ends_with("Updated to 2.0.0"), "tail is trimmed: {tail:?}");
+            assert!(
+                tail.ends_with("Updated to 2.0.0"),
+                "tail is trimmed: {tail:?}"
+            );
         }
         other => panic!("expected ClaudeUpdated, got {other:?}"),
     }
@@ -1297,7 +1313,11 @@ async fn shell_spawn_runs_a_shell_and_echoes() {
         })
         .await;
     assert_eq!(created.kind, proto::SessionKind::Shell);
-    assert_eq!(created.state, SessionState::Idle, "shells never wait on hooks");
+    assert_eq!(
+        created.state,
+        SessionState::Idle,
+        "shells never wait on hooks"
+    );
     c.until(|f| matches!(f, Frame::Control(env) if env.req == Some(req)).then_some(()))
         .await;
 
@@ -1363,10 +1383,16 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
     c.type_line(id, "echo [${SECRET_ENV}]").await;
     let seen = c.output_until(id, "[]").await;
     assert!(!seen.contains("hunter2"), "a shell gets no proxy env");
-    assert!(!d.work().join("settings.json").exists(), "claude was not run");
+    assert!(
+        !d.work().join("settings.json").exists(),
+        "claude was not run"
+    );
 
     let s = &c.sessions().await[0];
-    assert_eq!((s.kind, s.created_at), (proto::SessionKind::Shell, 1700000000));
+    assert_eq!(
+        (s.kind, s.created_at),
+        (proto::SessionKind::Shell, 1700000000)
+    );
 }
 mod freshness;
 mod git;
@@ -1483,7 +1509,8 @@ async fn wait_dead(pid: u32) {
 
 fn assert_restarted_in_place(seen: &[SessionEvent]) {
     assert!(
-        seen.iter().any(|e| matches!(e, SessionEvent::Created { .. })),
+        seen.iter()
+            .any(|e| matches!(e, SessionEvent::Created { .. })),
         "a respawn is announced like a spawn: {seen:?}"
     );
     assert!(
@@ -1500,13 +1527,20 @@ async fn respawn_resumes_the_journaled_conversation() {
     let mut c = d.client().await;
     let id = Uuid::new_v4();
     let mut spec = d.spec(id);
-    spec.args = vec!["--model".into(), "m".into(), "--resume".into(), "stale".into()];
+    spec.args = vec![
+        "--model".into(),
+        "m".into(),
+        "--resume".into(),
+        "stale".into(),
+    ];
     let old_pid = c.spawn(spec).await.unwrap();
     c.attach_until(id, BANNER).await;
     let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
     send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
-    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
-        .await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::ClaudeSession { .. }).then_some(())
+    })
+    .await;
     let created_at = d.journal()["sessions"][0]["created_at"].clone();
 
     let (pid, seen) = c.respawn(id, false).await;
@@ -1517,7 +1551,10 @@ async fn respawn_resumes_the_journaled_conversation() {
     d.runs_reach(2).await;
     let runs = d.runs();
     assert_eq!(runs[0], ["--model", "m", "--resume", "stale", "-n", "test"]);
-    assert_eq!(runs[1], ["--model", "m", "--resume", "conv-1", "-n", "test"]);
+    assert_eq!(
+        runs[1],
+        ["--model", "m", "--resume", "conv-1", "-n", "test"]
+    );
 
     // Same id, same journal entry (with the conversation), now live again.
     let journal = d.journal();
@@ -1528,7 +1565,10 @@ async fn respawn_resumes_the_journaled_conversation() {
     let Msg::Sessions { sessions } = listed else {
         panic!("expected sessions, got {listed:?}");
     };
-    assert_eq!((sessions.len(), sessions[0].id, sessions[0].pid), (1, id, pid));
+    assert_eq!(
+        (sessions.len(), sessions[0].id, sessions[0].pid),
+        (1, id, pid)
+    );
     assert!(!seen.iter().any(|e| matches!(e, SessionEvent::Removed)));
 
     // The tab works again after a re-attach.
@@ -1554,15 +1594,21 @@ async fn fresh_respawn_starts_a_new_conversation() {
     let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
     let token = d.token_other_than(&first).await;
     send_hook(&d.config.socket, &token, "SessionStart", payload).await;
-    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
-        .await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::ClaudeSession { .. }).then_some(())
+    })
+    .await;
 
     let (_, seen) = c.respawn(id, true).await;
     assert_restarted_in_place(&seen);
     d.runs_reach(3).await;
     let runs = d.runs();
     assert_eq!(runs[1], ["--model", "m", "-n", "test"]);
-    assert_eq!(runs[2], ["--model", "m", "-n", "test"], "fresh omits --resume");
+    assert_eq!(
+        runs[2],
+        ["--model", "m", "-n", "test"],
+        "fresh omits --resume"
+    );
     assert_eq!(d.journal()["sessions"].as_array().unwrap().len(), 1);
 }
 
@@ -1591,8 +1637,10 @@ async fn respawn_revives_a_dormant_session_and_rejects_unknown_ones() {
         bytes: vec![3],
     })
     .await;
-    c.event(id, |e| matches!(e, SessionEvent::Exited { .. }).then_some(()))
-        .await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::Exited { .. }).then_some(())
+    })
+    .await;
     assert_eq!(c.sessions().await[0].pid, None);
     let (pid, _) = c.respawn(id, false).await;
     assert!(pid.is_some());
@@ -1618,7 +1666,10 @@ async fn respawn_restarts_a_shell() {
     c.attach(id, 24, 80).await;
     c.type_line(id, "echo flag-[$FLAG]").await;
     c.output_until(id, "flag-[]").await;
-    assert!(!d.work().join("settings.json").exists(), "claude was not run");
+    assert!(
+        !d.work().join("settings.json").exists(),
+        "claude was not run"
+    );
     let journal = d.journal();
     assert_eq!(journal["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(journal["sessions"][0]["kind"], "shell");
@@ -1717,7 +1768,10 @@ async fn a_kill_during_a_respawn_is_not_undone() {
 
     let reply = a.reply(respawn).await;
     assert!(matches!(reply, Msg::Error { .. }), "{reply:?}");
-    assert!(b.sessions().await.is_empty(), "the killed session came back");
+    assert!(
+        b.sessions().await.is_empty(),
+        "the killed session came back"
+    );
     assert!(d.journal()["sessions"].as_array().unwrap().is_empty());
     wait_dead(old_pid).await;
     assert!(d.daemon.registry().in_flight.is_empty());
@@ -1826,13 +1880,21 @@ async fn a_fresh_reset_forgets_the_old_conversation() {
     c.attach_until(id, BANNER).await;
     let payload = serde_json::json!({"session_id": "conv-1", "source": "startup"});
     send_hook(&d.config.socket, &d.token().await, "SessionStart", payload).await;
-    c.event(id, |e| matches!(e, SessionEvent::ClaudeSession { .. }).then_some(()))
-        .await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::ClaudeSession { .. }).then_some(())
+    })
+    .await;
 
     let (_, seen) = c.respawn(id, true).await;
-    assert!(seen.contains(&SessionEvent::ClaudeSessionCleared), "{seen:?}");
+    assert!(
+        seen.contains(&SessionEvent::ClaudeSessionCleared),
+        "{seen:?}"
+    );
     let journal = d.journal();
-    assert_eq!(journal["sessions"][0]["claude_session_id"], serde_json::Value::Null);
+    assert_eq!(
+        journal["sessions"][0]["claude_session_id"],
+        serde_json::Value::Null
+    );
 
     // The new claude crashes before SessionStart.
     c.attach_until(id, BANNER).await;
@@ -1841,8 +1903,10 @@ async fn a_fresh_reset_forgets_the_old_conversation() {
         bytes: vec![3],
     })
     .await;
-    c.event(id, |e| matches!(e, SessionEvent::Exited { .. }).then_some(()))
-        .await;
+    c.event(id, |e| {
+        matches!(e, SessionEvent::Exited { .. }).then_some(())
+    })
+    .await;
     let s = &c.sessions().await[0];
     assert_eq!((s.pid, s.claude_session_id.as_deref()), (None, None));
 
@@ -1874,8 +1938,7 @@ async fn skip_permissions_support_is_rechecked_after_an_update() {
          if [ \"$1\" = \"--help\" ]; then echo '  --allow-dangerously-skip-permissions'; fi\n\
          exit 0\n";
     std::fs::write(&claude, script).unwrap();
-    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     assert!(
         check(&d.daemon).await.unwrap(),
         "a probe that did not run is not remembered"
@@ -1943,7 +2006,12 @@ fn extensions(lenses: &[(&str, &str)]) -> proto::SessionExtensions {
 /// The lens names a journal entry holds (`None`: no `extensions` field).
 fn journaled_lenses(entry: &serde_json::Value) -> Option<Vec<String>> {
     let lenses = entry.get("extensions")?["lenses"].as_array()?.clone();
-    Some(lenses.iter().map(|l| l["name"].as_str().unwrap().to_owned()).collect())
+    Some(
+        lenses
+            .iter()
+            .map(|l| l["name"].as_str().unwrap().to_owned())
+            .collect(),
+    )
 }
 
 #[test]
@@ -1963,11 +2031,17 @@ fn effective_extensions_follow_request_then_journal_then_legacy() {
     assert_eq!(legacy.lenses.len(), 1);
     assert_eq!(legacy.lenses[0].name, "latex");
     assert_eq!(legacy.lenses[0].kind, proto::LensKind::Tag);
-    assert_eq!(legacy.lenses[0].instruction, crate::claude::hooks::LATEX_CONTEXT);
+    assert_eq!(
+        legacy.lenses[0].instruction,
+        crate::claude::hooks::LATEX_CONTEXT
+    );
     // A host with `[claude] latex = false` drops the latex lens, asked or not.
     assert!(effective_extensions(None, None, false).lenses.is_empty());
     let both = extensions(&[("latex", "math"), ("keys", "k")]);
-    assert_eq!(names(effective_extensions(Some(both), None, false)), ["keys"]);
+    assert_eq!(
+        names(effective_extensions(Some(both), None, false)),
+        ["keys"]
+    );
     // A lens of a kind this daemon does not know is dropped.
     let mut odd = extensions(&[("keys", "k"), ("new", "n")]);
     odd.lenses[1].kind = proto::LensKind::Unknown;
@@ -2000,13 +2074,18 @@ async fn a_spawn_writes_a_private_context_file_and_a_kill_removes_it() {
     let settings = std::fs::read_to_string(d.work().join("settings.json")).unwrap();
     assert!(!settings.contains("INSTRUCTION"), "{settings}");
     let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
-    let hooks = settings["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+    let hooks = settings["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .unwrap();
     let expected = format!("'/bin/true' __context file '{}'", path.display());
     assert_eq!(hooks[1]["command"], expected.as_str());
 
     // The journal keeps the effective value.
     let journal = d.journal();
-    assert_eq!(journaled_lenses(&journal["sessions"][0]).unwrap(), ["keys", "abc"]);
+    assert_eq!(
+        journaled_lenses(&journal["sessions"][0]).unwrap(),
+        ["keys", "abc"]
+    );
 
     assert_eq!(c.call(Msg::Kill { id }).await, Msg::Ok);
     assert!(!path.exists());
@@ -2022,9 +2101,18 @@ async fn no_instructions_means_no_context_file_and_no_hook() {
     d.token().await;
     let settings = std::fs::read_to_string(d.work().join("settings.json")).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
-    assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(!d.dir.join("rt/context").join(format!("{id}.txt")).exists());
-    assert_eq!(journaled_lenses(&d.journal()["sessions"][0]).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        journaled_lenses(&d.journal()["sessions"][0]).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2045,10 +2133,16 @@ async fn a_respawn_with_extensions_replaces_the_journaled_ones() {
 
     let mut respawn = respawn_spec(id, false);
     respawn.extensions = Some(extensions(&[("abc", "NEW")]));
-    assert!(matches!(c.call(Msg::Respawn(respawn)).await, Msg::Spawned { .. }));
+    assert!(matches!(
+        c.call(Msg::Respawn(respawn)).await,
+        Msg::Spawned { .. }
+    ));
     d.runs_reach(3).await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "NEW");
-    assert_eq!(journaled_lenses(&d.journal()["sessions"][0]).unwrap(), ["abc"]);
+    assert_eq!(
+        journaled_lenses(&d.journal()["sessions"][0]).unwrap(),
+        ["abc"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

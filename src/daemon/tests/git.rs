@@ -559,7 +559,10 @@ async fn a_burst_of_git_requests_behind_a_stuck_one_is_bounded() {
                 _ => None,
             })
             .await;
-        assert!(refused.contains(&req), "answered while git is stuck: {msg:?}");
+        assert!(
+            refused.contains(&req),
+            "answered while git is stuck: {msg:?}"
+        );
         assert!(
             matches!(&msg, Msg::Error { message } if message.contains("busy")),
             "{msg:?}"

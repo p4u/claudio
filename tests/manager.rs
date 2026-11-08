@@ -254,7 +254,10 @@ fn test_5b_outdated_daemon_is_replaced() {
     old_tui.wait_exit(WAIT);
     let old_pid = harness.daemon_pid().expect("the old daemon runs");
     #[cfg(target_os = "linux")]
-    assert_eq!(fs::read_link(format!("/proc/{old_pid}/exe")).unwrap(), old_bin);
+    assert_eq!(
+        fs::read_link(format!("/proc/{old_pid}/exe")).unwrap(),
+        old_bin
+    );
 
     // This claudio replaces it, and the session is back.
     let tui = harness.start_tui();
@@ -523,7 +526,10 @@ fn test_wizard_browse_from_home_and_start_here() {
     // ← goes back up one level, → comes back down.
     tui.send_keys(LEFT_ARROW);
     tui.wait_for("start here: ~/work", Region::Screen, WAIT);
-    tui.wait_until(|s| !s.contains("start here: ~/work/proj", Region::Screen), WAIT);
+    tui.wait_until(
+        |s| !s.contains("start here: ~/work/proj", Region::Screen),
+        WAIT,
+    );
     tui.send_keys(DOWN_ARROW);
     tui.send_keys(RIGHT_ARROW);
     tui.wait_for("start here: ~/work/proj", Region::Screen, WAIT);
@@ -702,8 +708,10 @@ fn test_ssh_remote_session() {
     // mktemp -d gives us an isolated dir so we never touch anything else in /tmp.
     let remote_tmp = std::process::Command::new("ssh")
         .args([
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=30",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=30",
             &host,
             "mktemp -d /tmp/cl-ssh-XXXXXX",
         ])
@@ -753,8 +761,10 @@ fn test_ssh_remote_session() {
         );
         let _ = std::process::Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
                 &host_g,
                 &cleanup_cmd,
             ])
@@ -809,8 +819,7 @@ fn test_ssh_remote_session() {
     let mut trust_pressed = false;
     loop {
         let screen = tui.screen_text(Region::Screen);
-        let wizard_visible =
-            screen.contains("New session") || screen.contains("Resume");
+        let wizard_visible = screen.contains("New session") || screen.contains("Resume");
         // ① Wizard session picker: always handle first so Down/Enter go to the
         //    wizard, not to the session's trust dialog behind it.
         if wizard_visible {
@@ -918,7 +927,9 @@ fn test_proxy_env_injection() {
     // The claude-proxy source: $CLAUDIO_PROXY_SRC, else a sibling checkout.
     let proxy_src = std::env::var_os("CLAUDIO_PROXY_SRC")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../claude-proxy"));
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../claude-proxy")
+        });
     let build_out = std::process::Command::new("go")
         .args([
             "build",
@@ -1486,7 +1497,10 @@ fn test_tab_label_is_basename() {
     tui.wait_for(dir_name, Region::TabBar, WAIT);
     // Verify "Claude Code" does NOT appear in the tab bar.
     let tab_text = tui.screen_text(Region::TabBar);
-    assert!(!tab_text.contains("Claude Code"), "tab should not say 'Claude Code', got: {tab_text:?}");
+    assert!(
+        !tab_text.contains("Claude Code"),
+        "tab should not say 'Claude Code', got: {tab_text:?}"
+    );
     tui.quit(WAIT);
 }
 
@@ -1511,7 +1525,10 @@ fn test_terminal_tab_opens_next_to_active_and_runs_commands() {
     tui.send_keys(ALT_C);
     tui.wait_for("$ term@local", Region::TabBar, WAIT);
     let tabs = tui.screen_text(Region::TabBar);
-    let at = |s: &str| tabs.find(s).unwrap_or_else(|| panic!("{s:?} not in {tabs:?}"));
+    let at = |s: &str| {
+        tabs.find(s)
+            .unwrap_or_else(|| panic!("{s:?} not in {tabs:?}"))
+    };
     assert!(
         at(n0) < at("term@local") && at("term@local") < at(n1),
         "terminal must sit between the two sessions: {tabs:?}"
@@ -1520,7 +1537,10 @@ fn test_terminal_tab_opens_next_to_active_and_runs_commands() {
     // A terminal's status line is minimal: no state, model or proxy.
     tui.wait_for("$ terminal", Region::StatusBar, WAIT);
     let status = tui.screen_text(Region::StatusBar);
-    assert!(!status.contains("direct") && !status.contains("idle"), "{status:?}");
+    assert!(
+        !status.contains("direct") && !status.contains("idle"),
+        "{status:?}"
+    );
 
     // The shell is live. 6*7 only appears in the output, never in the typed line.
     tui.wait_for("$", Region::Pane, WAIT);
@@ -1582,7 +1602,17 @@ fn test_git_viewer_log_commit_and_diff() {
     run_git(repo, &["commit", "-q", "-m", "first commit"]);
     fs::write(repo.join("a.txt"), "first line\nhello world line\n").unwrap();
     run_git(repo, &["add", "-A"]);
-    run_git(repo, &["commit", "-q", "-m", "second change", "-m", "Body of the second."]);
+    run_git(
+        repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "second change",
+            "-m",
+            "Body of the second.",
+        ],
+    );
 
     let mut tui = harness.start_tui();
     wizard_pick_dir(&mut tui, repo);
@@ -1720,7 +1750,6 @@ fn shell_quote_ssh(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-
 // ── `claudio --plain` ─────────────────────────────────────────────────────────
 
 /// A fake claude that waits for a line, then exits with `status`.
@@ -1791,7 +1820,10 @@ fn test_plain_is_the_bare_session_full_screen() {
         listed.contains(harness.dirs[0].to_str().unwrap()),
         "claude runs in the current directory:\n{listed}"
     );
-    assert!(!harness.state_json().exists(), "plain mode never writes state.json");
+    assert!(
+        !harness.state_json().exists(),
+        "plain mode never writes state.json"
+    );
 
     // Input reaches claude.
     tui.send_keys(b"typed\r");
@@ -1823,7 +1855,11 @@ fn test_plain_help_lists_only_the_plain_keys() {
     ] {
         assert!(screen.contains(key), "{key} missing:\n{screen}");
     }
-    assert_eq!(screen.matches("Alt+").count(), 9, "exactly the plain keys:\n{screen}");
+    assert_eq!(
+        screen.matches("Alt+").count(),
+        9,
+        "exactly the plain keys:\n{screen}"
+    );
 
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("claudio keys", Region::Screen), WAIT);
@@ -1899,14 +1935,29 @@ fn test_plain_injects_proxy_env() {
     // The banner lists claude's argv, which wraps at the screen's edge.
     let screen = tui.screen_text(Region::Screen).replace('\n', "");
     assert!(screen.contains("-c hello"), "{screen}");
-    assert!(!screen.contains("sekret"), "the token must never reach argv:\n{screen}");
+    assert!(
+        !screen.contains("sekret"),
+        "the token must never reach argv:\n{screen}"
+    );
 
     let env = fs::read_to_string(&env_file).expect("env recorded");
     assert!(env.contains("ANTHROPIC_AUTH_TOKEN=sekret"), "{env}");
-    assert!(env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"), "{env}");
-    assert!(env.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus"), "{env}");
-    assert!(!env.contains("ANTHROPIC_API_KEY"), "api key must be removed: {env}");
-    assert!(!env.contains("CLAUDECODE"), "session marker must be scrubbed: {env}");
+    assert!(
+        env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:1"),
+        "{env}"
+    );
+    assert!(
+        env.contains("ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus"),
+        "{env}"
+    );
+    assert!(
+        !env.contains("ANTHROPIC_API_KEY"),
+        "api key must be removed: {env}"
+    );
+    assert!(
+        !env.contains("CLAUDECODE"),
+        "session marker must be scrubbed: {env}"
+    );
     drop(tui);
 }
 
@@ -1978,7 +2029,9 @@ fn test_plain_first_party_flag() {
 fn test_plain_exits_when_claude_ends_and_leaves_nothing() {
     let harness = ManagerHarness::new();
     let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
-    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+    assert!(!harness
+        .claudio_output(&["sessions"])
+        .contains("no sessions"));
 
     tui.send_keys(b"\x04");
     assert_eq!(tui.wait_exit_code(WAIT), 0);
@@ -1998,14 +2051,19 @@ fn test_a_plain_session_is_not_a_manager_tab() {
     let harness = ManagerHarness::new();
     let mut plain = harness.start_plain_with(&["--no-proxy"], |_| {});
     plain.wait_for("FAKE_CLAUDE_BANNER", Region::Screen, WAIT);
-    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+    assert!(!harness
+        .claudio_output(&["sessions"])
+        .contains("no sessions"));
     assert!(harness.journal_sessions().is_empty(), "not journaled");
 
     // With no session of its own, the manager opens its wizard.
     let mut manager = harness.start_tui();
     manager.wait_for("New session", Region::Screen, WAIT);
     let tabs = manager.screen_text(Region::TabBar);
-    assert!(tabs.trim().is_empty(), "no tab for the plain session: {tabs:?}");
+    assert!(
+        tabs.trim().is_empty(),
+        "no tab for the plain session: {tabs:?}"
+    );
     manager.send_keys(ESC);
     manager.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
     manager.quit(WAIT);
@@ -2034,7 +2092,9 @@ fn test_plain_exit_status_is_claudes() {
 fn test_plain_hangup_kills_the_session() {
     let harness = ManagerHarness::new();
     let mut tui = harness.start_plain_with(&["--no-proxy"], |_| {});
-    assert!(!harness.claudio_output(&["sessions"]).contains("no sessions"));
+    assert!(!harness
+        .claudio_output(&["sessions"])
+        .contains("no sessions"));
 
     let pid = tui.child.process_id().expect("claudio pid");
     // SAFETY: kill(2) has no preconditions.
@@ -2064,7 +2124,10 @@ fn test_plain_rejects_print_mode() {
         .expect("run claudio --plain -p");
     assert_eq!(res.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&res.stderr);
-    assert!(stderr.contains("-p is not supported with --plain"), "{stderr}");
+    assert!(
+        stderr.contains("-p is not supported with --plain"),
+        "{stderr}"
+    );
     assert!(!marker.exists(), "claude must not run");
 }
 
@@ -2085,7 +2148,11 @@ fn write_transcript(home: &std::path::Path, dir: &std::path::Path) {
         "type": "user", "cwd": real.to_string_lossy(),
         "message": {"role": "user", "content": "PROBE-PROMPT hello"},
     });
-    fs::write(pdir.join("11111111-2222-3333-4444-555555555555.jsonl"), format!("{rec}\n")).unwrap();
+    fs::write(
+        pdir.join("11111111-2222-3333-4444-555555555555.jsonl"),
+        format!("{rec}\n"),
+    )
+    .unwrap();
 }
 
 /// A directory with an earlier claude conversation offers to resume it
@@ -2115,7 +2182,11 @@ fn test_wizard_recent_dir_offers_resume() {
     let state = h.config_home.join("claudio/state.json");
     fs::create_dir_all(state.parent().unwrap()).unwrap();
     let dir = h.dirs[0].to_string_lossy().into_owned();
-    fs::write(&state, serde_json::json!({"recent_dirs": {"local": [dir]}}).to_string()).unwrap();
+    fs::write(
+        &state,
+        serde_json::json!({"recent_dirs": {"local": [dir]}}).to_string(),
+    )
+    .unwrap();
     let mut tui = h.start_tui();
     tui.wait_for("Explore local dirs", Region::Screen, WAIT);
     thread::sleep(Duration::from_millis(500));
@@ -2166,8 +2237,11 @@ exec cat
         project = project.display(),
     );
     fs::write(&h.fake_claude, script).unwrap();
-    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    fs::set_permissions(
+        &h.fake_claude,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 /// A formula in claude's answer is rendered in place of its `<latex>` tag
@@ -2221,9 +2295,7 @@ fn write_answers_fake_claude(h: &ManagerHarness) {
     let sid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
     let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
     let project = h.home.join(".claude/projects").join(encode_cwd(&cwd));
-    let prompt = |text: &str| {
-        serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
-    };
+    let prompt = |text: &str| serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
     let answer = |text: &str| {
         serde_json::json!({
             "type": "assistant",
@@ -2256,8 +2328,11 @@ exec cat
         lines = lines.join(" "),
     );
     fs::write(&h.fake_claude, script).unwrap();
-    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    fs::set_permissions(
+        &h.fake_claude,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 /// AC10: Alt+u opens the reader on the newest answer, rendered from the
@@ -2272,13 +2347,24 @@ fn test_reader_shows_the_answers_with_formulas_in_2d() {
     wizard_pick_dir(&mut tui, &h.dirs[0]);
 
     tui.send_keys(ALT_U);
-    tui.wait_for("answer 2/2 · Explain the quadratic formula", Region::Pane, DAEMON_WAIT);
+    tui.wait_for(
+        "answer 2/2 · Explain the quadratic formula",
+        Region::Pane,
+        DAEMON_WAIT,
+    );
     tui.wait_for("The roots of ax² + bx + c = 0 are", Region::Pane, WAIT);
     let pane = tui.screen_text(Region::Pane);
-    for row in ["      -b ± √(b² - 4ac)", "  x = ────────────────", "             2a"] {
+    for row in [
+        "      -b ± √(b² - 4ac)",
+        "  x = ────────────────",
+        "             2a",
+    ] {
         assert!(pane.contains(row), "missing {row:?} in:\n{pane}");
     }
-    assert!(pane.contains("• first item") && pane.contains("• second item"), "{pane}");
+    assert!(
+        pane.contains("• first item") && pane.contains("• second item"),
+        "{pane}"
+    );
 
     tui.send_keys(LEFT_ARROW);
     tui.wait_for("answer 1/2 · Say hi", Region::Pane, WAIT);
@@ -2346,7 +2432,11 @@ fn install_fake_extension(h: &ManagerHarness) {
     fs::write(dir.join("extension.toml"), FAKE_EXTENSION).unwrap();
     let program = dir.join("fake.sh");
     fs::write(&program, FAKE_EXTENSION_PROGRAM).unwrap();
-    fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 /// A fake claude whose answer has a `<keys>` tag: it saves its `--settings`
@@ -2392,8 +2482,11 @@ done
         project = project.display(),
     );
     fs::write(&h.fake_claude, script).unwrap();
-    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    fs::set_permissions(
+        &h.fake_claude,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 /// AC2, AC5, AC6, AC7: an external extension's tag lens is rendered by its
@@ -2419,7 +2512,9 @@ fn test_external_extension_lens_leader_and_actions() {
     let hooks = fs::read_to_string(&settings).unwrap();
     assert!(hooks.contains("__context file"), "{hooks}");
     assert!(!hooks.contains("EXT-INSTRUCTION"), "{hooks}");
-    assert!(!fs::read_to_string(&argv).unwrap().contains("EXT-INSTRUCTION"));
+    assert!(!fs::read_to_string(&argv)
+        .unwrap()
+        .contains("EXT-INSTRUCTION"));
     let context_dir = h.runtime_dir.join("claudio/context");
     let context: Vec<String> = fs::read_dir(&context_dir)
         .unwrap()
@@ -2440,13 +2535,20 @@ fn test_external_extension_lens_leader_and_actions() {
     tui.send_keys(ALT_Z);
     tui.wait_for("search conversations", Region::Screen, WAIT);
     let shown = tui.screen_text(Region::Screen);
-    for row in ["u  reader view", "p  insert snippet", "k  paste a stamp  (fake)"] {
+    for row in [
+        "u  reader view",
+        "p  insert snippet",
+        "k  paste a stamp  (fake)",
+    ] {
         assert!(shown.contains(row), "missing {row:?} in:\n{shown}");
     }
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("paste a stamp", Region::Screen), WAIT);
     thread::sleep(Duration::from_millis(300));
-    assert!(!tui.screen_text(Region::Pane).contains("^["), "nothing reached claude");
+    assert!(
+        !tui.screen_text(Region::Pane).contains("^["),
+        "nothing reached claude"
+    );
     tui.send_keys(ALT_Z);
     tui.wait_for("paste a stamp", Region::Screen, WAIT);
     tui.send_keys(b"u");
@@ -2463,7 +2565,10 @@ fn test_external_extension_lens_leader_and_actions() {
     thread::sleep(Duration::from_millis(300));
     let pane = tui.screen_text(Region::Pane);
     assert_eq!(pane.matches("PASTED-nokey").count(), 1, "{pane}");
-    assert!(!pane.contains("GOT"), "no Enter followed the paste:\n{pane}");
+    assert!(
+        !pane.contains("GOT"),
+        "no Enter followed the paste:\n{pane}"
+    );
 
     // A list: Down, Enter pastes the second item's text.
     tui.send_keys(ALT_Z);
@@ -2496,7 +2601,11 @@ fn test_external_extension_lens_leader_and_actions() {
     tui.send_keys(ALT_Z);
     tui.wait_for("hang", Region::Screen, WAIT);
     tui.send_keys(b"h");
-    tui.wait_for("extension fake timed out", Region::StatusBar, Duration::from_secs(25));
+    tui.wait_for(
+        "extension fake timed out",
+        Region::StatusBar,
+        Duration::from_secs(25),
+    );
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
@@ -2536,8 +2645,11 @@ while IFS= read -r line; do printf 'GOT %s\n' "$line"; done
         lines = lines.join(" "),
     );
     fs::write(&h.fake_claude, script).unwrap();
-    fs::set_permissions(&h.fake_claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    fs::set_permissions(
+        &h.fake_claude,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 }
 
 fn user_record(text: &str, cwd: &std::path::Path) -> serde_json::Value {
@@ -2579,7 +2691,10 @@ fn test_reader_draws_a_mermaid_diagram() {
     let pane = tui.screen_text(Region::Pane);
     assert!(pane.contains("beta"), "{pane}");
     assert!(pane.contains('┌') || pane.contains('╭'), "boxes:\n{pane}");
-    assert!(!pane.contains("flowchart LR"), "the source is not shown:\n{pane}");
+    assert!(
+        !pane.contains("flowchart LR"),
+        "the source is not shown:\n{pane}"
+    );
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
     tui.send_keys(ALT_Q);
@@ -2627,7 +2742,11 @@ fn test_search_finds_and_resumes_a_conversation() {
     };
     let deadline = Instant::now() + DAEMON_WAIT;
     while !resumed(&fs::read_to_string(&log).unwrap_or_default()) {
-        assert!(Instant::now() < deadline, "no resume of {other} in {}", there.display());
+        assert!(
+            Instant::now() < deadline,
+            "no resume of {other} in {}",
+            there.display()
+        );
         thread::sleep(Duration::from_millis(100));
     }
     tui.send_keys(ALT_Q);
@@ -2663,7 +2782,10 @@ fn test_snippets_paste_and_save_the_last_prompt() {
     tui.send_keys(ENTER);
     tui.wait_for("Review this change carefully.", Region::Pane, WAIT);
     thread::sleep(Duration::from_millis(300));
-    assert!(!tui.screen_text(Region::Pane).contains("GOT"), "no Enter after the paste");
+    assert!(
+        !tui.screen_text(Region::Pane).contains("GOT"),
+        "no Enter after the paste"
+    );
 
     tui.send_keys(ALT_Z);
     tui.wait_for("save last prompt as snippet", Region::Screen, WAIT);
@@ -2673,7 +2795,10 @@ fn test_snippets_paste_and_save_the_last_prompt() {
         .unwrap()
         .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
         .collect();
-    assert!(saved.iter().any(|t| t.contains("Say hello to the world")), "{saved:?}");
+    assert!(
+        saved.iter().any(|t| t.contains("Say hello to the world")),
+        "{saved:?}"
+    );
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
@@ -2725,7 +2850,10 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     let saved = fs::read_to_string(&config).unwrap();
     assert!(saved.starts_with("# my settings, keep me\n"), "{saved}");
     assert!(saved.contains(&prior), "the rest is kept:\n{saved}");
-    assert!(saved.ends_with("[extensions]\ndiagram = false\n"), "{saved}");
+    assert!(
+        saved.ends_with("[extensions]\ndiagram = false\n"),
+        "{saved}"
+    );
 
     // Snippets off: its keys leave the leader.
     tui.send_keys(DOWN_ARROW);
@@ -2741,9 +2869,15 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     let leader = tui.screen_text(Region::Screen);
     assert!(leader.contains("paste a stamp"), "{leader}");
     assert!(leader.contains("e  manage extensions"), "{leader}");
-    assert!(!leader.contains("insert snippet"), "snippets is off:\n{leader}");
+    assert!(
+        !leader.contains("insert snippet"),
+        "snippets is off:\n{leader}"
+    );
     let saved = fs::read_to_string(&config).unwrap();
-    assert!(saved.ends_with("[extensions]\ndiagram = false\nsnippets = false\n"), "{saved}");
+    assert!(
+        saved.ends_with("[extensions]\ndiagram = false\nsnippets = false\n"),
+        "{saved}"
+    );
 
     // `e` opens the screen too.
     tui.send_keys(b"e");

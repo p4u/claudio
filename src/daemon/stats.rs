@@ -23,7 +23,11 @@ pub async fn sample_loop(tx: tokio::sync::watch::Sender<HostSnapshot>) {
         let cpu_pct = compute_cpu_pct(prev, curr);
         prev = curr;
         let (mem_used, mem_total) = read_mem();
-        let _ = tx.send(HostSnapshot { cpu_pct, mem_used, mem_total });
+        let _ = tx.send(HostSnapshot {
+            cpu_pct,
+            mem_used,
+            mem_total,
+        });
     }
 }
 
@@ -73,20 +77,10 @@ fn read_cpu_raw() -> CpuRaw {
 fn compute_cpu_pct(prev: CpuRaw, curr: CpuRaw) -> f32 {
     let prev_idle = prev.idle + prev.iowait;
     let curr_idle = curr.idle + curr.iowait;
-    let prev_total = prev.user
-        + prev.nice
-        + prev.system
-        + prev.idle
-        + prev.iowait
-        + prev.irq
-        + prev.softirq;
-    let curr_total = curr.user
-        + curr.nice
-        + curr.system
-        + curr.idle
-        + curr.iowait
-        + curr.irq
-        + curr.softirq;
+    let prev_total =
+        prev.user + prev.nice + prev.system + prev.idle + prev.iowait + prev.irq + prev.softirq;
+    let curr_total =
+        curr.user + curr.nice + curr.system + curr.idle + curr.iowait + curr.irq + curr.softirq;
     let total_delta = curr_total.saturating_sub(prev_total);
     let idle_delta = curr_idle.saturating_sub(prev_idle);
     if total_delta == 0 {

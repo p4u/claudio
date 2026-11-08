@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(short_model("claude-opus-5-5[1m]"), "opus-5-5[1m]");
         assert_eq!(short_model("gpt-x"), "gpt-x");
         assert_eq!(fmt_rfc3339("2026-10-09T15:00:00Z"), "2026-10-09 15:00 UTC");
-        assert_eq!(fmt_rfc3339("2026-10-09T15:00:59.5+02:00"), "2026-10-09 13:00 UTC");
+        assert_eq!(
+            fmt_rfc3339("2026-10-09T15:00:59.5+02:00"),
+            "2026-10-09 13:00 UTC"
+        );
         assert_eq!(fmt_rfc3339("soon"), "soon");
     }
 

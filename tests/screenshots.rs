@@ -100,12 +100,7 @@ fn capture_screenshots() {
         thread::sleep(Duration::from_millis(200));
 
         // ── directories.png ───────────────────────────────────────────────────
-        save_shot(
-            &tui,
-            &demo,
-            &out_dir.join("directories.png"),
-            "directories",
-        );
+        save_shot(&tui, &demo, &out_dir.join("directories.png"), "directories");
 
         // Escape the wizard (cancels it) and quit.
         tui.send_keys(common::ESC);
@@ -175,7 +170,8 @@ fn capture_screenshots() {
             |s| {
                 let pane = s.region_text(Region::Pane);
                 // Must not be stuck on any onboarding dialog.
-                if pane.contains("Press Enter") || pane.contains("Security notes:")
+                if pane.contains("Press Enter")
+                    || pane.contains("Security notes:")
                     || pane.contains("Yes, I trust this folder")
                     || pane.contains("Choose the text style")
                 {
@@ -190,15 +186,18 @@ fn capture_screenshots() {
                     return false;
                 }
                 // At least a few lines of real response content above the prompt.
-                pane.lines().filter(|l| {
-                    let t = l.trim();
-                    !t.is_empty()
-                        && t != ">"
-                        && t != "❯"
-                        && !t.starts_with("Welcome to Claude")
-                        && !t.starts_with("Claude Code v")
-                        && t.len() > 5
-                }).count() >= 4
+                pane.lines()
+                    .filter(|l| {
+                        let t = l.trim();
+                        !t.is_empty()
+                            && t != ">"
+                            && t != "❯"
+                            && !t.starts_with("Welcome to Claude")
+                            && !t.starts_with("Claude Code v")
+                            && t.len() > 5
+                    })
+                    .count()
+                    >= 4
             },
             Duration::from_secs(120),
         );
@@ -305,10 +304,7 @@ fn capture_screenshots() {
         tui.wait_exit(WAIT);
     }
 
-    eprintln!(
-        "[screenshots] Done — PNGs written to {}",
-        out_dir.display()
-    );
+    eprintln!("[screenshots] Done — PNGs written to {}", out_dir.display());
 }
 
 // ── Demo environment ──────────────────────────────────────────────────────────
@@ -465,9 +461,15 @@ Host staging\n  HostName staging.example.com\n  User ubuntu\n";
         let forbidden = ["/volumes", "p4u", "vocdoni", "z6"];
         for pat in &forbidden {
             if let Some(at) = text.find(pat) {
-                let from = text[..at].char_indices().rev().nth(30).map_or(0, |(i, _)| i);
+                let from = text[..at]
+                    .char_indices()
+                    .rev()
+                    .nth(30)
+                    .map_or(0, |(i, _)| i);
                 let to = (at + pat.len() + 30).min(text.len());
-                let to = (to..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+                let to = (to..=text.len())
+                    .find(|i| text.is_char_boundary(*i))
+                    .unwrap_or(text.len());
                 panic!(
                     "[screenshots] PRIVACY VIOLATION in {label}: pattern {:?} appeared in SVG/screen text: …{}…",
                     pat,
@@ -502,11 +504,21 @@ fn setup_demo_projects(home: &PathBuf) {
     let api_gw = home.join("projects/api-gateway");
     git_init(&api_gw, "main");
     fs::write(api_gw.join("main.go"), "package main\n\nfunc main() {}\n").ok();
-    fs::write(api_gw.join("README.md"), "# api-gateway\nHTTP gateway service.\n").ok();
+    fs::write(
+        api_gw.join("README.md"),
+        "# api-gateway\nHTTP gateway service.\n",
+    )
+    .ok();
     git_commit(&api_gw, "Initial commit");
     // Create a feature branch.
     std::process::Command::new("git")
-        .args(["-C", api_gw.to_str().unwrap(), "checkout", "-b", "feat/rate-limit"])
+        .args([
+            "-C",
+            api_gw.to_str().unwrap(),
+            "checkout",
+            "-b",
+            "feat/rate-limit",
+        ])
         .output()
         .ok();
     fs::write(api_gw.join("ratelimit.go"), "// rate-limit middleware\n").ok();
@@ -532,7 +544,11 @@ fn setup_demo_projects(home: &PathBuf) {
 
     // notes — plain directory (not a git repo).
     let notes = home.join("notes");
-    fs::write(notes.join("ideas.md"), "# Ideas\n- improve API\n- refactor auth\n").ok();
+    fs::write(
+        notes.join("ideas.md"),
+        "# Ideas\n- improve API\n- refactor auth\n",
+    )
+    .ok();
 }
 
 /// Give `webapp` 12 conventional commits from three authors, two tags, a
@@ -578,7 +594,10 @@ fn setup_webapp_history(dir: &PathBuf) {
         &[
             ("package.json", &package("0.1.0")),
             ("README.md", "# webapp\nA demo React web application.\n"),
-            ("src/App.jsx", "export default function App() {\n  return <h1>Demo</h1>;\n}\n"),
+            (
+                "src/App.jsx",
+                "export default function App() {\n  return <h1>Demo</h1>;\n}\n",
+            ),
         ],
         "chore: scaffold the app with Vite",
         ana,
@@ -590,7 +609,12 @@ fn setup_webapp_history(dir: &PathBuf) {
         ana,
         31,
     );
-    commit(&[("src/session.js", &session(""))], "feat(auth): persist the session token", sam, 27);
+    commit(
+        &[("src/session.js", &session(""))],
+        "feat(auth): persist the session token",
+        sam,
+        27,
+    );
     commit(
         &[
             ("src/session.js", &session("export const clearToken = () => localStorage.removeItem(KEY);\n")),
@@ -626,11 +650,28 @@ fn setup_webapp_history(dir: &PathBuf) {
     git_run(dir, &["branch", "fix/nav-overflow"], lee, 15);
 
     git_run(dir, &["checkout", "-q", "main"], sam, 14);
-    commit(&[("src/api.js", &api(false))], "fix(api): retry failed requests with backoff", sam, 14);
-    commit(&[("src/api.js", &api(true))], "refactor(api): resolve paths against a base URL", sam, 11);
+    commit(
+        &[("src/api.js", &api(false))],
+        "fix(api): retry failed requests with backoff",
+        sam,
+        14,
+    );
+    commit(
+        &[("src/api.js", &api(true))],
+        "refactor(api): resolve paths against a base URL",
+        sam,
+        11,
+    );
     git_run(
         dir,
-        &["merge", "--no-ff", "-q", "feat/dark-mode", "-m", "Merge branch 'feat/dark-mode'"],
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "feat/dark-mode",
+            "-m",
+            "Merge branch 'feat/dark-mode'",
+        ],
         ana,
         9,
     );
@@ -640,7 +681,12 @@ fn setup_webapp_history(dir: &PathBuf) {
         lee,
         5,
     );
-    commit(&[("package.json", &package("0.2.0"))], "chore(release): 0.2.0", ana, 2);
+    commit(
+        &[("package.json", &package("0.2.0"))],
+        "chore(release): 0.2.0",
+        ana,
+        2,
+    );
     git_run(dir, &["tag", "-a", "v0.2.0", "-m", "v0.2.0"], ana, 2);
 }
 
@@ -650,7 +696,10 @@ fn git_run(dir: &PathBuf, args: &[&str], who: (&str, &str), days: u64) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let when = format!("{} +0000", now.saturating_sub(days * 86_400 + 3_600 * (days % 7 + 1)));
+    let when = format!(
+        "{} +0000",
+        now.saturating_sub(days * 86_400 + 3_600 * (days % 7 + 1))
+    );
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -876,11 +925,11 @@ fn dismiss_security_notes(tui: &mut TuiProcess) {
             // set.  Send two presses so that even if the first is dropped we end on
             // "Yes" (the list has only 2 items and likely doesn't wrap, so 2 presses
             // from "No" → "Yes" → stays at "Yes").
-            tui.send_keys(common::DOWN_ARROW);   // \x1b[B  normal mode
+            tui.send_keys(common::DOWN_ARROW); // \x1b[B  normal mode
             thread::sleep(Duration::from_millis(150));
-            tui.send_keys(b"\x1bOB");            // \x1bOB  application mode
+            tui.send_keys(b"\x1bOB"); // \x1bOB  application mode
             thread::sleep(Duration::from_millis(150));
-            tui.send_keys(common::DOWN_ARROW);   // second normal DOWN (stay at Yes if no-wrap)
+            tui.send_keys(common::DOWN_ARROW); // second normal DOWN (stay at Yes if no-wrap)
             thread::sleep(Duration::from_millis(300));
 
             eprintln!(
@@ -957,8 +1006,10 @@ fn dismiss_security_notes(tui: &mut TuiProcess) {
         // Claude uses `❯` (U+276F) as its prompt character.  The trust dialog also
         // shows `❯` as a cursor marker, but that case is handled above first.
         // Only treat `❯` as a ready-prompt when no dialog is active (already checked).
-        if pane.contains("\n> ") || pane.trim_start().starts_with("> ")
-            || pane.contains("❯") || pane.contains('\u{276F}')
+        if pane.contains("\n> ")
+            || pane.trim_start().starts_with("> ")
+            || pane.contains("❯")
+            || pane.contains('\u{276F}')
         {
             return;
         }
@@ -990,7 +1041,11 @@ fn redact_emails(text: &str) -> String {
             // Local part already copied to `out`: peel it back off.
             let mut start = out.len();
             for (idx, c) in out.char_indices().rev() {
-                if is_mail(c) { start = idx } else { break }
+                if is_mail(c) {
+                    start = idx
+                } else {
+                    break;
+                }
             }
             let local = out.len() - start;
             let mut end = i + 1;
@@ -1060,7 +1115,10 @@ fn convert_svg_to_png(svg: &PathBuf, png: &PathBuf) {
         Ok(out) if out.status.success() => return,
         Ok(out) => eprintln!(
             "[screenshots] inkscape warn: {}",
-            String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
         ),
         Err(_) => eprintln!("[screenshots] inkscape not found, trying magick"),
     }

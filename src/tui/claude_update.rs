@@ -238,8 +238,8 @@ fn install_prompt(host: &str) -> ConfirmPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::Effect;
     use crate::tui::app::AppConfig;
+    use crate::tui::app::Effect;
     use crate::tui::test_support;
     use crossterm::event::KeyCode;
 

@@ -271,7 +271,11 @@ mod tests {
     fn post_tool_use_matches_only_the_asking_tools() {
         let v = settings(Path::new("/b"), Path::new("/s"), "tok", None);
         for event in EVENTS {
-            let want = if *event == "PostToolUse" { "AskUserQuestion|ExitPlanMode" } else { "*" };
+            let want = if *event == "PostToolUse" {
+                "AskUserQuestion|ExitPlanMode"
+            } else {
+                "*"
+            };
             assert_eq!(v["hooks"][event][0]["matcher"], want, "{event}");
         }
     }

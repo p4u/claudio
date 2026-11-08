@@ -27,8 +27,8 @@ use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
-use super::selection::Selection;
 use super::fmt::{abbreviate_home, fmt_age, str_width, tail, truncate};
+use super::selection::Selection;
 use super::wizard::{resume_label, Wizard};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -65,7 +65,10 @@ fn draw_plain(frame: &mut Frame, app: &App) {
     let area = frame.area();
     draw_pane(frame, app, area);
     if let Some(notice) = &app.notice {
-        let text = format!(" {} ", truncate(&notice.text, (area.width as usize).saturating_sub(2)));
+        let text = format!(
+            " {} ",
+            truncate(&notice.text, (area.width as usize).saturating_sub(2))
+        );
         let width = (str_width(&text) as u16).min(area.width);
         if let Some(y) = area.bottom().checked_sub(1).filter(|_| width > 0) {
             let rect = Rect {
@@ -139,12 +142,13 @@ pub fn view_glyph(view: &SessionView, tick: usize) -> (&'static str, Style) {
     if view.kind == SessionKind::Shell {
         return (
             "$",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         );
     }
-    let reconnecting = view.host != "local"
-        && !view.attached
-        && matches!(view.state, SessionState::Unknown);
+    let reconnecting =
+        view.host != "local" && !view.attached && matches!(view.state, SessionState::Unknown);
     glyph(view.state, tick, reconnecting)
 }
 
@@ -289,12 +293,12 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
             // Steady color signals attention — no blinking which terminals
             // render inconsistently and users find aggressive.
             match view.state {
-                SessionState::NeedsApproval | SessionState::Error => {
-                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
-                }
-                SessionState::NeedsInput => {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                }
+                SessionState::NeedsApproval | SessionState::Error => Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+                SessionState::NeedsInput => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
                 _ => Style::default(),
             }
         };
@@ -330,7 +334,12 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
         super::latex::overlay(frame.buffer_mut(), area, &view.mirror, &view.latex);
     }
     // The external tag lenses' renderings, each over its own tags.
-    for tag in app.extensions.tag_lenses().into_iter().filter(|t| *t != "latex") {
+    for tag in app
+        .extensions
+        .tag_lenses()
+        .into_iter()
+        .filter(|t| *t != "latex")
+    {
         let items: Vec<super::latex::Formula> = view
             .lens
             .iter()
@@ -473,21 +482,25 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         draw_input(frame, filter_area, "filter> ", &hs.input);
         // Render LOCAL section header.
         let sections = ratatui::layout::Layout::vertical([
-            Constraint::Length(1),              // LOCAL header
+            Constraint::Length(1),                  // LOCAL header
             Constraint::Length(local_count as u16), // local items
-            Constraint::Length(1),              // REMOTE header
-            Constraint::Min(0),                 // remote items
+            Constraint::Length(1),                  // REMOTE header
+            Constraint::Min(0),                     // remote items
         ])
         .split(rest);
         let local_focused = hs.focus == HostSection::Local;
         let remote_focused = hs.focus == HostSection::Remote;
         let local_hdr_style = if local_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().add_modifier(Modifier::DIM)
         };
         let remote_hdr_style = if remote_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().add_modifier(Modifier::DIM)
         };
@@ -511,7 +524,13 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         let offset = selected.map_or(0, |i| i.saturating_sub(visible.saturating_sub(1)));
         let lines: Vec<Line> = std::iter::once(explore)
             .chain(hs.local_items.iter().enumerate().map(|(i, dir)| {
-                let mut row = dir_row(w, dir, selected == Some(i + 1), width.saturating_sub(2), now);
+                let mut row = dir_row(
+                    w,
+                    dir,
+                    selected == Some(i + 1),
+                    width.saturating_sub(2),
+                    now,
+                );
                 row.spans.insert(0, Span::raw("  "));
                 row
             }))
@@ -614,7 +633,11 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         frame.render_widget(
             Paragraph::new(format!("{hint}{toggle_key} hidden: {state}"))
                 .style(Style::default().add_modifier(Modifier::DIM)),
-            Rect { y: head.y + 1, height: 1, ..head },
+            Rect {
+                y: head.y + 1,
+                height: 1,
+                ..head
+            },
         );
     }
     draw_dir_list(frame, list, w, now);
@@ -640,7 +663,9 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
 
     // In browse mode row 0 is the "start here" pseudo-entry, ahead of the items.
     let here = w.here_dir().map(|dir| {
-        let style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let style = Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
         let style = if w.here_selected() {
             style.add_modifier(Modifier::REVERSED)
         } else {
@@ -654,9 +679,12 @@ fn draw_dir_list(frame: &mut Frame, area: Rect, w: &Wizard, now: u64) {
 
     let lines: Vec<Line> = here
         .into_iter()
-        .chain(w.items.iter().enumerate().map(|(i, path)| {
-            dir_row(w, path, i + first_item_row == selected, width, now)
-        }))
+        .chain(
+            w.items
+                .iter()
+                .enumerate()
+                .map(|(i, path)| dir_row(w, path, i + first_item_row == selected, width, now)),
+        )
         .skip(offset)
         .take(visible)
         .collect();
@@ -674,23 +702,20 @@ fn dir_row(w: &Wizard, path: &str, is_selected: bool, width: usize, now: u64) ->
     let mut badges: Vec<(String, Style)> = Vec::new();
     if let Some(m) = meta {
         if m.symlink {
-            badges.push((" ↪".to_owned(), Style::default().add_modifier(Modifier::DIM)));
+            badges.push((
+                " ↪".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ));
         }
         if m.recently_used {
             badges.push((" ↻".to_owned(), Style::default().fg(Color::Cyan)));
         }
         if let Some(at) = m.claude_at {
             let age = fmt_age(now.saturating_sub(at));
-            badges.push((
-                format!(" ✻ {age}"),
-                Style::default().fg(Color::Magenta),
-            ));
+            badges.push((format!(" ✻ {age}"), Style::default().fg(Color::Magenta)));
         }
         if let Some(branch) = &m.git {
-            badges.push((
-                format!(" ⎇ {branch}"),
-                Style::default().fg(Color::Green),
-            ));
+            badges.push((format!(" ⎇ {branch}"), Style::default().fg(Color::Green)));
         }
     }
 
@@ -748,8 +773,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
 
     // Split into filter input (1 line) + list.
     let [filter_area, list_area] =
-        ratatui::layout::Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
-            .areas(inner);
+        ratatui::layout::Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
     draw_input(frame, filter_area, "filter> ", filter);
 
     let visible = list_area.height as usize;
@@ -871,9 +895,7 @@ pub fn draw_help(frame: &mut Frame, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  ↑ newer claudio is available: {tag}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
             ),
             Span::raw("  — run `claudio upgrade`"),
         ]));
@@ -894,7 +916,8 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let mut cfg = crate::tui::test_support::config();
         cfg.ssh_hosts = vec!["prod-db".into(), "build-01".into()];
-        cfg.recent_dirs.insert("local".into(), vec!["/home/u/web".into()]);
+        cfg.recent_dirs
+            .insert("local".into(), vec!["/home/u/web".into()]);
         let mut app = App::new(cfg);
         app.recover(&Default::default(), &[]);
 
@@ -919,10 +942,8 @@ mod tests {
     #[test]
     fn the_pane_shows_formulas_rendered() {
         use ratatui::{backend::TestBackend, Terminal};
-        let mut app = crate::tui::test_support::app_with(&[crate::tui::test_support::info(
-            Some(1),
-            None,
-        )]);
+        let mut app =
+            crate::tui::test_support::app_with(&[crate::tui::test_support::info(Some(1), None)]);
         let v = &mut app.sessions[0];
         v.mirror.feed(b"energy: <latex>E = mc^2</latex>.");
         let rendered = crate::tui::latex::Rendered {
@@ -935,7 +956,12 @@ mod tests {
         let buf = term.backend().buffer();
         let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
         assert_eq!(row.trim_end(), "energy: E = mc\u{b2}.");
-        assert!(app.sessions[0].mirror.row_chars(0).iter().collect::<String>().contains("<latex>"));
+        assert!(app.sessions[0]
+            .mirror
+            .row_chars(0)
+            .iter()
+            .collect::<String>()
+            .contains("<latex>"));
         // The latex extension turned off: the tags show as written.
         app.extensions.set_enabled("latex", false);
         term.draw(|f| draw(f, &app)).unwrap();
@@ -1007,17 +1033,29 @@ mod tests {
         let now = 600u64;
         let make_view = |name: &str| SessionView {
             name: Some(name.to_owned()),
-            ..SessionView::new(Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (24, 80))
+            ..SessionView::new(
+                Uuid::new_v4(),
+                "local",
+                "/srv",
+                SessionKind::Claude,
+                (24, 80),
+            )
         };
         let sessions = vec![make_view("api"), make_view("docs")];
         // Wide bar: labels appear, no age.
         let titles_wide = tab_titles(&sessions, Some(0), 200, now);
         let wide_text: String = titles_wide.iter().map(|(p, s)| format!("{p}{s}")).collect();
         assert!(wide_text.contains("api"), "label should appear");
-        assert!(!wide_text.contains("10m"), "age should not appear in tab bar");
+        assert!(
+            !wide_text.contains("10m"),
+            "age should not appear in tab bar"
+        );
         // Narrow bar: labels still present, just shorter.
         let titles_narrow = tab_titles(&sessions, Some(0), 20, now);
-        let narrow_text: String = titles_narrow.iter().map(|(p, s)| format!("{p}{s}")).collect();
+        let narrow_text: String = titles_narrow
+            .iter()
+            .map(|(p, s)| format!("{p}{s}"))
+            .collect();
         assert!(str_width(&narrow_text) <= 21);
     }
 }

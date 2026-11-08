@@ -12,8 +12,8 @@ use ratatui::Frame;
 
 use crate::proto::{GitCommitInfo, GitFile, GitLogEntry};
 
-use super::super::git_view::{CommitPage, DiffPage, GitView, Load, Log, Patch, MESSAGE_ROWS_MAX};
 use super::super::fmt::{fmt_age, fmt_utc, spans_width, str_width, truncate};
+use super::super::git_view::{CommitPage, DiffPage, GitView, Load, Log, Patch, MESSAGE_ROWS_MAX};
 
 /// Columns of the author column in the log, when the pane is wide enough.
 const AUTHOR_COLS: usize = 14;

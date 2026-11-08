@@ -338,8 +338,16 @@ impl App {
             .unwrap_or_default();
         state::push_recent(&mut self.recent_dirs, &host, &cwd);
         let at = self.sessions.len();
-        self.start(Uuid::new_v4(), host, cwd, SessionKind::Claude, args, proxy, at)
-            .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
+        self.start(
+            Uuid::new_v4(),
+            host,
+            cwd,
+            SessionKind::Claude,
+            args,
+            proxy,
+            at,
+        )
+        .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
     }
 
     /// Open a terminal on the active session's host, in its launch directory
@@ -350,8 +358,16 @@ impl App {
             None => ("local".to_owned(), self.home.clone()),
         };
         let at = self.active.map_or(self.sessions.len(), |a| a + 1);
-        self.start(Uuid::new_v4(), host, cwd, SessionKind::Shell, Vec::new(), None, at)
-            .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
+        self.start(
+            Uuid::new_v4(),
+            host,
+            cwd,
+            SessionKind::Shell,
+            Vec::new(),
+            None,
+            at,
+        )
+        .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
     }
 
     /// Send the spawn of session `id`, add its tab at `at` (never before the

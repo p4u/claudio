@@ -29,10 +29,10 @@ use crate::proxy::ProxyChoice;
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::keymap::Keymap;
-use super::selection::{Clicks, Selection};
 use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
 };
+use super::selection::{Clicks, Selection};
 use super::state::{ClientState, KillTombstone};
 use super::stats_view::{StatsOutcome, StatsView, Window};
 
@@ -245,20 +245,39 @@ pub enum ReplyTo {
     DirEntries,
     /// The claude sessions in `cwd` on `host`, for the wizard of generation
     /// `gen`; a reply for a cancelled or replaced wizard is dropped.
-    ClaudeSessions { host: String, cwd: String, gen: u64 },
+    ClaudeSessions {
+        host: String,
+        cwd: String,
+        gen: u64,
+    },
     /// The recent projects on `host`, for the wizard of generation `gen`.
-    Projects { host: String, gen: u64 },
+    Projects {
+        host: String,
+        gen: u64,
+    },
     /// `UpdateClaude` on this host; the outcome becomes a notice.
     ClaudeUpdate(String),
     /// A request of the history viewer: the view's generation and the
     /// request's sequence number (see `git_view`).
-    Git { gen: u64, seq: u64 },
+    Git {
+        gen: u64,
+        seq: u64,
+    },
     /// `Answers` for the reader view opened under `gen` on session `id`.
-    Answers { gen: u64, id: SessionId },
+    Answers {
+        gen: u64,
+        id: SessionId,
+    },
     /// `Search` on `host`, for the search action started under `gen`.
-    Search { gen: u64, host: String },
+    Search {
+        gen: u64,
+        host: String,
+    },
     /// `LastPrompt` on `host`, for the snippet save started under `gen`.
-    LastPrompt { gen: u64, host: String },
+    LastPrompt {
+        gen: u64,
+        host: String,
+    },
     /// `Manifest` of plugin `name` at hash `sha256` on `host`.
     Manifest {
         host: String,
@@ -792,8 +811,13 @@ impl App {
         match result {
             Ok(o) => {
                 let from = o.from.name().unwrap_or("current subscription");
-                let to = o.to.as_ref().and_then(|t| t.name()).unwrap_or("next available");
-                self.notify(format!("switch scheduled: {from} → {to} (on the next message)"));
+                let to =
+                    o.to.as_ref()
+                        .and_then(|t| t.name())
+                        .unwrap_or("next available");
+                self.notify(format!(
+                    "switch scheduled: {from} → {to} (on the next message)"
+                ));
                 let active = self.active_view().map(|v| v.id) == Some(session);
                 if active {
                     self.refresh_session_cred(0);
@@ -885,7 +909,11 @@ impl App {
     /// Record a host-stats sample in the ring buffer.
     pub fn on_host_stats(&mut self, host: String, cpu_pct: f32, mem_used: u64, mem_total: u64) {
         let ring = self.host_stats.entry(host).or_default();
-        ring.push_back(HostStatsSample { cpu_pct, mem_used, mem_total });
+        ring.push_back(HostStatsSample {
+            cpu_pct,
+            mem_used,
+            mem_total,
+        });
         while ring.len() > 30 {
             ring.pop_front();
         }
@@ -917,9 +945,7 @@ mod tests {
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
     use crate::tui::state::SavedSession;
-    use crate::tui::test_support::{
-        self, alt, app_with, info, key, press, shell_info,
-    };
+    use crate::tui::test_support::{self, alt, app_with, info, key, press, shell_info};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
 
@@ -958,7 +984,10 @@ mod tests {
         assert_eq!(remote(&app), ["prod-db", "build-01"]);
         let gen = app.wizard_generation();
         app.on_reply(
-            ReplyTo::Projects { host: "local".into(), gen },
+            ReplyTo::Projects {
+                host: "local".into(),
+                gen,
+            },
             Ok(Msg::Projects { dirs: vec![] }),
         );
         assert_eq!(remote(&app), ["prod-db", "build-01"]);
@@ -988,7 +1017,10 @@ mod tests {
             hidden: false,
         };
         app.on_reply(
-            ReplyTo::Projects { host: "local".into(), gen },
+            ReplyTo::Projects {
+                host: "local".into(),
+                gen,
+            },
             Ok(Msg::Projects {
                 dirs: vec![dir("/srv/app"), dir("/srv/web"), dir("/srv/api")],
             }),
@@ -1044,7 +1076,10 @@ mod tests {
             ..test_support::config()
         });
         app.recover(&ClientState::default(), &[]);
-        assert!(app.take_effects().iter().any(|e| matches!(e, Effect::LoadSshHosts)));
+        assert!(app
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSshHosts)));
         let hosts = |app: &App| match &app.modal {
             Some(Modal::Wizard(w)) => w.host_step.as_ref().unwrap().items.clone(),
             _ => panic!("expected the wizard"),
@@ -1129,7 +1164,13 @@ mod tests {
             "expected Save in effects"
         );
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Request { msg: Msg::Rename { .. }, .. })),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Request {
+                    msg: Msg::Rename { .. },
+                    ..
+                }
+            )),
             "expected Rename request in effects"
         );
         app.on_terminal(alt('r'));
@@ -1325,7 +1366,11 @@ mod tests {
         let ids: Vec<_> = app.sessions.iter().map(|v| v.id).collect();
         assert_eq!(ids, [remote.id, local.id]);
         assert_eq!((app.active, app.sessions[0].attached), (Some(0), false));
-        assert_eq!(app.to_state().sessions[0], remote, "state.json keeps the tab");
+        assert_eq!(
+            app.to_state().sessions[0],
+            remote,
+            "state.json keeps the tab"
+        );
 
         // devbox's daemon restarted: the session is dormant.
         let dormant = SessionInfo {
@@ -1479,9 +1524,10 @@ mod tests {
         app.on_terminal(press(KeyCode::Enter));
         // The directory step opens in browse mode at `~/`: the home listing is requested.
         let effects = app.take_effects();
-        assert!(requests(&effects)
-            .iter()
-            .any(|m| **m == Msg::ListDir { path: "/home/u".into() }));
+        assert!(requests(&effects).iter().any(|m| **m
+            == Msg::ListDir {
+                path: "/home/u".into()
+            }));
         // Step 1: replace the `~/` input with "/w", then press Enter.
         app.on_terminal(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "/w".chars() {
@@ -1497,7 +1543,14 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
+        app.on_reply(
+            ReplyTo::ClaudeSessions {
+                host: "local".into(),
+                cwd: "/w".into(),
+                gen,
+            },
+            Ok(reply),
+        );
         let effects = app.take_effects();
         let reqs = requests(&effects);
         let Msg::Spawn(spec) = reqs[0] else {
@@ -1514,7 +1567,10 @@ mod tests {
         );
         assert!(app.modal.is_none());
         assert_eq!(
-            app.recent_dirs.get("local").map(Vec::as_slice).unwrap_or(&[]),
+            app.recent_dirs
+                .get("local")
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             &["/w".to_owned()][..]
         );
         assert_eq!(app.sessions[0].label(), "w");
@@ -1584,13 +1640,21 @@ mod tests {
         app.recover(&ClientState::default(), &live);
         assert_eq!(app.sessions.len(), 1);
         let effects = app.take_effects();
-        assert!(!requests(&effects).iter().any(|m| matches!(m, Msg::Spawn(_))));
+        assert!(!requests(&effects)
+            .iter()
+            .any(|m| matches!(m, Msg::Spawn(_))));
 
         let other = ephemeral(info(Some(4), None));
         let created = SessionEvent::Created {
             info: other.clone(),
         };
-        app.on_incoming_from("local", Incoming::Event { id: other.id, event: created });
+        app.on_incoming_from(
+            "local",
+            Incoming::Event {
+                id: other.id,
+                event: created,
+            },
+        );
         assert_eq!(app.sessions.len(), 1);
         app.recover_host("local", &[live[0].clone(), other]);
         assert_eq!(app.sessions.len(), 1, "nor after a reconnect");
@@ -1702,7 +1766,10 @@ mod tests {
         app.on_terminal(alt('g'));
         // Navigate down to index 1.
         app.modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert!(matches!(app.modal, Some(Modal::Overview { selected: 1, .. })));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Overview { selected: 1, .. })
+        ));
         // Press Enter — should activate session 1.
         app.modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal.is_none());
@@ -1788,7 +1855,11 @@ mod tests {
 
     #[test]
     fn terminal_opens_right_after_the_active_tab_and_is_activated() {
-        let live = [info(Some(1), None), info(Some(2), None), info(Some(3), None)];
+        let live = [
+            info(Some(1), None),
+            info(Some(2), None),
+            info(Some(3), None),
+        ];
         let mut app = app_with(&live);
         app.on_terminal(alt('c'));
         let effects = app.take_effects();
@@ -1799,13 +1870,20 @@ mod tests {
                 _ => None,
             })
             .expect("a SpawnShell request");
-        assert_eq!((spawn.cwd.as_str(), spawn.rows, spawn.cols), ("/srv/app", 27, 100));
+        assert_eq!(
+            (spawn.cwd.as_str(), spawn.rows, spawn.cols),
+            ("/srv/app", 27, 100)
+        );
         assert_eq!(app.sessions.len(), 4);
         assert_eq!(app.sessions[1].id, spawn.id, "inserted after tab 1");
         assert_eq!(app.sessions[1].kind, SessionKind::Shell);
         assert_eq!(app.active, Some(1));
         assert!(requests(&effects).contains(&&Msg::Detach { id: live[0].id }));
-        assert!(requests(&effects).contains(&&Msg::Attach { id: spawn.id, rows: 27, cols: 100 }));
+        assert!(requests(&effects).contains(&&Msg::Attach {
+            id: spawn.id,
+            rows: 27,
+            cols: 100
+        }));
 
         // From a terminal, the next one goes right after *it*, not at the end.
         app.on_terminal(alt('c'));
@@ -1833,7 +1911,9 @@ mod tests {
         app.sessions[0].proxy = Some("work".into());
         app.on_terminal(alt('c'));
         let effects = app.take_effects();
-        assert!(!effects.iter().any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
         assert_eq!(app.sessions[1].proxy, None);
     }
 
@@ -1842,7 +1922,11 @@ mod tests {
         let mut app = app_with(&[shell_info(Some(1)), info(Some(2), None)]);
         assert_eq!(app.sessions[0].label(), "term");
         app.sessions[0].title = Some("user@host: ~/src".into());
-        assert_eq!(app.sessions[0].label(), "term", "prompt titles do not rename it");
+        assert_eq!(
+            app.sessions[0].label(),
+            "term",
+            "prompt titles do not rename it"
+        );
         assert_eq!(crate::tui::ui::tab_label(&app.sessions[0]), "term@local");
         assert_eq!(crate::tui::ui::tab_label(&app.sessions[1]), "app");
         app.sessions[0].name = Some("build".into());
@@ -1876,7 +1960,9 @@ mod tests {
             matches!(&effects[0], Effect::Request { msg: Msg::SpawnShell(s), .. } if s.id == live[0].id),
             "{effects:?}"
         );
-        assert!(matches!(&effects[1], Effect::Request { msg: Msg::Spawn(s), .. } if s.args == ["--resume", "c2"]));
+        assert!(
+            matches!(&effects[1], Effect::Request { msg: Msg::Spawn(s), .. } if s.args == ["--resume", "c2"])
+        );
         assert_eq!(app.sessions[0].kind, SessionKind::Shell);
         assert_eq!(app.to_state().sessions[0].kind, SessionKind::Shell);
     }
@@ -1898,7 +1984,10 @@ mod tests {
         // Any other failure keeps the (dead) tab.
         app.on_terminal(alt('c'));
         let id = app.sessions[1].id;
-        app.on_reply(ReplyTo::Spawned(id), Err(std::io::Error::other("no such directory")));
+        app.on_reply(
+            ReplyTo::Spawned(id),
+            Err(std::io::Error::other("no such directory")),
+        );
         assert_eq!(app.sessions[1].state, SessionState::Exited);
     }
 
@@ -1945,14 +2034,20 @@ mod tests {
                 "Esc cancel"
             ]
         );
-        assert!(respawn_of(&app.take_effects()).is_none(), "nothing before the answer");
+        assert!(
+            respawn_of(&app.take_effects()).is_none(),
+            "nothing before the answer"
+        );
 
         // `r` keeps the conversation, answered on the same tab.
         app.on_terminal(press(KeyCode::Char('r')));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
         let (spec, to) = respawn_of(&effects).expect("a Respawn request");
-        assert_eq!((spec.id, spec.fresh, (spec.rows, spec.cols)), (id, false, (27, 100)));
+        assert_eq!(
+            (spec.id, spec.fresh, (spec.rows, spec.cols)),
+            (id, false, (27, 100))
+        );
         assert_eq!(*to, ReplyTo::Respawned(id));
         assert_eq!(app.sessions.len(), 1);
 
@@ -1991,7 +2086,10 @@ mod tests {
         let id = app.sessions[0].id;
         app.reset_session(id, false);
         let effects = app.take_effects();
-        assert!(respawn_of(&effects).is_none(), "not sent before the env exists");
+        assert!(
+            respawn_of(&effects).is_none(),
+            "not sent before the env exists"
+        );
         assert!(effects.iter().any(|e| matches!(
             e,
             Effect::SpawnWithProxy { msg: Msg::Respawn(spec), proxy_name, to, .. }
@@ -2037,14 +2135,19 @@ mod tests {
         app.reset_session(id, false);
         assert!(!app.sessions[0].first_party);
         let effects = app.take_effects();
-        assert!(!effects.iter().any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
     }
 
     #[test]
     fn a_successful_respawn_reattaches_the_active_tab() {
         let mut app = app_with(&[info(Some(1), None)]);
         let id = app.sessions[0].id;
-        app.on_reply(ReplyTo::Respawned(id), Ok(Msg::Spawned { id, pid: Some(9) }));
+        app.on_reply(
+            ReplyTo::Respawned(id),
+            Ok(Msg::Spawned { id, pid: Some(9) }),
+        );
         let effects = app.take_effects();
         assert!(requests(&effects)
             .iter()
@@ -2076,7 +2179,11 @@ mod tests {
 
     #[test]
     fn terminals_are_never_picked_for_attention() {
-        let mut live = [info(Some(1), None), shell_info(Some(2)), info(Some(3), None)];
+        let mut live = [
+            info(Some(1), None),
+            shell_info(Some(2)),
+            info(Some(3), None),
+        ];
         live[2].state = SessionState::NeedsInput;
         let mut app = app_with(&live);
         app.on_terminal(alt('a'));
@@ -2130,7 +2237,10 @@ mod tests {
         assert_eq!(cred_fetches(&effects), vec![("p", live[1].id, "c2")]);
         // Back at the first one soon after: no second request inside the gap.
         app.on_terminal(key(KeyCode::Left, KeyModifiers::ALT));
-        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        assert_eq!(
+            cred_fetches(&app.take_effects()),
+            vec![("p", live[0].id, "c1")]
+        );
         app.on_terminal(key(KeyCode::Right, KeyModifiers::ALT));
         assert!(
             cred_fetches(&app.take_effects()).is_empty(),
@@ -2183,7 +2293,10 @@ mod tests {
     fn credential_is_polled_every_30_seconds_while_active() {
         let (mut app, live) = proxied_app();
         app.refresh_session_cred(0);
-        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        assert_eq!(
+            cred_fetches(&app.take_effects()),
+            vec![("p", live[0].id, "c1")]
+        );
         app.on_tick();
         assert!(cred_fetches(&app.take_effects()).is_empty(), "too soon");
         app.session_creds.get_mut(&live[0].id).unwrap().asked_at -= 29;
@@ -2191,7 +2304,10 @@ mod tests {
         assert!(cred_fetches(&app.take_effects()).is_empty(), "29 s");
         app.session_creds.get_mut(&live[0].id).unwrap().asked_at -= 2;
         app.on_tick();
-        assert_eq!(cred_fetches(&app.take_effects()), vec![("p", live[0].id, "c1")]);
+        assert_eq!(
+            cred_fetches(&app.take_effects()),
+            vec![("p", live[0].id, "c1")]
+        );
         // Only the active session is polled.
         assert!(!app.session_creds.contains_key(&live[1].id));
     }
@@ -2212,7 +2328,10 @@ mod tests {
     }
 
     fn notice_text(app: &App) -> String {
-        app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default()
+        app.notice
+            .as_ref()
+            .map(|n| n.text.clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -2223,7 +2342,9 @@ mod tests {
         press_char(&mut app, 'n');
         match &app.modal {
             Some(Modal::Confirm(p)) => {
-                assert!(p.text.starts_with("Move this session to another subscription?"));
+                assert!(p
+                    .text
+                    .starts_with("Move this session to another subscription?"));
                 let hints: Vec<_> = p.choices.iter().map(Choice::hint).collect();
                 assert_eq!(hints, ["[y] switch", "[n] cancel"]);
             }
@@ -2309,7 +2430,9 @@ mod tests {
         );
         app.on_switch_result(
             id,
-            Err(SwitchError::NoAlternative("no other subscription available".into())),
+            Err(SwitchError::NoAlternative(
+                "no other subscription available".into(),
+            )),
         );
         assert_eq!(notice_text(&app), "no other subscription available");
         app.on_switch_result(id, Err(SwitchError::TooOld));
@@ -2382,7 +2505,9 @@ mod tests {
         assert!(app.session_credential(&app.sessions[0]).is_none());
 
         app.on_session_credential(id, "c1", Ok(Some(work_max())));
-        let name = app.session_credential(&app.sessions[0]).and_then(|c| c.name());
+        let name = app
+            .session_credential(&app.sessions[0])
+            .and_then(|c| c.name());
         assert_eq!(name, Some("work-max"));
 
         // An error (429, network) keeps what is shown; a 404 clears it.
@@ -2424,7 +2549,14 @@ mod tests {
             cwd: "/w".into(),
             sessions: vec![],
         };
-        app.on_reply(ReplyTo::ClaudeSessions { host: "local".into(), cwd: "/w".into(), gen }, Ok(reply));
+        app.on_reply(
+            ReplyTo::ClaudeSessions {
+                host: "local".into(),
+                cwd: "/w".into(),
+                gen,
+            },
+            Ok(reply),
+        );
         // No modal opened (wizard was closed).
         assert!(app.modal.is_none());
     }
@@ -2445,7 +2577,10 @@ mod tests {
                 }],
             })
         };
-        let to = |host: &str| ReplyTo::Projects { host: host.into(), gen };
+        let to = |host: &str| ReplyTo::Projects {
+            host: host.into(),
+            gen,
+        };
         app.on_reply(to("devbox"), reply("/remote"));
         assert!(app.projects.is_empty());
         // Even for a closed wizard: the next one starts with them.

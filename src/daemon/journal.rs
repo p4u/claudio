@@ -354,16 +354,25 @@ mod tests {
     #[test]
     fn entries_without_kind_are_claude_and_kind_is_kept_on_respawn() {
         let old = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w","created_at":1}"#;
-        assert_eq!(serde_json::from_str::<Entry>(old).unwrap().kind, SessionKind::Claude);
+        assert_eq!(
+            serde_json::from_str::<Entry>(old).unwrap().kind,
+            SessionKind::Claude
+        );
 
         let mut j = Journal {
             path: PathBuf::new(),
             sessions: Vec::new(),
         };
         let id = Uuid::new_v4();
-        assert_eq!(j.upsert_entry(&spec(id), SessionKind::Shell).kind, SessionKind::Shell);
+        assert_eq!(
+            j.upsert_entry(&spec(id), SessionKind::Shell).kind,
+            SessionKind::Shell
+        );
         // The journal's kind is authoritative: a later claude respawn keeps it.
-        assert_eq!(j.upsert_entry(&spec(id), SessionKind::Claude).kind, SessionKind::Shell);
+        assert_eq!(
+            j.upsert_entry(&spec(id), SessionKind::Claude).kind,
+            SessionKind::Shell
+        );
     }
 
     #[test]
@@ -472,9 +481,8 @@ mod tests {
         let path = dir.join("j.json");
         // A v0.5.0 journal: no `extensions`.
         let id = Uuid::new_v4();
-        let old = format!(
-            r#"{{"sessions":[{{"id":"{id}","cwd":"/w","args":[],"created_at":1}}]}}"#
-        );
+        let old =
+            format!(r#"{{"sessions":[{{"id":"{id}","cwd":"/w","args":[],"created_at":1}}]}}"#);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, old).unwrap();
         let mut j = Journal::load(&path);

@@ -103,7 +103,10 @@ pub(crate) fn check_spawn(req: &SpawnReq) -> Result<(), String> {
     check_name(req.name.as_deref())?;
     if let Some(resume) = &req.resume {
         let ok = (1..=64).contains(&resume.len())
-            && resume.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+            && resume
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
             && resume
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-');

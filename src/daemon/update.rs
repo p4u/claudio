@@ -281,8 +281,14 @@ mod tests {
 
         let started = std::time::Instant::now();
         let result = execute(&claude, false, None, Duration::from_millis(300)).await;
-        assert!(matches!(&result, Err(e) if e.contains("timed out")), "{result:?}");
-        assert!(started.elapsed() < Duration::from_secs(5), "the leader was reaped promptly");
+        assert!(
+            matches!(&result, Err(e) if e.contains("timed out")),
+            "{result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the leader was reaped promptly"
+        );
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(!marker.exists(), "a descendant outlived the timeout");
