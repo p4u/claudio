@@ -10,7 +10,7 @@ mod claude_update;
 mod confirm;
 pub(crate) mod connections;
 mod diagram;
-mod extensions;
+pub(crate) mod extensions;
 mod extensions_view;
 mod fmt;
 mod formulas;
@@ -22,15 +22,15 @@ mod latex;
 mod leader;
 mod notifications;
 mod plain;
-mod plugin_setup;
-mod plugins;
+pub(crate) mod plugin_setup;
+pub(crate) mod plugins;
 mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
-mod snippets;
+pub(crate) mod snippets;
 pub(crate) mod state;
-mod stats_view;
+pub(crate) mod stats_view;
 mod typeset;
 
 /// `recent` without the local directories that no longer exist, so the

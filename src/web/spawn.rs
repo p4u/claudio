@@ -1,14 +1,22 @@
 //! Starting sessions from the browser: `session.spawn`, `session.shell`,
-//! `session.respawn`. Minimal: direct sessions only (Task 5 adds proxy
-//! profiles, plugins and extensions). Nothing env-bearing leaves this file
-//! except over the daemon socket.
+//! `session.respawn`, composed as the TUI does (src/tui/sessions.rs
+//! `send_spawn`/`send_with_proxy`): the proxy profile's env, the plugins'
+//! flags, env and instructions, the extensions' lenses. Nothing
+//! env-bearing leaves this file except in `Msg::Spawn`/`Msg::Respawn` over
+//! the daemon socket: no DTO, log line, notice or error carries it.
+
+use std::sync::Arc;
 
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::ext::Extensions;
 use super::hub::HubHandle;
+use super::plugins::{notice_event, Plugins};
+use super::proxy::ProxyCache;
 use super::state::SessionMeta;
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
+use crate::tui::plugins::{compose, with_plugins, PluginPart};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -35,7 +43,6 @@ pub(crate) struct SpawnReq {
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // plugins come with Task 5
     pub skip_plugins: Vec<String>,
 }
 
@@ -109,23 +116,39 @@ pub(crate) fn check_spawn(req: &SpawnReq) -> Result<(), String> {
     Ok(())
 }
 
-const NOT_WIRED: &str = "proxy profiles are not wired yet";
 const FIRST_PARTY: &str = "first-party needs a proxy profile";
 
-/// The proxy profile `arg` names, given config.toml's and the env's
-/// (read in `spawn_blocking`): `None` is direct.
-async fn resolve(arg: &ProxyArg) -> Result<Option<String>, String> {
+/// What a spawn needs besides its request: the hub, the proxy config
+/// cache, the plugins and the extensions.
+pub(crate) struct SpawnCtx {
+    pub hub: HubHandle,
+    pub proxy: ProxyCache,
+    pub plugins: Plugins,
+    pub ext: Arc<Extensions>,
+}
+
+/// default → `default` (the `[proxy] default`, or "env" with CLAUDIO_PROXY_URL); direct → none; profile → its name.
+pub(crate) fn pick_profile(arg: &ProxyArg, default: Option<&str>) -> Option<String> {
     match arg {
-        ProxyArg::Direct => Ok(None),
-        ProxyArg::Profile { name } => Ok(Some(name.clone())),
-        ProxyArg::Default => {
-            let (_, default) =
-                tokio::task::spawn_blocking(crate::proxy::resolve::load_proxy_profiles)
-                    .await
-                    .map_err(|_| "cannot read config.toml".to_owned())?;
-            Ok(default)
-        }
+        ProxyArg::Default => default.map(str::to_owned),
+        ProxyArg::Direct => None,
+        ProxyArg::Profile { name } => Some(name.clone()),
     }
+}
+
+/// The proxy profile `arg` names, with the default read from config.toml
+/// and the env (in `spawn_blocking`): `None` is direct.
+async fn resolve(arg: &ProxyArg) -> Result<Option<String>, String> {
+    let default = match arg {
+        ProxyArg::Default => {
+            tokio::task::spawn_blocking(crate::proxy::resolve::load_proxy_profiles)
+                .await
+                .map_err(|_| "cannot read config.toml".to_owned())?
+                .1
+        }
+        _ => None,
+    };
+    Ok(pick_profile(arg, default.as_deref()))
 }
 
 fn reply_id(reply: std::io::Result<Msg>) -> Result<SessionId, String> {
@@ -136,23 +159,65 @@ fn reply_id(reply: std::io::Result<Msg>) -> Result<SessionId, String> {
     }
 }
 
-pub(crate) async fn spawn_claude(hub: &HubHandle, req: SpawnReq) -> Result<SessionId, String> {
-    check_spawn(&req)?;
-    let (client, _) = hub.host_client(&req.host).await?;
-    if resolve(&req.proxy).await?.is_some() {
-        return Err(NOT_WIRED.to_owned());
+/// `profile`'s env for a claude session (the proxy URL and token, its
+/// config's models), built in `spawn_blocking` (it reads config.toml). It
+/// goes into the daemon request only.
+async fn proxy_env(
+    ctx: &SpawnCtx,
+    profile: &str,
+    first_party: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let p = ProxyCache::profile(profile).await?;
+    let config = ctx.proxy.config(profile, &p).await;
+    drop(p);
+    let name = profile.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::proxy::resolve::proxy_env_for(Some(&name), config.as_ref(), first_party)
+    })
+    .await
+    .map_err(|_| "cannot read config.toml".to_owned())?
+}
+
+/// `msg` (a `Spawn` or `Respawn` without env) with the plugins' share and
+/// `profile`'s env, exactly as the TUI's `send_with_proxy`: compose's
+/// notices go to the tabs (they name plugins, never values).
+async fn with_proxy(
+    ctx: &SpawnCtx,
+    msg: Msg,
+    profile: Option<&str>,
+    first_party: bool,
+    parts: Vec<PluginPart>,
+) -> Result<Msg, String> {
+    let env = match profile {
+        Some(name) => proxy_env(ctx, name, first_party).await?,
+        None => Vec::new(),
+    };
+    let composed = compose(&parts);
+    for text in &composed.notices {
+        ctx.hub.broadcast(notice_event(text, "warn"));
     }
-    if req.first_party {
+    Ok(with_plugins(msg, composed).merge_env(env))
+}
+
+pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<SessionId, String> {
+    check_spawn(&req)?;
+    let hub = &ctx.hub;
+    let (client, _) = hub.host_client(&req.host).await?;
+    let profile = resolve(&req.proxy).await?;
+    if req.first_party && profile.is_none() {
         return Err(FIRST_PARTY.to_owned());
     }
-    let id = Uuid::new_v4();
+    let parts = match &profile {
+        Some(p) => ctx.plugins.parts(&req.host, p, &req.skip_plugins).await,
+        None => Vec::new(),
+    };
     let args = req
         .resume
         .as_ref()
         .map(|r| vec!["--resume".to_owned(), r.clone()])
         .unwrap_or_default();
     let spec = SpawnSpec {
-        id,
+        id: Uuid::new_v4(),
         cwd: req.cwd.clone(),
         name: check_name(req.name.as_deref())?,
         args,
@@ -160,14 +225,22 @@ pub(crate) async fn spawn_claude(hub: &HubHandle, req: SpawnReq) -> Result<Sessi
         rows: req.rows,
         cols: req.cols,
         ephemeral: false,
-        extensions: None,
+        extensions: Some(ctx.ext.session_extensions()),
     };
-    let sid = reply_id(client.request(Msg::Spawn(spec)).await)?;
+    let msg = with_proxy(
+        ctx,
+        Msg::Spawn(spec),
+        profile.as_deref(),
+        req.first_party,
+        parts,
+    )
+    .await?;
+    let sid = reply_id(client.request(msg).await)?;
     tracing::info!(op = "session.spawn", host = %req.host, %sid, "web op");
     let meta = SessionMeta {
         host: req.host.clone(),
-        proxy: None,
-        first_party: false,
+        proxy: profile,
+        first_party: req.first_party,
     };
     let prompt = req
         .prompt
@@ -178,7 +251,7 @@ pub(crate) async fn spawn_claude(hub: &HubHandle, req: SpawnReq) -> Result<Sessi
 }
 
 pub(crate) async fn spawn_shell(
-    hub: &HubHandle,
+    ctx: &SpawnCtx,
     host: String,
     cwd: String,
     name: Option<String>,
@@ -188,6 +261,7 @@ pub(crate) async fn spawn_shell(
     check_cwd(&cwd)?;
     check_size(rows, cols)?;
     let name = check_name(name.as_deref())?;
+    let hub = &ctx.hub;
     let (client, _) = hub.host_client(&host).await?;
     let spec = ShellSpec {
         id: Uuid::new_v4(),
@@ -207,30 +281,10 @@ pub(crate) async fn spawn_shell(
     Ok(sid)
 }
 
-pub(crate) async fn respawn(hub: &HubHandle, req: RespawnReq) -> Result<SessionId, String> {
+pub(crate) async fn respawn(ctx: &SpawnCtx, req: RespawnReq) -> Result<SessionId, String> {
     check_size(req.rows, req.cols)?;
+    let hub = &ctx.hub;
     let session = hub.session(req.sid).await?;
-    let first_party = if session.info.kind == SessionKind::Claude {
-        let proxy = match &req.proxy {
-            Some(arg) => resolve(arg).await?,
-            None if session.proxy_known => session.proxy.clone(),
-            None => return Err("proxy unknown".to_owned()),
-        };
-        if proxy.is_some() {
-            return Err(NOT_WIRED.to_owned());
-        }
-        let first_party = if req.proxy.is_some() {
-            req.first_party
-        } else {
-            session.first_party
-        };
-        if first_party {
-            return Err(FIRST_PARTY.to_owned());
-        }
-        first_party
-    } else {
-        false
-    };
     let spec = RespawnSpec {
         id: req.sid,
         fresh: req.fresh,
@@ -239,11 +293,49 @@ pub(crate) async fn respawn(hub: &HubHandle, req: RespawnReq) -> Result<SessionI
         cols: req.cols,
         extensions: None,
     };
-    let sid = reply_id(session.client.request(Msg::Respawn(spec)).await)?;
+    let (msg, profile, first_party) = if session.info.kind == SessionKind::Claude {
+        let (profile, first_party) = match &req.proxy {
+            Some(arg) => {
+                let profile = resolve(arg).await?;
+                if req.first_party && profile.is_none() {
+                    return Err(FIRST_PARTY.to_owned());
+                }
+                (profile, req.first_party)
+            }
+            None if session.proxy_known => {
+                let profile = session.proxy.clone();
+                let first_party = session.first_party && profile.is_some();
+                (profile, first_party)
+            }
+            None => return Err("proxy unknown".to_owned()),
+        };
+        // The plugins' env and instructions now (the journaled args keep
+        // their flags); a respawn waits for no manifest, as the TUI's reset.
+        let parts = match &profile {
+            Some(p) => ctx.plugins.parts_now(&session.host, p).await,
+            None => Vec::new(),
+        };
+        let spec = RespawnSpec {
+            extensions: Some(ctx.ext.session_extensions()),
+            ..spec
+        };
+        let msg = with_proxy(
+            ctx,
+            Msg::Respawn(spec),
+            profile.as_deref(),
+            first_party,
+            parts,
+        )
+        .await?;
+        (msg, profile, first_party)
+    } else {
+        (Msg::Respawn(spec), None, false)
+    };
+    let sid = reply_id(session.client.request(msg).await)?;
     tracing::info!(op = "session.respawn", host = %session.host, %sid, "web op");
     let meta = SessionMeta {
         host: session.host.clone(),
-        proxy: None,
+        proxy: profile,
         first_party,
     };
     hub.spawned(session.host, sid, meta, None).await;
@@ -288,6 +380,18 @@ mod tests {
         r.resume = Some("0b9c-AF12".into());
         r.prompt = Some("p".repeat(64 * 1024));
         assert!(check_spawn(&r).is_ok());
+    }
+
+    #[test]
+    fn pick_profile_follows_the_wizard() {
+        let lab = ProxyArg::Profile { name: "lab".into() };
+        assert_eq!(
+            pick_profile(&ProxyArg::Default, Some("work")),
+            Some("work".into())
+        );
+        assert_eq!(pick_profile(&ProxyArg::Default, None), None);
+        assert_eq!(pick_profile(&ProxyArg::Direct, Some("work")), None);
+        assert_eq!(pick_profile(&lab, Some("work")), Some("lab".into()));
     }
 
     #[test]

@@ -527,8 +527,7 @@ pub(crate) fn on_attached(view: &mut SessionView, rows: u16, cols: u16) {
     view.lens_seq = 0;
 }
 
-/// What other parts of the server (Task 5: plugins, extensions) follow.
-#[allow(dead_code)] // read by Task 5
+/// What other parts of the server (the plugins) follow.
 #[derive(Debug, Clone)]
 pub(crate) enum HubEvent {
     HostUp {
@@ -570,7 +569,6 @@ type Reply<T> = oneshot::Sender<T>;
 /// Run after a web-state write, with its outcome.
 type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
 
-#[allow(dead_code)] // `Broadcast` and `SetProfiles` are sent by Task 5's ops
 enum Cmd {
     OpenTab {
         tx: TabTx,
@@ -668,6 +666,10 @@ enum Cmd {
         default: Option<String>,
         reply: Reply<()>,
     },
+    /// config.toml's `[claude]` was re-read.
+    SetClaude {
+        claude: crate::config::ClaudeSection,
+    },
     Shutdown {
         reply: Reply<()>,
     },
@@ -709,7 +711,6 @@ enum Cmd {
 #[derive(Clone)]
 pub(crate) struct HubHandle {
     tx: mpsc::Sender<Cmd>,
-    #[allow(dead_code)] // subscribed to by Task 5
     events: broadcast::Sender<HubEvent>,
 }
 
@@ -923,7 +924,7 @@ impl HubHandle {
         self.ask(|reply| Cmd::Layout { tab, layout, reply }).await?
     }
 
-    #[allow(dead_code)] // used by Task 5
+    /// `ev` (a whole event) to every tab.
     pub(crate) fn broadcast(&self, ev: Value) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -931,7 +932,7 @@ impl HubHandle {
         });
     }
 
-    #[allow(dead_code)] // used by Task 5
+    /// Host connections, losses and claude installs, for the plugins.
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<HubEvent> {
         self.events.subscribe()
     }
@@ -949,7 +950,7 @@ impl HubHandle {
         let _ = self.ask(|reply| Cmd::ClaudeSkip { host, reply }).await;
     }
 
-    #[allow(dead_code)] // used by Task 5
+    /// config.toml's proxy profiles changed: a `profiles` event to every tab.
     pub(crate) async fn set_profiles(&self, names: Vec<String>, default: Option<String>) {
         let _ = self
             .ask(|reply| Cmd::SetProfiles {
@@ -958,6 +959,12 @@ impl HubHandle {
                 reply,
             })
             .await;
+    }
+
+    /// config.toml's `[claude]` changed: the install and update policy of
+    /// the hosts not offered yet.
+    pub(crate) async fn set_claude_policy(&self, claude: crate::config::ClaudeSection) {
+        let _ = self.tx.send(Cmd::SetClaude { claude }).await;
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -1191,6 +1198,7 @@ impl Hub {
                 self.to_tabs(&v);
                 let _ = reply.send(());
             }
+            Cmd::SetClaude { claude } => self.claude = claude,
             Cmd::Shutdown { reply } => self.shutdown(reply),
             Cmd::Connected {
                 host,

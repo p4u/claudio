@@ -605,7 +605,7 @@ async fn web_bad_frames_close_the_socket() {
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
     tab.ws
-        .send(Message::text("x".repeat(64 * 1024 + 1)))
+        .send(Message::text("x".repeat(128 * 1024 + 1)))
         .await
         .unwrap();
     assert_eq!(tab.close_code().await, Some(1009));
@@ -887,12 +887,21 @@ async fn web_paste_reaches_the_pty_bracketed() {
     .await
     .expect("paste");
     input_log_until(&dir, "\u{1b}[200~hello web\u{1b}[201~");
-    // 64 KiB + 1 of text cannot fit a client text frame (64 KiB): the
-    // socket's frame limit refuses it before the paste cap
-    // (`input::paste_has_a_size_cap` covers "too large").
-    let big = json!({"t": "req", "id": 99, "op": "session.paste", "sid": sid,
-        "text": "x".repeat(64 * 1024 + 1), "submit": false});
-    tab.ws.send(Message::text(big.to_string())).await.unwrap();
+    // 64 KiB + 1 of text fits a client text frame (128 KiB, Ruling R19):
+    // the paste cap answers.
+    let big = "x".repeat(64 * 1024 + 1);
+    assert_eq!(
+        tab.req(
+            "session.paste",
+            json!({"sid": sid, "text": big, "submit": false})
+        )
+        .await,
+        Err("too large".to_owned())
+    );
+    // A frame past 128 KiB still closes the socket.
+    let huge = json!({"t": "req", "id": 99, "op": "session.paste", "sid": sid,
+        "text": "x".repeat(128 * 1024), "submit": false});
+    tab.ws.send(Message::text(huge.to_string())).await.unwrap();
     assert_eq!(tab.close_code().await, Some(1009));
 }
 
@@ -1274,5 +1283,499 @@ async fn web_order_and_layout_persist_in_web_state() {
     assert!(
         !web.h().config_home.join("claudio/state.json").exists(),
         "the web never writes the TUI's state.json"
+    );
+}
+
+// ── Spawn composition: proxy env, plugins, extensions, snippets ──────────────
+
+const PLUGIN: &str = "vocdoni-test";
+const PROXY_TOKEN: &str = "tok-SECRET-proxy-7f3a9c";
+const PLUGIN_SECRET: &str = "plugin-SECRET-value-51d2e8";
+const MANIFEST: &str = r#"format = 1
+name = "vocdoni-test"
+version = "1.0.0"
+description = "Test setup"
+instructions = "Manifest instructions for the test."
+
+[[mcp]]
+name = "kb"
+type = "http"
+url = "https://kb.example.org/mcp"
+headers = { Authorization = "Bearer ${VOCDONI_TEST_TOKEN}" }
+secrets = ["VOCDONI_TEST_TOKEN"]
+
+[[agent]]
+name = "reviewer"
+description = "Reviews"
+prompt = "Review the change."
+"#;
+
+/// A fake claude-proxy on loopback: `/v1/claudio/config`, `/plugins`
+/// (PLUGIN, whose env holds PLUGIN_SECRET), the manifest, `/me/stats`
+/// (any period) and `/pool/health`; anything else 404. Its `host:port`.
+fn fake_proxy() -> String {
+    use sha2::Digest;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake proxy");
+    let addr = listener.local_addr().unwrap().to_string();
+    let sha = format!("{:x}", sha2::Sha256::digest(MANIFEST.as_bytes()));
+    let plugins = json!({"plugins": [{
+        "name": PLUGIN, "version": "1.0.0",
+        "bundle": {"url": format!("http://{addr}/{PLUGIN}.toml"), "sha256": sha},
+        "env": {"VOCDONI_TEST_TOKEN": PLUGIN_SECRET}}]})
+    .to_string();
+    let stats = json!({"version": 1, "user_name": "tester", "period": "24h",
+        "totals": {"requests": 12, "errors": 1, "input_tokens": 3400, "output_tokens": 5600, "cache_read": 0, "cache_creation": 0},
+        "by_model": [{"model": "claude-opus-5-5", "requests": 12, "errors": 1, "input_tokens": 3400, "output_tokens": 5600, "cache_read": 0, "cache_creation": 0}],
+        "limit": null})
+    .to_string();
+    let config = json!({"version": 1, "env": {}}).to_string();
+    let pool = json!({"version": 1, "providers": [{"name": "anthropic", "status": "ok"}]}).to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&head).into_owned();
+            let path = line
+                .split(' ')
+                .nth(1)
+                .unwrap_or("")
+                .split('?')
+                .next()
+                .unwrap_or("");
+            let (status, reply) = match path {
+                "/v1/claudio/config" => ("200 OK", config.as_str()),
+                "/v1/claudio/plugins" => ("200 OK", plugins.as_str()),
+                "/v1/claudio/me/stats" => ("200 OK", stats.as_str()),
+                "/v1/claudio/pool/health" => ("200 OK", pool.as_str()),
+                p if p == format!("/{PLUGIN}.toml") => ("200 OK", MANIFEST),
+                _ => ("404 Not Found", "{}"),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    addr
+}
+
+/// A fake claude that dumps its env to `env_file` (never to the terminal),
+/// lists `--agents`/`--mcp-config` in `--help`, then prints the banner and
+/// echoes lines.
+fn write_env_fake_claude(h: &ManagerHarness, env_file: &std::path::Path) {
+    let env_path = env_file.display();
+    let script = format!(
+        r#"#!/bin/sh
+[ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
+if [ "$1" = "--help" ]; then printf '  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n'; exit 0; fi
+env > "{env_path}.tmp" && mv "{env_path}.tmp" "{env_path}"
+printf '%s' "$2" > .fake-settings.json
+echo "FAKE_CLAUDE_BANNER pid=$$"
+while IFS= read -r line; do printf 'line:%s\n' "$line"; done
+"#
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Poll `op` until `pick` accepts its data.
+async fn until_req(tab: &mut Tab, op: &str, args: Value, pick: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + DAEMON_WAIT;
+    loop {
+        if let Ok(data) = tab.req(op, args.clone()).await {
+            if pick(&data) {
+                return data;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "{op} never satisfied");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// The env the fake claude of the next launch dumps to `env_file`
+/// (removed first by the caller).
+async fn launched_env(env_file: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if let Ok(env) = fs::read_to_string(env_file) {
+            return env;
+        }
+        assert!(std::time::Instant::now() < deadline, "claude never started");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// `claudio web` with the fake proxy as CLAUDIO_PROXY_URL (profile `env`).
+fn web_with_proxy(h: ManagerHarness, proxy: &str) -> Web {
+    let url = format!("{PROXY_TOKEN}@{proxy}");
+    Web::start_with(h, &[], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", url);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    })
+}
+
+/// AC3: the proxy token and a plugin's secret reach claude's env and never
+/// the browser (no WS frame, no HTTP body) nor the server's log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let config = h.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "\n[plugins.{PLUGIN}]\ndisabled = []\nreviewed = \"1.0.0\"\n"
+    ));
+    fs::write(&config, text).unwrap();
+    let proxy = fake_proxy();
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("{PROXY_TOKEN}@{proxy}"));
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    assert_eq!(tab.snapshot["profiles"]["default"], "env");
+    tab.connected("local").await;
+    until_req(&mut tab, "plugins.status", json!({}), |d| {
+        d["status"].as_array().is_some_and(|s| {
+            s.iter()
+                .any(|p| p["host"] == "local" && p["name"] == PLUGIN && p["state"] == "ready")
+        })
+    })
+    .await;
+    let reply = tab
+        .req(
+            "session.spawn",
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "default"}}),
+        )
+        .await
+        .expect("spawn");
+    let sid = reply["sid"].as_str().unwrap().to_owned();
+    let deadline = std::time::Instant::now() + WAIT;
+    let env = loop {
+        if let Ok(env) = fs::read_to_string(&env_file) {
+            break env;
+        }
+        assert!(std::time::Instant::now() < deadline, "claude never started");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(
+        env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")),
+        "the proxy token reaches claude"
+    );
+    assert!(
+        env.contains(&format!("VOCDONI_TEST_TOKEN={PLUGIN_SECRET}")),
+        "the plugin secret reaches claude"
+    );
+
+    // Everything a browser can see about this session and its plugins.
+    tab.req("session.attach", json!({"sid": sid, "rows": 24, "cols": 80}))
+        .await
+        .unwrap();
+    tab.output_until(&sid, "FAKE_CLAUDE_BANNER").await;
+    for (op, args) in [
+        ("hosts.list", json!({})),
+        ("plugins.list", json!({})),
+        ("plugins.items", json!({"name": PLUGIN})),
+        ("plugins.status", json!({})),
+        ("extensions.list", json!({})),
+        ("proxy.stats", json!({"profile": "env", "window": "24h"})),
+    ] {
+        tab.req(op, args)
+            .await
+            .unwrap_or_else(|e| panic!("{op}: {e}"));
+    }
+    let _ = tab.req("proxy.credential", json!({"sid": sid})).await; // no conversation yet: an error
+    let second = Tab::open(&web, &cookie).await; // a snapshot with the session in it
+    for frame in tab.seen.iter().chain(second.seen.iter()) {
+        let text = String::from_utf8_lossy(frame);
+        assert!(
+            !text.contains(PROXY_TOKEN),
+            "the proxy token in a frame: {text}"
+        );
+        assert!(
+            !text.contains(PLUGIN_SECRET),
+            "the plugin secret in a frame: {text}"
+        );
+    }
+    for path in ["/", "/index.html"] {
+        let body = web.get(path, &[("Accept-Encoding", "identity")]).body;
+        assert!(!body.contains(PROXY_TOKEN) && !body.contains(PLUGIN_SECRET));
+    }
+    let log = fs::read_to_string(web.h().root.join("web.log")).unwrap();
+    assert!(
+        !log.contains(PROXY_TOKEN) && !log.contains(PLUGIN_SECRET),
+        "a secret in the server log"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_respawn_without_a_known_proxy_asks() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    drop(tab);
+    let h = web.stop();
+    let state = h.config_home.join("claudio/web-state.json");
+    fs::remove_file(&state).unwrap();
+    assert!(!h.config_home.join("claudio/state.json").exists());
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let ask = json!({"sid": sid, "fresh": false, "rows": 24, "cols": 80});
+    let deadline = std::time::Instant::now() + WAIT;
+    let err = loop {
+        match tab.req("session.respawn", ask.clone()).await {
+            Err(e) if e == "no such session" => {
+                assert!(std::time::Instant::now() < deadline, "the session never came back");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            other => break other,
+        }
+    };
+    assert_eq!(err, Err("proxy unknown".to_owned()));
+    let mut direct = ask.clone();
+    direct["proxy"] = json!({"kind": "direct"});
+    let reply = tab.req("session.respawn", direct).await.expect("respawn");
+    assert_eq!(reply["sid"], sid.as_str());
+    tab.event("session", |v| v["session"]["id"] == sid.as_str())
+        .await;
+    let saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    let meta = &saved["sessions"][sid.as_str()];
+    assert_eq!(meta["host"], "local", "{saved}");
+    assert!(meta["proxy"].is_null(), "{saved}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_plugin_without_choices_is_left_out_until_saved() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dirs = h.dirs.clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let list = until_req(&mut tab, "plugins.list", json!({}), |d| {
+        d["plugins"][0]["manifest"] == "ready"
+    })
+    .await;
+    assert_eq!(list["plugins"][0]["name"], PLUGIN);
+    assert_eq!(list["plugins"][0]["choices_saved"], false);
+    let spawn = |dir: &std::path::PathBuf, skip: Option<&str>| {
+        let mut args = json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+            "proxy": {"kind": "default"}});
+        if let Some(skip) = skip {
+            args["skip_plugins"] = json!([skip]);
+        }
+        args
+    };
+    tab.req("session.spawn", spawn(&dirs[0], None))
+        .await
+        .expect("spawn");
+    let env = launched_env(&env_file).await;
+    assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
+    assert!(!env.contains(PLUGIN_SECRET), "no choices: left out");
+
+    tab.req(
+        "plugins.save",
+        json!({"name": PLUGIN, "disabled": ["agent:reviewer"]}),
+    )
+    .await
+    .expect("save");
+    let config = fs::read_to_string(web.h().config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains(&format!("[plugins.{PLUGIN}]")), "{config}");
+    assert!(
+        config.contains("disabled = [\"agent:reviewer\"]"),
+        "{config}"
+    );
+    until_req(&mut tab, "plugins.status", json!({}), |d| {
+        d["status"].as_array().is_some_and(|s| {
+            s.iter()
+                .any(|p| p["host"] == "local" && p["name"] == PLUGIN && p["state"] == "ready")
+        })
+    })
+    .await;
+    let items = tab
+        .req("plugins.items", json!({"name": PLUGIN}))
+        .await
+        .unwrap();
+    let reviewer = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "agent:reviewer")
+        .cloned()
+        .unwrap();
+    assert_eq!(reviewer["checked"], false);
+
+    fs::remove_file(&env_file).unwrap();
+    tab.req("session.spawn", spawn(&dirs[1], None))
+        .await
+        .expect("spawn with the plugin");
+    let env = launched_env(&env_file).await;
+    assert!(
+        env.contains(&format!("VOCDONI_TEST_TOKEN={PLUGIN_SECRET}")),
+        "saved: the plugin's secret is in"
+    );
+
+    fs::remove_file(&env_file).unwrap();
+    tab.req("session.spawn", spawn(&dirs[0], Some(PLUGIN)))
+        .await
+        .expect("spawn skipping the plugin");
+    let env = launched_env(&env_file).await;
+    assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
+    assert!(!env.contains(PLUGIN_SECRET), "skip_plugins leaves it out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_extension_toggle_edits_config_and_is_reread() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let diagram = |list: &Value| {
+        list["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "diagram")
+            .cloned()
+            .unwrap()
+    };
+    tab.req("extensions.toggle", json!({"name": "diagram", "on": false}))
+        .await
+        .expect("toggle");
+    let path = web.h().config_home.join("claudio/config.toml");
+    let config = fs::read_to_string(&path).unwrap();
+    let section = config.split("[extensions]").nth(1).expect("[extensions]");
+    assert!(section.contains("diagram = false"), "{config}");
+    tab.event("extensions_changed", |_| true).await;
+    let list = tab.req("extensions.list", json!({})).await.unwrap();
+    assert_eq!(diagram(&list)["enabled"], false);
+    assert_eq!(diagram(&list)["source"], "builtin");
+
+    fs::write(&path, config.replace("diagram = false", "diagram = true")).unwrap();
+    let edited = std::time::Instant::now();
+    tab.event("extensions_changed", |_| true).await;
+    assert!(
+        edited.elapsed() < std::time::Duration::from_secs(7),
+        "re-read within 7 s"
+    );
+    let list = tab.req("extensions.list", json!({})).await.unwrap();
+    assert_eq!(diagram(&list)["enabled"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_snippets_save_and_list() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let saved = tab
+        .req("snippets.save", json!({"text": "run the tests"}))
+        .await
+        .expect("save");
+    let name = saved["name"].as_str().unwrap().to_owned();
+    let list = tab.req("snippets.list", json!({})).await.unwrap();
+    assert!(
+        list["snippets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == name.as_str() && s["text"] == "run the tests"),
+        "{list}"
+    );
+    let dir = web.h().config_home.join("claudio/snippets");
+    assert!(dir.join(format!("{name}.md")).is_file());
+    assert_eq!(
+        tab.req("snippets.save", json!({"text": "x".repeat(64 * 1024 + 1)}))
+            .await,
+        Err("bad request: text: at most 64 KiB".to_owned())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_external_extension_action_runs_its_program() {
+    let h = ManagerHarness::new();
+    let dir = h.config_home.join("claudio/extensions/hello");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("extension.toml"),
+        r#"name = "hello"
+description = "says hi"
+command = ["./hello.sh"]
+[[action]]
+key = "h"
+title = "say hi"
+id = "greet"
+"#,
+    )
+    .unwrap();
+    let program = dir.join("hello.sh");
+    fs::write(
+        &program,
+        "#!/bin/sh\n\
+         while IFS= read -r line; do\n\
+         id=$(printf '%s' \"$line\" | sed 's/^{\"id\":\\([0-9]*\\).*/\\1/')\n\
+         printf '{\"id\":%s,\"result\":{\"kind\":\"notice\",\"text\":\"hi\"}}\\n' \"$id\"\n\
+         done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let list = tab.req("extensions.list", json!({})).await.unwrap();
+    let hello = list["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "hello")
+        .cloned()
+        .expect("hello is listed");
+    assert_eq!(hello["source"], "external");
+    assert_eq!(hello["actions"][0]["id"], "greet");
+    let reply = tab
+        .req("extensions.action", json!({"ext": "hello", "action": "greet"}))
+        .await
+        .expect("action");
+    assert_eq!(reply["result"], json!({"kind": "notice", "text": "hi"}));
+    assert_eq!(
+        tab.req("extensions.action", json!({"ext": "search", "action": "search"}))
+            .await,
+        Err("not an external extension".to_owned())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_proxy_stats_render_the_fixture() {
+    let proxy = fake_proxy();
+    let web = web_with_proxy(ManagerHarness::new(), &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let stats = tab
+        .req("proxy.stats", json!({"profile": "env", "window": "7d"}))
+        .await
+        .expect("stats");
+    assert_eq!(stats["user_name"], "tester");
+    assert_eq!(stats["window"], "7d");
+    assert_eq!(stats["totals"]["output_tokens"], 5600);
+    assert_eq!(stats["by_model"][0]["model"], "claude-opus-5-5");
+    assert_eq!(stats["pool"][0]["status"], "ok");
+    assert_eq!(
+        tab.req("proxy.stats", json!({"profile": "env", "window": "1h"}))
+            .await,
+        Err("bad request: window".to_owned())
     );
 }

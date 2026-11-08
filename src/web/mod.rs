@@ -5,8 +5,11 @@
 pub(crate) mod assets;
 pub(crate) mod auth;
 mod dto;
+mod ext;
 mod hub;
 mod input;
+mod plugins;
+mod proxy;
 mod spawn;
 mod state;
 mod ws;
@@ -50,7 +53,8 @@ pub(crate) struct AppState {
     pub search_slots: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     /// Open tabs, counted at the upgrade (at most `hub::MAX_TABS`).
     pub tabs: Arc<AtomicUsize>,
-    // Task 5 adds `ctx: Arc<spawn::SpawnCtx>`.
+    /// Spawns, proxy, plugins and extensions.
+    pub ctx: Arc<spawn::SpawnCtx>,
 }
 
 impl FromRef<AppState> for Arc<auth::Auth> {
@@ -211,25 +215,45 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
     .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
     // Files, before the hub starts: off the executor.
     let state_path = state::path();
-    let hub_cfg = {
+    let (hub_cfg, cached_plugins) = {
         let state_path = state_path.clone();
-        tokio::task::spawn_blocking(move || hub::HubConfig {
-            config: crate::config::load(),
-            tui_state: crate::tui::state::ClientState::load(&crate::paths::client_state()),
-            web: state::load(&state_path),
-            profiles: crate::proxy::resolve::load_proxy_profiles(),
-            state_path,
+        tokio::task::spawn_blocking(move || {
+            let cfg = hub::HubConfig {
+                config: crate::config::load(),
+                tui_state: crate::tui::state::ClientState::load(&crate::paths::client_state()),
+                web: state::load(&state_path),
+                profiles: crate::proxy::resolve::load_proxy_profiles(),
+                state_path,
+            };
+            (cfg, crate::proxy::plugins::load_all())
         })
         .await
         .map_err(|e| format!("cannot read the configuration: {e}"))?
     };
+    let config = hub_cfg.config.clone();
     let hub = hub::start(hub_cfg);
+    let ext = ext::Extensions::load(&config, &hub).await;
+    let plugins = plugins::Plugins::start(
+        hub.clone(),
+        ext.registry(),
+        cached_plugins,
+        config.extensions.clone(),
+        config.plugins.clone(),
+    );
+    ext.watch_config(plugins.clone(), hub.clone());
+    let ctx = Arc::new(spawn::SpawnCtx {
+        hub: hub.clone(),
+        proxy: proxy::ProxyCache::new(),
+        plugins,
+        ext: Arc::clone(&ext),
+    });
     let state = AppState {
         auth: Arc::new(auth),
         assets,
         hub: hub.clone(),
         search_slots: Arc::default(),
         tabs: Arc::default(),
+        ctx,
     };
 
     // The one line on stdout (the tests read it).
@@ -251,6 +275,7 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
     let stop = async move {
         shutdown().await;
         hub.shutdown().await;
+        ext.shutdown().await;
     };
     axum::serve(listener, router(state))
         .with_graceful_shutdown(stop)

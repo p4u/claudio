@@ -22,10 +22,11 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
+use super::{ext, proxy};
 use crate::proto::{Msg, SearchHit, SessionId};
 
-/// The largest client text frame.
-pub(crate) const MAX_TEXT: usize = 64 * 1024;
+/// The largest client text frame: a 64 KiB text and its JSON envelope.
+pub(crate) const MAX_TEXT: usize = 128 * 1024;
 /// The largest input payload of a client binary frame (17 header bytes more).
 pub(crate) const MAX_INPUT: usize = 64 * 1024;
 /// Binary frame kinds: server → client PTY output, client → server input.
@@ -391,6 +392,58 @@ struct LayoutArgs {
     layout: Layout,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatsArgs {
+    profile: String,
+    window: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnippetArgs {
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToggleArgs {
+    name: String,
+    on: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionArgs {
+    ext: String,
+    action: String,
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    sid: Option<SessionId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderArgs {
+    lens: String,
+    kind: String,
+    source: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NameArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginSaveArgs {
+    name: String,
+    disabled: Vec<String>,
+}
+
 /// The longest path `fs.list` / `claude.sessions` take, in bytes.
 const PATH_MAX: usize = 4096;
 /// The longest search query, in bytes.
@@ -466,17 +519,17 @@ pub(crate) async fn dispatch(
         }
         "session.spawn" => {
             let req: SpawnReq = parse(args)?;
-            let sid = spawn::spawn_claude(hub, req).await?;
+            let sid = spawn::spawn_claude(&state.ctx, req).await?;
             Ok(json!({ "sid": sid }))
         }
         "session.shell" => {
             let a: ShellArgs = parse(args)?;
-            let sid = spawn::spawn_shell(hub, a.host, a.cwd, a.name, a.rows, a.cols).await?;
+            let sid = spawn::spawn_shell(&state.ctx, a.host, a.cwd, a.name, a.rows, a.cols).await?;
             Ok(json!({ "sid": sid }))
         }
         "session.respawn" => {
             let req: RespawnReq = parse(args)?;
-            let sid = spawn::respawn(hub, req).await?;
+            let sid = spawn::respawn(&state.ctx, req).await?;
             Ok(json!({ "sid": sid }))
         }
         "session.kill" => {
@@ -695,8 +748,89 @@ pub(crate) async fn dispatch(
             let a: LayoutArgs = parse(args)?;
             hub.layout(tab, a.layout).await.map(|()| json!({}))
         }
+        "proxy.stats" => {
+            let a: StatsArgs = parse(args)?;
+            proxy::stats(&a.profile, &a.window).await
+        }
+        "proxy.credential" => {
+            let a: SidArgs = parse(args)?;
+            let (profile, conversation) = session_proxy(hub, a.sid).await?;
+            proxy::credential(&profile, &conversation).await
+        }
+        "proxy.switch" => {
+            let a: SidArgs = parse(args)?;
+            let (profile, conversation) = session_proxy(hub, a.sid).await?;
+            proxy::switch(&profile, &conversation).await
+        }
+        "snippets.list" => {
+            parse::<NoArgs>(args)?;
+            ext::snippets_list().await
+        }
+        "snippets.save" => {
+            let a: SnippetArgs = parse(args)?;
+            ext::snippets_save(a.text).await
+        }
+        "extensions.list" => {
+            parse::<NoArgs>(args)?;
+            Ok(state.ctx.ext.list())
+        }
+        "extensions.toggle" => {
+            let a: ToggleArgs = parse(args)?;
+            let ctx = &state.ctx;
+            ctx.ext
+                .toggle(&ctx.plugins, hub, &a.name, a.on)
+                .await
+                .map(|()| json!({}))
+        }
+        "extensions.action" => {
+            let a: ActionArgs = parse(args)?;
+            state
+                .ctx
+                .ext
+                .action(hub, &a.ext, &a.action, a.input, a.sid)
+                .await
+        }
+        "extensions.render" => {
+            let a: RenderArgs = parse(args)?;
+            state.ctx.ext.render(&a.lens, &a.kind, &a.source).await
+        }
+        "plugins.list" => {
+            parse::<NoArgs>(args)?;
+            Ok(state.ctx.plugins.list())
+        }
+        "plugins.items" => {
+            let a: NameArgs = parse(args)?;
+            state.ctx.plugins.items(&a.name)
+        }
+        "plugins.save" => {
+            let a: PluginSaveArgs = parse(args)?;
+            state
+                .ctx
+                .plugins
+                .save(&a.name, a.disabled)
+                .await
+                .map(|()| json!({}))
+        }
+        "plugins.status" => {
+            parse::<NoArgs>(args)?;
+            Ok(state.ctx.plugins.status())
+        }
         _ => Err("unknown op".to_owned()),
     }
+}
+
+/// The proxy profile and conversation of session `sid`, for
+/// `proxy.credential` / `proxy.switch`.
+async fn session_proxy(hub: &hub::HubHandle, sid: SessionId) -> Result<(String, String), String> {
+    let s = hub.session(sid).await?;
+    let profile = s
+        .proxy
+        .ok_or_else(|| "no proxy for this session".to_owned())?;
+    let conversation = s
+        .info
+        .claude_session_id
+        .ok_or_else(|| "no conversation yet".to_owned())?;
+    Ok((profile, conversation))
 }
 
 /// A full object id: 40 or 64 hex digits.
@@ -836,6 +970,18 @@ mod tests {
         }
         let big = format!(r#"{{"t":"req","id":1,"op":"{}"}}"#, "x".repeat(MAX_TEXT));
         assert_eq!(text_frame(&big), Frame::Close(1009, "too big"));
+        // A 64 KiB paste fits with its envelope (Ruling R19).
+        let paste = format!(
+            r#"{{"t":"req","id":2,"op":"session.paste","sid":"x","text":"{}","submit":false}}"#,
+            "x".repeat(64 * 1024 + 1)
+        );
+        assert_eq!(
+            text_frame(&paste),
+            Frame::Request {
+                id: 2,
+                op: "session.paste".into()
+            }
+        );
     }
 
     #[test]

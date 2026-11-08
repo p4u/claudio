@@ -27,7 +27,7 @@ use super::extensions::Source;
 const AGENTS: &str = "--agents";
 const MCP_CONFIG: &str = "--mcp-config";
 /// The reason the daemon gives a plugin whose install is under way.
-const INSTALLING: &str = "installing";
+pub(crate) const INSTALLING: &str = "installing";
 
 /// How often every profile's list is fetched again.
 pub const REFRESH_SECS: u64 = 15 * 60;
@@ -691,7 +691,7 @@ impl App {
 /// How long after its last ask a host that answered `a` is asked again, if
 /// it is: [`REASK_EVERY`] while a plugin installs, else a second after the
 /// soonest retry (no sooner than [`REASK_EVERY`]).
-fn reask_after(a: &Applied) -> Option<u64> {
+pub(crate) fn reask_after(a: &Applied) -> Option<u64> {
     a.skipped
         .iter()
         .filter_map(|(_, why)| match why.as_str() {
