@@ -65,6 +65,7 @@ pub fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
         context_tokens: None,
         kind: SessionKind::Claude,
         ephemeral: false,
+        attention: None,
     }
 }
 

@@ -766,6 +766,7 @@ impl Daemon {
                 if let Some(status) = session::status(&tx, STATUS_TIMEOUT).await {
                     info.state = status.state;
                     info.title = status.title;
+                    info.attention = status.attention;
                     info.pid = pid;
                 }
             }
@@ -1091,5 +1092,6 @@ fn dormant_info(entry: &Entry) -> SessionInfo {
         context_tokens: None,
         kind: entry.kind,
         ephemeral: entry.ephemeral,
+        attention: None,
     }
 }

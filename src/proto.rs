@@ -350,8 +350,9 @@ pub struct Welcome {
 /// The features a daemon of this build reports in [`Welcome::features`]:
 /// `lens` — it takes [`SpawnSpec::extensions`] and sends
 /// [`SessionEvent::Lens`]; `search` — it answers [`Msg::Search`];
-/// `last_prompt` — it answers [`Msg::LastPrompt`].
-pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt"];
+/// `last_prompt` — it answers [`Msg::LastPrompt`]; `attention` — it sends
+/// [`SessionEvent::Attention`] and fills [`SessionInfo::attention`].
+pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt", "attention"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Colors {
@@ -729,6 +730,35 @@ pub struct SessionInfo {
     /// Started with [`SpawnSpec::ephemeral`]: not a tab for the manager.
     #[serde(default)]
     pub ephemeral: bool,
+    /// What the session waits for, while its state wants attention. Old
+    /// daemons omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Attention>,
+}
+
+/// What a session waits for, from the hook that asked
+/// ([`SessionEvent::Attention`], [`SessionInfo::attention`]). Every string is
+/// sanitized and on one line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attention {
+    /// Grows with every attention of the session's process, from 1.
+    pub seq: u64,
+    /// The Notification's `notification_type` (`permission_prompt`,
+    /// `worker_permission_prompt`, `elicitation_dialog`,
+    /// `elicitation_url_dialog`, `idle_prompt`, `agent_needs_input`), or
+    /// `session_start`; at most 64 bytes.
+    pub kind: String,
+    /// The Notification's `message`; at most 512 bytes.
+    #[serde(default)]
+    pub message: String,
+    /// The most recent `PreToolUse`'s tool, for the approval kinds. Best
+    /// effort: in a parallel burst it may not be the tool that asks.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// That tool call in one line (its command, file, URL or pattern, else
+    /// its input as compact JSON); at most 1024 bytes.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// What a session is doing, derived from Claude Code hooks.
@@ -851,6 +881,13 @@ pub enum SessionEvent {
         seq: u64,
         items: Vec<LensItem>,
     },
+    /// The session asks for the user: a permission or dialog answer, or its
+    /// next message. Sent for every such hook, after any `State` event of the
+    /// same hook, whether or not the state changed. Nested, not flattened:
+    /// the payload's `kind` would collide with this enum's tag. Old clients
+    /// map it to `Unknown`. A client drops its attention on any `State` that
+    /// leaves `needs_approval`/`needs_input`.
+    Attention { attention: Attention },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
@@ -1897,7 +1934,41 @@ mod tests {
         });
         let welcome: Welcome = serde_json::from_value(welcome).unwrap();
         assert!(welcome.features.is_empty());
-        assert_eq!(DAEMON_FEATURES, ["lens", "search", "last_prompt"]);
+        assert_eq!(DAEMON_FEATURES, ["lens", "search", "last_prompt", "attention"]);
+    }
+
+    #[test]
+    fn attention_is_nested_and_unknown_to_old_clients() {
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum OldEvent {
+            Removed,
+            #[serde(other)]
+            Unknown,
+        }
+        let attention = Attention {
+            seq: 3,
+            kind: "permission_prompt".into(),
+            message: "m".into(),
+            tool: Some("Bash".into()),
+            detail: Some("ls".into()),
+        };
+        let ev = SessionEvent::Attention { attention: attention.clone() };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            json.starts_with(r#"{"kind":"attention","attention":{"seq":3,"kind":"permission_prompt""#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<OldEvent>(&json).unwrap(), OldEvent::Unknown);
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), ev);
+        let old = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w",
+            "state":"needs_approval","created_at":1}"#;
+        let mut info: SessionInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(info.attention, None);
+        info.attention = Some(attention);
+        let back: SessionInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back, info);
+        assert!(DAEMON_FEATURES.contains(&"attention"));
     }
 
     #[test]

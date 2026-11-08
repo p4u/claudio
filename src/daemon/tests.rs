@@ -509,6 +509,46 @@ async fn an_ephemeral_session_is_listed_as_such_and_never_journaled() {
     assert_eq!(journaled, [kept.to_string()]);
 }
 
+/// AC5: `ListSessions` carries the attention while the session waits, and
+/// none once a tool runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_info_carries_the_attention_while_waiting() {
+    let d = TestDaemon::start().await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    c.spawn(d.spec(id)).await;
+    let token = d.token().await;
+    let socket = &d.config.socket;
+    let pre = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "rm -rf build"}});
+    send_hook(socket, &token, "PreToolUse", pre).await;
+    let ask = serde_json::json!({
+        "notification_type": "permission_prompt",
+        "message": "Claude needs your permission to use Bash"
+    });
+    send_hook(socket, &token, "Notification", ask).await;
+    let attention = c
+        .event(id, |e| match e {
+            SessionEvent::Attention { attention } => Some(attention.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(attention.kind, "permission_prompt");
+    assert_eq!(attention.tool.as_deref(), Some("Bash"));
+    assert_eq!(attention.detail.as_deref(), Some("rm -rf build"));
+    let info = c.sessions().await.into_iter().find(|s| s.id == id).unwrap();
+    assert_eq!(info.state, SessionState::NeedsApproval);
+    assert_eq!(info.attention, Some(attention));
+
+    send_hook(socket, &token, "PreToolUse", serde_json::json!({"tool_name": "Bash"})).await;
+    c.event(id, |e| match e {
+        SessionEvent::State { state: SessionState::Working } => Some(()),
+        _ => None,
+    })
+    .await;
+    let info = c.sessions().await.into_iter().find(|s| s.id == id).unwrap();
+    assert_eq!(info.attention, None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hooks_update_state_and_journal() {
     let d = TestDaemon::start().await;

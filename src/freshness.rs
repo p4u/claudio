@@ -289,6 +289,7 @@ mod tests {
             context_tokens: None,
             kind,
             ephemeral,
+            attention: None,
         }
     }
 

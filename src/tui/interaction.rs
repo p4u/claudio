@@ -903,7 +903,7 @@ impl App {
                     self.take_lens_items(i, seq, items);
                 }
             }
-            SessionEvent::Unknown => {}
+            SessionEvent::Attention { .. } | SessionEvent::Unknown => {}
         }
     }
 

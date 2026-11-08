@@ -122,6 +122,7 @@ pub type Subscription = (ClientId, mpsc::Sender<Frame>);
 pub struct Status {
     pub state: SessionState,
     pub title: Option<String>,
+    pub attention: Option<crate::proto::Attention>,
 }
 
 /// The registry's handle on a live session.
@@ -917,6 +918,7 @@ impl Actor {
                 let _ = reply.send(Status {
                     state: self.tracker.state,
                     title: self.title.clone(),
+                    attention: self.tracker.attention.clone(),
                 });
             }
             // Handled by `run`.
