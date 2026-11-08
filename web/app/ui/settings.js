@@ -22,7 +22,7 @@ export function Settings() {
       </select></label>
     <label class="set-row"><span>Terminal font size<small>pixels</small></span>
       <input class="input" type="number" min="10" max="24" value=${s.fontSize} onChange=${(e) => updateSettings({ fontSize: e.target.value })} /></label>
-    <label class="set-row"><span>Render formulas in terminals<small>show each matched &lt;latex&gt; tag typeset, over the text</small></span>
+    <label class="set-row"><span>Render formulas in terminals<small>show each matched ${"<latex>"} tag typeset, over the text</small></span>
       <input class="toggle" type="checkbox" data-testid="render-formulas" checked=${s.renderFormulas} onChange=${(e) => updateSettings({ renderFormulas: e.target.checked })} /></label>
     <label class="set-row"><span>Sound<small>off by default</small></span>
       <input class="toggle" type="checkbox" checked=${s.sound} onChange=${(e) => updateSettings({ sound: e.target.checked })} /></label>
