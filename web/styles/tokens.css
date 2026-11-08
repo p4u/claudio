@@ -1,0 +1,99 @@
+/* Design tokens. Four themes on <html data-theme>: arcade-dark (default), arcade-light,
+   plain-dark, plain-light. State colours and glyphs follow the TUI (src/tui/ui/mod.rs). */
+:root {
+  --font-ui: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-pixel: "Departure Mono", "JetBrains Mono", ui-monospace, monospace;
+  --font-prose: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --term-font-size: 14px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
+  --topbar-h: 48px; --footer-h: 28px; --rail-w: 320px;
+  --t-fast: 120ms;
+}
+
+/* ---- dark base (arcade-dark and plain-dark share the palette) ---- */
+:root,
+:root[data-theme="arcade-dark"],
+:root[data-theme="plain-dark"] {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --panel: #121821;
+  --panel-2: #18212d;
+  --border: #1f2a37;
+  --border-strong: #33465c;
+  --text: #e6edf3;
+  --muted: #8b98a5;
+  --accent: #8b7bff;
+  --accent-ink: #0b0f14;
+  --st-working: #22d3ee;
+  --st-approval: #ff4d4f;
+  --st-input: #f5b32b;
+  --st-idle: #3ddc84;
+  --st-error: #ff2e63;
+  --st-exited: #8b98a5;
+  --st-unknown: #5c6b7a;
+  --st-shell: #3ddc84;
+  --shadow-hard: #000000;
+  --scrim: rgba(5, 8, 12, 0.72);
+  --scan: rgba(255, 255, 255, 0.03);
+  --hover: rgba(139, 152, 165, 0.10);
+  --term-bg: #0b0f14;
+}
+
+:root[data-theme="arcade-light"],
+:root[data-theme="plain-light"] {
+  color-scheme: light;
+  --bg: #f1ede3;
+  --panel: #fbf9f3;
+  --panel-2: #ece7da;
+  --border: #cfc7b3;
+  --border-strong: #8d8470;
+  --text: #1a2028;
+  --muted: #566170;
+  --accent: #5b43e0;
+  --accent-ink: #ffffff;
+  --st-working: #0a7388;
+  --st-approval: #c4222a;
+  --st-input: #86560a;
+  --st-idle: #12793b;
+  --st-error: #b8113c;
+  --st-exited: #566170;
+  --st-unknown: #566170;
+  --st-shell: #12793b;
+  --shadow-hard: rgba(26, 32, 40, 0.88);
+  --scrim: rgba(241, 237, 227, 0.78);
+  --scan: rgba(0, 0, 0, 0.035);
+  --hover: rgba(26, 32, 40, 0.07);
+  --term-bg: #fbf9f3;
+}
+
+:root[data-theme="plain-light"] {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #eef0f3;
+  --border: #d5d9e0;
+  --border-strong: #9aa3b0;
+}
+
+:root[data-theme="plain-dark"] {
+  --bg: #0f1115;
+  --panel: #171a20;
+  --panel-2: #1e222a;
+  --border: #272c35;
+  --border-strong: #3c4452;
+}
+
+/* ---- arcade vs plain chrome ---- */
+:root[data-theme^="arcade"] {
+  --bw: 2px;
+  --radius: 2px;
+  --font-head: var(--font-pixel);
+  --popover-shadow: 4px 4px 0 0 var(--shadow-hard);
+  --btn-edge: 3px;
+}
+:root[data-theme^="plain"] {
+  --bw: 1px;
+  --radius: 6px;
+  --font-head: var(--font-ui);
+  --popover-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --btn-edge: 0px;
+}
