@@ -44,8 +44,8 @@ export function Composer({ s }) {
 
   return html`<div class="composer-wrap">
     <textarea ref=${ref} class="composer" data-testid="composer" rows="1" value=${text} disabled=${!live}
-      placeholder=${live ? 'Prompt. Ctrl+Enter sends, Esc returns to the terminal.' : 'Not running. Resume it to write a prompt.'}
+      placeholder=${live ? 'Prompt…' : 'Not running. Resume it to write a prompt.'}
       aria-label="Prompt composer" onInput=${change} onKeyDown=${key}></textarea>
-    <button class="btn btn-sm btn-primary" data-testid="composer-send" disabled=${!live || busy || text.trim() === ''} onClick=${send} title="Ctrl+Enter">Send</button>
+    <button class="btn btn-sm btn-primary" data-testid="composer-send" disabled=${!live || busy || text.trim() === ''} onClick=${send} title="Ctrl+Enter sends. Shift+Enter adds a line. Esc returns to the terminal.">Send</button>
   </div>`;
 }

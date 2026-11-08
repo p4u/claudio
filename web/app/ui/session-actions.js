@@ -1,11 +1,11 @@
 // Operations on sessions and on the pane layout, plus the per-pane action buttons.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { model, selected, focused, req, reqQuiet } from '../store.js';
 import { applyEvent } from '../model.js';
 import { setGrid, dropOnPane, setFocus, placeBeside } from '../panes.js';
-import { termSize } from '../term.js';
+import { termSize, focusTerminal } from '../term.js';
 import { confirm, prompt, Dialog } from './modal.js';
 import { toast } from './toasts.js';
 import { narrow } from './narrow.js';
@@ -53,11 +53,25 @@ export function focusPane(i) {
 // Show a session in the focused pane (or focus the pane that already shows it).
 export function openSession(sid) {
   selected.value = sid;
-  if (narrow.value) return;
+  if (narrow.value) { openDrawer('reader', sid); return; } // no panes here: the reader is what Open can show
   showBoard.value = false;
   const lay = model.value.layout;
   const at = lay.panes.indexOf(sid);
   saveLayout(at >= 0 ? setFocus(lay, at) : dropOnPane(lay, lay.focus, sid));
+}
+
+// Open a session in the focused pane and put the keyboard in its terminal (the mode badge follows
+// the focus, so TERM shows once xterm has it). Used by the palette, Enter on a card or row.
+export function openAndEnter(sid) {
+  if (!model.value.sessions[sid]) return;
+  openSession(sid);
+  if (narrow.value) return;
+  let tries = 0;
+  const go = () => {
+    if (focused.value === sid && focusTerminal(sid)) return;
+    if (++tries < 30) setTimeout(go, 50);
+  };
+  setTimeout(go, 0);
 }
 
 export function dropSession(pane, sid) {
@@ -151,14 +165,33 @@ export function ProxyChooserHost() {
   return chooser.value ? html`<${ProxyChooser} />` : null;
 }
 
+// The pane header's actions. Wide: icon buttons. In a narrow pane (container query in layout.css)
+// they fold into one `⋯` button that opens the same buttons as a labelled menu, so every
+// data-testid stays on its real button; open the menu first (`[data-testid="session-menu-btn"]`).
 export function SessionActions({ s }) {
   const shell = s.kind === 'shell';
-  return html`<div class="session-actions" data-testid="session-actions">
-    <button class="icon-btn" data-testid="rename-btn" title="Rename" aria-label="Rename session" onClick=${() => renameSession(s)}>✎</button>
-    ${shell ? null : html`
-      <button class="icon-btn" data-testid="restart-resume-btn" title=${isDown(s) ? 'Resume the conversation' : 'Restart and resume the conversation'} aria-label=${isDown(s) ? 'Resume' : 'Restart and resume'} onClick=${() => (isDown(s) ? resumeSession(s) : restartSession(s, false))}>↻</button>
-      <button class="icon-btn" data-testid="restart-new-btn" title="Restart with a new conversation" aria-label="Restart with a new conversation" onClick=${() => restartSession(s, true)}>✦</button>
-      <button class="icon-btn" data-testid="terminal-tab-btn" title="Open a terminal in this folder" aria-label="Open a terminal tab" onClick=${() => openTerminalTab(s)}>$_</button>`}
-    <button class="icon-btn danger" data-testid="kill-btn" title="Kill" aria-label="Kill session" onClick=${() => killSession(s)}>✕</button>
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => { if (!root.current?.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); root.current?.querySelector('[data-testid="session-menu-btn"]')?.focus(); } };
+    document.addEventListener('pointerdown', away, true);
+    document.addEventListener('keydown', esc, true);
+    return () => { document.removeEventListener('pointerdown', away, true); document.removeEventListener('keydown', esc, true); };
+  }, [open]);
+  const run = (fn) => () => { setOpen(false); fn(); };
+  const item = (testid, ico, label, tip, fn, cls = '') => html`<button type="button" class=${`icon-btn act ${cls}`} data-testid=${testid} title=${tip} aria-label=${tip} onClick=${run(fn)}><span class="act-ico" aria-hidden="true">${ico}</span><span class="act-label">${label}</span></button>`;
+  return html`<div class="session-actions" ref=${root} data-testid="session-actions" data-open=${open}>
+    <button type="button" class="icon-btn more-btn" data-testid="session-menu-btn" aria-haspopup="menu" aria-expanded=${open} aria-label="Session actions" title="Session actions" onClick=${() => setOpen(!open)}>⋯</button>
+    <div class="act-row" role=${open ? 'menu' : null}>
+      ${item('rename-btn', '✎', 'Rename', 'Rename', () => renameSession(s))}
+      ${shell ? null : html`
+        ${item('restart-resume-btn', '↻', 'Restart (resume)', isDown(s) ? 'Resume the conversation' : 'Restart and resume the conversation', () => (isDown(s) ? resumeSession(s) : restartSession(s, false)))}
+        ${item('restart-new-btn', '✦', 'New conversation', 'Restart with a new conversation', () => restartSession(s, true))}
+        ${item('terminal-tab-btn', '$_', 'Terminal beside', 'Open a terminal in this folder beside this pane', () => openTerminalTab(s))}`}
+      <span class="act-sep" role="separator"></span>
+      ${item('kill-btn', '✕', 'Kill', 'Kill session', () => killSession(s), 'danger')}
+    </div>
   </div>`;
 }

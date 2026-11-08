@@ -46,14 +46,16 @@ function PaneSession({ s, i, focus }) {
   const [fit, setFit] = useState(null);
   const [att, setAtt] = useState(null);
   useEffect(() => { setFit(null); setAtt(null); }, [s.id]);
-  const foreign = fit && att && (fit.rows !== att.rows || fit.cols !== att.cols);
+  // Only a size set by another client is flagged; this tab's own panes letterbox silently.
+  const foreign = !!(att && att.foreign);
+  const dims = att ? ` · ${att.cols}×${att.rows}` : '';
   return html`
     <header class="pane-head">
       <span class="pane-no">${i + 1}</span><${Glyph} s=${s} />
-      <span class="pane-title" title=${s.label}>${s.label}</span>
+      <span class="pane-title" title=${`${s.label}${dims}`}>${s.label}</span>
       ${s.host !== 'local' ? html`<span class="chip">${s.host}</span>` : null}
       <${Branch} s=${s} />
-      ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" onClick=${() => { focusPane(i); setTimeout(() => refitTerminal(s.id), 0); }} title=${`The terminal is ${att.cols}x${att.rows} (set elsewhere); this pane fits ${fit.cols}x${fit.rows}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
+      ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" onClick=${() => { focusPane(i); setTimeout(() => refitTerminal(s.id), 0); }} title=${`Another client set this terminal to ${att.cols}x${att.rows}${fit ? `; this pane fits ${fit.cols}x${fit.rows}` : ''}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
       <span class="topbar-spacer"></span>
       <${SessionActions} s=${s} />
     </header>

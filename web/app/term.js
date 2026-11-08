@@ -73,6 +73,8 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   let disposed = false;
   let opened = false;
   let lastSent = null; // the size the PTY is believed to have
+  let mine = null; // the size THIS tab last asked for (attach or resize)
+  let wantFocus = false; // focus() came before the terminal was opened
   let timer = null;
   let raf = 0;
   const fit = new FitAddon();
@@ -109,8 +111,9 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     const s = proposed();
     if (!s || !shouldSendResize({ focused: isFocused(), cause: 'fit', size: s, lastSent })) return;
     lastSent = s;
+    mine = s;
     term.resize(s.cols, s.rows);
-    onAttached?.(s);
+    onAttached?.({ ...s, foreign: false });
     req('session.resize', { sid, ...s }).catch(() => {});
   }
 
@@ -129,7 +132,8 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     const s = proposed() ?? size();
     term.resize(s.cols, s.rows);
     lastSent = s;
-    onAttached?.(s);
+    mine = s;
+    onAttached?.({ ...s, foreign: false });
     onFit?.(s);
     req('session.attach', { sid, ...s }).catch(() => {});
   }
@@ -140,7 +144,10 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     term.resize(ev.cols, ev.rows);
     term.reset(); // the next output frame is the snapshot
     lastSent = { rows: ev.rows, cols: ev.cols };
-    onAttached?.({ rows: ev.rows, cols: ev.cols });
+    // Foreign only when the size is not the one this tab asked for: another client sized the PTY.
+    // A pane here that merely differs from the focused pane's fit just letterboxes.
+    const foreign = !!mine && (mine.rows !== ev.rows || mine.cols !== ev.cols);
+    onAttached?.({ rows: ev.rows, cols: ev.cols, foreign });
   });
 
   const d1 = term.onData((d) => sendInput(sid, d));
@@ -170,6 +177,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (disposed) return;
     term.open(el);
     opened = true;
+    if (wantFocus) { wantFocus = false; term.focus(); }
     ro.observe(el);
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style'] });
     attach();
@@ -177,7 +185,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
 
   const handle = {
     sid, term, attach, refit,
-    focus() { term.focus(); },
+    focus() { if (opened) term.focus(); else wantFocus = true; },
     findNext(q) { return search.findNext(q); },
     findPrevious(q) { return search.findPrevious(q); },
     dispose() {

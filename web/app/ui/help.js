@@ -13,7 +13,7 @@ export function Help() {
     <div class="help-list">
       ${rows.map((b) => html`<${Keys} keys=${b.action === 'focus-pane-1' ? '1' : b.keys} />
         <span>${b.action === 'focus-pane-1' ? 'focus pane 1 to 4' : b.help}</span>`)}
-      <${Keys} keys="Ctrl+K" /><span>command palette, also while typing</span>
+      <${Keys} keys="Ctrl+K" /><span>command palette, also in text fields (not in the terminal)</span>
     </div>
     <p class="help-note">Single keys work in app mode, when no text field has focus. In terminal mode every key goes to the terminal; only <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> comes back here.</p>
   <//>`;

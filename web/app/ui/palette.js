@@ -7,8 +7,9 @@ import { model, req, selected } from '../store.js';
 import { orderedSessions } from '../model.js';
 import { settings, updateSettings, THEMES } from '../settings.js';
 import { confirm, prompt } from './modal.js';
+import { openAndEnter } from './session-actions.js';
 
-const SKIP = new Set(['palette', 'palette-ctrl', 'close-overlay', 'leave-terminal', 'focus-pane-2', 'focus-pane-3', 'focus-pane-4']);
+const SKIP = new Set(['palette', 'palette-ctrl', 'close-overlay', 'leave-terminal', 'enter-terminal', 'focus-pane-2', 'focus-pane-3', 'focus-pane-4']);
 
 const quiet = (p) => p.catch(() => {});
 
@@ -16,7 +17,7 @@ export function sessionCommands(s) {
   const name = s.label || s.id.slice(0, 8);
   const tag = s.host === 'local' ? name : `${name} @${s.host}`;
   const cmds = [
-    { id: `go:${s.id}`, group: 'Sessions', title: `Go to ${tag}`, run: () => { selected.value = s.id; } },
+    { id: `go:${s.id}`, group: 'Sessions', title: `Go to ${tag}`, run: () => openAndEnter(s.id) },
     { id: `kill:${s.id}`, group: 'Sessions', title: `Kill ${tag}`, run: async () => {
       if (await confirm({ title: 'Kill session', body: `Kill ${name}? The process ends.`, yes: 'Kill', no: 'Keep' })) await quiet(req('session.kill', { sid: s.id }));
     } },

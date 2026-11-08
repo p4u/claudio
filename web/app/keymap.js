@@ -4,7 +4,7 @@ const E = (key, o = {}) => ({ key, code: o.code ?? '', ctrlKey: false, shiftKey:
 
 export const BINDINGS = [
   { keys: 'k', action: 'palette', help: 'command palette', ev: E('k') },
-  { keys: 'Ctrl+K', action: 'palette-ctrl', help: 'command palette (also while typing)', ev: E('k', { ctrlKey: true }), hide: true },
+  { keys: 'Ctrl+K', action: 'palette-ctrl', help: 'command palette (also in text fields; not in the terminal)', ev: E('k', { ctrlKey: true }), hide: true },
   { keys: 'a', action: 'next-attention', help: 'jump to the next session that needs you', ev: E('a') },
   { keys: 'n', action: 'new-session', help: 'new claude session', ev: E('n') },
   { keys: 't', action: 'new-terminal', help: 'new terminal tab', ev: E('t') },
