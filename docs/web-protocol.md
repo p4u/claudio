@@ -48,7 +48,10 @@ Checks run in this order on every request: `Host` not accepted → `421`; a meth
 
 One socket per browser tab, `ws://<host>/ws` (or `wss://` behind a TLS proxy).
 
-- Text frames: one JSON object each, UTF-8. Client → server text frames ≤ 64 KiB.
+- Text frames: one JSON object each, UTF-8. Client → server text frames ≤ 128 KiB, so a
+  request carrying a 64 KiB text (`session.paste`, `session.spawn`'s `prompt`, `snippets.save`)
+  fits with its JSON envelope and escaping, and an oversized text gets its op's `"too large"` /
+  `"bad request"` answer instead of a close.
 - Binary frames: `kind (1 byte) ‖ session uuid (16 bytes, RFC 4122 byte order) ‖ payload`.
   - `0x01` server → client: PTY output of a session the tab is attached to. The first `0x01`
     frame after an `attached` event for that session is the screen snapshot (reset the
