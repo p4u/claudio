@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rank, attentionQueue, cardActions, approveArgs, visibleQueue, isElicitation, JUST_IDLE_MS, PERMISSION_KINDS } from '../app/queue.js';
+import { stateClass, rank, attentionQueue, cardActions, approveArgs, visibleQueue, isElicitation, JUST_IDLE_MS, PERMISSION_KINDS } from '../app/queue.js';
 
 const NOW = 1_000_000_000_000; // ms
 const sec = (agoMs) => (NOW - agoMs) / 1000;
@@ -92,4 +92,20 @@ test('elicitation kinds are questions', () => {
   assert.equal(isElicitation(S('q2', { attention: att('elicitation_url_dialog') })), true);
   assert.equal(isElicitation(S('p', { attention: att('permission_prompt') })), false);
   assert.equal(isElicitation(S('n')), false);
+});
+
+test('stateClass: working, waiting, stopped and error', () => {
+  const c = (state, kind) => stateClass(S('x', { state, attention: kind ? att(kind) : null }));
+  assert.equal(c('working'), 'working');
+  assert.equal(c('starting'), 'working');
+  for (const k of ['permission_prompt', 'worker_permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'plan_approval', null]) {
+    assert.equal(c('needs_approval', k), 'waiting', `needs_approval ${k}`);
+  }
+  for (const k of ['ask_user_question', 'agent_needs_input', 'elicitation_dialog', 'elicitation_url_dialog']) {
+    assert.equal(c('needs_input', k), 'waiting', `needs_input ${k}`);
+  }
+  for (const k of ['idle_prompt', 'session_start', null]) assert.equal(c('needs_input', k), 'stopped', `needs_input ${k}`);
+  for (const st of ['idle', 'exited', 'unknown']) assert.equal(c(st), 'stopped');
+  assert.equal(c('error'), 'error');
+  assert.equal(stateClass(undefined), 'stopped');
 });

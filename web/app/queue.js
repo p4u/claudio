@@ -7,6 +7,20 @@ export const NO_ATTENTION_WARNING = 'permission or elicitation: check the termin
 export const ELICITATION_KINDS = ['elicitation_dialog', 'elicitation_url_dialog'];
 export const MAX_VISIBLE = 3;
 
+// What the person sees of a session, in four classes (rail, board, pane header, palette):
+// working (it runs), waiting (it asks you something), stopped (it finished or is down, at its
+// prompt), error. Imports nothing.
+const ASKING_KINDS = ['ask_user_question', 'agent_needs_input', 'plan_approval', ...ELICITATION_KINDS];
+export function stateClass(session) {
+  switch (session?.state) {
+    case 'working': case 'starting': return 'working';
+    case 'needs_approval': return 'waiting';
+    case 'needs_input': return ASKING_KINDS.includes(session.attention?.kind) ? 'waiting' : 'stopped';
+    case 'error': return 'error';
+    default: return 'stopped'; // idle, exited, unknown
+  }
+}
+
 // A question to answer (not a permission to grant): drawn with the amber `?`.
 export const isElicitation = (session) => ELICITATION_KINDS.includes(session?.attention?.kind);
 
