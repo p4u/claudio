@@ -167,7 +167,7 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
 | Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
 | Login and security | n/a | token URL, cookie | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests |
-| Layout and themes | n/a | Settings → Theme | `layout.save` | `theme switch applies plain`; `web_order_and_layout_persist_in_web_state` |
+| Layout and style | n/a | dark only ([DESIGN.md](../DESIGN.md)); Settings → Text size | `layout.save` | `the page follows DESIGN.md`; `web_order_and_layout_persist_in_web_state` |
 | Keys | `Alt+…` (see Keys) | the same Alt keys, `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette`; `Alt+u in a terminal opens the reader and sends nothing to claude`; `Alt+a focuses the session that needs attention, Alt+Right switches session` |
 | Newline in the prompt | `Shift+Enter` | `Shift+Enter` in a terminal | `session.input` | `Shift+Enter puts ESC CR into the input, Enter submits` |
 | Browser-reserved keys | n/a | Capture all keys, installable app | (client side) | `the settings have Capture all keys and the manifest is served` |
@@ -195,9 +195,11 @@ file changes or `build.rs` is touched (`web/` itself is not watched because of
   one fixed height: state icon, name, host chip (only with more than one host connected) and age.
   Hover and selection change colours only. There is no "Needs you" queue; `Alt+a`/`a` still jump
   to the next session that needs you, and Approve/Deny sit in the pane header and the board row.
-- **State icon** (`stateClass` in `web/app/queue.js`): working (cyan spinner), waiting (pulsing
-  amber `?`: a permission prompt, a question, a plan to approve), stopped (green `■`: finished or
-  not running), error (red `✗`). Shell sessions show `$`.
+- **State icon** (`stateClass` in `web/app/queue.js`): working (a green `●` LED that pulses
+  softly, still when the system asks for reduced motion), waiting (violet `?`: a permission
+  prompt, a question, a plan to approve), stopped (steel `■`: finished or not running), error
+  (coral `✗`). Shell sessions show `$`. Every icon has a text label or tooltip; the board shows
+  the state as a badge with its name.
 - **Hover info**: pointing at (or focusing) a rail item or board row for 800 ms shows its facts in
   a popover beside it; a key press or leaving hides it. Text only.
 - **Pane header**: `✕` closes the pane (the session keeps running, stays in the rail); `⏻` stops
@@ -205,3 +207,8 @@ file changes or `build.rs` is touched (`web/` itself is not watched because of
 - **Text size** (Settings): Small, Normal (default), Large scale the interface through the
   `--fs-*` tokens (the rail keeps its own, smaller scale); the terminal font size (default 15 px) is a
   separate setting.
+- **Style**: the page follows [DESIGN.md](../DESIGN.md), dark only: Void, Carbon and Graphite
+  surfaces with 1px Slate hairlines, radius 1px, no shadows, weight 400, JetBrains Mono for
+  labels, tabs, badges and buttons, Inter for prose, Phosphor Green only for active and status.
+  Every colour, radius and font is a token in `web/styles/tokens.css`, the terminal's ANSI
+  colours included; no ligatures anywhere.

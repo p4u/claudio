@@ -33,12 +33,9 @@ test('a matched <latex> tag in a pane is typeset over its text, and the setting 
   await expect(page.getByTestId('terminal')).toContainText('line:<latex>q + z</latex>');
   await page.waitForTimeout(300);
   await expect(layer.locator('.latex-box')).not.toHaveCount(0);
-  for (const [theme, name] of [['arcade-dark', 'dark'], ['arcade-light', 'light']]) {
-    await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
-    await page.waitForTimeout(400);
-    await page.getByTestId('terminal').screenshot({ path: path.join(SHOTS, `pane-${name}.png`) });
-  }
-  await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'arcade-dark'));
+  // the page is dark only (DESIGN.md): one screenshot of the overlay
+  await page.waitForTimeout(400);
+  await page.getByTestId('terminal').screenshot({ path: path.join(SHOTS, 'pane-dark.png') });
 
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByTestId('render-formulas').uncheck();
