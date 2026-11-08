@@ -268,7 +268,8 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | Op | Args | → | Notes |
 |---|---|---|---|
 | `snippets.list` | — | `{"snippets":[{"name","text"}]}` | |
-| `snippets.save` | `text` (≤ 64 KiB) | `{"name"}` | |
+| `snippets.save` | `text` (≤ 64 KiB), `name?` | `{"name"}` | without `name`: stored under the slug of the text, never replacing (`-2`, `-3`… when taken). With `name`: stored under `slug(name)` (same slug rules as the TUI) and an existing snippet of that name is replaced; the reply's `name` is that slug. These are the prompts the Compose editor's "Saved" library lists |
+| `snippets.delete` | `name` | `{}` | `name` must be the name of an existing snippet as `snippets.list` returns it (slug characters only: no `/`, `..`, hidden or non-`.md` file); anything else `"bad request: name: …"` |
 | `extensions.list` | — | `{"extensions":[Extension]}` | registry order |
 | `extensions.toggle` | `name`, `on` | `{}` | writes `[extensions] name = on` in config.toml; applies to new sessions |
 | `extensions.action` | `ext`, `action`, `input?`, `sid?` | `{"result":ActionResult}` | external extensions only; a built-in answers `"not an external extension"` (search and snippets are UI features) |
