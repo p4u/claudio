@@ -18,6 +18,10 @@ export function focusTerminal(sid) {
   return !!h;
 }
 
+export function refitTerminal(sid) {
+  handles.get(sid)?.refit();
+}
+
 export function termSize(sid) {
   const h = handles.get(sid);
   return h ? { rows: h.term.rows, cols: h.term.cols } : null;
@@ -89,30 +93,43 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   const size = () => ({ rows: term.rows, cols: term.cols });
   const hasBox = () => el.clientWidth > 8 && el.clientHeight > 8;
 
+  // The xterm grid always equals the PTY size this pane last learned; only the focused pane
+  // changes the PTY (and then the grid follows what was sent).
+  function proposed() {
+    if (!hasBox()) return null;
+    try {
+      const d = fit.proposeDimensions();
+      return d && d.rows > 0 && d.cols > 0 ? { rows: d.rows, cols: d.cols } : null;
+    } catch { return null; }
+  }
+
   function sendResize() {
     timer = null;
     if (disposed || conn.value !== 'open') return;
-    const s = size();
-    if (!shouldSendResize({ focused: isFocused(), cause: 'fit', size: s, lastSent })) return;
+    const s = proposed();
+    if (!s || !shouldSendResize({ focused: isFocused(), cause: 'fit', size: s, lastSent })) return;
     lastSent = s;
+    term.resize(s.cols, s.rows);
+    onAttached?.(s);
     req('session.resize', { sid, ...s }).catch(() => {});
   }
 
-  // Fit the terminal to its box now; tell the PTY (debounced) only when this is the focused pane.
   function refit() {
-    if (disposed || !opened || !hasBox()) return;
-    try { fit.fit(); } catch { return; }
-    onFit?.(size());
-    if (!shouldSendResize({ focused: isFocused(), cause: 'fit', size: size(), lastSent })) return;
+    if (disposed || !opened) return;
+    const s = proposed();
+    if (!s) return;
+    onFit?.(s);
+    if (!shouldSendResize({ focused: isFocused(), cause: 'fit', size: s, lastSent })) return;
     clearTimeout(timer);
     timer = setTimeout(sendResize, resizePolicy().debounceMs);
   }
 
   function attach() {
     if (disposed || !opened || conn.value !== 'open') return;
-    if (hasBox()) { try { fit.fit(); } catch { /* keep the current size */ } }
-    const s = size();
+    const s = proposed() ?? size();
+    term.resize(s.cols, s.rows);
     lastSent = s;
+    onAttached?.(s);
     onFit?.(s);
     req('session.attach', { sid, ...s }).catch(() => {});
   }
@@ -120,6 +137,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   const offOut = onOutput(sid, (bytes) => { if (!disposed) term.write(bytes); });
   const offEv = onServerEvent((ev) => {
     if (ev.ev !== 'attached' || ev.sid !== sid || disposed) return;
+    term.resize(ev.cols, ev.rows);
     term.reset(); // the next output frame is the snapshot
     lastSent = { rows: ev.rows, cols: ev.cols };
     onAttached?.({ rows: ev.rows, cols: ev.cols });

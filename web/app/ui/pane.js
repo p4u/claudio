@@ -3,7 +3,7 @@ import { html } from 'htm/preact';
 import { Component } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { model, conn } from '../store.js';
-import { createTerm } from '../term.js';
+import { createTerm, refitTerminal } from '../term.js';
 import { Glyph } from './glyph.js';
 import { Branch, Strip } from './strip.js';
 import { Composer } from './composer.js';
@@ -53,7 +53,7 @@ function PaneSession({ s, i, focus }) {
       <span class="pane-title" title=${s.label}>${s.label}</span>
       ${s.host !== 'local' ? html`<span class="chip">${s.host}</span>` : null}
       <${Branch} s=${s} />
-      ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" title=${`The terminal is ${att.cols}x${att.rows} (set elsewhere); this pane fits ${fit.cols}x${fit.rows}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
+      ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" onClick=${() => { focusPane(i); setTimeout(() => refitTerminal(s.id), 0); }} title=${`The terminal is ${att.cols}x${att.rows} (set elsewhere); this pane fits ${fit.cols}x${fit.rows}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
       <span class="topbar-spacer"></span>
       <${SessionActions} s=${s} />
     </header>

@@ -137,7 +137,7 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
 .pane-dormant { flex: 1; min-height: 0; display: grid; place-content: center; justify-items: center; gap: var(--space-3); text-align: center; padding: var(--space-4); }
 .pane-dormant .coin { font-family: var(--font-head); font-size: 20px; letter-spacing: 0.12em; color: var(--st-exited); }
 .term-host { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px; background: var(--term-bg); overflow: hidden; }
-.term-host .xterm { height: 100%; }
+.term-host .xterm { width: max-content; }
 .term-host .xterm-viewport { background-color: var(--term-bg) !important; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px var(--space-4); }
 .facts dt { color: var(--muted); }
