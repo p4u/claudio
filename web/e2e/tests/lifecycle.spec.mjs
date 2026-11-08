@@ -89,7 +89,9 @@ test('save and insert a snippet', async ({ page }) => {
   const sid = await srv.spawn(srv.dirs.a);
   await srv.fireHook(srv.dirs.a, 'Stop', {});
   await openIn(page, sid);
-  const composer = pane(page, 0).getByTestId('composer');
+  await pane(page, 0).getByTestId('terminal').click();
+  await page.keyboard.press('Alt+o');
+  const composer = page.getByTestId('composer');
   await expect(composer).toBeEnabled();
   await composer.fill('review the diff carefully');
   await page.keyboard.press('Control+k');
@@ -99,7 +101,13 @@ test('save and insert a snippet', async ({ page }) => {
   await page.getByTestId('snippet-save').click();
   const snip = page.getByTestId('snippet').filter({ hasText: 'review the diff carefully' });
   await expect(snip).toHaveCount(1);
+  // clear the draft, then insert the snippet: Compose opens with it
+  await page.keyboard.press('Escape');
+  await page.getByTestId('compose-btn').click();
   await composer.fill('');
+  await page.keyboard.press('Control+k');
+  await page.getByTestId('palette-input').fill('Insert snippet');
+  await page.getByTestId('palette-item').first().click();
   await snip.click();
   await expect(composer).toHaveValue('review the diff carefully');
 });

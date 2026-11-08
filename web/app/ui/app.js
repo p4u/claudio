@@ -26,6 +26,8 @@ import { NarrowView, narrow } from './narrow.js';
 import { Wizard, installWizard, openWizard } from './wizard.js';
 import { Search, installSearch } from './search.js';
 import { Snippets, installSnippets } from './snippets.js';
+import { ComposeDialog, installCompose } from './composer.js';
+import { installMaximize } from './maximize.js';
 import { DocumentView, ActionList, installActions } from './actions.js';
 import { Drawer } from './drawer.js';
 import './reader.js';
@@ -95,7 +97,7 @@ export function App() {
     <div class="main" style=${style} data-narrow=${small} data-drawer=${!!drawer.value} data-overlay=${plan.overlay} data-rail=${plan.railCollapsed ? 'strip' : 'full'} data-drawer-tab=${drawer.value?.tab ?? ''}>${small ? html`<${NarrowView} Board=${Board} />` : html`<${Rail} strip=${plan.railCollapsed} /><${Stage} railCollapsed=${plan.railCollapsed} railAuto=${plan.railAuto} />`}<${Drawer} plan=${plan} /></div>
     <${Footer} />
     ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />`
-      : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />`
+      : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />` : o === 'compose' ? html`<${ComposeDialog} />`
       : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />`
       : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />` : null}
     <${PluginSetupHost} /><${ProxyChooserHost} /><${Modal} />
@@ -168,6 +170,8 @@ export function installFocusModel() {
   installWizard();
   installSearch();
   installSnippets();
+  installCompose();
+  installMaximize();
   installActions();
   installExtensions();
   installHosts();

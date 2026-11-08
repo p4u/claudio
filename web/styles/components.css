@@ -248,6 +248,17 @@ input[type="radio"] { accent-color: var(--accent); }
 .panes[data-grid="4"] .composer::placeholder { color: transparent; }
 .panes[data-grid="4"] .composer-wrap .btn { display: none; }
 
+/* ---- Compose: the pop-up prompt editor (a dialog; the textarea is mono at the interface text size) ---- */
+.dialog[data-testid="compose"] { width: min(860px, calc(100vw - 32px)); }
+.compose-text {
+  display: block; width: 100%; min-height: 40vh; max-height: 60vh; resize: vertical; line-height: 1.5; tab-size: 4;
+  background: var(--bg); color: var(--text-strong); border: var(--hair) solid var(--border); border-radius: var(--radius); padding: var(--space-3);
+}
+.compose-text:hover { border-color: var(--border-strong); }
+.compose-text:disabled { opacity: 0.55; }
+.compose-text::placeholder { color: var(--text-faint); }
+.compose-hint { margin-right: auto; align-self: center; color: var(--text-muted); font-size: var(--fs-xs); letter-spacing: var(--track-mono); text-transform: uppercase; }
+
 /* ---- tabs: drawer tabs, segmented controls, host tabs. Mono uppercase, Steel, Bone on hover,
    the active one Phosphor with a 1px underline ---- */
 .drawer-tab, .seg-btn {

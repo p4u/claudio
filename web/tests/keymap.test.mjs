@@ -115,3 +115,14 @@ test('key check says what claudio does with a key', () => {
   assert.match(describeKey(ev('Shift', { shiftKey: true })), /goes to the page/);
   assert.match(describeKey(ev('a')), /key=a/);
 });
+
+test('Alt+O opens Compose and Alt+Shift+F fills the window', () => {
+  assert.equal(tuiBinding(alt('KeyO', { key: 'o' })), 'compose');
+  assert.equal(tuiBinding(alt('KeyF', { shiftKey: true, key: 'F' })), 'fullscreen-pane');
+  assert.equal(tuiBinding(alt('KeyF')), null);
+  assert.equal(tuiBinding(alt('KeyO', { shiftKey: true })), null);
+  assert.equal(tuiBinding(alt('KeyF', { shiftKey: true, ctrlKey: true })), null);
+  // Claude Code's own Alt keys stay with the session
+  for (const c of ['KeyP', 'KeyT', 'KeyM', 'KeyB', 'KeyF', 'KeyD']) assert.equal(tuiBinding(alt(c)), null, c);
+  assert.equal(tuiBinding(alt('Escape')), null);
+});

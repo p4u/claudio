@@ -1,27 +1,14 @@
-// Prompt snippets: inserted into the focused composer (never sent), saved from the composer or the last prompt.
+// Prompt snippets: inserted into the Compose editor of the focused claude session (never sent), saved from its draft or the last prompt.
 import { html } from 'htm/preact';
 import { useEffect, useState } from 'preact/hooks';
 import { model, focused, req, reqQuiet } from '../store.js';
 import { overlay, register } from '../palette.js';
 import { Dialog } from './modal.js';
 import { toast } from './toasts.js';
+import { insertIntoComposer, focusedDraft } from './composer.js';
 
 export function openSnippets() {
   overlay.value = 'snippets';
-}
-
-const focusedComposer = () => document.querySelector('.pane[data-focus="true"] [data-testid="composer"]');
-
-// Put text into the focused pane's composer through its own input event, so its state follows.
-export function insertIntoComposer(text) {
-  const ta = focusedComposer();
-  if (!ta || ta.disabled) return false;
-  const sep = ta.value && !ta.value.endsWith('\n') ? '\n' : '';
-  ta.value = ta.value + sep + text;
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-  return true;
 }
 
 export async function saveSnippet(text) {
@@ -51,12 +38,11 @@ export function Snippets() {
   useEffect(() => { load(); }, []);
   const close = () => { overlay.value = null; };
   const insert = (sn) => {
-    if (insertIntoComposer(sn.text)) close();
-    else toast({ text: 'Focus a claude session with a prompt box first.', level: 'warn' });
+    if (!insertIntoComposer(sn.text)) close(); // opens Compose, which replaces this list
   };
-  const composerText = focusedComposer()?.value ?? '';
+  const composerText = focusedDraft();
   return html`<${Dialog} title="Snippets" testid="snippets" wide onClose=${close}>
-    <p class="dialog-body">Click a snippet to put it in the prompt box. It is never sent for you.</p>
+    <p class="dialog-body">Click a snippet to put it in the Compose editor. It is never sent for you.</p>
     ${err ? html`<p class="wz-warn" role="alert">${err}</p>` : null}
     <ul class="snippet-list">
       ${items === null && !err ? html`<li class="wz-note">Loading…</li>` : null}
@@ -65,8 +51,8 @@ export function Snippets() {
         <b class="snippet-name">${sn.name}</b><span class="snippet-text">${sn.text}</span></button></li>`)}
     </ul>
     <div class="dialog-actions">
-      <button type="button" class="btn" data-testid="snippet-save" disabled=${!composerText.trim()} title="Save what is typed in the prompt box"
-        onClick=${async () => { if (await saveSnippet(composerText)) load(); }}>Save prompt box text</button>
+      <button type="button" class="btn" data-testid="snippet-save" disabled=${!composerText.trim()} title="Save the draft in the Compose editor"
+        onClick=${async () => { if (await saveSnippet(composerText)) load(); }}>Save the Compose draft</button>
       <button type="button" class="btn" onClick=${close}>Close</button>
     </div>
   <//>`;

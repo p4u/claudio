@@ -204,3 +204,9 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
 .latex-box { display: flex; overflow: visible; align-items: center; color: var(--latex-accent); }
 .latex-inner { display: inline-block; flex: none; white-space: nowrap; transform-origin: left center; line-height: 1.2; }
 .latex-inner .katex { font-size: 1em; }
+
+/* ---- fill the window: the focused pane covers the viewport; nothing is unmounted ---- */
+html[data-maximized] .topbar, html[data-maximized] .banner, html[data-maximized] .rail, html[data-maximized] .stage-bar,
+html[data-maximized] .drawer, html[data-maximized] .footer { display: none; }
+html[data-maximized] .pane:not([data-max="true"]) { visibility: hidden; }
+.pane[data-max="true"] { position: fixed; inset: 0; z-index: 40; border-radius: 0; border-width: 0; }

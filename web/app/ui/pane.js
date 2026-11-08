@@ -1,4 +1,4 @@
-// Panes: 1, 2 or 2x2. Each shows one session: header, xterm, composer and status strip.
+// Panes: 1, 2 or 2x2. Each shows one session: header, xterm, status strip (and the inline composer if the setting is on).
 import { html } from 'htm/preact';
 import { Component } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -7,6 +7,8 @@ import { createTerm, refitTerminal } from '../term.js';
 import { Glyph } from './glyph.js';
 import { Branch, Strip } from './strip.js';
 import { Composer } from './composer.js';
+import { maximized, toggleMaximize } from './maximize.js';
+import { settings } from '../settings.js';
 import { ApproveButtons } from './approve.js';
 import { SessionActions, dropSession, focusPane, resumeSession, closePane } from './session-actions.js';
 import { SID_TYPE } from './rail.js';
@@ -58,6 +60,7 @@ function PaneSession({ s, i, focus }) {
       <${Branch} s=${s} />
       ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" onClick=${() => { focusPane(i); setTimeout(() => refitTerminal(s.id), 0); }} title=${`Another client set this terminal to ${att.cols}x${att.rows}${fit ? `; this pane fits ${fit.cols}x${fit.rows}` : ''}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
       <span class="topbar-spacer"></span>
+      ${maximized.value === i ? html`<button type="button" class="btn btn-sm" data-testid="fullscreen-exit" title="Back to the layout (Alt+Shift+F)" onClick=${() => toggleMaximize(i)}>Exit full window</button>` : null}
       <${ApproveButtons} s=${s} />
       <${SessionActions} s=${s} pane=${i} />
     </header>
@@ -67,7 +70,7 @@ function PaneSession({ s, i, focus }) {
         <button class="btn btn-primary" data-testid="resume-btn" onClick=${() => resumeSession(s)}>Resume</button>
       </div>`
       : html`<${TermView} s=${s} focus=${focus} onFit=${setFit} onAttached=${setAtt} />`}
-    ${s.kind === 'claude' ? html`<${Composer} key=${s.id} s=${s} />` : null}
+    ${s.kind === 'claude' && settings.value.inlineComposer ? html`<${Composer} key=${s.id} s=${s} />` : null}
     <${Strip} s=${s} />`;
 }
 
@@ -78,7 +81,7 @@ export function Pane({ i }) {
   const sid = lay.panes[i] ?? null;
   const s = sid ? m.sessions[sid] : null;
   const [over, setOver] = useState(false);
-  return html`<section class="pane" data-testid="pane" data-pane=${i} data-focus=${focus} data-state=${s?.state ?? 'empty'} data-over=${over}
+  return html`<section class="pane" data-testid="pane" data-pane=${i} data-focus=${focus} data-max=${maximized.value === i} data-state=${s?.state ?? 'empty'} data-over=${over}
     onPointerDownCapture=${() => focusPane(i)}
     onDragOver=${(e) => { if (e.dataTransfer.types.includes(SID_TYPE)) { e.preventDefault(); if (!over) setOver(true); } }}
     onDragLeave=${(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}

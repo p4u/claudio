@@ -24,6 +24,8 @@ export function Settings() {
       <input class="input" type="number" min="10" max="24" value=${s.fontSize} onChange=${(e) => updateSettings({ fontSize: e.target.value })} /></label>
     <label class="set-row"><span>Render formulas in terminals<small>show each matched ${"<latex>"} tag typeset, over the text</small></span>
       <input class="toggle" type="checkbox" data-testid="render-formulas" checked=${s.renderFormulas} onChange=${(e) => updateSettings({ renderFormulas: e.target.checked })} /></label>
+    <label class="set-row"><span>Show a composer under each pane<small>off: claude's own input is the only one; Compose (Alt+O) opens an editor</small></span>
+      <input class="toggle" type="checkbox" data-testid="inline-composer" checked=${s.inlineComposer} onChange=${(e) => updateSettings({ inlineComposer: e.target.checked })} /></label>
     <label class="set-row"><span>Sound<small>off by default</small></span>
       <input class="toggle" type="checkbox" checked=${s.sound} onChange=${(e) => updateSettings({ sound: e.target.checked })} /></label>
     <div class="set-row"><span>Extensions<small>lenses, actions and proxy plugins</small></span>

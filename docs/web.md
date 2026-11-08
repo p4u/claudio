@@ -119,6 +119,8 @@ xterm and the browser do (matched on the physical key, so any layout works; AltG
 | `Alt+i` | Extensions screen |
 | `Alt+h` | Help |
 | `Alt+z` | Command palette (lists the extension actions) |
+| `Alt+o` | Compose: a pop-up editor for a long or multi-line prompt (web only) |
+| `Alt+Shift+F` | Fill the window with the focused pane; again to go back (web only) |
 
 `Shift+Enter` in a terminal inserts a newline in claude (it sends ESC CR, like `Alt+Enter`).
 
@@ -150,7 +152,8 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Stop (kill) | `Alt+x` | the stop icon `⏻` in the pane header (asks) | `session.kill` | `rename, kill and restart a session` |
 | Restart (resume / new) | `Alt+e` | Restart / New conversation (asks) | `session.respawn` | `rename, kill and restart a session`; `web_respawn_without_a_known_proxy_asks` |
 | Approve / deny a prompt | (type in the session) | Enter / Esc in the pane header or the board row | `session.approve` | `a permission prompt shows its text and Approve resolves it`; `an elicitation row waits for you but offers no Approve`; `web_approve_is_guarded_by_state_kind_and_seq` |
-| Prompt box | (type in the session) | composer under the terminal | `session.paste` | `save and insert a snippet`; `web_paste_reaches_the_pty_bracketed` |
+| Prompt box | (type in claude's own input) | Compose editor (`Alt+O`, pane header, palette): Insert pastes, Send pastes and presses Enter; Settings > "Show a composer under each pane" brings back an inline one | `session.paste` | `Insert pastes without submitting, Send submits…`; `save and insert a snippet`; `web_paste_reaches_the_pty_bracketed` |
+| Fill the window | (none) | pane header button, `Alt+Shift+F`, palette ("Fullscreen browser" also goes browser-fullscreen) | none (this browser tab only) | `Alt+Shift+F fills the window and again restores it…` |
 | Reader with formulas and diagrams | `Alt+u` | `r`: Answers, Formulas | `reader.answers`, `lens`/`latex` events, `extensions.render` | `the reader renders KaTeX and mermaid with no CSP violation` |
 | Git history | `Alt+l` | `g`, History tab | `git.log`, `git.commit`, `git.diff` | manual check (history list and commit view, probed in a browser on a fixture repo) |
 | Git working tree | `Alt+l` | `g`, Changes tab | `git.status`, `git.worktree_diff` | `Changes lists a modified file and shows its diff`; `web_git_status_and_worktree_diff` |

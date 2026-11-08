@@ -9,6 +9,14 @@ import { termSize, focusTerminal } from '../term.js';
 import { confirm, prompt, Dialog } from './modal.js';
 import { toast } from './toasts.js';
 import { narrow } from './narrow.js';
+import { openCompose } from './composer.js';
+import { maximized, toggleMaximize } from './maximize.js';
+
+// Monoline icons (stroke = currentColor, 1.5 wide), like the rest of the header's glyphs.
+const svg = (d) => html`<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" aria-hidden="true"><path d=${d} /></svg>`;
+const ICON_COMPOSE = svg('M2 3h12v8H7l-3 3v-3H2z M5 6h6 M5 8.5h4');
+const ICON_FILL = svg('M2 6V2h4 M10 2h4v4 M14 10v4h-4 M6 14H2v-4');
+const ICON_EXIT = svg('M6 2v4H2 M14 6h-4V2 M10 14v-4h4 M2 10h4v4');
 
 // true/false: the person chose the board or the panes; null: the board only while no pane holds a session
 export const showBoard = signal(null);
@@ -193,6 +201,8 @@ export function SessionActions({ s, pane = null }) {
   return html`<div class="session-actions" ref=${root} data-testid="session-actions" data-open=${open}>
     <button type="button" class="icon-btn more-btn" data-testid="session-menu-btn" aria-haspopup="menu" aria-expanded=${open} aria-label="Session actions" title="Session actions" onClick=${() => setOpen(!open)}>⋯</button>
     <div class="act-row" role=${open ? 'menu' : null}>
+      ${shell ? null : item('compose-btn', ICON_COMPOSE, 'Compose prompt', 'Compose a prompt (Alt+O)', () => openCompose(s.id))}
+      ${pane === null ? null : item('fullscreen-btn', maximized.value === pane ? ICON_EXIT : ICON_FILL, maximized.value === pane ? 'Leave the full window' : 'Fill the window', 'Fill the window (Alt+Shift+F)', () => toggleMaximize(pane))}
       ${item('rename-btn', '✎', 'Rename', 'Rename', () => renameSession(s))}
       ${shell ? null : html`
         ${item('restart-resume-btn', '↻', 'Restart (resume)', isDown(s) ? 'Resume the conversation' : 'Restart and resume the conversation', () => (isDown(s) ? resumeSession(s) : restartSession(s, false)))}

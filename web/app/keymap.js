@@ -72,15 +72,19 @@ export const TUI_BINDINGS = [
   A('Alt+i', 'KeyI', 'extensions', 'extensions screen'),
   A('Alt+h', 'KeyH', 'help', 'this help'),
   A('Alt+z', 'KeyZ', 'palette', 'command palette (the extension actions)'),
+  // Web-only. Claude Code uses Alt+P, Alt+T, Alt+M and readline's Alt+B/F/D/Enter, so Alt+O and
+  // Alt+Shift+F (not Alt+F) are free; the TUI has no key for either.
+  A('Alt+o', 'KeyO', 'compose', 'compose a prompt in an editor (Ctrl+Enter sends)'),
+  A('Alt+Shift+f', 'KeyF', 'fullscreen-pane', 'fill the window with the focused pane', { shift: true, key: 'F' }),
 ];
 
 const BY_CODE = new Map(TUI_BINDINGS.filter((b) => !b.ev.shiftKey).map((b) => [b.code, b.action]));
-const BY_DIGIT = new Map(TUI_BINDINGS.filter((b) => b.ev.shiftKey).map((b) => [b.code, b.action]));
+const BY_SHIFT = new Map(TUI_BINDINGS.filter((b) => b.ev.shiftKey).map((b) => [b.code, b.action]));
 
 // The action a TUI parity key runs, or null. AltGr (Ctrl+Alt) and Meta never match.
 export function tuiBinding(ev) {
   if (!ev.altKey || ev.ctrlKey || ev.metaKey) return null;
-  const table = ev.shiftKey ? BY_DIGIT : BY_CODE;
+  const table = ev.shiftKey ? BY_SHIFT : BY_CODE;
   return table.get(ev.code) ?? null;
 }
 
