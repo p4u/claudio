@@ -10,6 +10,7 @@
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
+#   make test-web   → browser app: node unit tests + Playwright e2e (debug build, fake claude/proxy)
 #   make e2e        → E2E suite only (alias for the integration subset of make test)
 #   make evidence   → run the PoC against real claude and capture artifacts
 #   make docker     → build the Docker image (docker compose)
@@ -24,7 +25,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker test test-unit e2e fmt clean install uninstall docker evidence help
+.PHONY: all build static static-docker test test-unit test-web e2e fmt clean install uninstall docker evidence help
 
 all: build
 
@@ -74,6 +75,13 @@ test-unit:
 ## Session-manager integration tests (fake claude, no API needed).
 test-manager:
 	$(CARGO) test --locked --test manager -- --test-threads=1
+
+## Browser app: node unit tests, then Playwright e2e against a debug build
+## (fake claude and proxy; uses the browsers cached in ~/.cache/ms-playwright).
+test-web:
+	node --test web/tests/*.test.mjs
+	$(CARGO) build --locked
+	cd web/e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --no-audit --no-fund && npx playwright test
 
 ## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
