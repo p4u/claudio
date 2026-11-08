@@ -3,15 +3,17 @@
 // Both only ever talk to claude with a bracketed paste (`session.paste`), plus Enter when sending.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { useRef, useState } from 'preact/hooks';
-import { model, focused, req } from '../store.js';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { model, focused, req, onServerEvent } from '../store.js';
 import { focusTerminal } from '../term.js';
-import { createDrafts, tooLarge } from '../compose.js';
+import { tooLarge } from '../compose.js';
+import { drafts } from './drafts.js';
 import { overlay, defineAction, register } from '../palette.js';
 import { Dialog } from './modal.js';
 import { toast } from './toasts.js';
+import { ComposeSide, saveAs } from './compose-library.js';
 
-export const drafts = createDrafts(); // sid -> unsent text, kept while the editor is closed
+export { drafts };
 export const composeSid = signal(null);
 
 export const isLive = (s) => !s.dormant && s.state !== 'exited' && s.state !== 'unknown' && s.state !== 'starting';
@@ -37,6 +39,8 @@ function target() {
 export function openCompose(sid) {
   const s = sid ? model.value.sessions[sid] : target();
   if (!s || s.kind !== 'claude') return;
+  const live = Object.keys(model.value.sessions);
+  if (live.length) drafts.sweep(new Set(live)); // drafts of sessions that went away while the page was closed
   composeSid.value = s.id;
   overlay.value = 'compose';
 }
@@ -49,7 +53,7 @@ export function closeCompose() {
 export function insertIntoComposer(text) {
   const s = target();
   if (!s) return false;
-  drafts.append(s.id, text);
+  drafts.append(s.id, text, s.label);
   openCompose(s.id);
   return true;
 }
@@ -60,24 +64,47 @@ export const focusedDraft = () => {
   return s?.kind === 'claude' ? drafts.get(s.id) : '';
 };
 
+const savedLabel = (at, nowMs) => {
+  const d = Math.max(0, Math.floor((nowMs - at) / 1000));
+  return d < 60 ? `saved ${d}s ago` : d < 3600 ? `saved ${Math.floor(d / 60)}m ago` : `saved ${Math.floor(d / 3600)}h ago`;
+};
+
 export function ComposeDialog() {
   const sid = composeSid.value;
   const s = model.value.sessions[sid];
   const ref = useRef(null);
   const [text, setText] = useState(drafts.get(sid));
   const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(t); }, []);
   if (!s) { queueMicrotask(closeCompose); return null; }
   const live = isLive(s);
   const over = tooLarge(text);
   const can = live && !busy && !over && text.trim() !== '';
+  const at = text === '' ? null : drafts.savedAt(sid);
 
-  const change = (e) => { setText(e.target.value); drafts.set(sid, e.target.value); };
+  const change = (e) => { setText(e.target.value); drafts.set(sid, e.target.value, s.label); };
+  // Put `next` in the editor; what was there is kept in Recent first, so a load never loses a draft.
+  const replace = (next) => {
+    if (text.trim() !== '' && text !== next) drafts.snapshot(sid, s.label, text);
+    setText(next);
+    drafts.set(sid, next, s.label);
+    ref.current?.focus();
+  };
+  const append = (extra) => { setText(drafts.append(sid, extra, s.label)); ref.current?.focus(); };
+  const clear = () => {
+    drafts.snapshot(sid, s.label, text);
+    drafts.clear(sid);
+    setText('');
+    ref.current?.focus();
+  };
   async function go(submit) {
     if (!can) return;
     setBusy(true);
     const ok = await paste(sid, text, submit);
     setBusy(false);
     if (!ok) return;
+    drafts.snapshot(sid, s.label, text);
     drafts.clear(sid);
     closeCompose();
     setTimeout(() => focusTerminal(sid), 0);
@@ -86,12 +113,20 @@ export function ComposeDialog() {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go(true); }
   };
   return html`<${Dialog} title=${`Compose prompt · ${s.label}`} testid="compose" wide onClose=${closeCompose}>
-    <textarea ref=${ref} class="compose-text" data-testid="composer" data-autofocus value=${text} disabled=${!live}
-      placeholder=${live ? 'Write the prompt. Enter adds a line.' : 'Not running. Resume it to write a prompt.'}
-      aria-label=${`Prompt for ${s.label}`} spellcheck=${false} onInput=${change} onKeyDown=${key}></textarea>
-    ${over ? html`<p class="wz-warn" role="alert" data-testid="compose-over">${OVER}</p>` : null}
-    <div class="dialog-actions">
-      <span class="compose-hint">Ctrl+Enter sends · Esc keeps the draft</span>
+    <div class="compose-body">
+      <div class="compose-main">
+        <textarea ref=${ref} class="compose-text" data-testid="composer" data-autofocus value=${text} disabled=${!live}
+          placeholder=${live ? 'Write the prompt. Enter adds a line.' : 'Not running. Resume it to write a prompt.'}
+          aria-label=${`Prompt for ${s.label}`} spellcheck=${false} onInput=${change} onKeyDown=${key}></textarea>
+        ${over ? html`<p class="wz-warn" role="alert" data-testid="compose-over">${OVER}</p>` : null}
+      </div>
+      <${ComposeSide} sid=${sid} text=${text} now=${tick} onReplace=${replace} onAppend=${append} />
+    </div>
+    <div class="dialog-actions compose-foot">
+      <span class="compose-hint" data-testid="compose-saved" title="The draft is kept in this browser, so a reload or a crash does not lose it">${text === '' ? '' : at ? savedLabel(at, tick) : 'saving…'}</span>
+      <span class="compose-hint" title="Esc closes and keeps the draft">Ctrl+Enter sends</span>
+      <button type="button" class="btn" data-testid="compose-clear" disabled=${text === ''} onClick=${clear} title="Empty the editor. The text stays in Recent">Clear</button>
+      <button type="button" class="btn" data-testid="compose-save-as" disabled=${text.trim() === '' || over} onClick=${() => saveAs(text)} title="Save this prompt under a name, for any session">Save as…</button>
       <button type="button" class="btn" data-testid="compose-insert" disabled=${!can} onClick=${() => go(false)} title="Put the text in claude's input box without sending it">Insert</button>
       <button type="button" class="btn btn-primary" data-testid="compose-send" disabled=${!can} onClick=${() => go(true)} title="Paste it and press Enter (Ctrl+Enter)">Send</button>
     </div>
@@ -108,7 +143,7 @@ export function Composer({ s }) {
   const grow = (el) => { el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 168)}px`; };
   const change = (e) => {
     setText(e.target.value);
-    drafts.set(s.id, e.target.value);
+    drafts.set(s.id, e.target.value, s.label);
     grow(e.target);
   };
 
@@ -116,6 +151,7 @@ export function Composer({ s }) {
     if (!live || busy || text.trim() === '') return;
     setBusy(true);
     if (await paste(s.id, text, true)) {
+      drafts.snapshot(s.id, s.label, text);
       drafts.clear(s.id);
       setText('');
       if (ref.current) ref.current.style.height = 'auto';
@@ -137,6 +173,9 @@ export function Composer({ s }) {
 }
 
 export function installCompose() {
+  // a session that goes away leaves its draft in Recent; the tab closing flushes the pending save
+  onServerEvent((ev) => { if (ev.ev === 'session_removed') drafts.drop(ev.sid); });
+  addEventListener('pagehide', () => drafts.flush());
   defineAction('compose', () => { if (overlay.value === 'compose') closeCompose(); else openCompose(); });
   register({ id: 'compose', group: 'Prompt', title: 'Compose prompt', keys: 'Alt+O', run: () => openCompose() });
 }

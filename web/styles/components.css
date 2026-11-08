@@ -258,6 +258,27 @@ input[type="radio"] { accent-color: var(--accent); }
 .compose-text:hover { border-color: var(--border-strong); }
 .compose-text:disabled { opacity: 0.55; }
 .compose-text::placeholder { color: var(--text-faint); }
+.compose-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--space-4); align-items: stretch; }
+.compose-main { min-width: 0; }
+.compose-foot { align-items: center; flex-wrap: nowrap; }
+.compose-foot .compose-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compose-foot .btn { flex: none; }
+.compose-foot .compose-hint { margin-right: 0; }
+.compose-foot .compose-hint:first-child { flex: none; min-width: 14ch; margin-right: var(--space-3); color: var(--steel); }
+.compose-foot .compose-hint + .compose-hint { margin-right: auto; }
+.compose-side { display: flex; flex-direction: column; min-width: 0; min-height: 40vh; max-height: 60vh; border-left: var(--hair) solid var(--border); padding-left: var(--space-4); background: var(--surface-2); }
+.compose-side .host-tabs { margin-bottom: var(--space-3); flex: none; }
+.lib-pane { display: flex; flex-direction: column; gap: var(--space-2); min-height: 0; flex: 1; }
+.lib-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; border-top: var(--hair) solid var(--border); }
+.lib-item { display: flex; flex-direction: column; gap: 2px; padding: var(--space-2) var(--space-2) var(--space-2) 0; border-bottom: var(--hair) solid var(--border); position: relative; }
+.lib-name { font-family: var(--font-mono); color: var(--text-strong); font-weight: 400; font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-line { color: var(--text-muted); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-sans); }
+.lib-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: 2px; }
+.lib-recent { flex-direction: row; align-items: stretch; padding: 0; }
+.lib-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; background: none; border: 0; border-left: var(--hair) solid transparent; padding: var(--space-2); color: inherit; }
+.lib-open:hover { background: var(--hover); border-left-color: var(--accent); }
+.lib-x { flex: none; align-self: center; }
+@media (max-width: 759px) { .compose-body { grid-template-columns: minmax(0, 1fr); } .compose-side { min-height: 0; max-height: 30vh; border-left: 0; padding-left: 0; } }
 .compose-hint { margin-right: auto; align-self: center; color: var(--text-muted); font-size: var(--fs-xs); letter-spacing: var(--track-mono); text-transform: uppercase; }
 
 /* ---- tabs: drawer tabs, segmented controls, host tabs. Mono uppercase, Steel, Bone on hover,
