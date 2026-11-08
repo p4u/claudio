@@ -670,13 +670,13 @@ input[type="radio"] { accent-color: var(--accent); }
 .hosts-btn { display: inline-flex; align-items: center; gap: 6px; }
 .hosts-btn::after { content: "▾"; color: var(--text-muted); }
 .hosts-sum { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.hosts-menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 50; min-width: 340px; max-width: 460px; padding: 4px 0; display: flex; flex-direction: column; gap: 0; }
+.hosts-menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 50; width: max-content; min-width: 280px; max-width: 520px; padding: 4px 0; display: flex; flex-direction: column; gap: 0; }
 .hosts-row { display: flex; align-items: center; gap: var(--space-3); width: 100%; padding: 6px var(--space-3); min-height: 36px; background: none; border: 0; border-left: var(--hair) solid transparent; color: var(--text-strong); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
 .hosts-row:hover, .hosts-row:focus-visible { background: var(--hover); border-left-color: var(--accent); }
-.hosts-glyph { font-size: var(--fs-2xs); }
+.hosts-glyph { flex: none; font-size: var(--fs-2xs); }
 .hosts-row[data-conn="up"] .hosts-glyph { color: var(--state-working); }
 .hosts-row[data-conn="connecting"] .hosts-glyph { color: var(--state-waiting); }
 .hosts-row[data-conn="down"] .hosts-glyph, .hosts-row[data-conn="down"] .hosts-name { color: var(--state-error); }
-.hosts-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hosts-ver { color: var(--text-muted); font-size: var(--fs-xs); min-width: 3.5em; text-align: right; }
+.hosts-name { flex: 1 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosts-ver { flex: 0 1 auto; min-width: 3.5em; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--fs-xs); text-align: right; }
 .hosts-add { color: var(--text-2); border-top: var(--hair) solid var(--border); margin-top: 4px; }

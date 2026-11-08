@@ -47,7 +47,7 @@ function HostRow({ host, onPick }) {
   const title = host.error ? `${host.name}: ${host.error}` : `${host.name}${host.version ? ` · claudio ${host.version}` : ''}${host.outdated ? ' · update pending' : ''}${host.connecting ? ' · connecting' : ''}`;
   return html`<button type="button" role="menuitem" class="hosts-row" data-testid="host-chip" data-host=${host.name} data-conn=${state} title=${title}
     aria-label=${`Host ${host.name}, ${host.connected ? 'connected' : host.connecting ? 'connecting' : 'offline'}${upd ? ', claude update available' : ''}`} onClick=${() => onPick(host.name)}>
-    <span class="hosts-glyph" aria-hidden="true">${g}</span><span class="hosts-name">${host.name}</span>
+    <span class="hosts-glyph" aria-hidden="true">${g}</span><span class="hosts-name" title=${host.name}>${host.name}</span>
     <span class="chip-bars">${st ? html`<${MiniBar} value=${st.cpu} label="cpu" /><${MiniBar} value=${st.mem_total ? (100 * st.mem_used) / st.mem_total : 0} label="mem" />` : null}</span>
     <span class="hosts-ver">${ver ?? ''}</span>
     ${host.outdated ? html`<span class="chip-badge" title="update pending">↑</span>` : null}${upd ? html`<span class="chip-badge chip-update" data-testid="claude-update-chip" title=${`claude ${upd.have ?? '?'} → ${upd.want ?? '?'} is available.`}>↑</span>` : null}

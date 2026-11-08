@@ -103,7 +103,7 @@ async function connectApi(port, token) {
   };
 }
 
-export async function startServer({ proxy = false } = {}) {
+export async function startServer({ proxy = false, hosts = [] } = {}) {
   const home = os.homedir();
   const base = path.join(home, '.cache/claudio/web-e2e');
   const root = path.join(base, crypto.randomBytes(4).toString('hex'));
@@ -113,6 +113,8 @@ export async function startServer({ proxy = false } = {}) {
   fs.chmodSync(path.join(root, 'run'), 0o700);
   fs.writeFileSync(path.join(root, 'cfg/claudio/config.toml'),
     '[claude]\nupdate_check = "off"\nremote_check = "off"\ninstall = "off"\n');
+  // Remembered remote hosts: they show in the Hosts menu (offline; the ssh to them just fails).
+  if (hosts.length) fs.writeFileSync(path.join(root, 'cfg/claudio/web-state.json'), JSON.stringify({ hosts }));
   fs.copyFileSync(path.join(here, 'fake-claude.sh'), path.join(root, 'fake-claude'));
   fs.chmodSync(path.join(root, 'fake-claude'), 0o755);
   const dirs = {
