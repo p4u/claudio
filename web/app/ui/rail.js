@@ -8,6 +8,7 @@ import { HostChip, attentionCount } from './topbar.js';
 import { stateClass } from '../queue.js';
 import { Glyph, ago, now, tone } from './glyph.js';
 import { infoProps } from './info.js';
+import { mergeHandlers } from '../props.js';
 import { openSession, openAndEnter } from './session-actions.js';
 
 export const SID_TYPE = 'application/x-claudio-sid';
@@ -37,6 +38,12 @@ export function reorder(sid, target, after) {
 }
 
 const attnLine = (s) => (s.attention ? [s.attention.message, s.attention.detail].filter(Boolean).join(' · ') : '');
+
+// A drag that carries the session id (board rows use only this; the rail adds its reorder targets).
+export function dragSource(s) {
+  const { draggable, onDragStart, onDragEnd } = dragProps(s);
+  return { draggable, onDragStart, onDragEnd };
+}
 
 function dragProps(s, mark) {
   return {
@@ -75,7 +82,7 @@ function SessionCard({ s, multiHost }) {
   const current = selected.value === s.id || focused.value === s.id;
   return html`<div class="card" role="button" tabindex="0" data-testid="session-card" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
     data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${current}
-    onClick=${() => openSession(s.id)} onKeyDown=${cardKeys(s)} ...${dragProps(s)} ...${infoProps(s)}>
+    onClick=${() => openSession(s.id)} onKeyDown=${cardKeys(s)} ...${mergeHandlers(dragProps(s), infoProps(s))}>
     <${Glyph} s=${s} /><span class="card-label">${s.label}</span>
     ${s.dormant ? html`<span class="chip chip-quiet">dormant</span>` : null}
     ${multiHost ? html`<span class="chip" title=${`host ${s.host}`}>${s.host}</span>` : null}<span class="card-age">${ago(s.state_since, now.value)}</span>
@@ -93,7 +100,7 @@ function RailStrip({ all }) {
       return html`<button type="button" key=${s.id} class="strip-card" data-testid="session-card" data-compact="true" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
         data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${selected.value === s.id || focused.value === s.id}
         aria-label=${`${s.label} on ${s.host}${attn ? `: ${attn}` : ''}`}
-        onClick=${() => openSession(s.id)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${dragProps(s)} ...${infoProps(s)}>
+        onClick=${() => openSession(s.id)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${mergeHandlers(dragProps(s), infoProps(s))}>
         <${Glyph} s=${s} />
       </button>`;
     })}

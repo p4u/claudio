@@ -8,7 +8,8 @@ import { ApproveButtons } from './approve.js';
 import { infoProps } from './info.js';
 import { Gauge, Branch } from './strip.js';
 import { openSession, openAndEnter, dropSession } from './session-actions.js';
-import { SID_TYPE } from './rail.js';
+import { SID_TYPE, dragSource } from './rail.js';
+import { mergeHandlers } from '../props.js';
 import { narrow } from './narrow.js';
 
 function Row({ s }) {
@@ -16,7 +17,7 @@ function Row({ s }) {
   const attn = s.attention ? [s.attention.message, s.attention.detail].filter(Boolean).join(' · ') : '';
   return html`<div class="board-row" role="row" tabindex="0" data-testid="board-row" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind}
     data-tone=${tone(s)} data-fresh=${!!fresh.value[s.id]} aria-current=${current} aria-selected=${selected.value === s.id} onClick=${() => openSession(s.id)}
-    onKeyDown=${(e) => { if (e.target === e.currentTarget && e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${infoProps(s, true)}>
+    onKeyDown=${(e) => { if (e.target === e.currentTarget && e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${mergeHandlers(dragSource(s), infoProps(s, true))}>
     <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${stateClass(s)}">${s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : CLASS_NAME[stateClass(s)]}</span></span>
     <span class="bcol bcol-label" title=${s.label}>${s.label}</span>
     <span class="bcol bcol-host"><span class="chip">${s.host}</span></span>
