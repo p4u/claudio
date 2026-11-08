@@ -1,6 +1,6 @@
 # Web UI (`claudio web`): design
 
-Status: draft   Class: architectural
+Status: audited (APPROVE WITH CHANGES, all findings folded in; approval delegated by the owner)   Class: architectural
 Owner decisions so far (2026-11-08): build a modern, dynamic web UI with every capability of
 the terminal manager plus what a browser enables; style "a bit retro-arcade, not too much";
 run the delivery autonomously to the end (the owner delegated spec and plan approval).
@@ -14,7 +14,8 @@ session, so the user switches tab to learn *what* a session waits for (`Alt+a` c
 attention). It shows one pane at a time, cannot render tables, KaTeX or mermaid properly (the
 reader is a cell-grid approximation, `src/tui/reader/`, `src/tui/typeset/`,
 `src/tui/diagram/`), and its git view is history only (`src/daemon/git.rs` has log/commit/diff
-of commits, nothing for the working tree). Notifications rely on OSC 9, which many terminals
+of commits; `git_status.rs` gives only counts for the status bar, no file list or working-tree
+patch). Notifications rely on OSC 9, which many terminals
 ignore.
 
 ## Goals
@@ -133,18 +134,26 @@ claudio web [--listen 127.0.0.1:7337] [--allow-host NAME]... [--no-open] [--prin
 
 ### Authentication and request checks
 
-- Token: 32 bytes from `/dev/urandom`, hex, in `<config dir>/web-token`, mode 0600, created on
-  first start, reused afterwards so bookmarks keep working.
+- Token: 32 bytes from `/dev/urandom`, hex, in `paths::config_dir()/web-token`, mode 0600,
+  created on first start, reused afterwards so bookmarks keep working. `web-token` and
+  `web-state.json` live in `paths::config_dir()` (beside `config.toml` and `state.json`),
+  written with `paths::write_atomic`, mode 0600; `state.json` is read with
+  `tui::state::ClientState::load` (made `pub(crate)`), never written.
 - The token travels in the URL **fragment** (`#t=`), never in a query string, so it is not in
-  server logs or `Referer`. `index.html`'s script posts it to `POST /api/login {"token": …}`,
+  server logs or `Referer`. `index.html` loads `app/boot.js` (no inline script), which posts it to `POST /api/login {"token": …}`,
   then removes the fragment with `history.replaceState`.
 - `/api/login` compares in constant time. Success sets `claudio_web=<32 random bytes hex>;
   HttpOnly; SameSite=Strict; Path=/` and records the session (in memory; idle expiry 24 h; at
   most 64, oldest dropped). Failure answers 401; more than 5 failures in 60 s answers 429 for
-  the rest of the minute.
+  the rest of the minute. The Origin check runs before the body is read; only requests that
+  passed it count towards the limit. The limit is global (every loopback client shares
+  `127.0.0.1`).
 - Every request: the `Host` header must be in the accepted set, else 421. Every request other
-  than `GET`/`HEAD` and every WebSocket upgrade: the `Origin` header must be present and its
-  host[:port] must equal the `Host` header, else 403. `/api/*` (except login) and `/ws`
+  than `GET`/`HEAD`, and every WebSocket upgrade, must carry an `Origin` whose scheme is
+  `http` or `https` and whose host[:port] is in the accepted set (the three loopback forms
+  plus every `--allow-host NAME`, with or without the listen port); else 403. With any
+  `--allow-host`, the cookie also gets `Secure` and the docs tell the proxy to terminate TLS.
+  `--allow-host` values are compared case-insensitively. `/api/*` (except login) and `/ws`
   without a valid cookie answer 401. Static assets need no cookie (they hold no data).
 - Headers on every response: `Content-Security-Policy: default-src 'self'; script-src 'self';
   style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src
@@ -156,7 +165,10 @@ claudio web [--listen 127.0.0.1:7337] [--allow-host NAME]... [--no-open] [--prin
   model output shown in the UI. Must hold: no request without the token-derived cookie acts on
   sessions; no secret (proxy tokens, plugin env values, `Spawn.env`) is ever sent to the
   browser; model output rendered as HTML is sanitized; the token file and `web-state.json`
-  are 0600.
+  are 0600. Holding the cookie equals holding the member's shell on every connected host,
+  remote hosts included; the token file is as sensitive as an SSH key. `claudio web` logs
+  every `session.shell`, `session.spawn`, `session.kill`, `session.approve` and
+  `extensions.action` with its op, host and session id (never its text).
 
 ### Browser protocol (WebSocket, version 1)
 
@@ -175,7 +187,9 @@ Text frames are JSON; binary frames carry terminal bytes.
 - Binary server → client: `0x01 ‖ session uuid (16 bytes) ‖ bytes` (PTY output; the first
   frame after `attached` is the snapshot). Binary client → server: `0x02 ‖ uuid ‖ bytes`
   (input, ≤ 64 KiB per frame).
-- Limits: text frame ≤ 1 MiB, binary ≤ 64 KiB + 17; larger frames close the socket with 1009.
+- Limits: client→server text frame ≤ 64 KiB, client→server binary ≤ 64 KiB + 17 (input);
+  larger frames close the socket with 1009. Server→client frames are bounded by the daemon's
+  `MAX_FRAME` (1 MiB) plus 17 bytes; the client accepts up to 2 MiB.
   A tab whose outgoing queue exceeds 8 MiB is disconnected (it reconnects and re-snapshots).
 - DTOs carry no secrets: `Session {id, host, kind, cwd, name, title, label, state, attention,
   claude_session_id, model, context_tokens, output_tokens, turns, git, created_at, pid,
@@ -184,17 +198,21 @@ Text frames are JSON; binary frames carry terminal bytes.
   version}`.
 - Ops (args → data):
   - `hosts.list`, `hosts.candidates` (ssh config + MRU), `hosts.connect {host}`,
-    `hosts.disconnect {host}`.
+    `hosts.disconnect {host}`. ssh runs with `BatchMode=yes` (no prompts): `hosts.connect`
+    answers `ok:false` with the last 3 sanitized stderr lines of ssh (host keys, agent,
+    permissions), and the Host DTO's `error` carries the same text until the next attempt.
   - `session.attach {id,rows,cols}`, `session.detach {id}`, `session.resize {id,rows,cols}`,
     `session.spawn {host,cwd,resume?,proxy:{kind:"default"|"direct"|"profile",name?},
     first_party?,name?,prompt?}` → `{id}`, `session.shell {host,cwd,name?}` → `{id}`,
-    `session.respawn {id,fresh}`, `session.kill {id}`, `session.rename {id,name|null}`,
+    `session.respawn {id,fresh,proxy?}`, `session.kill {id}`, `session.rename {id,name|null}`,
     `session.paste {id,text,submit}`, `session.approve {id,decision:"approve"|"deny",
     attention_seq}`, `session.order {ids}`.
   - `fs.list {host,path}`, `fs.projects {host}`, `claude.sessions {host,cwd}`.
   - `reader.answers {id}`, `reader.last_prompt {id}`.
-  - `search {query}` (every connected host that has the `search` feature; merged, newest
-    first, each hit tagged with its host).
+  - `search {query}` fans out to every connected host that has the `search` feature, one
+    request per host at a time per hub (queued, 10 s deadline), merged newest first, each hit
+    tagged with its host; a host that answers `search busy` is retried once after 500 ms,
+    then reported in `data.failed: [{host, error}]`.
   - `git.status {id}`, `git.worktree_diff {id,path,staged}`, `git.log {id,all,skip}`,
     `git.commit {id,oid}`, `git.diff {id,oid,file}`.
   - `proxy.stats {profile,window:"24h"|"7d"|"30d"}`, `proxy.credential {id}`,
@@ -211,23 +229,42 @@ Text frames are JSON; binary frames carry terminal bytes.
 - The hub keeps, per host, the `Sessions` list and applies each `SessionEvent` exactly as
   `App::on_event` does for the fields the DTO carries (Meta fields `None` = no news; `Created`
   adds unless `ephemeral`; `Removed` deletes; a host disconnect marks its sessions `unknown`).
-  Each change is broadcast to every tab as a `session` event.
+  Each change is broadcast to every tab as a `session` event. `Latex` is taken as the
+  `latex` lens list only from a host without the `lens` feature; `Lens` only from a host with
+  it; a list with a lower `seq` than the one held is dropped, and `seq` resets to 0 on
+  `attached`.
 - Journaled sessions without a pid are `dormant`; the UI offers *Resume* (respawn with
   `--resume`), never auto-respawns them (the TUI's recovery may run concurrently; spawn is
   idempotent by id anyway).
 - Attach is reference-counted per session across tabs and panes: the first subscriber sends
   `Attach`, the last unsubscribe sends `Detach`. Output is fanned out to subscribed tabs. Only
   the focused pane sends `session.resize`; every pane follows the size in `attached` events
-  (the daemon re-sends `Attached` when another client resizes).
+  (the daemon re-sends `Attached` when another client resizes). Last writer wins, as for a
+  second TUI. A pane never sends `session.resize` in response to an `attached` event (no
+  echo) and debounces its own fit by 250 ms; a pane sized by another client shows the
+  foreign size in its header.
 - `session.paste` wraps the text in bracketed paste (`ESC[200~ … ESC[201~`, with any
   `ESC[201~` inside removed and C0 controls other than `\t`, `\n` removed), appends `\r` when
   `submit`, ≤ 64 KiB.
-- `session.approve` sends `\r` (approve: claude's highlighted first option, "Yes") or `ESC`
-  (deny) only when the hub's state for that session is `needs_approval` and its
-  `attention.seq` equals the request's `attention_seq`; otherwise it answers
-  `ok:false, error:"stale"`. The UI shows which key each button sends.
-- `session.spawn` with `prompt`: after the spawn, the hub waits (≤ 60 s) for the session's
-  first `needs_input` state and pastes the prompt with `submit`.
+- `session.approve` is accepted only when the hub's state for the session is
+  `needs_approval`, its `attention.kind` is `permission_prompt` or
+  `worker_permission_prompt`, and `attention.seq` equals the request's `attention_seq`;
+  otherwise `ok:false, error:"stale"` (or `"not a permission prompt"`). `approve` sends `\r`,
+  which selects the option claude highlights by default ("Yes"); `deny` sends `ESC`, which
+  rejects the tool and interrupts the turn. Because another client may have moved the
+  highlight, the buttons are labelled with the key they send ("Enter" and "Esc") and the card
+  has *Open* next to them. Elicitation dialogs get only *Open* (no Approve/Deny). On a host
+  without the `attention` feature the hub reports `attention: null` and `attention_seq` must be
+  `0`; `seq` on hosts with the feature starts at 1, so `0` never matches a real attention.
+  There the kind is unknown, so the card offers Approve/Deny with the warning "permission or
+  elicitation: check the terminal".
+- `session.spawn` with `prompt`: the hub attaches to the new session itself (its own
+  subscriber, at the spawn's `rows`/`cols` so the PTY size does not change), waits for
+  `needs_input`, then for the output to contain `ESC[?2004h` and to be quiet for 500 ms, then
+  pastes the prompt with `submit`; it gives up after 60 s with a `notice`. While the pending
+  prompt exists the pane shows "opening prompt pending". The hub's subscriber is released
+  after the paste (the pane's own subscription is independent). `session.spawn` takes
+  `rows`/`cols` (the pane's size).
 
 ### Spawn composition (parity with the TUI)
 
@@ -244,18 +281,33 @@ Text frames are JSON; binary frames carry terminal bytes.
   (checkboxes per item, all on by default); *Skip* spawns without it for this time.
 - Extensions: the session's lenses from `Registry::session_extensions()` built from the same
   config as the TUI.
+- `config.toml` has two writers (TUI and web). The web re-reads `config.toml` after every
+  save and on a 5 s mtime poll (`spawn_blocking`), and applies the file's
+  `[extensions]`/`[plugins.*]` to its registry; a lost edit is thus visible, not silent.
+  (Cross-process locking is out of scope.)
 - `web-state.json` records the proxy profile and first-party flag of each session the web
-  started (needed for `session.respawn`); for a session it did not start it falls back to the
-  TUI's `state.json` (read only), else no proxy.
+  started (needed for `session.respawn`); for a session it did not start it reads the TUI's
+  `state.json` (read only). When neither knows, `session.respawn` answers `ok:false,
+  error:"proxy unknown"` and the UI asks (default/direct/profile, pre-selecting `[proxy]
+  default`) before sending again with an explicit `proxy` argument.
 
 ### Daemon additions (backward compatible)
 
 1. Attention detail. `claude::state::Tracker` keeps the last `PreToolUse` `tool_name` and a
    one-line summary of `tool_input` (`command` for Bash, `file_path` for Edit/Write/Read,
-   `url` for WebFetch, `pattern` for Grep/Glob, else compact JSON), and the `message` of the
-   Notification. On entering `NeedsApproval` or `NeedsInput` it emits, after the `State`
-   event, `SessionEvent::Attention {seq, message, tool, detail}` (`seq` increments per
-   session). All strings pass `claude::latex::sanitize`, `message` ≤ 512 bytes, `detail` ≤
+   `url` for WebFetch, `pattern` for Grep/Glob, else compact JSON), and emits
+   `SessionEvent::Attention {seq, kind, message, tool, detail}` for **every** Notification
+   whose type maps to `NeedsApproval` or `NeedsInput` (and for the `SessionStart` that sets
+   `NeedsInput`, with kind `session_start`), after any `State` event of the same hook and
+   whether or not the state changed; `seq` increments per emitted `Attention`, starting at 1.
+   `kind` is the hook's `notification_type` (`permission_prompt`,
+   `worker_permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`, `idle_prompt`,
+   `agent_needs_input`), sanitized, ≤ 64 bytes; `message` is the Notification's `message`.
+   `tool`/`detail` are best-effort (they name the most recent `PreToolUse`, which may differ
+   from the prompting tool in a parallel burst) and the UI shows `message` first. A
+   `PreToolUse`, `UserPromptSubmit`, `Stop` or `StopFailure` clears the current attention
+   (`SessionInfo.attention = None`; clients clear theirs on any `State` event that leaves
+   `needs_approval`/`needs_input`). All strings pass `claude::latex::sanitize`, `message` ≤ 512 bytes, `detail` ≤
    1024 bytes (cut on a char boundary). `SessionInfo` gains `#[serde(default)] attention:
    Option<Attention>` (the current one while the state wants attention, else `None`).
    `DAEMON_FEATURES` gains `"attention"`.
@@ -264,7 +316,13 @@ Text frames are JSON; binary frames carry terminal bytes.
    `--numstat` for staged and unstaged; ≤ 2000 files). `Msg::GitWorktreeDiff {cwd, path,
    staged}` → `Msg::GitPatch` (same caps and sanitizing as `GitDiff`; untracked files diffed
    against `/dev/null`). Both run through the existing git runner (deadline, scrubbed env, no
-   textconv/ext-diff, per-client concurrency limit). `DAEMON_FEATURES` gains `"worktree"`.
+   textconv/ext-diff, per-client concurrency limit; `server.rs` routes `GitWorktree` and
+   `GitWorktreeDiff` through `spawn_git` and `git::handle`, like the three existing ops).
+   `path` must be relative, contain no `..` component or NUL, and name an entry of the status
+   the daemon itself produced (the daemon re-runs `git status --porcelain=v2 -z` and requires
+   an exact match); an untracked entry is diffed with `git diff --no-index -- /dev/null
+   <path>` after `lstat` shows a regular file (symlinks are refused). Anything else answers
+   `Error "no such path"`. `DAEMON_FEATURES` gains `"worktree"`.
 
 Compatibility matrix:
 
@@ -273,7 +331,7 @@ Compatibility matrix:
 | new daemon → old TUI/web | `Attention` deserializes to `SessionEvent::Unknown`; extra `SessionInfo.attention` ignored by serde |
 | old daemon → new web | no `attention` feature: board shows state without detail; approve works on state only (seq 0) |
 | new web → old daemon, `GitWorktree*` | `Error "unsupported op…"`; the UI checks the feature first and hides the Changes tab |
-| browser protocol v1 ↔ other versions | `hello.v` mismatch → the page shows "server updated" and reloads |
+| browser protocol v1 ↔ other versions | `hello.v` mismatch → the page shows "server updated" and reloads once; a second mismatch in a row shows the message without reloading (`Cache-Control: no-store` on `/` and `index.html`) |
 
 Rollout: one release (daemons are replaced by newer builds through freshness). Rollback: the
 previous release; the additions are inert to old clients.
@@ -286,6 +344,17 @@ previous release; the additions are inert to old clients.
   markdown, highlight.js (common languages) for code. All vendored, pinned, with licenses in
   `web/vendor/LICENSES.md`. Fonts (OFL): a pixel display face for the logo, headers and badges
   only, JetBrains Mono for UI and terminals, Inter for reader prose.
+- Vendored files (exact list in `web/vendor/MANIFEST.txt` with version, URL and SHA-256):
+  mermaid's ESM build (`mermaid.esm.min.mjs` + its `chunks/mermaid.esm.min/*.mjs`);
+  `katex.min.js`, `katex.min.css` and `fonts/*.woff2` only (editing the CSS is forbidden, so
+  the ttf/woff `url()`s stay and 404 harmlessly); xterm.js + the 4 addons; highlight.js
+  `common` (ESM); preact, htm, signals, marked, dompurify. Fonts: two weights each of
+  JetBrains Mono and Inter (woff2), one pixel face. Assets are stored gzipped (level 9) in the
+  binary and served with `Content-Encoding: gzip` (decompressed on the fly for a client
+  without gzip), so the budget counts gzipped bytes. The plan measures the gzipped set before
+  any Rust work; if it exceeds 3.5 MiB, mermaid is reduced to the diagram chunks for
+  flowchart, sequence, class, state, er, gantt and pie (the others render as a code block with
+  a notice).
 - Layout: top bar (logo, host chips with cpu/mem, 5h/7d gauges of the active profile, palette
   button, settings); left rail (attention queue on top, then sessions grouped by host and by
   repo, collapsible, drag to reorder); centre pane grid (1, 2 side by side, or 2×2; drag a
@@ -315,6 +384,11 @@ previous release; the additions are inert to old clients.
   with copy buttons, copy answer, a formulas list, lens items. Model text is untrusted: marked
   output goes through DOMPurify; mermaid SVG goes through DOMPurify's SVG profile; KaTeX runs
   with `trust:false`, `maxSize`, `maxExpand`, and per-formula errors render as code.
+  Built-in lenses render natively (`latex` → KaTeX, `diagram` → mermaid). An external lens's
+  item is rendered through the extension host exactly as the TUI's reader does and shown as
+  its `block` rows (or `inline`) in a monospace `<pre>`, text only; a `document` action result
+  is markdown through marked + DOMPurify; `paste` goes through `session.paste`; `list` opens
+  the palette-style picker.
 - Changes: working-tree file list (staged/unstaged/untracked/conflicts) refreshed when the
   session's `git` meta changes, unified and side-by-side diff with line numbers. History: log
   pages, commit details, per-file patches.
@@ -378,22 +452,41 @@ previous release; the additions are inert to old clients.
 - [ ] AC4: terminal round trip: attach → `attached` + snapshot binary frame; input frame
       reaches the fake claude; resize forwarded (integration test).
 - [ ] AC5: attention: `Tracker` unit tests (PreToolUse Bash + permission Notification →
-      `State` then `Attention{tool:"Bash",detail:<command>}`; caps; sanitize); daemon test that
-      `SessionInfo.attention` is set while waiting and cleared after.
+      `State` then `Attention{kind:"permission_prompt",tool:"Bash",detail:<command>}`; caps;
+      sanitize; `idle_prompt` after `SessionStart` emits `Attention` with no `State`;
+      `permission_prompt` then `elicitation_dialog` emits two `Attention`s with increasing
+      `seq`); daemon test that `SessionInfo.attention` is set while waiting and cleared after.
 - [ ] AC6: worktree ops: daemon tests on a temp repo with staged, unstaged, untracked and
-      renamed files; caps; old-daemon compatibility (unknown op → Error).
-- [ ] AC7: approve guard: stale `attention_seq` → `stale`; matching → `\r` reaches the PTY.
+      renamed files; caps; old-daemon compatibility (unknown op → Error); `GitWorktreeDiff`
+      with `../x`, an absolute path, a symlink and a path not in the status → `Error`; a stuck
+      `git` (fake binary that sleeps) does not block a concurrent `Sessions` request.
+- [ ] AC7: approve guard: stale `attention_seq` → `stale`; matching → `\r` reaches the PTY;
+      `elicitation_dialog` → `not a permission prompt`.
 - [ ] AC8: browser e2e (Playwright, `make test-web`, fake claude): login from the token URL;
       the board lists sessions with states; a session in needs-approval shows its attention
-      text in the queue and Approve resolves it; a pane shows the terminal and typed keys
+      text in the queue and Approve resolves it (an `elicitation_dialog` card has no Approve); a pane shows the terminal and typed keys
       echo; the wizard starts a session in a chosen dir; the reader renders a KaTeX formula and
       a mermaid diagram from a fixture transcript; the Changes tab lists a modified file and
-      shows its diff; the palette opens with Ctrl+Shift+Space then `k`; theme switch.
+      shows its diff; the palette opens with Ctrl+Shift+Space then `k`; theme switch. The page
+      registers a `securitypolicyviolation` listener; the e2e asserts zero violations after
+      rendering KaTeX, mermaid, highlighted code and a terminal. With `Notification` permission
+      granted (`context.grantPermissions(['notifications'])`), a fixture transition to
+      needs-approval in a hidden session calls `new Notification` once (stubbed on `window`)
+      and a second identical transition within the debounce window does not.
 - [ ] AC9: JS unit tests (`node --test web/tests`) for the protocol client, the attention
       queue ordering, the keymap/focus model, the markdown/latex/mermaid preprocessing and the
       notification debounce.
 - [ ] AC10: existing suites unchanged and green: `make test-unit`, `make test-manager`.
 - [ ] AC11: release binary grows by at most 4 MiB (measured and reported).
+- [ ] AC13: parity table in `docs/web.md`: one row per Goal-2 capability with the TUI key,
+      the web action, the WS op(s) and the test (e2e name or Rust test). Every row has a test
+      or a one-line manual check recorded in `.delivery/2026-11-08-web-ui/parity.md`.
+- [ ] AC14: e2e (fake claude, fake proxy as in `tests/manager.rs`): open a terminal tab and
+      run `echo ok`; rename, kill, restart a session; `search` finds a fixture conversation;
+      save and insert a snippet; toggle an extension off and on (config.toml line changes); a
+      plugin without choices opens the setup screen before spawn, Skip spawns without it;
+      `proxy.stats` renders the fixture window; `claude.update` with a fake installer shows
+      progress and completion.
 - [ ] AC12: docs: README section, `docs/web.md` (usage, security model, keys), CLAUDE.md
       architecture entries for `src/web/` and `web/`.
 
