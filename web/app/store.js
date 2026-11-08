@@ -1,5 +1,5 @@
 // Signals around model.js, fed by the protocol connection.
-import { signal } from '@preact/signals';
+import { signal, computed } from '@preact/signals';
 import { Connection, versionAction } from './proto.js';
 import { emptyModel, applySnapshot, applyEvent } from './model.js';
 import { toast } from './ui/toasts.js';
@@ -93,6 +93,12 @@ export function req(op, args) {
   });
 }
 
+// Like req, but a failure does not toast: the caller decides what to tell the person.
+export function reqQuiet(op, args) {
+  if (!connection) return Promise.reject(new Error('disconnected'));
+  return connection.request(op, args);
+}
+
 export function sendInput(sid, data) {
   connection?.sendInput(sid, data);
 }
@@ -103,3 +109,9 @@ export function setMode(m) {
 
 // The session the rail points at (a session id or null).
 export const selected = signal(null);
+
+// The session shown in the focused pane (a session id or null).
+export const focused = computed(() => {
+  const lay = model.value.layout;
+  return lay.panes[lay.focus] ?? null;
+});

@@ -1,136 +1,50 @@
 import { html } from 'htm/preact';
-import { signal } from '@preact/signals';
-import { model, mode, setMode, banner, selected, fresh, conn, serverInfo } from '../store.js';
-import { orderedSessions, groupSessions } from '../model.js';
+import { effect } from '@preact/signals';
+import { model, mode, setMode, banner, selected, focused, conn, serverInfo, onServerEvent } from '../store.js';
+import { orderedSessions } from '../model.js';
 import { appAction, isLeaveTerminal } from '../keymap.js';
 import { overlay, defineAction, runAction } from '../palette.js';
-import { Topbar, HostChip } from './topbar.js';
+import { settings } from '../settings.js';
+import { attentionQueue } from '../queue.js';
+import { makeNotifier, titleText } from '../notify.js';
+import { focusTerminal } from '../term.js';
+import { Topbar } from './topbar.js';
 import { Toasts } from './toasts.js';
 import { Modal, modal, closeModal } from './modal.js';
 import { Palette } from './palette.js';
 import { Help } from './help.js';
 import { Settings } from './settings.js';
+import { Glyph, glyphFor, ago } from './glyph.js';
+import { Rail } from './rail.js';
+import { Board } from './board.js';
+import { PaneGrid } from './pane.js';
+import { Queue, queueSessions } from './queue.js';
+import { NarrowView, narrow } from './narrow.js';
+import { showBoard, boardShown, setGridSize, focusPane, openSession, trackRemoved, ProxyChooserHost } from './session-actions.js';
 
-const GLYPH = { working: '⠸', needs_approval: '◆', needs_input: '?', idle: '✓', error: '✗', exited: '○', starting: '·', unknown: '·' };
-const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const STATE_NAME = { working: 'working', needs_approval: 'needs approval', needs_input: 'needs input', idle: 'idle', error: 'error', exited: 'exited', starting: 'starting', unknown: 'reconnecting' };
+export { glyphFor, Glyph, ago };
 
-const spin = signal(0);
-const now = signal(Date.now());
-const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-if (!reduced) setInterval(() => { spin.value = (spin.value + 1) % SPIN.length; }, 100);
-setInterval(() => { now.value = Date.now(); }, 20000);
-
-export function glyphFor(s) {
-  if (s.kind === 'shell' && s.state !== 'exited') return '$';
-  if (s.state === 'unknown') return '⇄';
-  if (s.state === 'working' && !reduced) return SPIN[spin.value];
-  return GLYPH[s.state] ?? '·';
+// Sessions waiting for the person (approval or input), approval first.
+export function attentionSessions(m) {
+  return attentionQueue(Object.values(m.sessions), Date.now()).filter((s) => s.state === 'needs_approval' || s.state === 'needs_input');
 }
 
-export function ago(sec, nowMs = Date.now()) {
-  if (!sec) return '';
-  const d = Math.max(0, Math.floor(nowMs / 1000 - sec));
-  if (d < 60) return `${d}s`;
-  if (d < 3600) return `${Math.floor(d / 60)}m`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h`;
-  return `${Math.floor(d / 86400)}d`;
-}
-
-export function Glyph({ s }) {
-  return html`<span class="glyph" role="img" aria-label=${s.kind === 'shell' ? 'terminal' : STATE_NAME[s.state]}>${glyphFor(s)}</span>`;
-}
-
-const asking = (s) => s.state === 'needs_approval' || s.state === 'needs_input';
-
-function SessionCard({ s }) {
-  const g = s.git;
-  const dirty = g ? g.staged + g.unstaged + g.untracked : 0;
-  return html`<button class="card" data-testid="session-card" data-sid=${s.id} data-state=${s.state} data-kind=${s.kind}
-    data-fresh=${!!fresh.value[s.id]} aria-current=${selected.value === s.id} onClick=${() => { selected.value = s.id; }}>
-    <span class="card-row"><${Glyph} s=${s} /><span class="card-label">${s.label}</span><span class="card-age">${ago(s.state_since, now.value)}</span></span>
-    <span class="card-meta">
-      ${s.kind === 'shell' ? html`<span class="chip">terminal</span>` : null}
-      ${s.branch ? html`<span class="chip">⎇ ${s.branch}${dirty ? ` ±${dirty}` : ''}</span>` : null}
-      ${s.model ? html`<span class="chip">${s.model}</span>` : null}
-      ${s.context_tokens ? html`<span class="chip">ctx ${Math.round(s.context_tokens / 1000)}k</span>` : null}
-    </span>
-  </button>`;
-}
-
-function QueueCard({ s }) {
-  const a = s.attention;
-  return html`<div class="qcard" data-testid="queue-card" data-sid=${s.id} data-state=${s.state} data-kind=${a?.kind ?? s.state} data-fresh=${!!fresh.value[s.id]}>
-    <div class="card-row"><${Glyph} s=${s} /><span class="card-label">${s.label}</span>
-      ${s.host !== 'local' ? html`<span class="chip">${s.host}</span>` : null}<span class="card-age">${ago(s.state_since, now.value)}</span></div>
-    <div class="qcard-msg">${a?.detail || a?.message || STATE_NAME[s.state]}</div>
-    <div class="qcard-foot"><span class="qcard-kind">${a?.kind ? a.kind.replace(/_/g, ' ') : STATE_NAME[s.state]}${a?.tool ? ` · ${a.tool}` : ''}</span>
-      <button class="btn btn-sm" data-testid="open-btn" onClick=${() => { selected.value = s.id; }}>Open</button></div>
+function StageBar({ board }) {
+  const lay = model.value.layout;
+  return html`<div class="stage-bar">
+    <button class="btn btn-sm" data-testid="board-btn" aria-pressed=${board} title="Show every session as a row" onClick=${() => { showBoard.value = !board; }}>Board</button>
+    <span class="stage-sep"></span>
+    <span class="stage-label">Panes</span>
+    ${[1, 2, 4].map((n) => html`<button class="btn btn-sm" data-testid="grid-btn" data-grid=${n} aria-pressed=${!board && lay.grid === n} aria-label=${`${n} pane${n > 1 ? 's' : ''}`} title=${n === 1 ? 'One pane' : n === 2 ? 'Two panes side by side' : 'Four panes in a grid'} onClick=${() => setGridSize(n)}>${n}</button>`)}
   </div>`;
 }
 
-export function attentionSessions(m) {
-  const list = orderedSessions(m).filter(asking);
-  return list.sort((a, b) => (a.state === b.state ? 0 : a.state === 'needs_approval' ? -1 : 1));
-}
-
-function Rail() {
-  const m = model.value;
-  const all = orderedSessions(m);
-  const queue = attentionSessions(m);
-  const groups = groupSessions(all);
-  return html`<nav class="rail" data-testid="rail" aria-label="Sessions">
-    <section class="rail-section">
-      <div class="section-head"><span>Needs you</span><span>${queue.length}</span></div>
-      <div class="queue" data-testid="queue">
-        ${queue.length === 0 ? html`<p class="rail-empty">Nothing waiting. All quiet.</p>` : queue.map((s) => html`<${QueueCard} key=${s.id} s=${s} />`)}
-      </div>
-    </section>
-    <section class="rail-section" style="padding-bottom:0"><div class="section-head"><span>Sessions</span><span>${all.length}</span></div></section>
-    <div class="rail-groups">
-      ${all.length === 0 ? html`<p class="rail-empty">No sessions yet.</p>` : null}
-      ${groups.map((h) => html`<details class="host-group" open key=${h.host}>
-        <summary><div class="host-title">${m.hosts[h.host] ? html`<${HostChip} host=${m.hosts[h.host]} />` : h.host}</div></summary>
-        ${h.groups.map((g) => html`<details class="cwd-group" open key=${g.cwd}>
-          <summary><div class="cwd-title" title=${g.cwd}><span></span><span>${g.label}</span></div></summary>
-          <div class="cards">${g.sessions.map((s) => html`<${SessionCard} key=${s.id} s=${s} />`)}</div>
-        </details>`)}
-      </details>`)}
-    </div>
-  </nav>`;
-}
-
-function Pane({ i }) {
-  const m = model.value;
-  const lay = m.layout;
-  const focus = lay.focus === i;
-  const sid = lay.panes[i] ?? (focus ? selected.value : null);
-  const s = sid ? m.sessions[sid] : null;
-  return html`<section class="pane" data-testid="pane" data-pane=${i} data-focus=${focus} data-state=${s?.state ?? 'empty'}>
-    <header class="pane-head"><span class="pane-no">${i + 1}</span>
-      ${s ? html`<${Glyph} s=${s} /><span class="pane-title">${s.label}</span>${s.host !== 'local' ? html`<span class="chip">${s.host}</span>` : null}` : html`<span class="muted">empty</span>`}
-    </header>
-    <div class="pane-body">
-      ${s ? html`<dl class="facts">
-        <dt>state</dt><dd>${STATE_NAME[s.state]}</dd>
-        <dt>folder</dt><dd title=${s.cwd}>${s.cwd}</dd>
-        ${s.branch ? html`<dt>branch</dt><dd>${s.branch}</dd>` : null}
-        ${s.model ? html`<dt>model</dt><dd>${s.model}</dd>` : null}
-        ${s.turns != null ? html`<dt>turns</dt><dd>${s.turns}</dd>` : null}
-        ${s.context_tokens != null ? html`<dt>context</dt><dd>${s.context_tokens.toLocaleString()} tokens</dd>` : null}
-      </dl>` : html`<div class="pane-empty">
-        <div class="coin">PRESS <kbd>N</kbd> TO START</div>
-        <div class="hint"><span><kbd>N</kbd> new session</span><span><kbd>T</kbd> terminal</span><span><kbd>K</kbd> palette</span><span><kbd>?</kbd> keys</span></div>
-      </div>`}
-    </div>
+function Stage() {
+  const board = boardShown(model.value.layout);
+  return html`<section class="stage" data-testid="stage" data-view=${board ? 'board' : 'panes'}>
+    <${StageBar} board=${board} />
+    ${board ? html`<${Board} />` : html`<${PaneGrid} />`}
   </section>`;
-}
-
-function Board() {
-  const lay = model.value.layout;
-  return html`<main class="board" data-testid="board" data-grid=${lay.grid}>
-    ${Array.from({ length: lay.grid }, (_, i) => html`<${Pane} key=${i} i=${i} />`)}
-  </main>`;
 }
 
 function Footer() {
@@ -144,12 +58,13 @@ function Footer() {
 
 export function App() {
   const o = overlay.value;
+  const small = narrow.value;
   return html`<${Topbar} />
     ${banner.value ? html`<div class="banner" role="alert">${banner.value}</div>` : null}
-    <div class="main"><${Rail} /><${Board} /></div>
+    <div class="main" data-narrow=${small}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} /><${Stage} />`}</div>
     <${Footer} />
     ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />` : null}
-    <${Modal} /><${Toasts} />`;
+    <${ProxyChooserHost} /><${Modal} /><${Toasts} />`;
 }
 
 // ---- focus model: terminal mode forwards everything; app mode owns single keys ----
@@ -170,16 +85,29 @@ export function installFocusModel() {
   defineAction('close-overlay', () => { if (modal.value) closeModal(); else overlay.value = null; });
   defineAction('rail-next', () => step(1));
   defineAction('rail-prev', () => step(-1));
+  // `a`: the first card of the queue, in the focused pane
   defineAction('next-attention', () => {
-    const q = attentionSessions(model.value);
-    if (!q.length) return;
-    const at = q.findIndex((s) => s.id === selected.value);
-    selected.value = q[(at + 1) % q.length].id;
+    const q = queueSessions();
+    if (q.length) openSession(q[0].id);
   });
+  for (let n = 1; n <= 4; n++) {
+    defineAction(`focus-pane-${n}`, () => {
+      if (narrow.value || n > model.value.layout.grid) return;
+      showBoard.value = false;
+      focusPane(n - 1);
+    });
+  }
   defineAction('enter-terminal', () => {
-    setMode('terminal');
-    document.querySelector('[data-testid="terminal"] textarea')?.focus();
+    const want = selected.value;
+    if (want && want !== focused.value && model.value.sessions[want]) {
+      openSession(want);
+      setTimeout(() => { if (focusTerminal(want)) setMode('terminal'); }, 150);
+      return;
+    }
+    if (focused.value && focusTerminal(focused.value)) setMode('terminal');
   });
+  onServerEvent(trackRemoved);
+  installNotifications();
 
   document.addEventListener('keydown', (ev) => {
     if (mode.value === 'terminal') {
@@ -191,6 +119,8 @@ export function installFocusModel() {
       }
       return;
     }
+    // Enter on a focused button, row or summary activates it; it is not "type into the terminal".
+    if (ev.key === 'Enter' && ev.target instanceof Element && ev.target.closest('button, a, summary, [role="button"], [role="row"]')) return;
     const ctx = { typing: isTyping(document.activeElement), overlay: overlay.value !== null || modal.value !== null };
     const action = appAction(ev, ctx);
     if (!action || ev.repeat) return;
@@ -203,4 +133,48 @@ export function installFocusModel() {
     const inTerm = ev.target instanceof Element && ev.target.closest('[data-testid="terminal"]');
     setMode(inTerm ? 'terminal' : 'app');
   }, true);
+}
+
+// ---- notifications: the tab title always, the desktop notification when the person turned it on ----
+function blip() {
+  try {
+    const ctx = new (globalThis.AudioContext || globalThis.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.04;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.09);
+    osc.onended = () => ctx.close();
+  } catch { /* no audio */ }
+}
+
+function installNotifications() {
+  const notifier = makeNotifier();
+  let primed = false;
+  const run = () => {
+    const m = model.value;
+    const s = settings.value;
+    const sessions = Object.values(m.sessions);
+    const shown = document.visibilityState === 'visible' && !narrow.value ? m.layout.panes.filter(Boolean) : [];
+    document.title = titleText(sessions.filter((x) => x.kind !== 'shell' && (x.state === 'needs_approval' || x.state === 'needs_input' || x.state === 'error')).length);
+    if (!primed) { // the first snapshot is what the person is looking at: arm, don't announce
+      if (Object.keys(m.hosts).length === 0) return;
+      primed = true;
+      notifier.check(sessions, shown);
+      return;
+    }
+    for (const hit of notifier.check(sessions, shown)) {
+      if (s.sound) blip();
+      if (s.notifications && globalThis.Notification?.permission === 'granted') {
+        const n = new Notification(hit.title, { body: hit.body, tag: hit.sid });
+        n.onclick = () => { window.focus(); openSession(hit.sid); n.close(); };
+      }
+    }
+  };
+  effect(run);
+  document.addEventListener('visibilitychange', run);
 }

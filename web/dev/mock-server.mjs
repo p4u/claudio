@@ -103,6 +103,11 @@ function frame(kind, sid, payload) {
   return Buffer.concat([Buffer.from([kind]), idb, Buffer.isBuffer(payload) ? payload : Buffer.from(payload)]);
 }
 
+// Write text into the terminal of every client attached to a session (how the mock shows what an op did).
+function toTerminals(sid, text) {
+  for (const c of clients) if (c.attached.has(sid)) c.ws.send(frame(0x01, sid, text));
+}
+
 const BANNER = (s) => `\x1b[2J\x1b[H\x1b[1;36mclaudio mock\x1b[0m  ${s.label} @ ${s.host}\r\n\x1b[2mThis is a fixture terminal: what you type is echoed back.\x1b[0m\r\n\r\n$ `;
 
 // ---- ops ----
@@ -183,6 +188,7 @@ const OPS = {
     const rows = need(a, 'rows', 'number'); const cols = need(a, 'cols', 'number');
     if (rows < 1 || rows > 1000 || cols < 1 || cols > 1000) throw bad('rows/cols out of range');
     c.attached.add(s.id);
+    console.log(`mock: session.attach ${s.id.slice(0, 4)} ${cols}x${rows}`);
     setImmediate(() => {
       send(c.ws, ev('attached', { sid: s.id, rows, cols }));
       c.ws.send(frame(0x01, s.id, BANNER(s)));
@@ -190,7 +196,7 @@ const OPS = {
     return {};
   },
   'session.detach': (a, c) => { c.attached.delete(sess(a).id); return {}; },
-  'session.resize': (a) => { sess(a); need(a, 'rows', 'number'); need(a, 'cols', 'number'); return {}; },
+  'session.resize': (a) => { sess(a); need(a, 'rows', 'number'); need(a, 'cols', 'number'); console.log(`mock: session.resize ${a.sid.slice(0, 4)} ${a.cols}x${a.rows}`); return {}; },
   'session.spawn': (a) => {
     const h = host(a);
     need(a, 'cwd'); need(a, 'rows', 'number'); need(a, 'cols', 'number');
@@ -206,7 +212,7 @@ const OPS = {
     if (s.kind === 'claude' && !a.proxy && !s.proxy_known) throw new OpError('proxy unknown');
     s.state = 'starting'; s.state_since = now(); s.attention = null; s.dormant = false; s.pid = 5000;
     emitSession(s);
-    setTimeout(() => { s.state = 'idle'; emitSession(s); }, 700);
+    setTimeout(() => { if (!state.sessions.has(s.id)) return; s.state = 'idle'; emitSession(s); }, 700);
     return { sid: s.id };
   },
   'session.kill': (a) => {
@@ -228,6 +234,8 @@ const OPS = {
     if (typeof a.text !== 'string') throw bad('text must be a string');
     if (a.text.length > 65536) throw new OpError('too large');
     need(a, 'submit', 'boolean');
+    const s = sess(a);
+    toTerminals(s.id, `\r\n\x1b[36m[mock] session.paste ${a.text.length} chars${a.submit ? ' + submit' : ''}:\x1b[0m ${a.text.replace(/\r?\n/g, '\r\n')}\r\n$ `);
     return {};
   },
   'session.approve': (a) => {
@@ -240,6 +248,8 @@ const OPS = {
       if (s.state !== 'needs_approval' || !s.attention || s.attention.seq !== seq) throw new OpError('stale');
       if (!['permission_prompt', 'worker_permission_prompt'].includes(s.attention.kind)) throw new OpError('not a permission prompt');
     }
+    toTerminals(s.id, `\r\n\x1b[33m[mock] session.approve ${a.decision}: sent ${a.decision === 'approve' ? 'Enter (\\r)' : 'Esc (\\x1b)'}\x1b[0m\r\n$ `);
+    console.log(`mock: session.approve ${a.decision} ${s.id} seq=${seq}`);
     s.state = 'working'; s.state_since = now(); s.attention = null;
     emitSession(s);
     return {};
@@ -481,6 +491,18 @@ wss.on('connection', (ws) => {
   });
   ws.on('close', () => clients.delete(c));
 });
+
+// Attention moves by itself: every 20 s the "parser" session, once it works again, asks for a new
+// permission (a new seq), so the queue, the blink and the notifications can be seen live.
+let attentionSeq = 10;
+const cycler = setInterval(() => {
+  const s = state.sessions.get(ids.working);
+  if (!s || s.state !== 'working') return;
+  s.state = 'needs_approval'; s.state_since = now();
+  s.attention = { seq: ++attentionSeq, kind: 'permission_prompt', message: 'Claude needs your permission to use Edit', tool: 'Edit', detail: 'src/lexer/mod.rs' };
+  emitSession(s);
+}, 20000);
+cycler.unref();
 
 const statsTimer = setInterval(() => {
   for (const h of Object.values(state.hosts)) {
