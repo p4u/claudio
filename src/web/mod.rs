@@ -4,12 +4,19 @@
 
 pub(crate) mod assets;
 pub(crate) mod auth;
+mod dto;
+mod hub;
+mod input;
+mod spawn;
+mod state;
 mod ws;
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::FromRef;
 use axum::routing::{get, post};
@@ -38,7 +45,12 @@ pub(crate) struct AppState {
     /// Read by the asset route in debug disk mode only.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub assets: Arc<assets::Assets>,
-    // Task 4 adds `hub: hub::HubHandle`; Task 5 adds `ctx: Arc<spawn::SpawnCtx>`.
+    pub hub: hub::HubHandle,
+    /// One search at a time per host (docs/web-protocol.md §5).
+    pub search_slots: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
+    /// Open tabs, counted at the upgrade (at most `hub::MAX_TABS`).
+    pub tabs: Arc<AtomicUsize>,
+    // Task 5 adds `ctx: Arc<spawn::SpawnCtx>`.
 }
 
 impl FromRef<AppState> for Arc<auth::Auth> {
@@ -197,9 +209,27 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         auth::csp(assets.importmap_sha256()),
     )
     .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
+    // Files, before the hub starts: off the executor.
+    let state_path = state::path();
+    let hub_cfg = {
+        let state_path = state_path.clone();
+        tokio::task::spawn_blocking(move || hub::HubConfig {
+            config: crate::config::load(),
+            tui_state: crate::tui::state::ClientState::load(&crate::paths::client_state()),
+            web: state::load(&state_path),
+            profiles: crate::proxy::resolve::load_proxy_profiles(),
+            state_path,
+        })
+        .await
+        .map_err(|e| format!("cannot read the configuration: {e}"))?
+    };
+    let hub = hub::start(hub_cfg);
     let state = AppState {
         auth: Arc::new(auth),
         assets,
+        hub: hub.clone(),
+        search_slots: Arc::default(),
+        tabs: Arc::default(),
     };
 
     // The one line on stdout (the tests read it).
@@ -216,8 +246,14 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
     }
     tracing::info!(listen = %args.listen, "web: serving");
 
+    // Tabs are closed (1001) and web-state.json written before the server
+    // stops waiting for its connections.
+    let stop = async move {
+        shutdown().await;
+        hub.shutdown().await;
+    };
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(stop)
         .await
         .map_err(|e| format!("server error: {e}"))
 }

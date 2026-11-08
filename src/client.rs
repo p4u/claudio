@@ -21,7 +21,7 @@
 //! (longer for `Spawn`).  When the writer exits abnormally it signals the
 //! reader to stop as well, failing all pending requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::future::Future;
 use std::io;
@@ -166,6 +166,61 @@ pub async fn connect(socket: &Path) -> io::Result<Client> {
 /// is dropped.  The child is owned by a supervisor task so handshake failures
 /// don't leak it.
 pub async fn connect_ssh(host: &str) -> io::Result<Client> {
+    connect_ssh_with(host, None).await
+}
+
+/// How many of ssh's last stderr lines a failed [`connect_ssh_reporting`]
+/// names, and the longest each may be.
+const SSH_TAIL_LINES: usize = 3;
+const SSH_TAIL_CHARS: usize = 200;
+
+/// [`connect_ssh`], keeping ssh's last stderr lines: a failed connect's
+/// error ends with them (sanitized, at most 3, each ≤ 200 chars), so the
+/// web can say why (host keys, agent, permissions). The TUI keeps
+/// `connect_ssh`, whose errors do not change.
+pub async fn connect_ssh_reporting(host: &str) -> io::Result<Client> {
+    let tail = Arc::new(Mutex::new(SshTail::default()));
+    match connect_ssh_with(host, Some(Arc::clone(&tail))).await {
+        Ok(client) => Ok(client),
+        Err(e) => {
+            // ssh's last words may still be on their way.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline && !lock_tail(&tail).ended {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let lines: Vec<String> = lock_tail(&tail).lines.iter().cloned().collect();
+            if lines.is_empty() {
+                Err(e)
+            } else {
+                Err(io::Error::new(
+                    e.kind(),
+                    format!("{e}: {}", lines.join(" | ")),
+                ))
+            }
+        }
+    }
+}
+
+/// ssh's last stderr lines, and whether its stderr ended.
+#[derive(Default)]
+struct SshTail {
+    lines: VecDeque<String>,
+    ended: bool,
+}
+
+fn lock_tail(m: &Mutex<SshTail>) -> MutexGuard<'_, SshTail> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One ssh stderr line as a failed connect reports it: sanitized, trimmed,
+/// at most [`SSH_TAIL_CHARS`] characters; `None` when nothing is left.
+fn ssh_tail_line(line: &str) -> Option<String> {
+    let clean = crate::claude::latex::sanitize(line);
+    let clean: String = clean.trim().chars().take(SSH_TAIL_CHARS).collect();
+    (!clean.is_empty()).then_some(clean)
+}
+
+async fn connect_ssh_with(host: &str, tail: Option<Arc<Mutex<SshTail>>>) -> io::Result<Client> {
     crate::remote::validate_host(host).map_err(io::Error::other)?;
 
     let mut child = crate::remote::ssh_cmd(host)
@@ -201,7 +256,19 @@ pub async fn connect_ssh(host: &str) -> io::Result<Client> {
             if line.contains(crate::freshness::DEFERRED) {
                 flag.store(true, Ordering::Relaxed);
             }
+            if let Some(tail) = &tail {
+                if let Some(clean) = ssh_tail_line(&line) {
+                    let mut t = lock_tail(tail);
+                    t.lines.push_back(clean);
+                    while t.lines.len() > SSH_TAIL_LINES {
+                        t.lines.pop_front();
+                    }
+                }
+            }
             tracing::debug!(host = %host_owned, "ssh stderr: {line}");
+        }
+        if let Some(tail) = &tail {
+            lock_tail(tail).ended = true;
         }
         let _ = child.wait().await;
     });
@@ -1198,5 +1265,20 @@ mod tests {
         );
 
         fake.abort();
+    }
+
+    #[test]
+    fn ssh_tail_lines_are_sanitized_and_cut() {
+        assert_eq!(
+            ssh_tail_line("  Permission denied (publickey).\r "),
+            Some("Permission denied (publickey).".to_owned())
+        );
+        assert_eq!(
+            ssh_tail_line("host key \u{1b}[31mchanged\u{7}"),
+            Some("host key [31mchanged".to_owned())
+        );
+        assert_eq!(ssh_tail_line(" \t "), None);
+        let long = ssh_tail_line(&"é".repeat(500)).unwrap();
+        assert_eq!(long.chars().count(), SSH_TAIL_CHARS);
     }
 }
