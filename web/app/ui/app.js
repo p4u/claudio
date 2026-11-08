@@ -54,7 +54,7 @@ function StageBar({ board, railCollapsed, railAuto }) {
     <button class="btn btn-sm btn-icon" data-testid="rail-toggle" aria-pressed=${railCollapsed} aria-label=${railCollapsed ? 'Show the session list' : 'Hide the session list'}
       title=${railAuto ? 'The window is too narrow for the list beside the drawer. Close the drawer or widen the window.' : railCollapsed ? 'Show the session list' : 'Collapse the session list to icons'}
       onClick=${() => updateSettings({ railCollapsed: !settings.value.railCollapsed })}>${railCollapsed ? '»' : '«'}</button>
-    <button class="btn btn-sm btn-primary" data-testid="new-session-btn" title="New session (n)" onClick=${() => openWizard({ kind: 'claude' })}>+ New</button>
+    <button class="btn btn-sm" data-testid="new-session-btn" title="New session (n)" onClick=${() => openWizard({ kind: 'claude' })}>+ New</button>
     <span class="stage-sep"></span>
     <button class="btn btn-sm" data-testid="board-btn" aria-pressed=${board} title="Show every session as a row" onClick=${() => { showBoard.value = !board; }}>Board</button>
     <span class="stage-sep"></span>

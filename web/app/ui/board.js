@@ -18,7 +18,7 @@ function Row({ s }) {
   return html`<div class="board-row" role="row" tabindex="0" data-testid="board-row" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind}
     data-tone=${tone(s)} data-fresh=${!!fresh.value[s.id]} aria-current=${current} aria-selected=${selected.value === s.id} onClick=${() => openSession(s.id)}
     onKeyDown=${(e) => { if (e.target === e.currentTarget && e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${mergeHandlers(dragSource(s), infoProps(s, true))}>
-    <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${stateClass(s)}">${s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : stateClass(s) === 'waiting' ? 'waiting' : CLASS_NAME[stateClass(s)]}</span></span>
+    <span class="bcol bcol-state"><span class="badge bstate" data-class=${stateClass(s)} data-kind=${s.kind}><${Glyph} s=${s} />${s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : stateClass(s) === 'waiting' ? 'waiting' : CLASS_NAME[stateClass(s)]}</span></span>
     <span class="bcol bcol-label" title=${s.label}>${s.label}</span>
     <span class="bcol bcol-host"><span class="chip">${s.host}</span></span>
     <span class="bcol bcol-repo" title=${s.cwd}>${s.branch ? html`<${Branch} s=${s} />` : html`<span class="muted">${s.cwd}</span>`}</span>

@@ -3,20 +3,17 @@ import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { isElicitation, stateClass } from '../queue.js';
 
-const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 export const STATE_NAME = { working: 'working', needs_approval: 'needs approval', needs_input: 'needs input', idle: 'idle', error: 'error', exited: 'exited', starting: 'starting', unknown: 'reconnecting' };
 
-const spin = signal(0);
 export const now = signal(Date.now());
-export const reduced = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-if (!reduced) setInterval(() => { spin.value = (spin.value + 1) % SPIN.length; }, 100);
 setInterval(() => { now.value = Date.now(); }, 20000);
 
-// 'input' for a question the session asks (the amber `?`), else null.
+// 'input' for a question the session asks (the violet `?`), else null.
 export const tone = (s) => (s.state === 'needs_approval' && isElicitation(s) ? 'input' : null);
 
-// What each class shows: working = the spinner, waiting = a pulsing `?`, stopped = `■`, error = `✗`.
-const CLASS_GLYPH = { waiting: '?', stopped: '■', error: '✗' };
+// What each class shows: working = a green LED (it pulses softly in CSS unless motion is reduced),
+// waiting = a violet `?`, stopped = a steel `■`, error = a coral `✗`.
+const CLASS_GLYPH = { working: '●', waiting: '?', stopped: '■', error: '✗' };
 export const CLASS_NAME = { working: 'working', waiting: 'waiting for you', stopped: 'stopped', error: 'error' };
 export const CLASS_TIP = {
   working: 'Working', waiting: 'Waiting for you: claude asks something', stopped: 'Stopped: claude finished or is not running', error: 'Error',
@@ -25,9 +22,7 @@ export const CLASS_TIP = {
 export function glyphFor(s) {
   if (s.kind === 'shell' && s.state !== 'exited') return '$';
   if (s.state === 'unknown') return '⇄';
-  const c = stateClass(s);
-  if (c === 'working') return reduced ? '⠸' : SPIN[spin.value];
-  return CLASS_GLYPH[c];
+  return CLASS_GLYPH[stateClass(s)];
 }
 
 export function ago(sec, nowMs = Date.now()) {
@@ -42,5 +37,5 @@ export function ago(sec, nowMs = Date.now()) {
 export function Glyph({ s }) {
   const c = stateClass(s);
   const name = s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : CLASS_NAME[c];
-  return html`<span class="glyph" role="img" data-class=${c} data-tone=${tone(s)} aria-label=${name} title=${s.state === 'unknown' ? 'Reconnecting: its host is not connected' : CLASS_TIP[c]}>${glyphFor(s)}</span>`;
+  return html`<span class="glyph" role="img" data-class=${c} data-tone=${tone(s)} data-kind=${s.kind} data-state=${s.state} aria-label=${name} title=${s.state === 'unknown' ? 'Reconnecting: its host is not connected' : CLASS_TIP[c]}>${glyphFor(s)}</span>`;
 }

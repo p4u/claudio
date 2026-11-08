@@ -41,18 +41,18 @@ async function boot() {
         body: JSON.stringify({ token }), credentials: 'same-origin',
       });
     } catch {
-      show('CLAUDIO', 'Cannot reach the server.');
+      show('claudio', 'Cannot reach the server.');
       return;
     }
     history.replaceState(null, '', location.pathname);
     if (r.status === 204) return start();
-    if (r.status === 429) return show('CLAUDIO', 'Too many attempts: wait a minute.');
-    return show('CLAUDIO', r.status === 401 || !m ? TOKEN_BAD : `Sign-in failed (${r.status}).`);
+    if (r.status === 429) return show('claudio', 'Too many attempts: wait a minute.');
+    return show('claudio', r.status === 401 || !m ? TOKEN_BAD : `Sign-in failed (${r.status}).`);
   }
   let r;
-  try { r = await fetch('/api/me', { credentials: 'same-origin' }); } catch { show('CLAUDIO', 'Cannot reach the server.'); return; }
+  try { r = await fetch('/api/me', { credentials: 'same-origin' }); } catch { show('claudio', 'Cannot reach the server.'); return; }
   if (r.status === 204) return start();
-  show('CLAUDIO', NO_SESSION);
+  show('claudio', NO_SESSION);
 }
 
 boot();

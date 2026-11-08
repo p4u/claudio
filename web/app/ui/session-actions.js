@@ -100,7 +100,7 @@ export function closePane(i) {
 }
 
 export async function killSession(s) {
-  const ok = await confirm({ title: 'Stop session?', body: `${s.label} on ${s.host} stops now. A conversation can be resumed later from its folder.`, yes: 'Stop', no: 'Keep' });
+  const ok = await confirm({ title: 'Stop session?', body: `${s.label} on ${s.host} stops now. A conversation can be resumed later from its folder.`, yes: 'Stop', no: 'Keep', danger: true });
   if (ok) req('session.kill', { sid: s.id }).catch(() => {});
 }
 

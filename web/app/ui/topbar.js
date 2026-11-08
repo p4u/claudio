@@ -79,7 +79,7 @@ function HostsMenu({ hosts }) {
     else if (e.key === 'Tab') close(false);
   };
   return html`<div class="hosts-wrap" ref=${wrap}>
-    <button type="button" class="btn btn-sm hosts-btn" data-testid="hosts-btn" aria-haspopup="menu" aria-expanded=${open} title="Hosts"
+    <button type="button" class="nav-btn hosts-btn" data-testid="hosts-btn" aria-haspopup="menu" aria-expanded=${open} title="Hosts"
       onClick=${() => { hostsOpen.value = !open; }}
       onKeyDown=${(e) => { if (e.key === 'ArrowDown' && !open) { e.preventDefault(); hostsOpen.value = true; } }}>
       Hosts <span class="hosts-sum" data-testid="hosts-summary">${sum.up}/${sum.total}</span>${sum.glyph ? html`<span class="chip-glyph" aria-hidden="true">${sum.glyph}</span>` : null}
@@ -100,17 +100,17 @@ export function Topbar() {
   const hosts = Object.values(m.hosts).sort((a, b) => (a.name === 'local' ? -1 : b.name === 'local' ? 1 : a.name.localeCompare(b.name)));
   const attn = attentionCount(m);
   return html`<header class="topbar">
-    <div class="logo"><span class="logo-mark" aria-hidden="true"></span>CLAUDIO</div>
+    <div class="logo">claudi<span class="logo-accent">o</span></div>
     <${HostsMenu} hosts=${hosts} />
     <div class="topbar-spacer"></div>
     <${CredentialBar} />
     ${attn > 0 ? html`<span class="badge badge-attn" title="sessions waiting for you">${attn} waiting</span>` : null}
-    <span class="conn" data-conn=${conn.value} title=${serverInfo.value.version ? `claudio ${serverInfo.value.version}` : ''}>${CONN[conn.value]}</span>
+    <span class="badge conn" data-conn=${conn.value} title=${serverInfo.value.version ? `claudio ${serverInfo.value.version}` : ''}>${CONN[conn.value]}</span>
     <span class="badge" data-testid="mode-badge" data-mode=${mode.value} title="Ctrl+Shift+Space leaves the terminal">${mode.value === 'terminal' ? 'TERM' : 'APP'}</span>
     <div class="topbar-actions">
-      <button class="btn btn-sm" onClick=${() => { overlay.value = 'palette'; }} title="Command palette">Palette <kbd>K</kbd></button>
-      <button class="btn btn-sm" onClick=${() => { overlay.value = 'help'; }} title="Keys" aria-label="Keys">?</button>
-      <button class="btn btn-sm" onClick=${() => { overlay.value = 'settings'; }} title="Settings">Settings</button>
+      <button class="nav-btn" onClick=${() => { overlay.value = 'palette'; }} title="Command palette">Palette <kbd>K</kbd></button>
+      <button class="icon-btn" onClick=${() => { overlay.value = 'help'; }} title="Keys" aria-label="Keys">?</button>
+      <button class="nav-btn" onClick=${() => { overlay.value = 'settings'; }} title="Settings">Settings</button>
     </div>
   </header>`;
 }

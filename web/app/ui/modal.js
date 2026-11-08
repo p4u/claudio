@@ -16,9 +16,10 @@ function open(spec) {
   });
 }
 
-// confirm({title, body, yes, no}) -> Promise<boolean>
-export function confirm({ title, body = '', yes = 'Yes', no = 'No' }) {
-  return open({ kind: 'confirm', title, body, yes, no, cancelValue: false });
+// confirm({title, body, yes, no, danger}) -> Promise<boolean>. `danger`: the yes button is a ghost
+// button, never the filled primary (a destructive action is confirmed, not promoted).
+export function confirm({ title, body = '', yes = 'Yes', no = 'No', danger = false }) {
+  return open({ kind: 'confirm', title, body, yes, no, danger, cancelValue: false });
 }
 
 // prompt({title, value, yes, no}) -> Promise<string|null>
@@ -40,12 +41,12 @@ export function Modal() {
   return html`<div class="scrim" onMouseDown=${(e) => { if (e.target === e.currentTarget) closeModal(); }}>
     <div class="dialog popover" role="dialog" aria-modal="true" aria-label=${m.title}
       onKeyDown=${(e) => { if (e.key === 'Escape') { e.stopPropagation(); closeModal(); } if (e.key === 'Enter' && isPrompt) submit(); }}>
-      <h2 class="pixel dialog-title">${m.title}</h2>
+      <h2 class="dialog-title">${m.title}</h2>
       ${m.body ? html`<p class="dialog-body">${m.body}</p>` : null}
       ${isPrompt ? html`<input class="input" ref=${ref} data-testid=${m.testid} value=${m.value} placeholder=${m.placeholder} />` : null}
       <div class="dialog-actions">
         <button class="btn" data-testid="confirm-no" onClick=${closeModal}>${m.no}</button>
-        <button class="btn btn-primary" data-testid="confirm-yes" ref=${isPrompt ? null : ref} onClick=${submit}>${m.yes}</button>
+        <button class=${m.danger ? 'btn' : 'btn btn-primary'} data-testid="confirm-yes" ref=${isPrompt ? null : ref} onClick=${submit}>${m.yes}</button>
       </div>
     </div>
   </div>`;
@@ -71,7 +72,7 @@ export function Dialog({ title, onClose, testid, wide = false, children }) {
   };
   return html`<div class="scrim" onMouseDown=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
     <div class=${`dialog popover${wide ? ' wide' : ''}`} ref=${root} tabindex="-1" role="dialog" aria-modal="true" aria-label=${title} data-testid=${testid} onKeyDown=${keydown}>
-      <h2 class="pixel dialog-title"><span>${title}</span><button class="icon-btn" aria-label="close" onClick=${onClose}>×</button></h2>
+      <h2 class="dialog-title"><span>${title}</span><button class="icon-btn" aria-label="close" onClick=${onClose}>×</button></h2>
       ${children}
     </div>
   </div>`;

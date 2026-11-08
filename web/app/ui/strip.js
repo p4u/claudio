@@ -22,12 +22,17 @@ export function gitText(g) {
   return parts.join(' ');
 }
 
+// A segmented meter: one cell per segment of segments(), lit cells in the level's colour.
+export function SegBar({ f, n = 8 }) {
+  return html`<span class="gauge-bar" aria-hidden="true">${[...segments(f, n)].map((c, i) => html`<i key=${i} data-on=${c === '█'}></i>`)}</span>`;
+}
+
 export function Gauge({ s, bare = false }) {
   const f = ctxFraction(s);
   if (f === null) return null;
   const pct = Math.round(f * 100);
   return html`<span class="gauge" data-testid="gauge" data-level=${level(f)} title=${`context ${fmtTokens(s.context_tokens)} (${pct}%)`}>
-    <span class="gauge-bar" aria-hidden="true">${segments(f)}</span>${bare ? null : html`<span class="gauge-pct">${pct}%</span>`}</span>`;
+    <${SegBar} f=${f} />${bare ? null : html`<span class="gauge-pct">${pct}%</span>`}</span>`;
 }
 
 export function Branch({ s }) {
