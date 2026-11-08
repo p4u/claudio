@@ -13,10 +13,11 @@ export const setupOpen = () => setup.value !== null;
 export const cancelPluginSetup = () => setup.value?.finish('cancelled');
 
 // -> Promise<'saved' | 'skipped' | 'cancelled'>
-export function openPluginSetup(name) {
+// `starting`: the session that starts once this closes (the subtitle says so).
+export function openPluginSetup(name, starting = null) {
   return new Promise((resolve) => {
     setup.value?.finish('cancelled');
-    const entry = { name };
+    const entry = { name, starting };
     entry.finish = (v) => {
       if (setup.value === entry) setup.value = null;
       resolve(v);
@@ -62,6 +63,7 @@ function PluginSetup({ entry }) {
     } catch { setBusy(false); /* req toasted; stay open */ }
   }
   return html`<${Dialog} title=${`Set up ${entry.name}`} testid="plugin-setup" wide onClose=${() => entry.finish('cancelled')}>
+    ${entry.starting ? html`<p class="setup-starting" data-testid="plugin-starting">Starting ${entry.starting} after this…</p>` : null}
     <p class="dialog-body">Choose what <b>${entry.name}</b>${state.version ? ` ${state.version}` : ''} may install and enable for your sessions. You can change this later in Extensions.</p>
     <div class="setup-bar">
       <span class="muted">${on} of ${all} on</span>
@@ -96,14 +98,14 @@ export function PluginSetupHost() {
 // Before a claude session spawns on `profile`: every enabled plugin of it whose choices were never
 // saved opens its setup in turn. Save continues, Skip leaves it out, Escape cancels the spawn.
 export function installPluginGate() {
-  setBeforeSpawn(async (profile) => {
+  setBeforeSpawn(async (profile, starting) => {
     if (!profile) return { skip: [] };
     let plugins;
     try { plugins = (await reqQuiet('plugins.list')).plugins ?? []; } catch { return { skip: [] }; }
     const skip = [];
     for (const p of plugins) {
       if (!p.enabled || p.profile !== profile || p.manifest !== 'ready' || p.choices_saved || p.refused) continue;
-      const r = await openPluginSetup(p.name);
+      const r = await openPluginSetup(p.name, starting);
       if (r === 'cancelled') return null;
       if (r === 'skipped') skip.push(p.name);
     }

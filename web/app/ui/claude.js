@@ -8,7 +8,10 @@ import { model, req } from '../store.js';
 const dismissed = signal({}); // host -> key of the claude event the person closed
 
 const keyOf = (c) => `${c.phase}|${c.have ?? ''}|${c.want ?? ''}|${c.version ?? ''}|${c.tail ?? ''}`;
-const shown = (c) => dismissed.value[c.host] !== keyOf(c);
+// An update offer is not a toast: it is the `↑` on the host chip (see updateOffered). Toasts are for
+// an install offer on a host with no claude, progress, done and failure.
+export const updateOffered = (c) => !!c && c.phase === 'offer_update';
+const shown = (c) => c.phase !== 'offer_update' && dismissed.value[c.host] !== keyOf(c);
 const close = (c) => { dismissed.value = { ...dismissed.value, [c.host]: keyOf(c) }; };
 
 async function act(c, install) {
@@ -53,8 +56,7 @@ function ClaudeToast({ c }) {
   </div>`;
 }
 
-export function ClaudeToasts() {
+export function ClaudeToastList() {
   const list = Object.values(model.value.claude).filter((c) => c && c.phase && shown(c));
-  if (!list.length) return null;
-  return html`<div class="claude-toasts" aria-live="polite">${list.map((c) => html`<${ClaudeToast} key=${c.host} c=${c} />`)}</div>`;
+  return html`${list.map((c) => html`<${ClaudeToast} key=${c.host} c=${c} />`)}`;
 }

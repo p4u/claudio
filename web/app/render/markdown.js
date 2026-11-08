@@ -86,6 +86,19 @@ export function extractLatex(markdown, nonce) {
   return { text: out + md.slice(at), formulas };
 }
 
+// The distinct formulas of a list of answers ({text}), in the order they are written, newest answer first.
+// For a host without the `lens` feature, which never sends the formula list.
+export function answerFormulas(answers) {
+  const seen = new Set();
+  const out = [];
+  for (const a of answers ?? []) {
+    for (const f of extractLatex(a?.text ?? '', 'f').formulas) {
+      if (f.tex && !seen.has(f.tex)) { seen.add(f.tex); out.push(f.tex); }
+    }
+  }
+  return out;
+}
+
 // Raw HTML from the model, before DOMPurify: drops on*= attributes. DOMPurify would remove them
 // anyway; this keeps the browser from reporting a CSP violation while it parses them (the e2e
 // asserts there are none), and is only a first pass. DOMPurify stays the guarantee.

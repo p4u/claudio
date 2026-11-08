@@ -11,6 +11,7 @@ import { Dialog } from './modal.js';
 import { toast } from './toasts.js';
 import { ago } from './glyph.js';
 import { openSession } from './session-actions.js';
+import { setup as pluginSetup } from './plugin-setup.js';
 
 export const wizardArgs = signal({});
 
@@ -168,7 +169,7 @@ export function Wizard() {
     try {
       let skip = [];
       if (!shell) {
-        const r = await beforeSpawn(resolvedProfile(w.proxy, profiles));
+        const r = await beforeSpawn(resolvedProfile(w.proxy, profiles), w.name.trim() || w.cwd.replace(/\/+$/, '').split('/').pop() || 'the session');
         if (r === null) return;
         skip = r.skip;
       }
@@ -189,6 +190,10 @@ export function Wizard() {
   const key = (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || (e.target.tagName === 'INPUT' && e.target.type === 'text'))) { e.preventDefault(); start(); }
   };
+
+  // The plugin setup is the next step: it shows alone, over nothing, and the wizard (its entries
+  // kept) comes back if the setup is cancelled.
+  if (busy && pluginSetup.value) return null;
 
   return html`<${Dialog} title=${shell ? 'New terminal' : 'New session'} testid="wizard" wide onClose=${() => { overlay.value = null; }}>
     <div class="wizard" onKeyDown=${key}>

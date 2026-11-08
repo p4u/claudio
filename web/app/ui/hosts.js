@@ -6,6 +6,7 @@ import { model, req, reqQuiet } from '../store.js';
 import { overlay, register } from '../palette.js';
 import { Dialog, confirm } from './modal.js';
 import { toast } from './toasts.js';
+import { updateOffered } from './claude.js';
 
 export const hostPanel = signal(''); // the host shown ('' = just the add form)
 
@@ -39,6 +40,7 @@ function Fact({ k, v, mono }) {
 function HostFacts({ h }) {
   const claude = model.value.claude[h.name];
   const working = claude && (claude.phase === 'installing' || claude.phase === 'updating');
+  const offered = updateOffered(claude) ? claude : null;
   const remote = h.name !== 'local';
   const state = h.connected ? 'connected' : h.connecting ? 'connecting…' : 'offline';
   const sessions = Object.values(model.value.sessions).filter((s) => s.host === h.name).length;
@@ -53,13 +55,15 @@ function HostFacts({ h }) {
       <${Fact} k="System" v=${h.os ? `${h.os} ${h.arch ?? ''}`.trim() : null} />
       <${Fact} k="claude" v=${h.claude ? `${h.claude.version}` : (h.connected ? 'not installed' : null)} />
       <${Fact} k="claude path" v=${h.claude?.path} mono />
+      ${offered ? html`<${Fact} k="Update" v=${`claude ${offered.have ?? '?'} → ${offered.want ?? '?'} is available`} />` : null}
       <${Fact} k="Daemon" v=${h.version ? `claudio ${h.version}${h.outdated ? ' (older than this server; it is replaced once idle)' : ''}` : null} />
       <${Fact} k="Sessions" v=${sessions} />
       <div class="kv"><dt>Features</dt><dd>${(h.features ?? []).length ? (h.features ?? []).map((f) => html`<span class="chip" key=${f}>${f}</span>`) : html`<span class="muted">none</span>`}</dd></div>
     </dl>
     ${h.error ? html`<pre class="host-error" data-testid="host-error">${h.error}</pre>` : null}
     <div class="host-actions">
-      ${h.connected ? html`<button type="button" class="btn btn-sm" data-testid="host-claude-btn" disabled=${working} onClick=${() => req('claude.update', { host: h.name, install: !h.claude }).catch(() => {})}>${working ? 'Working…' : h.claude ? 'Update claude' : 'Install claude'}</button>` : null}
+      ${h.connected ? html`<button type="button" class=${`btn btn-sm${offered ? ' btn-primary' : ''}`} data-testid="host-claude-btn" data-autofocus=${offered ? true : null} disabled=${working} onClick=${() => req('claude.update', { host: h.name, install: !h.claude }).catch(() => {})}>${working ? 'Working…' : h.claude ? 'Update claude' : 'Install claude'}</button>` : null}
+      ${offered ? html`<button type="button" class="btn btn-sm" data-testid="host-claude-skip" title="Do not offer this version again" onClick=${() => req('claude.skip', { host: h.name }).catch(() => {})}>Skip this version</button>` : null}
       ${remote && !h.connected ? html`<button type="button" class="btn btn-sm btn-primary" data-testid="host-connect-btn" disabled=${h.connecting} onClick=${() => req('hosts.connect', { host: h.name }).catch(() => {})}>${h.connecting ? 'Connecting…' : 'Connect'}</button>` : null}
       ${remote && h.connected ? html`<button type="button" class="btn btn-sm btn-deny" data-testid="host-disconnect-btn" onClick=${disconnect}>Disconnect</button>` : null}
     </div>

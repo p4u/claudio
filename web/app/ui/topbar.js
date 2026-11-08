@@ -3,6 +3,7 @@ import { model, conn, mode, serverInfo } from '../store.js';
 import { overlay } from '../palette.js';
 import { openHostPanel, MiniBar } from './hosts.js';
 import { CredentialBar } from './stats.js';
+import { updateOffered } from './claude.js';
 
 const CONN = { open: 'live', connecting: 'connecting', closed: 'offline' };
 
@@ -12,9 +13,11 @@ export function HostChip({ host, bars = false }) {
   const state = host.connected ? 'up' : host.connecting ? 'connecting' : 'down';
   const st = bars && host.connected ? model.value.stats[host.name] : null;
   const title = host.error ? `${host.name}: ${host.error}` : `${host.name}${host.version ? ` · claudio ${host.version}` : ''}${host.outdated ? ' · update pending' : ''}${host.connecting ? ' · connecting' : ''}`;
+  const offer = model.value.claude[host.name];
+  const upd = updateOffered(offer) ? offer : null;
   const open = (e) => { e.preventDefault(); e.stopPropagation(); openHostPanel(host.name); };
-  return html`<button type="button" class="chip chip-btn" data-testid="host-chip" data-host=${host.name} data-conn=${state} title=${title} aria-label=${`Host ${host.name}, ${host.connected ? 'connected' : host.connecting ? 'connecting' : 'offline'}`} onClick=${open}>
-    <span class="chip-dot"></span>${host.name}${host.connecting ? html`<span class="chip-glyph" aria-hidden="true" title="reconnecting">⇄</span>` : null}${host.outdated ? html`<span class="chip-badge" title="update pending">↑</span>` : null}
+  return html`<button type="button" class="chip chip-btn" data-testid="host-chip" data-host=${host.name} data-conn=${state} title=${title} aria-label=${`Host ${host.name}, ${host.connected ? 'connected' : host.connecting ? 'connecting' : 'offline'}${upd ? ', claude update available' : ''}`} onClick=${open}>
+    <span class="chip-dot"></span>${host.name}${host.connecting ? html`<span class="chip-glyph" aria-hidden="true" title="reconnecting">⇄</span>` : null}${host.outdated ? html`<span class="chip-badge" title="update pending">↑</span>` : null}${upd ? html`<span class="chip-badge chip-update" data-testid="claude-update-chip" title=${`claude ${upd.have ?? '?'} → ${upd.want ?? '?'} is available. Click to update.`}>↑</span>` : null}
     ${st ? html`<span class="chip-bars"><${MiniBar} value=${st.cpu} label="cpu" /><${MiniBar} value=${st.mem_total ? (100 * st.mem_used) / st.mem_total : 0} label="mem" /></span>` : null}
   </button>`;
 }

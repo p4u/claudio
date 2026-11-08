@@ -1,11 +1,12 @@
 // The reader (drawer tab "reader"): the last answers of a session, rendered for reading, and the
 // formulas / lens items the session produced.
 import { html } from 'htm/preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { model, reqQuiet } from '../store.js';
 import { settings } from '../settings.js';
 import { defineAction } from '../palette.js';
 import { renderAnswer, formulaNode } from '../render/answer.js';
+import { answerFormulas } from '../render/markdown.js';
 import { registerDrawerTab, toggleDrawer } from './drawer.js';
 import { toast } from './toasts.js';
 
@@ -21,6 +22,13 @@ export function Prose({ markdown, class: cls = '' }) {
   const theme = settings.value.theme;
   useEffect(() => { if (ref.current) renderAnswer(ref.current, markdown, { onCopy: copied }).catch(() => {}); }, [markdown, theme]);
   return html`<div class=${`prose ${cls}`} ref=${ref}></div>`;
+}
+
+export function updatedText(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 5) return 'updated just now';
+  if (s < 60) return `updated ${s} s ago`;
+  return `updated ${Math.floor(s / 60)} min ago`;
 }
 
 function firstLine(s) {
@@ -75,14 +83,17 @@ function Formula({ tex }) {
   </li>`;
 }
 
-export function FormulasView({ sid }) {
+// `fromAnswers`: the formulas found in the rendered answers, for a host that does not send them
+// (no `lens` feature) or a session whose list is still empty.
+export function FormulasView({ sid, fromAnswers = [] }) {
   const lens = model.value.lens[sid];
   const items = lens?.items ?? [];
   const latex = items.filter((x) => x.tag === 'latex').map((x) => x.text);
-  const formulas = latex.length ? latex : (lens?.formulas ?? []);
+  const fromLens = latex.length ? latex : (lens?.formulas ?? []);
+  const formulas = fromLens.length ? fromLens : fromAnswers;
   const others = new Map();
   for (const it of items) if (it.tag !== 'latex') others.set(it.tag, [...(others.get(it.tag) ?? []), it]);
-  if (!formulas.length && !others.size) return html`<p class="reader-empty">No formulas or lens items in this conversation yet. Claude writes formulas inside <code>&lt;latex&gt;</code> tags.</p>`;
+  if (!formulas.length && !others.size) return html`<p class="reader-empty">No formulas or lens items in this conversation yet. Claude writes formulas inside <code>${'<latex>'}</code> tags.</p>`;
   return html`<div class="lens-view" data-testid="formulas">
     ${formulas.length ? html`<section><h3>Formulas <span class="count">${formulas.length}</span></h3>
       <ol class="formula-list">${formulas.map((t, i) => html`<${Formula} key=${`${i}:${t}`} tex=${t} />`)}</ol></section>` : null}
@@ -96,30 +107,34 @@ export function ReaderPanel({ sid }) {
   const turns = s?.turns ?? null;
   // an answer lands at Stop: also refresh when the session settles (idle or waiting for input)
   const settled = s && (s.state === 'idle' || s.state === 'needs_input') ? s.state : 'busy';
-  const [data, setData] = useState({ loading: true, answers: [], error: null });
+  const [data, setData] = useState({ loading: true, answers: [], error: null, at: null });
   const [view, setView] = useState('answers');
   const [nonce, setNonce] = useState(0);
   useEffect(() => {
     let dead = false;
     setData((d) => ({ ...d, loading: true, error: null }));
     reqQuiet('reader.answers', { sid })
-      .then((r) => { if (!dead) setData({ loading: false, answers: r.answers ?? [], error: null }); })
-      .catch((e) => { if (!dead) setData({ loading: false, answers: [], error: e.message }); });
+      .then((r) => { if (!dead) setData({ loading: false, answers: r.answers ?? [], error: null, at: Date.now() }); })
+      .catch((e) => { if (!dead) setData({ loading: false, answers: [], error: e.message, at: null }); });
     return () => { dead = true; };
   }, [sid, turns, settled, nonce]);
+  const [tick, setTick] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setTick(Date.now()), 5000); return () => clearInterval(t); }, []);
+  const derived = useMemo(() => answerFormulas(data.answers), [data.answers]);
   if (!s) return null;
   const lens = model.value.lens[sid];
-  const nLens = (lens?.items?.length ?? 0) || (lens?.formulas?.length ?? 0);
+  const nLens = ((lens?.items?.length ?? 0) || (lens?.formulas?.length ?? 0)) || derived.length;
   return html`<div class="reader" data-testid="reader" data-view=${view}>
     <div class="reader-bar">
       <div class="seg" role="tablist">
         <button class="seg-btn" role="tab" aria-selected=${view === 'answers'} data-testid="reader-view-answers" onClick=${() => setView('answers')}>Answers</button>
         <button class="seg-btn" role="tab" aria-selected=${view === 'formulas'} data-testid="reader-view-formulas" onClick=${() => setView('formulas')}>Formulas${nLens ? html` <span class="count">${nLens}</span>` : null}</button>
       </div>
+      <span class="reader-updated" data-testid="reader-updated">${data.at ? updatedText(tick - data.at) : data.loading ? 'reading…' : ''}</span>
       <button class="icon-btn" title="Reload the answers" aria-label="Reload the answers" onClick=${() => setNonce(nonce + 1)}>↻</button>
     </div>
     <div class="reader-scroll">
-      ${view === 'formulas' ? html`<${FormulasView} sid=${sid} />`
+      ${view === 'formulas' ? html`<${FormulasView} sid=${sid} fromAnswers=${derived} />`
         : s.kind !== 'claude' ? html`<p class="reader-empty">A terminal tab has no answers to read.</p>`
         : data.error ? html`<p class="reader-empty reader-error" role="alert">Could not read the answers: ${data.error}</p>`
         : data.loading && !data.answers.length ? html`<p class="reader-empty">Reading the conversation…</p>`

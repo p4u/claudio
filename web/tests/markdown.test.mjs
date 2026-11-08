@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractLatex, placeholderRe, fenceLang, MARKDOWN_PURIFY, SVG_PURIFY, KATEX_OPTIONS, MERMAID_CONFIG } from '../app/render/markdown.js';
+import { extractLatex, answerFormulas, placeholderRe, fenceLang, MARKDOWN_PURIFY, SVG_PURIFY, KATEX_OPTIONS, MERMAID_CONFIG } from '../app/render/markdown.js';
 
 const NONCE = 'abc123';
 
@@ -70,4 +70,15 @@ test('stripEventHandlers drops on*= attributes from raw tags and leaves text alo
   assert.equal(stripEventHandlers('<a href="u" onclick="a(1)" onmouseover=\'b\'>t</a>'), '<a href="u">t</a>');
   assert.equal(stripEventHandlers('<svg/onload=alert(1)>'), '<svg>');
   assert.equal(stripEventHandlers('plain text with onclick=foo inside'), 'plain text with onclick=foo inside');
+});
+
+test('answerFormulas lists the distinct formulas of the answers, skipping code', () => {
+  const answers = [
+    { text: 'See <latex>a+b</latex> and <latex>c</latex>.\n```\n<latex>nope</latex>\n```' },
+    { text: 'Again <latex>a+b</latex>, plus\n\n<latex>\\int x</latex>' },
+    { text: 'none here' },
+  ];
+  assert.deepEqual(answerFormulas(answers), ['a+b', 'c', '\\int x']);
+  assert.deepEqual(answerFormulas([]), []);
+  assert.deepEqual(answerFormulas(undefined), []);
 });

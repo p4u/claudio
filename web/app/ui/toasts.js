@@ -18,13 +18,16 @@ export function toast({ text, level = 'info', actions = [], sticky = false }) {
 
 const MARK = { info: 'i', warn: '!', error: '×' };
 
-export function Toasts() {
-  return html`<div class="toasts" aria-live="polite">
-    ${toasts.value.map((t) => html`<div key=${t.id} class=${`toast toast-${t.level}`} data-testid="toast" data-level=${t.level} role=${t.level === 'error' ? 'alert' : 'status'}>
+// The toasts of the one stack (app.js puts the claude toasts in the same container).
+export function ToastList() {
+  return html`${toasts.value.map((t) => html`<div key=${t.id} class=${`toast toast-${t.level}`} data-testid="toast" data-level=${t.level} role=${t.level === 'error' ? 'alert' : 'status'}>
       <span class="toast-mark" aria-hidden="true">${MARK[t.level] ?? 'i'}</span>
       <span class="toast-text">${t.text}</span>
       ${t.actions.map((a) => html`<button class="btn btn-sm" onClick=${() => { dismiss(t.id); a.run(); }}>${a.label}</button>`)}
       <button class="icon-btn" aria-label="dismiss" onClick=${() => dismiss(t.id)}>×</button>
-    </div>`)}
-  </div>`;
+    </div>`)}`;
+}
+
+export function Toasts() {
+  return html`<div class="toasts" aria-live="polite"><${ToastList} /></div>`;
 }
