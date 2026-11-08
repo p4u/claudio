@@ -506,6 +506,16 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 
 ### Non-obvious constraints (don't "fix" these — web)
 
+- **`DESIGN.md` is the web UI's style reference; every UI change follows it.** Dark only;
+  surfaces Void `#0b0e12` → Carbon `#181a1d` → Graphite `#1f2124`, 1px Slate `#303235`
+  hairlines, radius 1px, no shadows, weight 400 only, mono (JetBrains Mono) for every
+  technical label/tab/badge/button with wide tracking, sans (Inter) for prose; Phosphor Green
+  `#00d892` only for active/status, Deep Teal `#002923` the only filled button. Two owner
+  decisions on top of it: text sizes stay at the owner's larger scale (not DESIGN.md's
+  marketing-site 11–14px), and session states map to working = green, waiting = Syntax
+  Violet `#c58aff`, stopped = Steel `#818284`, error = Syntax Coral `#ff6285`. The tokens live
+  in `web/styles/tokens.css`; never hard-code a colour, radius or font outside it.
+
 - **The import map is the only inline script, and its hash is in the CSP.** `build.rs`
   hashes the map's exact text; editing it changes the hash (a rebuild picks it up). No other
   inline script, inline handler, `eval` or CDN, ever. The e2e asserts zero
