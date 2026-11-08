@@ -1,11 +1,9 @@
 import { html } from 'htm/preact';
-import { settings, updateSettings, THEMES, TEXT_SIZES } from '../settings.js';
+import { settings, updateSettings, TEXT_SIZES } from '../settings.js';
 import { overlay } from '../palette.js';
 import { toast } from './toasts.js';
 import { Dialog } from './modal.js';
 import { captureKeys, captured } from './capture.js';
-
-const LABELS = { 'arcade-dark': 'Arcade dark', 'arcade-light': 'Arcade light', 'plain-dark': 'Plain dark', 'plain-light': 'Plain light' };
 
 async function setNotifications(on) {
   if (!on) { updateSettings({ notifications: false }); return; }
@@ -17,15 +15,9 @@ async function setNotifications(on) {
 
 export function Settings() {
   const s = settings.value;
-  return html`<${Dialog} title="Settings" testid="settings" onClose=${() => { overlay.value = null; }}>
-    <label class="set-row"><span>Theme<small>pixel face and scanlines are arcade only</small></span>
-      <select class="select" data-testid="theme-select" data-autofocus value=${s.theme} onChange=${(e) => updateSettings({ theme: e.target.value })}>
-        ${THEMES.map((t) => html`<option value=${t} selected=${t === s.theme}>${LABELS[t]}</option>`)}
-      </select></label>
-    <label class="set-row"><span>Scanlines<small>faint, on the board only</small></span>
-      <input class="toggle" type="checkbox" checked=${s.scanlines} disabled=${!s.theme.startsWith('arcade')} onChange=${(e) => updateSettings({ scanlines: e.target.checked })} /></label>
+  return html`<${Dialog} title="Settings" testid="settings" wide onClose=${() => { overlay.value = null; }}>
     <label class="set-row"><span>Text size<small>the interface text; the terminal has its own size</small></span>
-      <select class="select" data-testid="text-size-select" value=${s.textSize} onChange=${(e) => updateSettings({ textSize: e.target.value })}>
+      <select class="select" data-testid="text-size-select" data-autofocus value=${s.textSize} onChange=${(e) => updateSettings({ textSize: e.target.value })}>
         ${TEXT_SIZES.map((t) => html`<option value=${t} selected=${t === s.textSize}>${t[0].toUpperCase() + t.slice(1)}</option>`)}
       </select></label>
     <label class="set-row"><span>Terminal font size<small>pixels</small></span>

@@ -5,7 +5,7 @@ import { filter } from '../fuzzy.js';
 import { overlay, registry, runAction, hasAction } from '../palette.js';
 import { model, req, selected } from '../store.js';
 import { orderedSessions } from '../model.js';
-import { settings, updateSettings, THEMES } from '../settings.js';
+import { settings } from '../settings.js';
 import { confirm, prompt } from './modal.js';
 import { openAndEnter } from './session-actions.js';
 
@@ -19,7 +19,7 @@ export function sessionCommands(s) {
   const cmds = [
     { id: `go:${s.id}`, group: 'Sessions', title: `Go to ${tag}`, run: () => openAndEnter(s.id) },
     { id: `kill:${s.id}`, group: 'Sessions', title: `Kill ${tag}`, run: async () => {
-      if (await confirm({ title: 'Kill session', body: `Kill ${name}? The process ends.`, yes: 'Kill', no: 'Keep' })) await quiet(req('session.kill', { sid: s.id }));
+      if (await confirm({ title: 'Kill session', body: `Kill ${name}? The process ends.`, yes: 'Kill', no: 'Keep', danger: true })) await quiet(req('session.kill', { sid: s.id }));
     } },
     { id: `rename:${s.id}`, group: 'Sessions', title: `Rename ${tag}`, run: async () => {
       const v = await prompt({ title: 'Rename session', value: s.name ?? '', yes: 'Rename' });
@@ -43,9 +43,6 @@ export function buildCommands(m, cfg) {
     out.push({ id: `action:${b.action}`, group: 'Actions', title: b.help[0].toUpperCase() + b.help.slice(1), keys: b.keys, when: () => hasAction(b.action), run: () => runAction(b.action) });
   }
   out.push({ id: 'settings', group: 'App', title: 'Settings', run: () => { overlay.value = 'settings'; } });
-  for (const t of THEMES) {
-    if (t !== cfg.theme) out.push({ id: `theme:${t}`, group: 'App', title: `Theme: ${t.replace('-', ' ')}`, run: () => updateSettings({ theme: t }) });
-  }
   for (const s of orderedSessions(m)) out.push(...sessionCommands(s));
   return out;
 }

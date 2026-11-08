@@ -21,7 +21,6 @@
 #   preact-11.2.0.tgz 3c4456766bd32b6b534d52bf4e9c2a29b33e7eedf6e96ed479300ba1a7888ebf
 #   JetBrainsMono@2.304/jbm.zip 6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf
 #   Inter@4.1/inter.zip 9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e
-#   DepartureMono@1.500/dm.zip bf3e48059aeef4617ec585bdea81dcc3491c576b3e7a472f52faf40e09ee5c3a
 
 vendor/preact/preact.mjs  preact@11.2.0  https://registry.npmjs.org/preact/-/preact-11.2.0.tgz#dist/preact.mjs  sha256:bdcbd9abdf2c77c5c45326eab42191e949222d479d0d5f69467387a77040cb55
 vendor/preact/hooks/hooks.mjs  preact@11.2.0  https://registry.npmjs.org/preact/-/preact-11.2.0.tgz#hooks/dist/hooks.mjs  sha256:e862ab2973aa6455eaa0f77c5d832d2157d6be59a17c8ba546550a575b58c6b4
@@ -171,6 +170,4 @@ vendor/mermaid/chunks/mermaid.esm.min/xychartDiagram-IFGWRUGB.mjs  mermaid@12.3.
 fonts/JetBrainsMono-Regular.woff2  JetBrainsMono@2.304  https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip#fonts/webfonts/JetBrainsMono-Regular.woff2  sha256:a9cb1cd82332b23a47e3a1239d25d13c86d16c4220695e34b243effa999f45f2
 fonts/JetBrainsMono-Bold.woff2  JetBrainsMono@2.304  https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip#fonts/webfonts/JetBrainsMono-Bold.woff2  sha256:c503cc5ec5f8b2c7666b7ecda1adf44bd45f2e6579b2eba0fc292150416588a2
 fonts/Inter-Regular.woff2  Inter@4.1  https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip#web/Inter-Regular.woff2  sha256:e06f6b1bc553aaea4e4668023ed0ab0a147129c3107f511bc7d03d361b0ae085
-fonts/Inter-SemiBold.woff2  Inter@4.1  https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip#web/Inter-SemiBold.woff2  sha256:5cb7103e4e605989afebc03d989c79201e54b21b5183db33981f70db9178a301
-fonts/DepartureMono-Regular.woff2  DepartureMono@1.500  https://github.com/rektdeckard/departure-mono/releases/download/v1.500/DepartureMono-1.500.zip#DepartureMono-1.500/DepartureMono-Regular.woff2  sha256:5b4fed1daa90708aa9c6ee1190abca9dc22164a1c1def0020386e46b61038cfb
 # gzipped total: 2604489 bytes (budget 3670016)

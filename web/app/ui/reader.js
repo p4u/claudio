@@ -3,7 +3,6 @@
 import { html } from 'htm/preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { model, reqQuiet } from '../store.js';
-import { settings } from '../settings.js';
 import { defineAction } from '../palette.js';
 import { renderAnswer, formulaNode } from '../render/answer.js';
 import { answerFormulas } from '../render/markdown.js';
@@ -16,11 +15,10 @@ async function copy(text) {
   try { await navigator.clipboard.writeText(text); copied(); } catch { toast({ text: 'The browser refused to copy.', level: 'warn' }); }
 }
 
-// The body of one answer: markdown into a ref, re-rendered when the text or the theme changes.
+// The body of one answer: markdown into a ref, re-rendered when the text changes.
 export function Prose({ markdown, class: cls = '' }) {
   const ref = useRef(null);
-  const theme = settings.value.theme;
-  useEffect(() => { if (ref.current) renderAnswer(ref.current, markdown, { onCopy: copied }).catch(() => {}); }, [markdown, theme]);
+  useEffect(() => { if (ref.current) renderAnswer(ref.current, markdown, { onCopy: copied }).catch(() => {}); }, [markdown]);
   return html`<div class=${`prose ${cls}`} ref=${ref}></div>`;
 }
 
