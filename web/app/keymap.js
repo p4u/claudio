@@ -43,10 +43,86 @@ export function appAction(ev, ctx = {}) {
 }
 
 // Keys the app must never bind: they collide with the browser or with a terminal's own use.
+// Alt+letter is not here: the TUI's own bindings use exactly these (TUI_BINDINGS).
 export function forbidden(ev) {
   const k = String(ev.key).toLowerCase();
-  if (ev.altKey && /^[a-z]$/.test(k)) return true;
   if (ev.ctrlKey && !ev.altKey && (k === 'w' || k === 't' || k === 'n')) return true;
   if (ev.ctrlKey && k === 'tab') return true;
   return false;
+}
+
+// ---- TUI parity: the manager's Alt keys (src/tui/keymap.rs), active everywhere ----
+// Matched on `code` (layout independent). `action` names are run through palette.js's runAction.
+const A = (keys, code, action, help, o = {}) => ({ keys, code, action, help, ev: { key: o.key ?? code, code, ctrlKey: false, shiftKey: !!o.shift, altKey: true, metaKey: false } });
+const DIGIT_HELP = 'go to session 1…9, 0 for 10 (rail order)';
+export const TUI_BINDINGS = [
+  A('Alt+←', 'ArrowLeft', 'session-prev', 'previous session in the focused pane'),
+  A('Alt+→', 'ArrowRight', 'session-next', 'next session in the focused pane'),
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((d) => A(`Alt+Shift+${d}`, `Digit${d}`, `goto-session-${d === 0 ? 10 : d}`, DIGIT_HELP, { shift: true, key: ')!@#$%^&*('[d] })),
+  A('Alt+n', 'KeyN', 'new-session', 'new claude session'),
+  A('Alt+c', 'KeyC', 'terminal-beside', 'terminal beside, in the session\'s folder'),
+  A('Alt+r', 'KeyR', 'rename-focused', 'rename the focused session'),
+  A('Alt+x', 'KeyX', 'kill-focused', 'kill the focused session (asks)'),
+  A('Alt+e', 'KeyE', 'restart-focused', 'restart the focused session'),
+  A('Alt+a', 'KeyA', 'next-attention', 'next session that needs you'),
+  A('Alt+g', 'KeyG', 'board', 'the board (overview)'),
+  A('Alt+s', 'KeyS', 'stats', 'stats drawer'),
+  A('Alt+l', 'KeyL', 'history', 'history drawer'),
+  A('Alt+u', 'KeyU', 'reader', 'reader drawer'),
+  A('Alt+i', 'KeyI', 'extensions', 'extensions screen'),
+  A('Alt+h', 'KeyH', 'help', 'this help'),
+  A('Alt+z', 'KeyZ', 'palette', 'command palette (the extension actions)'),
+];
+
+const BY_CODE = new Map(TUI_BINDINGS.filter((b) => !b.ev.shiftKey).map((b) => [b.code, b.action]));
+const BY_DIGIT = new Map(TUI_BINDINGS.filter((b) => b.ev.shiftKey).map((b) => [b.code, b.action]));
+
+// The action a TUI parity key runs, or null. AltGr (Ctrl+Alt) and Meta never match.
+export function tuiBinding(ev) {
+  if (!ev.altKey || ev.ctrlKey || ev.metaKey) return null;
+  const table = ev.shiftKey ? BY_DIGIT : BY_CODE;
+  return table.get(ev.code) ?? null;
+}
+
+// ---- what a terminal gets for a key ----
+// Shift+Enter is claude's newline: ESC CR, the same as Alt+Enter (xterm sends a bare CR).
+export function shiftEnterBytes(ev) {
+  return ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey ? '\x1b\r' : null;
+}
+
+const NAMED = { Enter: '\r', Escape: '\x1b', Tab: '\t', Backspace: '\x7f', ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D' };
+
+// An approximation of what xterm.js sends, for the key check; null when the key sends nothing.
+export function terminalBytes(ev) {
+  if (ev.metaKey) return null;
+  const se = shiftEnterBytes(ev);
+  if (se) return se;
+  if (ev.key === 'Tab' && ev.shiftKey) return '\x1b[Z';
+  let base = Object.hasOwn(NAMED, ev.key) ? NAMED[ev.key] : null;
+  if (base === null && ev.key.length === 1) {
+    base = ev.key;
+    if (ev.ctrlKey && /^[a-z]$/i.test(ev.key)) base = String.fromCharCode(ev.key.toUpperCase().charCodeAt(0) - 64);
+    else if (ev.ctrlKey) return null;
+  }
+  if (base === null) return null;
+  return ev.altKey ? '\x1b' + base : base;
+}
+
+export function escapeBytes(b) {
+  return [...b].map((c) => {
+    const n = c.codePointAt(0);
+    if (n === 0x5c) return '\\\\';
+    return n < 0x20 || n === 0x7f ? `\\x${n.toString(16).padStart(2, '0')}` : c;
+  }).join('');
+}
+
+// One line for the help's key check: the key, its code, modifiers, and what claudio does with it.
+export function describeKey(ev) {
+  const mods = ['ctrl', 'alt', 'shift', 'meta'].filter((m) => ev[m + 'Key']).join('+') || 'none';
+  const head = `key=${ev.key} code=${ev.code} mods=${mods}`;
+  const act = tuiBinding(ev);
+  if (act) return `${head} → claudio: ${act}`;
+  if (isLeaveTerminal(ev)) return `${head} → claudio: leave-terminal`;
+  const b = terminalBytes(ev);
+  return b === null ? `${head} → goes to the page` : `${head} → sent to the session: ${escapeBytes(b)}`;
 }
