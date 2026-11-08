@@ -1,18 +1,134 @@
-/* Design tokens. Four themes on <html data-theme>: arcade-dark (default), arcade-light,
-   plain-dark, plain-light. State colours and glyphs follow the TUI (src/tui/ui/mod.rs). */
+/* Design tokens: the single source of every colour, radius, font and tracking (DESIGN.md).
+   Dark only. No other stylesheet or script hard-codes a colour, radius, shadow or font family. */
 :root {
-  --font-ui: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Departure Mono", "JetBrains Mono", ui-monospace, monospace;
-  --font-prose: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+
+  /* ---- palette (DESIGN.md "Colors"), by name ---- */
+  --void: #0b0e12;
+  --carbon: #181a1d;
+  --graphite: #1f2124;
+  --slate: #303235;
+  --fog: #5d5e61;
+  --steel: #818284;
+  --ash: #a3a4a5;
+  --silver: #bababb;
+  --bone: #dedede;
+  --phosphor: #00d892;
+  --deep-teal: #002923;
+  --emerald: #005441;
+  --magenta: #9f3f53;
+  --violet: #c58aff;
+  --coral: #ff6285;
+  --forest: #006d4a;
+
+  /* ---- semantic ---- */
+  --bg: var(--void);            /* the canvas */
+  --surface: var(--carbon);     /* panels, panes, rail, drawer, code blocks, badge fill */
+  --surface-2: var(--graphite); /* dialogs, menus, popovers, toasts */
+  --border: var(--slate);       /* every hairline */
+  --border-strong: var(--fog);  /* a hovered input, a scrollbar thumb */
+  --text: var(--silver);
+  --text-2: var(--ash);         /* secondary text, ghost buttons, links at rest */
+  --text-muted: var(--steel);   /* labels, inactive tabs, metadata */
+  --text-faint: var(--fog);     /* line numbers, disabled, comments */
+  --text-strong: var(--bone);   /* names, headings, hover */
+  --accent: var(--phosphor);    /* active, selected, status: never a large fill */
+  --accent-fill: var(--deep-teal);
+  --accent-fill-hover: var(--emerald);
+  --hover: color-mix(in srgb, var(--slate) 45%, transparent);
+  --scrim: color-mix(in srgb, var(--void) 78%, transparent);
+  --selection: color-mix(in srgb, var(--emerald) 85%, transparent);
+
+  /* session states (owner decision): working, waiting for you, stopped, error; shells and unknown */
+  --state-working: var(--phosphor);
+  --state-waiting: var(--violet);
+  --state-stopped: var(--steel);
+  --state-error: var(--coral);
+  --state-shell: var(--ash);
+  --state-unknown: var(--fog);
+
+  /* gauges: ok, warn (>= 60 %), hot (>= 85 %) */
+  --gauge-ok: var(--phosphor);
+  --gauge-warn: var(--violet);
+  --gauge-hot: var(--coral);
+  --gauge-track: var(--slate);
+
+  /* diffs */
+  --diff-add-text: var(--phosphor);
+  --diff-add-bg: color-mix(in srgb, var(--deep-teal) 85%, var(--carbon));
+  --diff-add-gutter: color-mix(in srgb, var(--emerald) 55%, var(--carbon));
+  --diff-del-text: var(--coral);
+  --diff-del-bg: color-mix(in srgb, var(--magenta) 16%, var(--carbon));
+  --diff-del-gutter: color-mix(in srgb, var(--magenta) 32%, var(--carbon));
+  --diff-hunk: var(--steel);
+  --diff-ln: var(--fog);
+
+  /* code (highlight.js) */
+  --hl-kw: var(--violet);
+  --hl-str: var(--phosphor);
+  --hl-num: var(--coral);
+  --hl-com: var(--fog);
+  --hl-title: var(--bone);
+  --hl-type: var(--ash);
+  --hl-attr: var(--silver);
+  --hl-meta: var(--steel);
+
+  /* the status badge ring (DESIGN.md "Elevation"): the only box-shadow in the app */
+  --ring: inset 0 0 0 1px;
+  --ring-neutral: color-mix(in srgb, var(--bone) 15%, transparent);
+  --ring-accent: color-mix(in srgb, var(--phosphor) 15%, transparent);
+  --ring-working: color-mix(in srgb, var(--state-working) 15%, transparent);
+  --ring-waiting: color-mix(in srgb, var(--state-waiting) 15%, transparent);
+  --ring-stopped: color-mix(in srgb, var(--state-stopped) 15%, transparent);
+  --ring-error: color-mix(in srgb, var(--state-error) 15%, transparent);
+  --focus-pane: color-mix(in srgb, var(--phosphor) 45%, var(--slate));
+
+  /* the terminal: Carbon like its pane, Silver ink, a Phosphor cursor. xterm needs plain colours,
+     so the ANSI set is hex, derived from the palette (cyan: a green-teal; bright: lifted). */
+  --term-bg: var(--carbon);
+  --term-fg: var(--silver);
+  --term-cursor: var(--phosphor);
+  --term-selection: #00544199;
+  --ansi-black: #1f2124;
+  --ansi-red: #ff6285;
+  --ansi-green: #00d892;
+  --ansi-yellow: #a3a4a5;
+  --ansi-blue: #c58aff;
+  --ansi-magenta: #c58aff;
+  --ansi-cyan: #3cc7b4;
+  --ansi-white: #bababb;
+  --ansi-bright-black: #5d5e61;
+  --ansi-bright-red: #ff8aa5;
+  --ansi-bright-green: #5cf0b8;
+  --ansi-bright-yellow: #dedede;
+  --ansi-bright-blue: #d9b3ff;
+  --ansi-bright-magenta: #d9b3ff;
+  --ansi-bright-cyan: #7fe0d0;
+  --ansi-bright-white: #dedede;
+  --latex-accent: var(--bone);
+
+  /* ---- type ---- */
+  --font-sans: "Inter", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --font-features: "calt" 0, "liga" 0; /* no ligatures anywhere: the mono grid stays rigid */
+  --track-mono: 0.053em;      /* buttons, nav, tabs */
+  --track-mono-wide: 0.064em; /* small uppercase labels and badges */
+  --track-sans-sm: 0.044em;   /* small sans */
+  --track-display: -0.005em;  /* large sans headings */
   --term-font-size: 15px;
-  /* UI text scale: today's sizes plus --fs-add. Normal (+2px) is the default; Small (0) is the old
-     scale, Large (+4px); set by the "Text size" setting through <html data-text>. */
+  /* UI text scale: the owner's sizes plus --fs-add. Normal is the default; Small and Large come
+     from the "Text size" setting through <html data-text>. */
   --fs-add: 4px;
   --rail-add: 2px; /* the rail (Sessions list) keeps its own, smaller scale */
   --fs-2xs: calc(10px + var(--fs-add)); --fs-xs: calc(11px + var(--fs-add)); --fs-sm: calc(12px + var(--fs-add));
   --fs-md: calc(13px + var(--fs-add)); --fs-lg: calc(14px + var(--fs-add)); --fs-xl: calc(16px + var(--fs-add));
   --fs-2xl: calc(20px + var(--fs-add)); --fs-3xl: calc(22px + var(--fs-add));
-  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
+
+  /* ---- shape and space ---- */
+  --radius: 1px;
+  --hair: 1px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px;
+  --measure: 680px;
   --topbar-h: 56px; --footer-h: 34px; --rail-w: 320px;
   --t-fast: 120ms;
 }
@@ -25,90 +141,8 @@
   --fs-2xl: calc(20px + var(--rail-add)); --fs-3xl: calc(22px + var(--rail-add));
 }
 
-/* ---- dark base (arcade-dark and plain-dark share the palette) ---- */
-:root,
-:root[data-theme="arcade-dark"],
-:root[data-theme="plain-dark"] {
-  color-scheme: dark;
-  --bg: #0b0f14;
-  --panel: #121821;
-  --panel-2: #18212d;
-  --border: #1f2a37;
-  --border-strong: #33465c;
-  --text: #e6edf3;
-  --muted: #8b98a5;
-  --accent: #8b7bff;
-  --accent-ink: #0b0f14;
-  --st-working: #22d3ee;
-  --st-approval: #ff4d4f;
-  --st-input: #f5b32b;
-  --st-idle: #3ddc84;
-  --st-error: #ff2e63;
-  --st-exited: #8b98a5;
-  --st-unknown: #5c6b7a;
-  --st-shell: #3ddc84;
-  --shadow-hard: #000000;
-  --scrim: rgba(5, 8, 12, 0.72);
-  --scan: rgba(255, 255, 255, 0.03);
-  --hover: rgba(139, 152, 165, 0.10);
-  --term-bg: #0b0f14;
-}
-
-:root[data-theme="arcade-light"],
-:root[data-theme="plain-light"] {
-  color-scheme: light;
-  --bg: #f1ede3;
-  --panel: #fbf9f3;
-  --panel-2: #ece7da;
-  --border: #cfc7b3;
-  --border-strong: #8d8470;
-  --text: #1a2028;
-  --muted: #566170;
-  --accent: #5b43e0;
-  --accent-ink: #ffffff;
-  --st-working: #0a7388;
-  --st-approval: #c4222a;
-  --st-input: #86560a;
-  --st-idle: #12793b;
-  --st-error: #b8113c;
-  --st-exited: #566170;
-  --st-unknown: #566170;
-  --st-shell: #12793b;
-  --shadow-hard: rgba(26, 32, 40, 0.88);
-  --scrim: rgba(241, 237, 227, 0.78);
-  --scan: rgba(0, 0, 0, 0.035);
-  --hover: rgba(26, 32, 40, 0.07);
-  --term-bg: #fbf9f3;
-}
-
-:root[data-theme="plain-light"] {
-  --bg: #f5f6f8;
-  --panel: #ffffff;
-  --panel-2: #eef0f3;
-  --border: #d5d9e0;
-  --border-strong: #9aa3b0;
-}
-
-:root[data-theme="plain-dark"] {
-  --bg: #0f1115;
-  --panel: #171a20;
-  --panel-2: #1e222a;
-  --border: #272c35;
-  --border-strong: #3c4452;
-}
-
-/* ---- arcade vs plain chrome ---- */
-:root[data-theme^="arcade"] {
-  --bw: 2px;
-  --radius: 2px;
-  --font-head: var(--font-pixel);
-  --popover-shadow: 4px 4px 0 0 var(--shadow-hard);
-  --btn-edge: 3px;
-}
-:root[data-theme^="plain"] {
-  --bw: 1px;
-  --radius: 6px;
-  --font-head: var(--font-ui);
-  --popover-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-  --btn-edge: 0px;
-}
+/* ---- faces: Inter Regular for prose, JetBrains Mono Regular for chrome (Bold only for the
+   terminal's bold cells) ---- */
+@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Inter"; src: url("/fonts/Inter-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }

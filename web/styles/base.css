@@ -1,54 +1,53 @@
-@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
-@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2"); font-weight: 700; font-display: swap; }
-@font-face { font-family: "Departure Mono"; src: url("/fonts/DepartureMono-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
-@font-face { font-family: "Inter"; src: url("/fonts/Inter-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
-@font-face { font-family: "Inter"; src: url("/fonts/Inter-SemiBold.woff2") format("woff2"); font-weight: 600; font-display: swap; }
-
+/* Base: the canvas, the two faces, weight 400 everywhere, the focus ring. */
 *, *::before, *::after { box-sizing: border-box; }
+/* No ligatures anywhere (the `font` shorthand resets them, so every element sets them itself). */
+*, *::before, *::after { font-feature-settings: var(--font-features); font-variant-ligatures: none; }
 html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 400 var(--fs-md)/1.45 var(--font-ui);
+  font: 400 var(--fs-md)/1.45 var(--font-mono);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
-h1, h2, h3, p { margin: 0; }
-code, kbd { font-family: var(--font-ui); }
-::selection { background: var(--accent); color: var(--accent-ink); }
+h1, h2, h3, h4, h5, h6, p { margin: 0; }
+/* Weight 400 only: hierarchy comes from size, colour and tracking (DESIGN.md). */
+h1, h2, h3, h4, h5, h6, b, strong, th, dt, legend, optgroup { font-weight: 400; }
+b, strong { color: var(--text-strong); }
+code, kbd, pre, samp { font-family: var(--font-mono); }
+::selection { background: var(--selection); color: var(--text-strong); }
 
+/* Focus: a 1px Phosphor outline, 2px out, on everything focusable. Never removed. */
 :focus { outline: none; }
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
+:focus-visible { outline: var(--hair) solid var(--accent); outline-offset: 2px; }
+/* a dialog that takes the focus itself (no field to start in) is a container, not a control */
+[role="dialog"][tabindex="-1"]:focus-visible { outline: none; }
 
-.pixel { font-family: var(--font-head); font-weight: 400; letter-spacing: 0.04em; }
-.muted { color: var(--muted); }
+.muted { color: var(--text-muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+*:hover { scrollbar-color: var(--border-strong) transparent; }
 
 /* ---- boot screen (before the app loads) ---- */
 .boot {
   min-height: 100%;
   display: grid;
-  place-items: center;
-  padding: var(--space-5);
+  align-items: center;
+  padding: var(--space-5) clamp(24px, 10vw, 160px);
 }
 .boot-card {
   max-width: 460px;
-  background: var(--panel);
-  border: var(--bw) solid var(--border-strong);
+  background: var(--surface);
+  border: var(--hair) solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--popover-shadow);
   padding: var(--space-5);
 }
-.boot-card h1 { font-family: var(--font-head); font-size: var(--fs-2xl); letter-spacing: 0.08em; margin-bottom: var(--space-3); }
-.boot-card p { color: var(--muted); }
-.boot-card code { color: var(--text); background: var(--panel-2); padding: 1px 6px; border-radius: var(--radius); }
+.boot-card h1 { font-family: var(--font-sans); font-size: var(--fs-2xl); letter-spacing: var(--track-display); color: var(--text-strong); margin-bottom: var(--space-3); }
+.boot-card p { font-family: var(--font-sans); color: var(--text-muted); }
+.boot-card code { color: var(--text); background: var(--surface-2); padding: 1px 6px; border-radius: var(--radius); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
