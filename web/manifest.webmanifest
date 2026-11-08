@@ -1,0 +1,11 @@
+{
+  "name": "claudio",
+  "short_name": "claudio",
+  "description": "Claude Code sessions in the browser",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": [{ "src": "/icons/claudio.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

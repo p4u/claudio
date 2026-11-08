@@ -100,9 +100,36 @@ TERM; `Ctrl+Shift+Space` leaves it.
 Everything else is a button, the palette (`k`) or a menu: rename, restart, kill, terminal tab,
 history, stats, snippets, extensions, hosts, settings.
 
-**Never bound:** `Alt+letter` (the TUI's manager keys; terminals use them), `Ctrl+W`,
-`Ctrl+T`, `Ctrl+N` and `Ctrl+Tab` (the browser's), and any key while the terminal has focus
-except `Ctrl+Shift+Space`.
+### The TUI's keys, anywhere
+
+These are the manager's Alt keys. They work in a terminal too: the page takes them before
+xterm and the browser do (matched on the physical key, so any layout works; AltGr is not Alt).
+`Alt+q` and everything not listed goes to the session.
+
+| Key | Action |
+|---|---|
+| `Alt+←` / `Alt+→` | Previous / next session in the focused pane (rail order) |
+| `Alt+Shift+1`…`9`, `0` | Go to session 1 to 10 |
+| `Alt+n` | New claude session |
+| `Alt+c` | Terminal beside, in the session's folder |
+| `Alt+r` / `Alt+x` / `Alt+e` | Rename / kill (asks) / restart the focused session |
+| `Alt+a` | Next session that needs you |
+| `Alt+g` | The board |
+| `Alt+s` / `Alt+l` / `Alt+u` | Stats / history / reader drawer |
+| `Alt+i` | Extensions screen |
+| `Alt+h` | Help |
+| `Alt+z` | Command palette (lists the extension actions) |
+
+`Shift+Enter` in a terminal inserts a newline in claude (it sends ESC CR, like `Alt+Enter`).
+
+**Browser keys.** In a normal tab the browser keeps `Ctrl+T`, `Ctrl+W`, `Ctrl+N` and `Ctrl+Tab`.
+Two ways round it: **Capture all keys** (Settings, Help, or the palette) goes fullscreen and
+locks the keyboard where the browser supports it (Chromium, Brave, Edge; hold Esc to leave
+fullscreen); or install claudio as an app (Brave or Chrome menu, "Install claudio...") and
+capture there too. `Alt+←` / `Alt+→` are the browser's history keys, claudio takes them first.
+
+**Key check.** Help has a Key check section: turn it on and each key press shows its `key`,
+`code`, modifiers and what claudio does with it. Nothing is sent to a session meanwhile.
 
 ## TUI parity
 
@@ -136,12 +163,14 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | claude install / update | update prompt | host chip → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
 | Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
 | Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |
-| Next attention | `Alt+a` | `a`, the queue | (client side) | manual check (`a` focuses the session that needs approval); queue: `a permission prompt shows its text…` |
-| Help | `Alt+h` | `?` | (client side) | manual check (`?` opens the key list) |
-| Overview of all sessions | `Alt+g` | Board | (client side) | `the board lists sessions with their states` |
+| Next attention | `Alt+a` | `Alt+a`, `a`, the queue | (client side) | manual check (`a` focuses the session that needs approval); queue: `a permission prompt shows its text…` |
+| Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
+| Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
 | Login and security | n/a | token URL, cookie | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests |
 | Layout and themes | n/a | Settings → Theme | `layout.save` | `theme switch applies plain`; `web_order_and_layout_persist_in_web_state` |
-| Keys | n/a | `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette` |
+| Keys | `Alt+…` (see Keys) | the same Alt keys, `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette`; `Alt+u in a terminal opens the reader and sends nothing to claude`; `Alt+a focuses the session that needs attention, Alt+Right switches session` |
+| Newline in the prompt | `Shift+Enter` | `Shift+Enter` in a terminal | `session.input` | `Shift+Enter puts ESC CR into the input, Enter submits` |
+| Browser-reserved keys | n/a | Capture all keys, installable app | (client side) | `the settings have Capture all keys and the manifest is served` |
 
 ## Developing the page
 

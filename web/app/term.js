@@ -6,6 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
+import { tuiBinding, shiftEnterBytes } from './keymap.js';
 import { conn, req, sendInput, onOutput, onServerEvent } from './store.js';
 import { shouldSendResize, resizePolicy } from './panes.js';
 import { confirm } from './ui/modal.js';
@@ -150,6 +151,17 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     // A pane here that merely differs from the focused pane's fit just letterboxes.
     const foreign = !!mine && (mine.rows !== ev.rows || mine.cols !== ev.cols);
     onAttached?.({ rows: ev.rows, cols: ev.cols, foreign });
+  });
+
+  // Keys the app takes first (document capture already did, this is the belt) and Shift+Enter:
+  // claude's newline is ESC CR, which xterm does not send for Shift.
+  term.attachCustomKeyEventHandler((ev) => {
+    if (tuiBinding(ev)) return false;
+    const nl = shiftEnterBytes(ev);
+    if (!nl) return true;
+    ev.preventDefault();
+    if (ev.type === 'keydown') sendInput(sid, nl);
+    return false;
   });
 
   const d1 = term.onData((d) => sendInput(sid, d));

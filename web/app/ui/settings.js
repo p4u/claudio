@@ -3,6 +3,7 @@ import { settings, updateSettings, THEMES } from '../settings.js';
 import { overlay } from '../palette.js';
 import { toast } from './toasts.js';
 import { Dialog } from './modal.js';
+import { captureKeys, captured } from './capture.js';
 
 const LABELS = { 'arcade-dark': 'Arcade dark', 'arcade-light': 'Arcade light', 'plain-dark': 'Plain dark', 'plain-light': 'Plain light' };
 
@@ -31,6 +32,8 @@ export function Settings() {
       <input class="toggle" type="checkbox" checked=${s.sound} onChange=${(e) => updateSettings({ sound: e.target.checked })} /></label>
     <div class="set-row"><span>Extensions<small>lenses, actions and proxy plugins</small></span>
       <button type="button" class="btn btn-sm" data-testid="open-extensions" onClick=${() => { overlay.value = 'extensions'; }}>Manage…</button></div>
+    <div class="set-row"><span>Capture all keys<small>fullscreen, so Ctrl+T, Ctrl+W, Ctrl+N and Ctrl+Tab reach the terminal</small></span>
+      <button type="button" class="btn btn-sm" data-testid="capture-keys" aria-pressed=${captured.value} onClick=${captureKeys}>${captured.value ? 'Release' : 'Capture'}</button></div>
     <label class="set-row"><span>Notifications<small>when a background session needs you</small></span>
       <input class="toggle" type="checkbox" checked=${s.notifications} onChange=${(e) => setNotifications(e.target.checked)} /></label>
   <//>`;

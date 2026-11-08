@@ -100,6 +100,7 @@ pub(crate) fn mime(path: &str) -> &'static str {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
+        "webmanifest" => "application/manifest+json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "ico" => "image/x-icon",
@@ -303,6 +304,7 @@ mod tests {
         assert_eq!(mime("/fonts/Inter-Regular.woff2"), "font/woff2");
         assert_eq!(mime("/icon.svg"), "image/svg+xml");
         assert_eq!(mime("/x.json"), "application/json");
+        assert_eq!(mime("/manifest.webmanifest"), "application/manifest+json");
         assert_eq!(mime("/x.unknown"), "application/octet-stream");
         assert_eq!(mime("/noext"), "application/octet-stream");
         assert_eq!(mime("/dir.js/noext"), "application/octet-stream");

@@ -2,7 +2,7 @@ import { html } from 'htm/preact';
 import { effect } from '@preact/signals';
 import { model, mode, setMode, banner, selected, focused, conn, serverInfo, onServerEvent } from '../store.js';
 import { orderedSessions } from '../model.js';
-import { appAction, isLeaveTerminal } from '../keymap.js';
+import { appAction, isLeaveTerminal, tuiBinding, describeKey } from '../keymap.js';
 import { overlay, defineAction, runAction } from '../palette.js';
 import { settings, updateSettings } from '../settings.js';
 import { planLayout, stageFloor } from '../layout.js';
@@ -36,7 +36,9 @@ import { ExtensionsScreen, installExtensions } from './extensions.js';
 import { PluginSetupHost, installPluginGate, setupOpen, cancelPluginSetup } from './plugin-setup.js';
 import { ClaudeToastList } from './claude.js';
 import { HostPanel, installHosts } from './hosts.js';
-import { drawer, showBoard, boardShown, setGridSize, focusPane, openSession, openAndEnter, trackRemoved, ProxyChooserHost } from './session-actions.js';
+import { drawer, showBoard, boardShown, setGridSize, focusPane, openSession, openAndEnter, trackRemoved, ProxyChooserHost, renameSession, killSession, restartSession, openTerminalTab } from './session-actions.js';
+import { keyCheck, keyCheckLog } from './key-check.js';
+import './capture.js';
 
 export { glyphFor, Glyph, ago };
 
@@ -128,6 +130,26 @@ export function installFocusModel() {
     const q = queueSessions();
     if (q.length) openSession(q[0].id);
   });
+  // TUI parity (keymap.js TUI_BINDINGS): relative moves and jumps in rail order, in the focused pane
+  const keep = (sid) => (mode.value === 'terminal' ? openAndEnter(sid) : openSession(sid));
+  const move = (delta) => {
+    const list = orderedSessions(model.value);
+    if (!list.length) return;
+    const at = list.findIndex((x) => x.id === focused.value);
+    keep(list[at < 0 ? (delta > 0 ? 0 : list.length - 1) : (at + delta + list.length) % list.length].id);
+  };
+  defineAction('session-next', () => move(1));
+  defineAction('session-prev', () => move(-1));
+  for (let n = 1; n <= 10; n++) {
+    defineAction(`goto-session-${n}`, () => { const x = orderedSessions(model.value)[n - 1]; if (x) keep(x.id); });
+  }
+  const withFocused = (fn) => () => { const x = model.value.sessions[focused.value]; if (x) fn(x); };
+  defineAction('terminal-beside', withFocused(openTerminalTab));
+  defineAction('rename-focused', withFocused(renameSession));
+  defineAction('kill-focused', withFocused(killSession));
+  defineAction('restart-focused', withFocused((x) => restartSession(x, false)));
+  defineAction('board', () => { showBoard.value = !boardShown(model.value.layout); });
+  defineAction('extensions', () => { overlay.value = 'extensions'; });
   for (let n = 1; n <= 4; n++) {
     defineAction(`focus-pane-${n}`, () => {
       if (narrow.value || n > model.value.layout.grid) return;
@@ -152,6 +174,21 @@ export function installFocusModel() {
   installNotifications();
 
   document.addEventListener('keydown', (ev) => {
+    // The help's key check only reports: nothing runs and nothing reaches a session (Esc closes the help).
+    if (keyCheck.value && overlay.value === 'help' && ev.key !== 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      keyCheckLog.value = describeKey(ev);
+      return;
+    }
+    // TUI parity keys: before xterm and the browser see them, in a terminal or out of it.
+    const tui = modal.value ? null : tuiBinding(ev);
+    if (tui) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!ev.repeat) runAction(tui);
+      return;
+    }
     if (mode.value === 'terminal') {
       if (isLeaveTerminal(ev)) {
         ev.preventDefault();

@@ -166,7 +166,7 @@ kbd {
   background: var(--scrim);
   display: grid; justify-items: center; align-items: start; padding-top: 12vh;
 }
-.dialog { width: min(480px, calc(100vw - 32px)); padding: var(--space-4); }
+.dialog { width: min(480px, calc(100vw - 32px)); max-height: calc(88vh - 16px); overflow-y: auto; padding: var(--space-4); }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .dialog-title { font-size: 14px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-3); display: flex; justify-content: space-between; align-items: center; }
 .dialog-body { color: var(--muted); margin-bottom: var(--space-4); }
@@ -199,6 +199,8 @@ kbd {
 /* help */
 .help-list { display: grid; grid-template-columns: max-content 1fr; gap: 8px var(--space-4); align-items: center; }
 .help-note { margin-top: var(--space-4); padding-top: var(--space-3); border-top: var(--bw) solid var(--border); color: var(--muted); font-size: 12px; }
+.help-h { margin: var(--space-4) 0 var(--space-2); font-size: 13px; }
+.key-check-out { margin: var(--space-2) 0 0; min-height: 2.5em; padding: var(--space-2); border: var(--bw) solid var(--border); white-space: pre-wrap; font-size: 12px; }
 
 /* settings */
 .set-row { display: grid; grid-template-columns: 1fr minmax(140px, 220px); gap: var(--space-3); align-items: center; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
