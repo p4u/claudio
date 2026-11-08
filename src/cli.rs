@@ -361,7 +361,7 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_COLS=<n> / CLAUDIO_ROWS=<n>  Emulated terminal size (default: 120x40).\n\
 \x20  CLAUDIO_DEBUG=1                   Verbose wrapper diagnostics.\n\
 \x20  CLAUDIO_RAW_LOG=<path>            Dump the raw PTY byte stream to a file.\n\
-\x20  CLAUDIO_NO_BROWSER=1              `claudio proxy login` prints the sign-in URL without opening a browser.\n\
+\x20  CLAUDIO_NO_BROWSER=1              `claudio proxy login` and `claudio web` print their URL without opening a browser.\n\
 \n\
 \x20Environment variables — API server (--api):\n\
 \x20  CLAUDIO_API_BIND=<host:port>      Listen address (default: 127.0.0.1:8080).\n\
@@ -378,6 +378,17 @@ pub const HELP_APPENDIX: &str = "\n\
 \x20  CLAUDIO_API_MAX_LIVE=<n>          Max live claude processes; idle ones are demoted (default: 6).\n\
 \x20  CLAUDIO_API_SESSION_TTL=<n>       Drop an idle conversation mapping after n seconds (default: 600).\n\
 \x20  CLAUDIO_API_REINJECT_TURNS=<n>    Re-inject the system prompt every n turns (default: 6).\n\
+\n\
+\x20Web UI:\n\
+\x20  claudio web [--listen 127.0.0.1:7337] [--allow-host NAME]... [--no-open] [--print-url] [--rotate-token]\n\
+\x20                              Serve the session manager to a browser on this machine (loopback only).\n\
+\x20                              Prints http://127.0.0.1:7337/#t=<token> and opens it. The token (in\n\
+\x20                              ~/.config/claudio/web-token, 0600) is as sensitive as an SSH key: it\n\
+\x20                              reaches every session on every connected host. From another machine:\n\
+\x20                              ssh -L 7337:127.0.0.1:7337 HOST. Behind a TLS reverse proxy on this\n\
+\x20                              host: --allow-host NAME. --print-url prints the URL and exits;\n\
+\x20                              --rotate-token makes a new token. See docs/web.md.\n\
+\x20  CLAUDIO_WEB_DIR=<dir>             (debug builds only) serve the browser app from <dir>, not the binary.\n\
 \n\
 \x20Daemon commands:\n\
 \x20  claudio daemon status             Show whether the daemon is running, its version and session count.\n\
@@ -622,5 +633,7 @@ mod tests {
         assert!(HELP_APPENDIX.contains("--api"));
         assert!(HELP_APPENDIX.contains("CLAUDIO_API_BIND"));
         assert!(HELP_APPENDIX.contains("CLAUDIO_LOG_MESSAGES_FILE"));
+        assert!(HELP_APPENDIX.contains("claudio web"));
+        assert!(HELP_APPENDIX.contains("CLAUDIO_WEB_DIR"));
     }
 }

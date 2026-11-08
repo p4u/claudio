@@ -33,7 +33,7 @@ serde_json = "1"
 # OpenAI-compatible API server (--api). Only exercised in API mode, but linked
 # unconditionally so a single static binary serves both roles.
 serde = { version = "1", features = ["derive"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 futures = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
@@ -61,11 +61,24 @@ unicode-width = "0.2"
 # features (no HTML output). Pinned exactly like the parser: the reader's
 # hostile-input bounds were measured against this version.
 pulldown-cmark = { version = "=0.13.6", default-features = false }
+# `claudio web`: the embedded browser app is stored gzipped (build.rs) and
+# decompressed for a client without gzip; base64 for the import-map hash in
+# debug disk mode. Pure Rust (flate2's default miniz_oxide backend).
+flate2 = "1"
+base64 = "0.22"
+
+[build-dependencies]
+flate2 = "1"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Only needed in integration tests (no runtime dep).
 [dev-dependencies]
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["test-util"] }
+# `claudio web`'s WebSocket in tests/web.rs: the version axum's `ws` feature
+# pulls, so one copy builds.
+tokio-tungstenite = "0.29"
 
 [profile.release]
 strip = true

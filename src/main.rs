@@ -28,6 +28,7 @@ mod remote;
 mod term;
 mod tui;
 mod upgrade;
+mod web;
 
 use std::io::{IsTerminal, Read, Write};
 
@@ -169,6 +170,11 @@ fn main() -> std::process::ExitCode {
     // `claudio sessions` — list sessions as a table.
     if argv.get(1).map(String::as_str) == Some("sessions") {
         return sessions_cmd();
+    }
+
+    // `claudio web [...]` — the session manager in a browser (src/web/).
+    if argv.get(1).map(String::as_str) == Some("web") {
+        return web::run(&argv[2..]);
     }
 
     // `claudio --plain [--proxy <name>|--no-proxy] [claude args…]` — plain
