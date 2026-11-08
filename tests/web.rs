@@ -116,7 +116,9 @@ impl Web {
     fn stop(mut self) -> ManagerHarness {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.h.take().unwrap()
+        let h = self.h.take().unwrap();
+        daemon_settled(&h);
+        h
     }
 
     fn host(&self) -> String {
@@ -179,6 +181,22 @@ impl Drop for Web {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(h) = &self.h {
+            daemon_settled(h);
+        }
+    }
+}
+
+/// Once a daemon was started (its log exists), wait until it wrote its PID,
+/// so the harness can stop it: a server killed right after starting one
+/// must not leave it running.
+fn daemon_settled(h: &ManagerHarness) {
+    if !h.runtime_dir.join("claudio/daemon.log").exists() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + DAEMON_WAIT;
+    while h.daemon_pid().is_none() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -290,7 +308,17 @@ impl Tab {
         if let Some(i) = found {
             return text_json(&self.pending.remove(i).unwrap()).unwrap();
         }
+        // Other frames (host stats every ~2 s) must not keep a wait alive.
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no matching frame in time; buffered: {:?}",
+                self.pending
+                    .iter()
+                    .filter_map(text_json)
+                    .collect::<Vec<_>>()
+            );
             let msg = self.next_message().await;
             match text_json(&msg) {
                 Some(v) if pick(&v) => return v,
@@ -336,7 +364,12 @@ impl Tab {
             }
         }
         self.pending = keep;
+        let deadline = tokio::time::Instant::now() + WAIT;
         while !text.contains(needle) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{needle:?} not in the output in time: {text:?}"
+            );
             let msg = self.next_message().await;
             match output_of(&msg, &id) {
                 Some(b) => text.push_str(&String::from_utf8_lossy(b)),
@@ -588,4 +621,658 @@ async fn web_bad_frames_close_the_socket() {
         .await
         .unwrap();
     assert_eq!(tab.close_code().await, Some(1009));
+}
+
+// ── The hub: a fake claude, hooks, sessions ──────────────────────────────────
+
+/// A fake claude for the web tests: answers --version/--help, saves its
+/// --settings JSON (the hook commands) to `.fake-settings.json` in its cwd,
+/// optionally turns bracketed paste on, prints a banner, then logs every
+/// input line to `.fake-input.log`, answers `size` with `stty size` and
+/// echoes any other line as `line:<text>`.
+fn write_web_fake_claude(h: &ManagerHarness, bracketed_paste: bool) {
+    let bp = if bracketed_paste {
+        r"printf '\033[?2004h'"
+    } else {
+        ":"
+    };
+    let script = format!(
+        r#"#!/bin/sh
+[ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
+[ "$1" = "--help" ] && exit 0
+printf '%s' "$2" > .fake-settings.json
+{bp}
+echo "FAKE_CLAUDE_BANNER pid=$$"
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> .fake-input.log
+  case "$line" in
+    size) stty size ;;
+    *) printf 'line:%s\n' "$line" ;;
+  esac
+done
+"#
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Run the hook command for `event` of the session started in `dir` (from
+/// the settings its fake claude saved) with `payload` on stdin, as claude
+/// does.
+fn fire_hook(dir: &std::path::Path, event: &str, payload: Value) {
+    let path = dir.join(".fake-settings.json");
+    let deadline = std::time::Instant::now() + WAIT;
+    let settings: Value = loop {
+        if let Some(v) = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
+            break v;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no settings in {dir:?}"
+        );
+        thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let command = settings["hooks"][event][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("a hook command")
+        .to_owned();
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+/// `dir/.fake-input.log` once it contains `needle`.
+fn input_log_until(dir: &std::path::Path, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let log = fs::read_to_string(dir.join(".fake-input.log")).unwrap_or_default();
+        if log.contains(needle) {
+            return log;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle:?} not in {log:?}"
+        );
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The name claude gives `dir`'s project directory (the rule of
+/// `claude::projects::encode_cwd`, on the canonical path).
+fn project_dir_name(dir: &std::path::Path) -> String {
+    fs::canonicalize(dir)
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+impl Tab {
+    /// Wait until `host` is connected (the snapshot may already say so).
+    async fn connected(&mut self, host: &str) {
+        let in_snapshot = self.snapshot["hosts"].as_array().is_some_and(|hs| {
+            hs.iter()
+                .any(|h| h["name"] == host && h["connected"] == true)
+        });
+        if !in_snapshot {
+            let ev = self
+                .event("host", |v| {
+                    v["host"]["name"] == host && v["host"]["connected"] == true
+                })
+                .await;
+            // Remembered, so a second wait on this tab returns at once.
+            match self.snapshot["hosts"].as_array_mut() {
+                Some(hosts) => {
+                    hosts.retain(|h| h["name"] != host);
+                    hosts.push(ev["host"].clone());
+                }
+                None => self.snapshot["hosts"] = json!([ev["host"]]),
+            }
+        }
+    }
+
+    /// Spawn a direct claude session in `dir` at 24×80 and attach to it; its sid.
+    async fn spawn_attached(&mut self, dir: &std::path::Path) -> String {
+        self.connected("local").await;
+        let reply = self
+            .req(
+                "session.spawn",
+                json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}}),
+            )
+            .await
+            .expect("spawn");
+        let sid = reply["sid"].as_str().unwrap().to_owned();
+        self.req(
+            "session.attach",
+            json!({"sid": sid, "rows": 24, "cols": 80}),
+        )
+        .await
+        .expect("attach");
+        let attached = self.event("attached", |v| v["sid"] == sid.as_str()).await;
+        assert_eq!(
+            (attached["rows"].as_u64(), attached["cols"].as_u64()),
+            (Some(24), Some(80))
+        );
+        self.output_until(&sid, "FAKE_CLAUDE_BANNER").await;
+        sid
+    }
+}
+
+// ── AC4: attach, snapshot, input, resize ─────────────────────────────────────
+
+/// AC4: attach → `attached` + the snapshot frame; input reaches the PTY;
+/// a resize reaches it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_attach_snapshot_input_and_resize() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    tab.input(&sid, b"ping-web\r").await;
+    tab.output_until(&sid, "line:ping-web").await;
+    tab.req(
+        "session.resize",
+        json!({"sid": sid, "rows": 30, "cols": 100}),
+    )
+    .await
+    .unwrap();
+    tab.input(&sid, b"size\r").await;
+    tab.output_until(&sid, "30 100").await;
+}
+
+// ── AC7: the approve guard ───────────────────────────────────────────────────
+
+/// AC7: approve only for a permission prompt at the current seq.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_approve_is_guarded_by_state_kind_and_seq() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    fire_hook(
+        &dir,
+        "PreToolUse",
+        json!({"tool_name": "Bash", "tool_input": {"command": "ls -la"}}),
+    );
+    fire_hook(
+        &dir,
+        "Notification",
+        json!({"notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"}),
+    );
+    let ev = tab
+        .event("session", |v| {
+            v["session"]["id"] == sid.as_str()
+                && v["session"]["state"] == "needs_approval"
+                && v["session"]["attention"]["kind"] == "permission_prompt"
+        })
+        .await;
+    let a = &ev["session"]["attention"];
+    assert_eq!(a["tool"], "Bash");
+    assert_eq!(a["detail"], "ls -la");
+    assert_eq!(a["message"], "Claude needs your permission to use Bash");
+    let seq = a["seq"].as_u64().unwrap();
+    let approve = |s: u64| json!({"sid": sid, "decision": "approve", "attention_seq": s});
+    assert_eq!(
+        tab.req("session.approve", approve(seq + 1)).await,
+        Err("stale".to_owned())
+    );
+    assert_eq!(
+        tab.req("session.approve", approve(seq - 1)).await,
+        Err("stale".to_owned())
+    );
+    tab.input(&sid, b"abc").await;
+    tab.req("session.approve", approve(seq))
+        .await
+        .expect("approve");
+    input_log_until(&dir, "abc\n"); // the Enter reached the PTY and ended the line
+    fire_hook(
+        &dir,
+        "Notification",
+        json!({"notification_type": "elicitation_dialog", "message": "pick one"}),
+    );
+    let ev = tab
+        .event("session", |v| {
+            v["session"]["id"] == sid.as_str()
+                && v["session"]["attention"]["kind"] == "elicitation_dialog"
+        })
+        .await;
+    let seq = ev["session"]["attention"]["seq"].as_u64().unwrap();
+    assert_eq!(
+        tab.req("session.approve", approve(seq)).await,
+        Err("not a permission prompt".to_owned())
+    );
+    let unknown =
+        json!({"sid": uuid::Uuid::new_v4().to_string(), "decision": "deny", "attention_seq": 1});
+    assert_eq!(
+        tab.req("session.approve", unknown).await,
+        Err("no such session".to_owned())
+    );
+}
+
+// ── Paste, shared attach, lifecycle, argument checks ─────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_paste_reaches_the_pty_bracketed() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    tab.req(
+        "session.paste",
+        json!({"sid": sid, "text": "hello\u{1b}[201~ web", "submit": true}),
+    )
+    .await
+    .expect("paste");
+    input_log_until(&dir, "\u{1b}[200~hello web\u{1b}[201~");
+    // 64 KiB + 1 of text cannot fit a client text frame (64 KiB): the
+    // socket's frame limit refuses it before the paste cap
+    // (`input::paste_has_a_size_cap` covers "too large").
+    let big = json!({"t": "req", "id": 99, "op": "session.paste", "sid": sid,
+        "text": "x".repeat(64 * 1024 + 1), "submit": false});
+    tab.ws.send(Message::text(big.to_string())).await.unwrap();
+    assert_eq!(tab.close_code().await, Some(1009));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_two_tabs_share_one_attach() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut a = Tab::open(&web, &cookie).await;
+    let sid = a.spawn_attached(&dir).await;
+    let mut b = Tab::open(&web, &cookie).await;
+    b.req(
+        "session.attach",
+        json!({"sid": sid, "rows": 40, "cols": 100}),
+    )
+    .await
+    .expect("attach b");
+    for tab in [&mut a, &mut b] {
+        let ev = tab.event("attached", |v| v["sid"] == sid.as_str()).await;
+        assert_eq!(
+            (ev["rows"].as_u64(), ev["cols"].as_u64()),
+            (Some(24), Some(80)),
+            "no resize for the second subscriber"
+        );
+    }
+    b.input(&sid, b"from-b\r").await;
+    a.output_until(&sid, "line:from-b").await;
+    b.output_until(&sid, "line:from-b").await;
+    b.req("session.detach", json!({"sid": sid}))
+        .await
+        .expect("detach b");
+    a.input(&sid, b"still-a\r").await;
+    a.output_until(&sid, "line:still-a").await;
+    a.input(&sid, b"size\r").await;
+    a.output_until(&sid, "24 80").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_session_lifecycle_shell_rename_kill() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let reply = tab
+        .req(
+            "session.shell",
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80}),
+        )
+        .await
+        .expect("shell");
+    let sid = reply["sid"].as_str().unwrap().to_owned();
+    let ev = tab
+        .event("session", |v| v["session"]["id"] == sid.as_str())
+        .await;
+    assert_eq!(ev["session"]["kind"], "shell");
+    assert_eq!(ev["session"]["label"], "term");
+    tab.req("session.rename", json!({"sid": sid, "name": "renamed"}))
+        .await
+        .expect("rename");
+    tab.event("session", |v| {
+        v["session"]["id"] == sid.as_str()
+            && v["session"]["name"] == "renamed"
+            && v["session"]["label"] == "renamed"
+    })
+    .await;
+    tab.req("session.rename", json!({"sid": sid, "name": null}))
+        .await
+        .expect("clear the name");
+    tab.event("session", |v| {
+        v["session"]["id"] == sid.as_str()
+            && v["session"]["name"].is_null()
+            && v["session"]["label"] == "term"
+    })
+    .await;
+    tab.req("session.kill", json!({"sid": sid}))
+        .await
+        .expect("kill");
+    tab.event("session_removed", |v| v["sid"] == sid.as_str())
+        .await;
+    assert_eq!(
+        tab.req("session.kill", json!({"sid": sid})).await,
+        Err("no such session".to_owned())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_refuses_unknown_ids_and_bad_args() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let random = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        tab.req("session.kill", json!({"sid": random})).await,
+        Err("no such session".to_owned())
+    );
+    let err = tab
+        .req(
+            "session.attach",
+            json!({"sid": random, "rows": 0, "cols": 80}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("bad request"), "{err}");
+    let err = tab
+        .req(
+            "session.spawn",
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+                "proxy": {"kind": "direct"}, "bogus": 1}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("bad request"), "{err}");
+    assert_eq!(
+        tab.req("hosts.connect", json!({"host": "local"})).await,
+        Err("local is always connected".to_owned())
+    );
+    assert_eq!(
+        tab.req("hosts.disconnect", json!({"host": "local"})).await,
+        Err("cannot disconnect local".to_owned())
+    );
+    assert!(tab
+        .req("hosts.connect", json!({"host": "-oProxyCommand=x"}))
+        .await
+        .is_err());
+    assert_eq!(
+        tab.req("fs.list", json!({"host": "nohost", "path": "/"}))
+            .await,
+        Err("no such host".to_owned())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_opening_prompt_is_pasted_after_bracketed_paste_mode() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, true);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let reply = tab
+        .req(
+            "session.spawn",
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+                "proxy": {"kind": "direct"}, "prompt": "first task"}),
+        )
+        .await
+        .expect("spawn");
+    let sid = reply["sid"].as_str().unwrap().to_owned();
+    tab.event("session", |v| {
+        v["session"]["id"] == sid.as_str() && v["session"]["prompt_pending"] == true
+    })
+    .await;
+    let log = fs::read_to_string(dir.join(".fake-input.log")).unwrap_or_default();
+    assert!(!log.contains("first task"), "pasted too early: {log:?}");
+    fire_hook(
+        &dir,
+        "SessionStart",
+        json!({"session_id": "c1", "source": "startup"}),
+    );
+    input_log_until(&dir, "\u{1b}[200~first task\u{1b}[201~");
+    tab.event("session", |v| {
+        v["session"]["id"] == sid.as_str() && v["session"]["prompt_pending"] == false
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_tab_limit_is_16() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tabs = Vec::new();
+    for _ in 0..16 {
+        tabs.push(Tab::open(&web, &cookie).await);
+    }
+    assert_eq!(web.ws_with(&cookie, &web.origin()).await.err(), Some(503));
+    let mut first = tabs.remove(0);
+    first.ws.close(None).await.unwrap();
+    drop(first);
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        match web.ws_with(&cookie, &web.origin()).await {
+            Ok(_) => break,
+            Err(503) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(code) => panic!("no room after a close: {code}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_git_status_and_worktree_diff() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = h.dirs[0].clone();
+    common::run_git(&dir, &["init", "-q"]);
+    fs::write(dir.join("a.txt"), "one\n").unwrap();
+    common::run_git(&dir, &["add", "a.txt"]);
+    common::run_git(&dir, &["commit", "-q", "-m", "first"]);
+    fs::write(dir.join("a.txt"), "one\nchanged\n").unwrap();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    let status = tab
+        .req("git.status", json!({"sid": sid}))
+        .await
+        .expect("git.status");
+    let files = status["files"].as_array().expect("files");
+    assert!(
+        files
+            .iter()
+            .any(|f| f["path"] == "a.txt" && f["worktree"] == "M"),
+        "{status}"
+    );
+    let patch = tab
+        .req(
+            "git.worktree_diff",
+            json!({"sid": sid, "path": "a.txt", "staged": false}),
+        )
+        .await
+        .expect("git.worktree_diff");
+    assert!(
+        patch["patch"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("+changed"),
+        "{patch}"
+    );
+    assert_eq!(
+        tab.req(
+            "git.worktree_diff",
+            json!({"sid": sid, "path": "../x", "staged": false})
+        )
+        .await,
+        Err("no such path".to_owned())
+    );
+    let log = tab
+        .req("git.log", json!({"sid": sid}))
+        .await
+        .expect("git.log");
+    assert!(!log["commits"].as_array().unwrap().is_empty(), "{log}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_reader_and_search_read_a_fixture_transcript() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dir = fs::canonicalize(&h.dirs[0]).unwrap();
+    let cwd = dir.to_string_lossy().into_owned();
+    let project = h
+        .root
+        .join("claude-config/projects")
+        .join(project_dir_name(&dir));
+    fs::create_dir_all(&project).unwrap();
+    let records = [
+        json!({"type": "user", "cwd": cwd, "message": {"role": "user", "content": "first question"}}),
+        json!({"type": "assistant", "cwd": cwd, "message": {"role": "assistant",
+            "content": [{"type": "text", "text": "The first answer."}]}}),
+        json!({"type": "user", "cwd": cwd, "message": {"role": "user", "content": "second question"}}),
+        json!({"type": "assistant", "cwd": cwd, "message": {"role": "assistant",
+            "content": [{"type": "text", "text": "The second answer has fixtureword."}]}}),
+    ];
+    let jsonl: String = records.iter().map(|r| format!("{r}\n")).collect();
+    fs::write(project.join("conv-1.jsonl"), jsonl).unwrap();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = tab.spawn_attached(&dir).await;
+    fire_hook(
+        &dir,
+        "SessionStart",
+        json!({"session_id": "conv-1", "source": "resume"}),
+    );
+    tab.event("session", |v| {
+        v["session"]["id"] == sid.as_str() && v["session"]["claude_session_id"] == "conv-1"
+    })
+    .await;
+    let answers = tab
+        .req("reader.answers", json!({"sid": sid}))
+        .await
+        .expect("reader.answers");
+    let answers = answers["answers"].as_array().expect("answers").clone();
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(answers[0]["prompt"], "second question");
+    assert_eq!(answers[1]["prompt"], "first question");
+    let found = tab
+        .req("search", json!({"query": "fixtureword"}))
+        .await
+        .expect("search");
+    assert_eq!(found["failed"], json!([]), "{found}");
+    assert!(
+        found["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["host"] == "local" && hit["conversation"] == "conv-1"),
+        "{found}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_hosts_report_daemon_features() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let hosts = tab.req("hosts.list", json!({})).await.expect("hosts.list");
+    let local = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "local")
+        .cloned()
+        .expect("local");
+    assert_eq!(local["connected"], true);
+    let features = local["features"].as_array().unwrap();
+    for f in ["attention", "worktree"] {
+        assert!(features.iter().any(|x| x == f), "{local}");
+    }
+    // The Welcome carries claude's raw `--version` line.
+    assert_eq!(local["claude"]["version"], "claude 0.0.0-fake");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_order_and_layout_persist_in_web_state() {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let dirs = h.dirs.clone();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut a = Tab::open(&web, &cookie).await;
+    let mut b = Tab::open(&web, &cookie).await;
+    let sa = a.spawn_attached(&dirs[0]).await;
+    let sb = a.spawn_attached(&dirs[1]).await;
+    a.req("session.order", json!({"sids": [sb, sa]}))
+        .await
+        .expect("order");
+    let ev = b.event("order", |_| true).await;
+    assert_eq!(ev["sids"], json!([sb, sa]));
+    let layout = json!({"grid": 2, "panes": [sa, null], "focus": 0});
+    a.req("layout.save", json!({"layout": layout}))
+        .await
+        .expect("layout.save");
+    let ev = b.event("layout", |_| true).await;
+    assert_eq!(ev["layout"], layout);
+    let err = a
+        .req(
+            "layout.save",
+            json!({"layout": {"grid": 3, "panes": [null, null, null], "focus": 0}}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("bad request"), "{err}");
+    drop((a, b));
+    let h = web.stop();
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let tab = Tab::open(&web, &cookie).await;
+    assert_eq!(tab.snapshot["layout"], layout);
+    assert_eq!(tab.snapshot["order"], json!([sb, sa]));
+    let state = web.h().config_home.join("claudio/web-state.json");
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        !web.h().config_home.join("claudio/state.json").exists(),
+        "the web never writes the TUI's state.json"
+    );
 }
