@@ -269,6 +269,18 @@ claudio runs the `claude` your login shell finds. The daemon asks your shell for
 
 ---
 
+## Web UI
+
+`claudio web` serves the same sessions to a browser: a queue of what needs you, terminal panes, the reader with formulas and diagrams, git changes, proxy stats, search, snippets and the wizard. It is one more client of your daemons (local and SSH hosts), so nothing about your sessions changes.
+
+```bash
+claudio web          # http://127.0.0.1:7337, signs you in with a private token
+```
+
+It listens on loopback only; use `ssh -L 7337:127.0.0.1:7337 host` or a TLS reverse proxy to reach it from elsewhere. The token file is as sensitive as an SSH key, and the page runs under a strict CSP with no external requests. Usage, the security model, keys and the TUI parity table: [docs/web.md](docs/web.md).
+
+---
+
 ## Drop-in `-p` and the API server
 
 `claudio -p` is a drop-in for `claude -p` that drives the interactive Claude Code UI and reads the real answer and token usage from the session transcript. `claudio --api` serves an OpenAI-compatible HTTP API on the same backend. See [docs/print-and-api.md](docs/print-and-api.md).

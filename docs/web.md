@@ -1,0 +1,156 @@
+# `claudio web`
+
+`claudio web` serves the session manager to a browser. It is one more client of the claudio
+daemons, like the TUI: the same sessions, the same hosts (local and over SSH), the same
+`config.toml`. Sessions keep running when you close the tab. The wire contract between the
+server and the page is [web-protocol.md](web-protocol.md); the design is in
+[specs/2026-11-08-web-ui-design.md](specs/2026-11-08-web-ui-design.md).
+
+## Usage
+
+```bash
+claudio web                      # serve on 127.0.0.1:7337 and open the browser
+claudio web --listen 127.0.0.1:9000 --no-open
+claudio web --print-url          # print the sign-in URL for the stored token and exit
+claudio web --rotate-token       # make a new token (every browser signs in again)
+```
+
+On start it prints `claudio web: http://127.0.0.1:7337/#t=<token>`. Open that URL once: the
+page posts the token to `/api/login`, gets a cookie and removes the token from the address bar.
+Later visits need no token while the cookie lives (24 h idle).
+
+Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
+`127.0.0.1:7337`), `--allow-host NAME` (repeatable), `--no-open`, `--print-url`,
+`--rotate-token`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
+
+### From another machine
+
+The server never listens on a non-loopback address. Two ways to reach it:
+
+- **SSH tunnel** (the simple one): `ssh -L 7337:127.0.0.1:7337 host`, then open the URL on the
+  laptop.
+- **A TLS reverse proxy** on the same host (Caddy, nginx) that forwards to the loopback port.
+  Tell the server the name the browser uses: `claudio web --allow-host claudio.example.org`. That
+  name is then accepted in `Host` and `Origin`, and the cookie gets `Secure`. The proxy must pass
+  WebSocket upgrades on `/ws` and keep the `Host` header.
+
+**Installed window.** Chromium and Safari can install the page as an app (Install, or Add to
+Dock). An app window has no tab strip, so `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and friends stay with
+the terminal in it, and the page's own keys are not fighting the browser's.
+
+## Security model
+
+- **Loopback only.** `--listen` refuses anything else. Remote access goes through SSH or a TLS
+  proxy you run.
+- **The token is a key.** It lives in `~/.config/claudio/web-token` (mode 0600, 64 hex),
+  is reused across runs and is compared in constant time. Treat it like an SSH private key:
+  whoever has it can type into your sessions. `--rotate-token` replaces it. It is printed on
+  stdout at start and by `--print-url`, and nowhere else (never in a log, a query string, a
+  WebSocket frame or an HTTP body).
+- **Cookie.** `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
+  `--allow-host` is set. Sessions are kept in the server's memory: 24 h idle expiry, at most 64.
+  Five failed logins in 60 s lock the login for the rest of that minute (`429`).
+- **Host and Origin.** Every request needs an accepted `Host` (loopback names with the port,
+  plus `--allow-host` names), else `421`. A `POST` or a WebSocket upgrade also needs an
+  accepted `Origin`, else `403`. `/ws` and `/api/*` need the cookie, else `401`. This stops DNS
+  rebinding and cross-site requests.
+- **CSP.** `default-src 'self'; script-src 'self' 'sha256-<import map>'; …`, with
+  `frame-ancestors 'none'`, `object-src 'none'` and `connect-src 'self'`, plus `nosniff` and
+  `Referrer-Policy: no-referrer`, on every response. The only inline script is the import map
+  in `index.html`; `build.rs` hashes its exact text into the CSP. No inline handlers, no `eval`,
+  no CDN: the page runs from the files embedded in the binary. The e2e asserts the browser
+  sees zero `securitypolicyviolation` events.
+- **Secrets never reach the page.** Proxy tokens, plugin environment values, `Spawn.env`,
+  hook tokens and socket paths stay on the server; they travel only inside spawn requests to the
+  daemon. Browser DTOs are built field by field.
+- **Untrusted text.** Everything model-written is rendered as text, except answers: markdown
+  goes through DOMPurify, formulas through KaTeX (`trust: false`), diagrams through mermaid
+  (`securityLevel: "strict"`) and DOMPurify's SVG profile.
+- **What is logged** (INFO, to stderr): `session.shell`, `session.spawn`, `session.kill`,
+  `session.approve` and `extensions.action`, with the op, the host and the session id. Never
+  values, typed text or tokens.
+- **State.** The web writes `web-state.json` (layout, order, proxy choice per session) and
+  `web-token` in the config dir. It reads the TUI's `state.json` and never writes it.
+
+## Keys
+
+The page has two modes, shown by the badge in the top bar. **TERM**: focus is inside a
+terminal and every key goes to the session; the app takes one key only. **APP**: focus is
+anywhere else and single keys drive the app. Clicking a terminal (or Enter on a session) enters
+TERM; `Ctrl+Shift+Space` leaves it.
+
+| Key | Mode | Action |
+|---|---|---|
+| `Ctrl+Shift+Space` | TERM | Leave the terminal (the only key the app takes there) |
+| `k` | APP | Command palette |
+| `Ctrl+K` | APP, text fields | Command palette (not inside a terminal) |
+| `a` | APP | Jump to the next session that needs you |
+| `n` | APP | New claude session (wizard) |
+| `t` | APP | New terminal tab |
+| `/` | APP | Search conversations |
+| `1` `2` `3` `4` | APP | Focus pane 1 to 4 |
+| `↓` / `↑` | APP | Next / previous session in the rail |
+| `r` | APP | Reader: the session's last answers |
+| `g` | APP | Git changes |
+| `?` | APP | Help (this list) |
+| `Enter` | APP | Type into the focused terminal |
+| `Esc` | APP | Close the open panel |
+
+Everything else is a button, the palette (`k`) or a menu: rename, restart, kill, terminal tab,
+history, stats, snippets, extensions, hosts, settings.
+
+**Never bound:** `Alt+letter` (the TUI's manager keys; terminals use them), `Ctrl+W`,
+`Ctrl+T`, `Ctrl+N` and `Ctrl+Tab` (the browser's), and any key while the terminal has focus
+except `Ctrl+Shift+Space`.
+
+## TUI parity
+
+One row per capability of the TUI. `Test` is the e2e test title (`web/e2e/tests`) or the Rust
+test in `tests/web.rs`; rows without an automated test say how they were checked.
+
+| Capability | TUI key | Web action | WS op(s) | Test |
+|---|---|---|---|---|
+| Sessions on many hosts | wizard host list | host chips in the top bar, host panel (`+`) | `hosts.list`, `hosts.candidates`, `hosts.connect`, `hosts.disconnect` | `web_hosts_report_daemon_features`; ssh hosts: manual check on a real host |
+| Terminal panes (1, 2, 4) | `Alt+←/→` | pane grid buttons, `1`-`4`, drag a card | `session.attach`, `session.detach`, `session.resize`, `layout.save` | `a pane shows the terminal and typed keys echo`; `web_attach_snapshot_input_and_resize`; `web_two_tabs_share_one_attach` |
+| Terminal tabs | `Alt+c` | `t`, "Terminal beside" in a pane | `session.shell` | `a terminal tab runs echo ok`; `web_session_lifecycle_shell_rename_kill` |
+| New-session wizard: dirs | `Alt+n` | `n`: folder field, recent folders, browser | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir` |
+| Wizard: resume | `Alt+n` resume list | "Conversation" field | `claude.sessions`, `session.spawn` (`resume`) | `web_reader_and_search_read_a_fixture_transcript`; `search finds a fixture conversation` |
+| Wizard: proxy profile | wizard proxy choice | "Proxy" select | `session.spawn` (`proxy`) | `web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser` |
+| Wizard: first-party | wizard checkbox | "First-party session" | `session.spawn` (`first_party`) | `web_respawn_without_a_known_proxy_asks` (the rule); the UI box: manual check |
+| Opening prompt | wizard prompt | "Opening prompt" | `session.spawn` (`prompt`) | `web_opening_prompt_is_pasted_after_bracketed_paste_mode` |
+| Rename | `Alt+r` | pencil in the pane header | `session.rename` | `rename, kill and restart a session` |
+| Kill | `Alt+x` | Kill in the pane header (asks) | `session.kill` | `rename, kill and restart a session` |
+| Restart (resume / new) | `Alt+e` | Restart / New conversation (asks) | `session.respawn` | `rename, kill and restart a session`; `web_respawn_without_a_known_proxy_asks` |
+| Approve / deny a prompt | (type in the session) | Enter / Esc on the queue card | `session.approve` | `a permission prompt shows its text and Approve resolves it`; `an elicitation card offers Open only`; `web_approve_is_guarded_by_state_kind_and_seq` |
+| Prompt box | (type in the session) | composer under the terminal | `session.paste` | `save and insert a snippet`; `web_paste_reaches_the_pty_bracketed` |
+| Reader with formulas and diagrams | `Alt+u` | `r`: Answers, Formulas | `reader.answers`, `lens`/`latex` events, `extensions.render` | `the reader renders KaTeX and mermaid with no CSP violation` |
+| Git history | `Alt+l` | `g`, History tab | `git.log`, `git.commit`, `git.diff` | manual check (history list and commit view, probed in a browser on a fixture repo) |
+| Git working tree | `Alt+l` | `g`, Changes tab | `git.status`, `git.worktree_diff` | `Changes lists a modified file and shows its diff`; `web_git_status_and_worktree_diff` |
+| Proxy stats | `Alt+s` | Stats tab | `proxy.stats` | `proxy stats render the fixture window`; `web_proxy_stats_render_the_fixture` |
+| Subscription switch | `Alt+s` → `n` | "Move to next subscription" in Stats | `proxy.credential`, `proxy.switch` | not covered: the fake proxy has no `/session` route; manual check on a real proxy |
+| Search | `Alt+z` `s` | `/` | `search` | `search finds a fixture conversation`; `web_reader_and_search_read_a_fixture_transcript` |
+| Snippets | `Alt+z` `p` / `P` | palette: Insert snippet, Save last prompt | `snippets.list`, `snippets.save`, `reader.last_prompt` | `save and insert a snippet`; `web_snippets_save_and_list` |
+| Extensions screen | `Alt+i` | Settings → Manage… | `extensions.list`, `extensions.toggle`, `extensions.action` | `toggling an extension rewrites its config.toml line`; `web_extension_toggle_edits_config_and_is_reread`; `web_external_extension_action_runs_its_program` |
+| Plugin setup | first spawn, extensions screen | setup step before the spawn, Enter on a plugin row | `plugins.list`, `plugins.items`, `plugins.save`, `plugins.status` | `a plugin without choices opens setup before spawn and Skip spawns without it`; `web_plugin_without_choices_is_left_out_until_saved` |
+| claude install / update | update prompt | host chip → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
+| Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
+| Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |
+| Next attention | `Alt+a` | `a`, the queue | (client side) | manual check (`a` focuses the session that needs approval); queue: `a permission prompt shows its text…` |
+| Help | `Alt+h` | `?` | (client side) | manual check (`?` opens the key list) |
+| Overview of all sessions | `Alt+g` | Board | (client side) | `the board lists sessions with their states` |
+| Login and security | n/a | token URL, cookie | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests |
+| Layout and themes | n/a | Settings → Theme | `layout.save` | `theme switch applies plain`; `web_order_and_layout_persist_in_web_state` |
+| Keys | n/a | `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette` |
+
+## Developing the page
+
+```bash
+node --test web/tests/*.test.mjs   # pure logic, no browser (Node 22)
+node web/dev/mock-server.mjs       # the page against a mock server on :7338 (MOCK_MANY=1, MOCK_FOREIGN=1)
+cargo test --test web -- --test-threads=1   # the server, with a fake claude
+make test-web                      # node tests, then Playwright against a debug build
+```
+
+A debug build run with `CLAUDIO_WEB_DIR=web` serves the files from disk, so edits show on
+reload; every build embeds them gzipped (`build.rs`). `make test-web` needs the Playwright browsers in `~/.cache/ms-playwright`
+(`npx playwright install chromium` once, in `web/e2e`).

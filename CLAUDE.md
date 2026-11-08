@@ -65,6 +65,19 @@ cargo test --features diag --test remote -- --test-threads=1 --nocapture
 Tests `t1`, `t7`, `t8` are unit-style and always run. Tests `t2`–`t6` require
 `CLAUDIO_SSH_TEST_HOST` to be set to a reachable SSH host alias.
 
+**Web UI** (`claudio web`; fake claude and fake proxy, no API key):
+
+```bash
+cargo test --test web -- --test-threads=1   # server: auth, hub, spawn, proxy, plugins (tests/web.rs)
+node --test web/tests/*.test.mjs            # browser logic, no browser (glob form: the directory form fails on Node 22)
+make test-web                               # node tests, then Playwright e2e against a debug build (web/e2e)
+```
+
+The e2e starts a real `claudio web` per spec file in `~/.cache/claudio/web-e2e/<hex>/`
+with an isolated env (`XDG_*`, `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDIO_CLAUDE_PATH` = a fake
+claude), so it never touches your own daemon or `~/.claude`. Needs Chromium in
+`~/.cache/ms-playwright` and `npm ci` in `web/e2e`. Run one spec: `cd web/e2e && npx playwright test board`.
+
 - Run one unit test: `cargo test --bin claudio <name_substring>`.
 - Run one E2E test: `CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration <name> -- --test-threads=1 --nocapture`.
 - CI runs only the release build and unit tests, on Linux and macOS (claudio is Unix-only). Keep code compiling on both.
@@ -382,6 +395,52 @@ Reasons name ids and fields, never values.
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
 
+### Web UI (`claudio web`, `src/web/`, `web/`)
+
+`claudio web` (`src/main.rs` routes it; flags in `docs/web.md`) serves the manager to a
+browser: one more client of the daemons, like the TUI, over the same socket and ssh bridge.
+`docs/web-protocol.md` is the contract between server and page (version 1); change it first,
+in its own commit. User docs, the security model and the TUI parity table: `docs/web.md`.
+
+**`src/web/`** (axum, loopback only):
+- `mod.rs` — args (`--listen`, `--allow-host`, `--no-open`, `--print-url`, `--rotate-token`),
+  routes, startup, graceful shutdown (tabs closed 1001, `web-state.json` written).
+- `auth.rs` — token file (`<config>/web-token`, 0600, constant-time compare), cookie sessions
+  (24 h idle, 64), login rate limit, `guard` (Host 421, Origin 403, cookie 401), the CSP
+  (`csp`, with the import-map hash) and security headers on every response.
+- `assets.rs` — the embedded app, gzipped by `build.rs`; `CLAUDIO_WEB_DIR=<dir>` serves from
+  disk in a debug build.
+- `ws.rs` — the WebSocket: `hello` + `snapshot`, JSON requests (§5 ops), binary PTY frames,
+  size limits and close codes, per-tab queue (8 MiB, close 1013).
+- `hub.rs` — one actor owning hosts, daemon connections, sessions, tabs and `web-state.json`;
+  attach refcount per session and fan-out; the approve guard runs here.
+- `dto.rs` — Session and Host DTOs, built field by field (never a serialized `Profile`,
+  `SpawnSpec`, `Applied`).
+- `input.rs` — `approve_key` (state + attention kind + seq) and `paste_bytes` (bracketed,
+  controls stripped, 64 KiB).
+- `state.rs` — `web-state.json` (layout, order, per-session proxy name, remote hosts); reads
+  the TUI's `state.json`, never writes it.
+- `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — spawns composed as the TUI does
+  (`tui::plugins::compose`, `Msg::merge_env`), proxy stats/credential/switch, the plugin
+  state machine re-expressed async, and the extension registry, external host, snippets and
+  config.toml toggles.
+- `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.
+
+**`web/`** (no build step; ES modules through the import map):
+- `index.html` — the import map (the only inline script) and the stylesheet links.
+- `app/` — `boot.js` (login, CSP violation log `window.__claudioCsp`), `store.js` (model +
+  WebSocket), `proto.js`, `term.js` (xterm.js), pure logic with node tests (`queue.js`,
+  `keymap.js`, `layout.js`, `panes.js`, `wizard.js`, `model.js`, `notify.js`, ...);
+  `app/ui/` Preact components (`htm`, signals); `app/render/` markdown, KaTeX, mermaid,
+  highlight, all behind DOMPurify.
+- `styles/`, `fonts/` — tokens and themes (arcade and plain, dark and light); vendored fonts.
+- `vendor/` — pinned upstream files, byte-identical, listed in `MANIFEST.txt` with version,
+  URL and SHA-256; licenses in `LICENSES.md`.
+- `tests/` — `node --test` suites for the pure modules. `e2e/` — Playwright specs and
+  fixtures (`server.mjs` starts a real `claudio web`, `fake-claude.sh`, `fake-proxy.mjs`,
+  `transcript.mjs`). `dev/mock-server.mjs` — the page against a mock (`MOCK_MANY=1`,
+  `MOCK_FOREIGN=1`).
+
 ### Non-obvious constraints (don't "fix" these — manager)
 
 - **Keys must never collide with claude/terminal bindings.** All manager keys
@@ -443,6 +502,30 @@ Reasons name ids and fields, never values.
   benign formulas only). The same goes for the `typeset` engine, and the
   reader's markdown is parsed on the worker too; `App` and the drawing only
   lay out what the worker made.
+
+### Non-obvious constraints (don't "fix" these — web)
+
+- **The import map is the only inline script, and its hash is in the CSP.** `build.rs`
+  hashes the map's exact text; editing it changes the hash (a rebuild picks it up). No other
+  inline script, inline handler, `eval` or CDN, ever. The e2e asserts zero
+  `securitypolicyviolation` events.
+- **Vendored files under `web/vendor/` are byte-identical to upstream.** Delete whole files
+  (mermaid reduction rule) but never edit one; every file is in `MANIFEST.txt`.
+- **The web never writes `state.json`.** It reads it; its own state is `web-state.json` and
+  `web-token`, both written with `paths::write_atomic` (0600).
+- **DTO fields are fixed by `docs/web-protocol.md`.** A new field or message changes the doc
+  first. Session ids are `sid` in every request and event (an `id` argument would collide with
+  the request id); only the Session DTO keeps `id`.
+- **`SessionEvent::Attention` is nested** (`SessionEvent::Attention { attention }`) because the
+  payload's own `kind` would collide with the enum's `kind` tag.
+- **Secrets stay server-side.** Proxy tokens and plugin env go only in `Msg::Spawn`/`Respawn`
+  over the daemon socket; nothing env-bearing is serialized into a DTO, log or notice.
+- **Approve is guarded in the hub actor** (state + attention kind + seq, no await between
+  check and send); a stale click answers `"stale"`, it never types into the wrong prompt.
+- **Pure browser modules import nothing through bare specifiers**, so `node --test` runs
+  them without a browser; keep UI-only imports in `app/ui/`.
+- **Stable `data-testid`s are the e2e's interface** (listed in the plan's Global Constraints); rename one and
+  the Playwright specs break.
 
 ### Print-mode pipeline (`-p`)
 
