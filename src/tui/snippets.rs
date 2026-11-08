@@ -115,6 +115,49 @@ pub fn save(dir: &Path, text: &str) -> io::Result<String> {
     Err(io::Error::other(format!("too many snippets named {base}")))
 }
 
+/// Save `text` under the name [`slug`] makes of `name` in `dir` (created
+/// 0700), replacing the snippet of that name (its `.md`, or its `.txt` when
+/// that is the only file). Returns the slug. 0600, written whole.
+pub fn save_named(dir: &Path, name: &str, text: &str) -> io::Result<String> {
+    paths::ensure_private_dir(dir)?;
+    let name = slug(name);
+    let md = dir.join(format!("{name}.md"));
+    let txt = dir.join(format!("{name}.txt"));
+    let target = if md.symlink_metadata().is_err() && txt.symlink_metadata().is_ok() {
+        txt
+    } else {
+        md
+    };
+    paths::write_atomic(&target, text.as_bytes())?;
+    Ok(name)
+}
+
+/// Delete the snippet `name`, as [`load`] names it: the file `<name>.md`.
+/// `name` is slug characters only (letters, digits, `-`, `_`), so it cannot
+/// leave `dir`, reach a hidden file or a non-`.md` one; anything else, or a
+/// name with no regular `.md` file, is an `InvalidInput` / `NotFound` error.
+pub fn delete(dir: &Path, name: &str) -> io::Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 255 - 3
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a snippet name",
+        ));
+    }
+    let path = dir.join(format!("{name}.md"));
+    match path.symlink_metadata() {
+        Ok(m) if m.is_file() => fs::remove_file(&path),
+        _ => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no such snippet",
+        )),
+    }
+}
+
 /// A file name for `text`: its first words, lowercase ASCII letters and
 /// digits joined by `-`, at most [`MAX_SLUG`] characters; `snippet` when
 /// nothing is left.
@@ -234,5 +277,60 @@ mod tests {
         );
         assert!(loaded.contains(&snippet("fix-the-tests-2", "fix the tests!")));
         let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn save_named_uses_the_slug_of_the_name_and_replaces() {
+        let dir = scratch().join("snippets");
+        assert_eq!(
+            save_named(&dir, "Release Notes!", "v1").unwrap(),
+            "release-notes"
+        );
+        assert_eq!(
+            save_named(&dir, "release notes", "v2\n").unwrap(),
+            "release-notes"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("release-notes.md")).unwrap(),
+            "v2\n"
+        );
+        assert_eq!(load(&dir).unwrap().len(), 1);
+        // a name that is only a .txt file is replaced in place, not doubled
+        fs::write(dir.join("old.txt"), "a").unwrap();
+        assert_eq!(save_named(&dir, "old", "b").unwrap(), "old");
+        assert!(!dir.join("old.md").exists());
+        assert_eq!(fs::read_to_string(dir.join("old.txt")).unwrap(), "b");
+        // a path-looking name is only ever a slug
+        assert_eq!(save_named(&dir, "../x", "c").unwrap(), "x");
+        assert!(dir.join("x.md").is_file());
+        assert_eq!(save_named(&dir, "", "d").unwrap(), "snippet");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.join("x.md")), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn delete_removes_only_an_existing_md_snippet() {
+        let dir = scratch();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("keep.md"), "k").unwrap();
+        fs::write(dir.join("gone.md"), "g").unwrap();
+        fs::write(dir.join("t.txt"), "t").unwrap();
+        fs::write(dir.join(".hidden.md"), "h").unwrap();
+        fs::write(dir.parent().unwrap().join("outside.md"), "o").unwrap();
+        delete(&dir, "gone").unwrap();
+        assert!(!dir.join("gone.md").exists());
+        let kind = |n: &str| delete(&dir, n).unwrap_err().kind();
+        for bad in ["../outside", "a/b", ".hidden", "..", "", "x\0", "k.md"] {
+            assert_eq!(kind(bad), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        assert_eq!(kind("unknown"), io::ErrorKind::NotFound);
+        assert_eq!(kind("t"), io::ErrorKind::NotFound); // .txt is not deleted
+        assert_eq!(kind("sub"), io::ErrorKind::NotFound); // not a file
+        assert!(dir.join("keep.md").is_file() && dir.join(".hidden.md").is_file());
+        assert!(dir.parent().unwrap().join("outside.md").is_file());
+        let _ = fs::remove_file(dir.parent().unwrap().join("outside.md"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

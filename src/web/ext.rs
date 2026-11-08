@@ -372,7 +372,7 @@ pub(crate) async fn snippets_list() -> Result<Value, String> {
 }
 
 /// ≤ 64 KiB
-pub(crate) async fn snippets_save(text: String) -> Result<Value, String> {
+pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<Value, String> {
     use crate::tui::snippets;
     if text.len() > SNIPPET_MAX {
         return Err("bad request: text: at most 64 KiB".to_owned());
@@ -380,11 +380,32 @@ pub(crate) async fn snippets_save(text: String) -> Result<Value, String> {
     if text.trim().is_empty() {
         return Err("bad request: text: empty".to_owned());
     }
-    let name = tokio::task::spawn_blocking(move || snippets::save(&snippets::dir(), &text))
-        .await
+    if name.as_deref().is_some_and(|n| n.trim().is_empty()) {
+        return Err("bad request: name: empty".to_owned());
+    }
+    let name = tokio::task::spawn_blocking(move || match name {
+        Some(n) => snippets::save_named(&snippets::dir(), &n, &text),
+        None => snippets::save(&snippets::dir(), &text),
+    })
+    .await
         .map_err(|_| "cannot save the snippet".to_owned())?
         .map_err(|e| format!("cannot save the snippet: {e}"))?;
     Ok(json!({ "name": name }))
+}
+
+/// Delete the snippet `name` (as `snippets.list` returns it).
+pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
+    use crate::tui::snippets;
+    let r = tokio::task::spawn_blocking(move || snippets::delete(&snippets::dir(), &name))
+        .await
+        .map_err(|_| "cannot delete the snippet".to_owned())?;
+    match r {
+        Ok(()) => Ok(json!({})),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound) => {
+            Err(format!("bad request: name: {e}"))
+        }
+        Err(e) => Err(format!("cannot delete the snippet: {e}")),
+    }
 }
 
 #[cfg(test)]

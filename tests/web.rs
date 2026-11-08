@@ -1781,6 +1781,52 @@ async fn web_snippets_save_and_list() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_snippets_save_named_list_delete() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let dir = web.h().config_home.join("claudio/snippets");
+    let saved = tab
+        .req("snippets.save", json!({"text": "v1", "name": "Release Notes"}))
+        .await
+        .expect("save named");
+    assert_eq!(saved["name"], "release-notes");
+    tab.req("snippets.save", json!({"text": "v2", "name": "release notes"}))
+        .await
+        .expect("replace");
+    let list = tab.req("snippets.list", json!({})).await.unwrap();
+    let mine: Vec<&Value> = list["snippets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["name"] == "release-notes")
+        .collect();
+    assert_eq!(mine.len(), 1, "{list}");
+    assert_eq!(mine[0]["text"], "v2");
+    assert_eq!(
+        fs::read_to_string(dir.join("release-notes.md")).unwrap(),
+        "v2"
+    );
+    for bad in ["../x", "a/b", ".hidden", "nope", ""] {
+        let r = tab.req("snippets.delete", json!({ "name": bad })).await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.starts_with("bad request: name:")),
+            "{bad}: {r:?}"
+        );
+    }
+    assert_eq!(
+        tab.req("snippets.save", json!({"text": "x", "name": " "})).await,
+        Err("bad request: name: empty".to_owned())
+    );
+    tab.req("snippets.delete", json!({"name": "release-notes"}))
+        .await
+        .expect("delete");
+    assert!(!dir.join("release-notes.md").exists());
+    let list = tab.req("snippets.list", json!({})).await.unwrap();
+    assert!(list["snippets"].as_array().unwrap().is_empty(), "{list}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_external_extension_action_runs_its_program() {
     let h = ManagerHarness::new();
     let dir = h.config_home.join("claudio/extensions/hello");

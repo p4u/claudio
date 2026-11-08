@@ -402,6 +402,14 @@ struct StatsArgs {
 #[serde(deny_unknown_fields)]
 struct SnippetArgs {
     text: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnippetDeleteArgs {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -767,7 +775,11 @@ pub(crate) async fn dispatch(
         }
         "snippets.save" => {
             let a: SnippetArgs = parse(args)?;
-            ext::snippets_save(a.text).await
+            ext::snippets_save(a.text, a.name).await
+        }
+        "snippets.delete" => {
+            let a: SnippetDeleteArgs = parse(args)?;
+            ext::snippets_delete(a.name).await
         }
         "extensions.list" => {
             parse::<NoArgs>(args)?;
