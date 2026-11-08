@@ -98,3 +98,12 @@ export function groupSessions(sessions) {
     })),
   }));
 }
+
+// A repo gets its own sub-group in the rail only when it holds two sessions or more on that host;
+// the rest are listed flat. -> { singles: Session[], groups: group[] }
+export function railGroups(groups) {
+  const singles = [];
+  const multi = [];
+  for (const g of groups) (g.sessions.length >= 2 ? multi : singles).push(g);
+  return { singles: singles.flatMap((g) => g.sessions), groups: multi };
+}

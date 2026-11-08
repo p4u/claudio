@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyModel, applySnapshot, applyEvent, orderedSessions, groupSessions } from '../app/model.js';
+import { emptyModel, applySnapshot, applyEvent, orderedSessions, groupSessions, railGroups } from '../app/model.js';
 
 const S = (id, o = {}) => ({ id, host: 'local', kind: 'claude', cwd: '/w/a', label: id, state: 'idle', created_at: 1, ...o });
 const H = (name) => ({ name, connected: true });
@@ -93,4 +93,12 @@ test('groupSessions puts local first and groups by cwd', () => {
   assert.deepEqual(g[0].groups[0].sessions.map((s) => s.id), ['2', '4']);
   assert.equal(g[0].groups[0].label, 'a');
   assert.equal(g[1].groups[0].label, 'app');
+});
+
+test('railGroups lists a repo flat unless it holds two sessions on that host', () => {
+  const groups = groupSessions([S('a', { cwd: '/w/api' }), S('b', { cwd: '/w/docs' }), S('c', { cwd: '/w/api' }), S('d', { cwd: '/w/parser' })])[0].groups;
+  const r = railGroups(groups);
+  assert.deepEqual(r.singles.map((s) => s.id), ['b', 'd']);
+  assert.deepEqual(r.groups.map((g) => [g.label, g.sessions.map((s) => s.id)]), [['api', ['a', 'c']]]);
+  assert.deepEqual(railGroups([]), { singles: [], groups: [] });
 });
