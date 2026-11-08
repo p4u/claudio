@@ -215,3 +215,13 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
   .board-head .bcol-attn { display: none; }
   .footer .push { display: none; }
 }
+
+/* <latex> formulas over the terminal (app/ui/latex-layer.js): cyan in dark themes, a readable teal in light ones */
+:root { --latex-accent: #22d3ee; }
+:root[data-theme$="light"] { --latex-accent: #0a7388; }
+.term-host .xterm-screen { position: relative; }
+.latex-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.latex-box, .latex-blank { position: absolute; background: var(--term-bg); pointer-events: none; }
+.latex-box { display: flex; overflow: visible; align-items: center; color: var(--latex-accent); }
+.latex-inner { display: inline-block; flex: none; white-space: nowrap; transform-origin: left center; line-height: 1.2; }
+.latex-inner .katex { font-size: 1em; }

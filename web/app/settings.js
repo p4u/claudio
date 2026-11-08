@@ -3,7 +3,7 @@ import { signal } from '@preact/signals';
 import { clampDrawer, DRAWER_DEFAULT } from './layout.js';
 
 export const THEMES = ['arcade-dark', 'arcade-light', 'plain-dark', 'plain-light'];
-export const DEFAULTS = { theme: 'arcade-dark', scanlines: true, fontSize: 14, sound: false, notifications: false, drawerWidth: DRAWER_DEFAULT, railCollapsed: false };
+export const DEFAULTS = { theme: 'arcade-dark', scanlines: true, fontSize: 14, sound: false, notifications: false, drawerWidth: DRAWER_DEFAULT, railCollapsed: false, renderFormulas: true };
 const KEY = 'claudio.settings';
 
 export function sanitize(raw) {
@@ -16,6 +16,7 @@ export function sanitize(raw) {
     sound: o.sound === true,
     drawerWidth: clampDrawer(o.drawerWidth ?? DRAWER_DEFAULT),
     railCollapsed: o.railCollapsed === true,
+    renderFormulas: o.renderFormulas !== false,
     notifications: o.notifications === true && globalThis.Notification?.permission === 'granted',
   };
 }

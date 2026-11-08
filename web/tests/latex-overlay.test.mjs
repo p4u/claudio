@@ -91,3 +91,10 @@ test('unmatched text yields null; the newest formula wins', () => {
   // strict beats loose even when an older formula is strict
   assert.equal(matchFormula(['a_b', 'ab'], 'a_b'), 'a_b');
 });
+
+test('formulasOf prefers the latex lens items, else the latex event list', async () => {
+  const { formulasOf } = await import('../app/latex-overlay.js');
+  assert.deepEqual(formulasOf(undefined), []);
+  assert.deepEqual(formulasOf({ items: [{ tag: 'latex', text: 'a' }, { tag: 'x', text: 'b' }], formulas: ['z'] }), ['a']);
+  assert.deepEqual(formulasOf({ items: [], formulas: ['z'] }), ['z']);
+});

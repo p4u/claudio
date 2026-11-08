@@ -9,6 +9,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { conn, req, sendInput, onOutput, onServerEvent } from './store.js';
 import { shouldSendResize, resizePolicy } from './panes.js';
 import { confirm } from './ui/modal.js';
+import { createLatexLayer } from './ui/latex-layer.js';
 
 const handles = new Map(); // sid -> handle
 
@@ -91,6 +92,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   term.unicode.activeVersion = '11';
   term.loadAddon(new WebLinksAddon((_ev, uri) => { openLink(uri); }));
   term.loadAddon(search);
+  const latex = createLatexLayer(term, sid);
 
   const size = () => ({ rows: term.rows, cols: term.cols });
   const hasBox = () => el.clientWidth > 8 && el.clientHeight > 8;
@@ -170,6 +172,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     term.options.theme = l.theme;
     if (term.options.fontSize !== l.fontSize) term.options.fontSize = l.fontSize;
     refit();
+    latex.schedule();
   });
 
   const fontReady = document.fonts?.load ? document.fonts.load(`${look().fontSize}px "JetBrains Mono"`).catch(() => {}) : Promise.resolve();
@@ -177,6 +180,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (disposed) return;
     term.open(el);
     opened = true;
+    latex.attach();
     if (wantFocus) { wantFocus = false; term.focus(); }
     ro.observe(el);
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style'] });
@@ -193,7 +197,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
       disposed = true;
       clearTimeout(timer);
       if (raf) cancelAnimationFrame(raf);
-      ro.disconnect(); mo.disconnect();
+      ro.disconnect(); mo.disconnect(); latex.dispose();
       el.removeEventListener('pointerup', copy);
       offOut(); offEv(); d1.dispose(); d2.dispose();
       if (handles.get(sid) === handle) handles.delete(sid);

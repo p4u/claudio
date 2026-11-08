@@ -76,6 +76,13 @@ export function matchFormula(formulas, text, keys = null) {
   return newest((x) => x.strict, strict) ?? newest((x) => x.loose, loose) ?? newest((x) => x.html, loose);
 }
 
+// The latex formulas of a session's model.lens entry: the `latex` lens items, else the `latex`
+// event list (hosts without the `lens` feature). The reader uses the same rule.
+export function formulasOf(lens) {
+  const fromItems = (lens?.items ?? []).filter((x) => x.tag === 'latex').map((x) => x.text);
+  return fromItems.length ? fromItems : (lens?.formulas ?? []);
+}
+
 // ---- screen rows: {glyphs: [{col, ch}], width} ----
 
 const colOf = (row, i) => row.glyphs[i]?.col ?? row.width;
