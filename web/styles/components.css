@@ -101,16 +101,17 @@ kbd {
   padding: 0 var(--space-3);
   transition: background var(--t-fast), border-color var(--t-fast);
 }
-.card:hover { background: var(--hover); }
+.card:hover { background-color: var(--hover); }
 .card[draggable="true"] { -webkit-user-drag: element; }
 .card[data-drop="before"]::before, .card[data-drop="after"]::after {
   content: ""; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); z-index: 2;
 }
 .card[data-drop="before"]::before { top: 0; }
 .card[data-drop="after"]::after { bottom: 0; }
-.card[aria-current="true"] { border-left-color: var(--accent); background: var(--surface-2); }
+.card[data-shown="true"] { background: linear-gradient(var(--steel), var(--steel)) left / 3px 100% no-repeat; }
+.card[aria-current="true"] { background: linear-gradient(var(--accent), var(--accent)) left / 3px 100% no-repeat, var(--surface-2); outline: var(--hair) solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
 .card[aria-current="true"] .card-label { color: var(--text-strong); }
-.card[data-selected="true"] { border-left-color: var(--accent); }
+.card-pane { flex: none; min-width: 2ch; text-align: center; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); border: var(--hair) solid var(--border); border-radius: var(--radius); }
 .chip-quiet { background: none; box-shadow: none; padding: 0 4px; color: var(--text-muted); }
 .card-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: max(15px, var(--fs-md)); }
 .card-age { color: var(--text-muted); font-size: var(--fs-xs); flex: none; min-width: 3ch; text-align: right; }

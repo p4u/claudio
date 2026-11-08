@@ -75,17 +75,23 @@ const cardKeys = (s) => (e) => {
   else if (e.key === ' ') { e.preventDefault(); openSession(s.id); }
 };
 
+// The row that has the keyboard: the session of the focused pane (the rail's own pick when no pane shows one).
+const pickedSid = () => focused.value ?? selected.value;
+
 // One fixed-height line: state icon, name, host (only with more than one host), age. Everything
 // else is in the hover info.
 function SessionCard({ s, multiHost }) {
   const mark = dropMark.value?.sid === s.id ? (dropMark.value.after ? 'after' : 'before') : null;
-  const current = selected.value === s.id || focused.value === s.id;
-  return html`<div class="card" role="button" tabindex="0" data-testid="session-card" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
+  const current = pickedSid() === s.id;
+  const pane = model.value.layout.panes.indexOf(s.id);
+  const shown = !current && pane >= 0; // on screen in another pane
+  const multi = model.value.layout.panes.length > 1;
+  return html`<div class="card" role="button" tabindex="0" data-testid="session-card" data-sid=${s.id} data-shown=${shown} data-pane=${pane >= 0 && multi ? pane + 1 : null} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
     data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${current}
     onClick=${() => openSession(s.id)} onKeyDown=${cardKeys(s)} ...${mergeHandlers(dragProps(s), infoProps(s))}>
     <${Glyph} s=${s} /><span class="card-label">${s.label}</span>
     ${s.dormant ? html`<span class="chip chip-quiet">dormant</span>` : null}
-    ${multiHost ? html`<span class="chip" title=${`host ${s.host}`}>${s.host}</span>` : null}<span class="card-age">${ago(s.state_since, now.value)}</span>
+    ${multiHost ? html`<span class="chip" title=${`host ${s.host}`}>${s.host}</span>` : null}${pane >= 0 && multi ? html`<span class="card-pane" data-testid="card-pane" title=${`shown in pane ${pane + 1}`}>${pane + 1}</span>` : null}<span class="card-age">${ago(s.state_since, now.value)}</span>
   </div>`;
 }
 
@@ -98,7 +104,7 @@ function RailStrip({ all }) {
       const attn = attnLine(s);
       const mark = dropMark.value?.sid === s.id ? (dropMark.value.after ? 'after' : 'before') : null;
       return html`<button type="button" key=${s.id} class="strip-card" data-testid="session-card" data-compact="true" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
-        data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${selected.value === s.id || focused.value === s.id}
+        data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${pickedSid() === s.id}
         aria-label=${`${s.label} on ${s.host}${attn ? `: ${attn}` : ''}`}
         onClick=${() => openSession(s.id)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${mergeHandlers(dragProps(s), infoProps(s))}>
         <${Glyph} s=${s} />
