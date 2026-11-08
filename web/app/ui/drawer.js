@@ -7,9 +7,10 @@ import { drawer, openDrawer } from './session-actions.js';
 
 export const drawerTabs = signal([]); // [{ name, title, order, Component }]
 
-// registerDrawerTab(name, { title, order?, Component }) -> unregister. Component gets { sid }.
-export function registerDrawerTab(name, { title, order = 100, Component }) {
-  const tab = { name, title, order, Component };
+// registerDrawerTab(name, { title, order?, Component, disabled? }) -> unregister. Component gets { sid }.
+// disabled(session) -> a reason (the tab is greyed out with it as its tooltip) or null.
+export function registerDrawerTab(name, { title, order = 100, Component, disabled = null }) {
+  const tab = { name, title, order, Component, disabled };
   drawerTabs.value = [...drawerTabs.value.filter((t) => t.name !== name), tab].sort((a, b) => a.order - b.order);
   return () => { drawerTabs.value = drawerTabs.value.filter((t) => t !== tab); };
 }
@@ -34,8 +35,11 @@ export function Drawer() {
   return html`<aside class="drawer" data-testid="drawer" data-tab=${cur?.name ?? ''} aria-label="Session details">
     <header class="drawer-head">
       <div class="drawer-tabs" role="tablist">
-        ${tabs.map((t) => html`<button key=${t.name} class="drawer-tab" role="tab" data-testid=${`drawer-tab-${t.name}`} aria-selected=${cur?.name === t.name}
-          onClick=${() => openDrawer(t.name, d.sid)}>${t.title}</button>`)}
+        ${tabs.map((t) => {
+          const why = t.disabled?.(s) ?? null;
+          return html`<button key=${t.name} class="drawer-tab" role="tab" data-testid=${`drawer-tab-${t.name}`} aria-selected=${cur?.name === t.name}
+            disabled=${!!why} title=${why ?? t.title} onClick=${() => openDrawer(t.name, d.sid)}>${t.title}</button>`;
+        })}
       </div>
       <span class="drawer-title" title=${s.label}>${s.label}</span>
       <button class="icon-btn" aria-label="Close the drawer" title="Close" onClick=${closeDrawer}>×</button>

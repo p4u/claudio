@@ -54,7 +54,7 @@ const state = {
   hosts: {
     local: { name: 'local', connected: true, connecting: false, error: null, outdated: false, hostname: 'devbox', os: 'linux', arch: 'x86_64',
       claude: { path: '/usr/local/bin/claude', version: '2.1.0' }, features: ['lens', 'search', 'last_prompt', 'attention', 'worktree'], version: VERSION },
-    z6: { name: 'z6', connected: true, connecting: false, error: null, outdated: false, hostname: 'z6', os: 'linux', arch: 'aarch64',
+    z6: { name: 'z6', connected: true, connecting: false, error: null, outdated: true, hostname: 'z6', os: 'linux', arch: 'aarch64',
       claude: { path: '/home/p4u/.local/bin/claude', version: '2.0.9' }, features: ['lens', 'search', 'last_prompt'], version: VERSION },
   },
   sessions: new Map(),
@@ -65,6 +65,8 @@ const state = {
     { name: 'latex', description: 'Renders <latex> formulas', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [{ name: 'latex', kind: 'tag' }], actions: [] },
     { name: 'search', description: 'Search past conversations', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [{ id: 'search', title: 'Search', input: 'query' }] },
     { name: 'snippets', description: 'Prompt snippets', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [] },
+    { name: 'vocdoni-internal', description: 'Internal tools: docs MCP server, reviewer agent', enabled: true, source: 'plugin', profile: 'work', refused: null, lenses: [], actions: [] },
+    { name: 'broken-ext', description: 'An external extension that failed admission', enabled: false, source: 'external', profile: null, refused: 'manifest: lens name "todo" is already taken by tasks', lenses: [], actions: [] },
     { name: 'tasks', description: 'Task notes (fixture extension)', enabled: true, source: 'external', profile: null, refused: null, lenses: [{ name: 'todo', kind: 'tag' }],
       actions: [{ id: 'summary', title: 'Summary document', input: null }, { id: 'note', title: 'Add a note', input: 'note text' }, { id: 'pick', title: 'Pick a task', input: null }, { id: 'insert', title: 'Insert checklist', input: null }, { id: 'resume', title: 'Resume the last chat', input: null }] },
   ],
@@ -81,7 +83,7 @@ function seed() {
   add(session(ids.elicit, { label: 'docs-site', cwd: '/home/dev/docs', branch: 'main', state: 'needs_approval', state_since: now() - 15, model: 'sonnet',
     attention: { seq: 1, kind: 'elicitation_dialog', message: 'Which package manager should I use?', tool: null, detail: null } }));
   add(session(ids.input, { label: 'claudio', state: 'needs_input', state_since: now() - 300, attention: { seq: 2, kind: 'idle_prompt', message: 'Claude is waiting for your input', tool: null, detail: null } }));
-  add(session(ids.working, { label: 'parser', cwd: '/home/dev/parser', branch: 'refactor/lexer', state: 'working', state_since: now() - 8, context_tokens: 151000,
+  add(session(ids.working, { label: 'parser', cwd: '/home/dev/parser', branch: 'refactor/lexer', proxy: 'work', state: 'working', state_since: now() - 8, context_tokens: 151000,
     git: { head: 'refactor/lexer', detached: false, upstream: false, ahead: 0, behind: 0, staged: 0, unstaged: 6, untracked: 2, conflicts: 0 } }));
   add(session(ids.idle, { label: 'infra', host: 'z6', cwd: '/srv/infra', branch: 'main', state: 'idle', state_since: now() - 1800, model: 'sonnet', proxy: 'work', first_party: false }));
   add(session(ids.shell, { kind: 'shell', label: 'term', cwd: '/home/dev/claudio', state: 'idle', model: null, branch: null, git: null, claude_session_id: null, context_tokens: null, turns: null, output_tokens: null }));
@@ -246,16 +248,138 @@ function newSession(h, kind, a) {
   return id;
 }
 
+// Shapes follow src/proto.rs (GitWorktreeStatus, GitPatch, GitLogPage, GitCommitInfo): docs/web-protocol.md section 4.
 const GIT_STATUS = {
-  root: '/home/dev/claudio', branch: 'main', truncated: false,
+  root: '/home/dev/claudio', branch: 'feat/auth', truncated: false,
   files: [
-    { path: 'src/main.rs', old_path: null, index: 'M', worktree: '.', added: 4, removed: 1 },
-    { path: 'web/app/store.js', old_path: null, index: '.', worktree: 'M', added: 21, removed: 7 },
+    { path: 'src/auth/session.rs', old_path: null, index: 'U', worktree: 'U', added: null, removed: null },
+    { path: 'src/main.rs', old_path: null, index: 'M', worktree: '.', added: 6, removed: 2 },
+    { path: 'src/lexer/mod.rs', old_path: null, index: 'M', worktree: 'M', added: 9, removed: 4 },
+    { path: 'web/app/store.js', old_path: null, index: '.', worktree: 'M', added: 7, removed: 4 },
+    { path: 'docs/guide.md', old_path: 'docs/intro.md', index: 'R', worktree: '.', added: 2, removed: 1 },
+    { path: 'assets/logo.png', old_path: null, index: '.', worktree: 'M', added: null, removed: null },
     { path: 'notes.txt', old_path: null, index: '?', worktree: '?', added: null, removed: null },
+    { path: 'scratch/todo.md', old_path: null, index: '?', worktree: '?', added: null, removed: null },
   ],
 };
-const PATCH = (p) => ({ text: `diff --git a/${p} b/${p}\n--- a/${p}\n+++ b/${p}\n@@ -1,2 +1,3 @@\n context\n-old line\n+new line\n+another line\n`, truncated: false, binary: false });
-const COMMIT = (oid) => ({ oid, short: oid.slice(0, 7), author: 'Dev', time: now() - 3600, subject: 'feat: fixture commit', body: '', files: [{ path: 'src/main.rs', added: 4, removed: 1 }], truncated: false });
+const MAIN_RS = [
+  '@@ -1,12 +1,16 @@',
+  ' use std::io;',
+  '+use std::path::PathBuf;',
+  ' ',
+  ' mod auth;',
+  ' mod lexer;',
+  ' ',
+  '-fn main() {',
+  '-    let args: Vec<String> = std::env::args().collect();',
+  '+fn main() -> io::Result<()> {',
+  '+    let args: Vec<String> = std::env::args().skip(1).collect();',
+  '+    let root = PathBuf::from(args.first().map(String::as_str).unwrap_or("."));',
+  '     println!("starting");',
+  '+    auth::init(&root)?;',
+  '+    Ok(())',
+  ' }',
+  ' ',
+  '@@ -40,6 +44,7 @@ fn helper() {',
+  '     let n = 1;',
+  '     let m = 2;',
+  '-    println!("{}", n + m);',
+  '+    println!("sum = {}", n + m);',
+  '+    println!("product = {}", n * m);',
+  '     done();',
+  ' }',
+].join('\n');
+const LEXER_RS = [
+  '@@ -10,9 +10,14 @@ impl Lexer {',
+  '     pub fn next(&mut self) -> Token {',
+  '         self.skip_ws();',
+  '-        match self.peek() {',
+  '-            Some(c) if c.is_ascii_digit() => self.number(),',
+  '-            Some(c) if c.is_alphabetic() => self.ident(),',
+  '-            _ => Token::Eof,',
+  '-        }',
+  '+        let Some(c) = self.peek() else { return Token::Eof };',
+  '+        if c.is_ascii_digit() {',
+  '+            self.number()',
+  '+        } else if c.is_alphabetic() || c == \'_\' {',
+  '+            self.ident()',
+  '+        } else {',
+  '+            self.punct(c)',
+  '+        }',
+  '     }',
+  ' }',
+].join('\n');
+const STORE_JS = [
+  '@@ -52,10 +52,10 @@ function handleEvent(ev) {',
+  '   const before = ev.ev === \'session\' ? model.value.sessions[ev.session.id] : null;',
+  '   model.value = applyEvent(model.value, ev);',
+  '-  if (ev.ev === \'session\' && asking(ev.session)) markFresh(ev.session.id);',
+  '+  if (ev.ev === \'session\' && asking(ev.session) && !(asking(before) && before.state === ev.session.state)) markFresh(ev.session.id);',
+  '   if (ev.ev === \'notice\') toast({ text: ev.text, level: ev.level });',
+  '-  for (const fn of listeners) fn(ev);',
+  '+  for (const fn of listeners) fn(ev); // after the model update',
+  ' }',
+].join('\n');
+const NEW_FILE = ['@@ -0,0 +1,3 @@', '+# Notes', '+', '+Remember to rotate the token.'].join('\n');
+const header = (p, o = p) => `diff --git a/${o} b/${p}\n--- a/${o}\n+++ b/${p}\n`;
+const WORKTREE_PATCH = {
+  'src/main.rs': header('src/main.rs') + MAIN_RS + '\n',
+  'src/lexer/mod.rs': header('src/lexer/mod.rs') + LEXER_RS + '\n',
+  'web/app/store.js': header('web/app/store.js') + STORE_JS + '\n',
+  'docs/guide.md': 'diff --git a/docs/intro.md b/docs/guide.md\nsimilarity index 80%\nrename from docs/intro.md\nrename to docs/guide.md\n--- a/docs/intro.md\n+++ b/docs/guide.md\n@@ -1,3 +1,4 @@\n # Guide\n-Old intro line.\n+New intro line.\n+A second line.\n ok\n',
+  'assets/logo.png': 'diff --git a/assets/logo.png b/assets/logo.png\nindex 1111111..2222222 100644\nBinary files a/assets/logo.png and b/assets/logo.png differ\n',
+  'notes.txt': 'diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n' + NEW_FILE + '\n',
+  'scratch/todo.md': 'diff --git a/scratch/todo.md b/scratch/todo.md\nnew file mode 100644\n--- /dev/null\n+++ b/scratch/todo.md\n' + NEW_FILE + '\n',
+  'src/auth/session.rs': 'diff --git a/src/auth/session.rs b/src/auth/session.rs\n--- a/src/auth/session.rs\n+++ b/src/auth/session.rs\n@@ -1,7 +1,13 @@\n fn load() {\n-    old();\n+<<<<<<< HEAD\n+    ours();\n+=======\n+    theirs();\n+>>>>>>> feat/other\n }\n',
+};
+const hex40 = (n) => crypto.createHash('sha1').update(`commit-${n}`).digest('hex');
+const SUBJECTS = ['feat: add the session cookie', 'fix: reject an empty token', 'refactor: split the lexer', 'docs: explain the web ui', 'test: cover the approve guard', 'chore: bump dependencies', 'feat: queue cards show the tool', 'fix: keep the pty size on re-attach'];
+const LOG_N = 230;
+const logEntry = (i) => ({
+  id: hex40(i), parents: i + 1 < LOG_N ? [hex40(i + 1)] : [], author: ['Pau Escrich', 'Dev', 'Ana Ruiz'][i % 3], time: now() - 1800 * (i + 1) - i * 977,
+  refs: i === 0 ? ['HEAD -> refs/heads/feat/auth', 'refs/remotes/origin/feat/auth'] : i === 3 ? ['tag: refs/tags/v0.7.1'] : i === 5 ? ['refs/heads/main', 'refs/remotes/origin/main'] : [],
+  subject: `${SUBJECTS[i % SUBJECTS.length]}${i >= SUBJECTS.length ? ` (${i})` : ''}`,
+});
+const COMMIT_FILES = [
+  { path: 'src/main.rs', old_path: null, added: 6, removed: 2 },
+  { path: 'src/lexer/mod.rs', old_path: null, added: 9, removed: 4 },
+  { path: 'docs/guide.md', old_path: 'docs/intro.md', added: 2, removed: 1 },
+  { path: 'assets/logo.png', old_path: null, added: null, removed: null },
+];
+const commitIndex = (oid) => { for (let i = 0; i < LOG_N; i++) if (hex40(i) === oid) return i; return -1; };
+const COMMIT = (oid) => {
+  const i = commitIndex(oid);
+  if (i < 0) throw new OpError('no such commit');
+  const e = logEntry(i);
+  return { id: e.id, parents: e.parents, author: e.author, email: `${e.author.split(' ')[0].toLowerCase()}@example.com`, time: e.time, committer_time: e.time + 60, refs: e.refs,
+    message: `${e.subject}\n\nThe body explains why. It wraps over a few lines and mentions the\nreader, the hub and the daemon so the layout can be judged.\n\n- first point\n- second point`, files: COMMIT_FILES, first_parent: i === 6 };
+};
+const COMMIT_PATCH = (file) => {
+  const f = COMMIT_FILES[file];
+  const body = { 'src/main.rs': MAIN_RS, 'src/lexer/mod.rs': LEXER_RS }[f.path];
+  if (f.path === 'assets/logo.png') return 'diff --git a/assets/logo.png b/assets/logo.png\nBinary files a/assets/logo.png and b/assets/logo.png differ\n';
+  if (f.path === 'docs/guide.md') return WORKTREE_PATCH['docs/guide.md'];
+  return header(f.path) + body + '\n';
+};
+
+// Stats per window (the bars differ so a switch is visible).
+const STATS = {
+  '24h': { requests: 412, errors: 3, input: 1200000, output: 310000, cr: 9000000, cc: 400000, f: 1 },
+  '7d': { requests: 2890, errors: 21, input: 8400000, output: 2150000, cr: 61000000, cc: 2800000, f: 7 },
+  '30d': { requests: 11800, errors: 80, input: 33000000, output: 8900000, cr: 240000000, cc: 11000000, f: 30 },
+};
+const MODELS = [['claude-opus-4', 0.58], ['claude-sonnet-4', 0.31], ['claude-haiku-4', 0.09], ['claude-3-7-sonnet', 0.02]];
+let credState = { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
+let retryAt = Date.now() + 45000;
+const PLUGIN_STATUS = () => ([
+  { host: 'local', name: 'vocdoni-internal', state: 'ready', installed: ['plugin:vocdoni-internal@market'], present: ['mcp:docs'], skipped: [{ id: 'agent:reviewer', reason: 'failed: marketplace unreachable', retry_secs: Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) }], dropped: [], error: null },
+  { host: 'z6', name: 'vocdoni-internal', state: 'pending', installed: [], present: [], skipped: [{ id: 'mcp:docs', reason: 'missing secret DOCS_TOKEN', retry_secs: null }], dropped: ['--agents'], error: null },
+]);
+// ---- claude offers (replayed on connect, as the protocol says) ----
+const claudeOffers = new Map([
+  ['z6', { host: 'z6', phase: 'offer_update', have: '2.0.9', want: '2.1.0', version: null, tail: null }],
+]);
+let installFailedOnce = false;
 
 const OPS = {
   'hosts.list': () => ({ hosts: Object.values(state.hosts) }),
@@ -265,8 +389,10 @@ const OPS = {
     if (name === 'local') throw new OpError('local is always connected');
     if (name === 'edge-1') throw new OpError('ssh: connect to host edge-1 port 22: Connection timed out\nbootstrap failed');
     if (!state.hosts[name]) {
-      state.hosts[name] = { name, connected: true, connecting: false, error: null, outdated: false, hostname: name, os: 'linux', arch: 'x86_64', claude: { path: '/usr/bin/claude', version: '2.1.0' }, features: ['lens', 'search'], version: VERSION };
+      state.hosts[name] = { name, connected: true, connecting: false, error: null, outdated: false, hostname: name, os: 'linux', arch: 'x86_64', claude: null, features: ['lens', 'search'], version: VERSION };
       broadcast(ev('host', { host: state.hosts[name] }));
+      claudeOffers.set(name, { host: name, phase: 'offer_install', have: null, want: '2.1.0', version: null, tail: null });
+      setTimeout(() => broadcast(ev('claude', claudeOffers.get(name))), 300);
     }
     return { host: state.hosts[name] };
   },
@@ -397,30 +523,53 @@ const OPS = {
     const s = sess(a); needHostFeature(state.hosts[s.host], 'worktree');
     const p = need(a, 'path'); need(a, 'staged', 'boolean');
     if (!GIT_STATUS.files.some((f) => f.path === p)) throw new OpError('no such path');
-    return PATCH(p);
+    return { id: 'worktree', path: p, patch: WORKTREE_PATCH[p], truncated: p === 'src/lexer/mod.rs' && a.staged };
   },
   'git.log': (a) => {
     sess(a);
-    return { commits: [COMMIT('a'.repeat(40)), COMMIT('b'.repeat(40))].map(({ files, body, ...c }) => c), next_skip: null, truncated: false };
+    const skip = a.skip ?? 0; const limit = Math.min(a.limit ?? 100, 500);
+    if (!Number.isInteger(skip) || !Number.isInteger(limit)) throw bad('skip/limit');
+    const total = a.all ? LOG_N + 40 : LOG_N;
+    const commits = [];
+    for (let i = skip; i < Math.min(total, skip + limit); i++) commits.push(i < LOG_N ? logEntry(i) : { ...logEntry(i), subject: `other branch: ${logEntry(i).subject}`, refs: i === LOG_N ? ['refs/heads/feat/other'] : [] });
+    return { root: '/home/dev/claudio', head: 'feat/auth', commits, more: skip + commits.length < total };
   },
   'git.commit': (a) => { sess(a); return COMMIT(need(a, 'oid')); },
-  'git.diff': (a) => { sess(a); need(a, 'oid'); return PATCH('src/main.rs'); },
-  'proxy.stats': (a) => ({
-    profile: need(a, 'profile'), window: need(a, 'window'), user_name: 'dev',
-    totals: { requests: 412, errors: 3, input_tokens: 1200000, output_tokens: 310000, cache_read: 9000000, cache_creation: 400000 },
-    by_model: [{ model: 'opus', requests: 300, errors: 2, input_tokens: 900000, output_tokens: 250000, cache_read: 7000000, cache_creation: 300000 }],
-    limit: { output_tokens: 1000000, window_seconds: 18000, used_output_tokens: 310000, used_pct: 31, blocked: false, blocked_until: null },
-    pool: [{ name: 'acct-1', status: 'ok' }],
-  }),
+  'git.diff': (a) => {
+    sess(a);
+    const oid = need(a, 'oid');
+    COMMIT(oid);
+    if (a.file === undefined) return { id: oid, path: null, patch: COMMIT_FILES.map((_, i) => COMMIT_PATCH(i)).join(''), truncated: false };
+    if (!Number.isInteger(a.file) || a.file < 0 || a.file >= COMMIT_FILES.length) throw new OpError('no such file');
+    return { id: oid, path: COMMIT_FILES[a.file].path, patch: COMMIT_PATCH(a.file), truncated: false };
+  },
+  'proxy.stats': (a) => {
+    const w = STATS[need(a, 'window')];
+    if (!w) throw bad('window');
+    const f = (v, share) => Math.round(v * share);
+    const by_model = MODELS.map(([model, share]) => ({ model, requests: f(w.requests, share), errors: f(w.errors, share), input_tokens: f(w.input, share), output_tokens: f(w.output, share), cache_read: f(w.cr, share), cache_creation: f(w.cc, share) }));
+    const limit = 1000000 * w.f;
+    return {
+      profile: need(a, 'profile'), window: a.window, user_name: 'dev',
+      totals: { requests: w.requests, errors: w.errors, input_tokens: w.input, output_tokens: w.output, cache_read: w.cr, cache_creation: w.cc },
+      by_model,
+      limit: { output_tokens: limit, window_seconds: 18000, used_output_tokens: w.output, used_pct: Math.round((100 * w.output) / limit), blocked: false, blocked_until: null },
+      pool: [{ name: 'acct-1', status: 'ok' }, { name: 'acct-2', status: 'ok' }, { name: 'acct-3', status: 'cooling down' }],
+    };
+  },
   'proxy.credential': (a) => {
     const s = sess(a);
     if (!s.proxy) throw new OpError('no proxy for this session');
-    return { credential: { name: 'acct-1', plan: 'max', provider: 'anthropic', five_hour_pct: 41, seven_day_pct: 12, switched_secs_ago: null } };
+    if (!s.claude_session_id) throw new OpError('no conversation yet');
+    return { credential: { name: credState.name, plan: credState.plan, provider: 'anthropic', five_hour_pct: credState.five, seven_day_pct: credState.seven, switched_secs_ago: null } };
   },
   'proxy.switch': (a) => {
     const s = sess(a);
     if (!s.proxy) throw new OpError('no proxy for this session');
-    return { from: 'acct-1', to: 'acct-2', state: 'switched' };
+    if (!s.claude_session_id) throw new OpError('no conversation yet');
+    const from = credState.name;
+    credState = from === 'acct-1' ? { name: 'acct-2', plan: 'max', five: 88, seven: 63 } : { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
+    return { from, to: credState.name, state: 'switched' };
   },
   'snippets.list': () => ({ snippets: state.snippets }),
   'snippets.save': (a) => { const text = need(a, 'text'); const name = `snippet-${state.snippets.length + 1}`; state.snippets.push({ name, text }); return { name }; },
@@ -465,9 +614,22 @@ const OPS = {
     p.choices_saved = true;
     return {};
   },
-  'plugins.status': () => ({ status: [{ host: 'local', name: 'vocdoni-internal', state: 'ready', installed: [], present: ['mcp:docs'], skipped: [], dropped: [], error: null }] }),
-  'claude.update': (a) => { host(a); need(a, 'install', 'boolean'); return {}; },
-  'claude.skip': (a) => { host(a); return {}; },
+  'plugins.status': () => ({ status: PLUGIN_STATUS().map(({ ...x }) => x) }),
+  'claude.update': (a) => {
+    const h = host(a); const install = need(a, 'install', 'boolean');
+    const phase = install ? 'installing' : 'updating';
+    claudeOffers.set(h.name, { host: h.name, phase, have: h.claude?.version ?? null, want: null, version: null, tail: null });
+    broadcast(ev('claude', claudeOffers.get(h.name)));
+    setTimeout(() => {
+      let o;
+      if (install && !installFailedOnce) { installFailedOnce = true; o = { host: h.name, phase: 'failed', have: null, want: null, version: null, tail: 'curl: (6) Could not resolve host: claude.ai\ninstaller exited with status 6' }; }
+      else { h.claude = { path: '/home/dev/.local/bin/claude', version: '2.1.0' }; broadcast(ev('host', { host: h })); o = { host: h.name, phase: 'done', have: null, want: null, version: '2.1.0', tail: null }; }
+      claudeOffers.set(h.name, o);
+      broadcast(ev('claude', o));
+    }, 2600);
+    return {};
+  },
+  'claude.skip': (a) => { const h = host(a); claudeOffers.delete(h.name); return {}; },
   'layout.save': (a, c) => {
     const l = a.layout;
     const ok = l && [1, 2, 4].includes(l.grid) && Array.isArray(l.panes) && l.panes.length === l.grid
@@ -579,6 +741,8 @@ wss.on('connection', (ws) => {
     send(ws, ev('latex', { sid, seq: 1, formulas: LENS.filter((x) => x.tag === 'latex').map((x) => x.text) }));
   }
   for (const h of Object.values(state.hosts)) send(ws, ev('host_stats', { host: h.name, cpu: 12, mem_used: 6e9, mem_total: 16e9 }));
+  for (const o of claudeOffers.values()) send(ws, ev('claude', o));
+  for (const st of PLUGIN_STATUS()) send(ws, ev('plugin_status', st));
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
       const b = Buffer.from(data);
@@ -617,6 +781,14 @@ const statsTimer = setInterval(() => {
   }
 }, 2000);
 statsTimer.unref();
+
+// The plugin retry comes due, then the daemon asks again and a new countdown starts.
+const retryTimer = setInterval(() => {
+  if (Date.now() < retryAt) return;
+  retryAt = Date.now() + 45000;
+  for (const st of PLUGIN_STATUS()) broadcast(ev('plugin_status', st));
+}, 1000);
+retryTimer.unref();
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`mock: http://127.0.0.1:${PORT}/#t=${TOKEN}`);

@@ -27,6 +27,8 @@ export function Settings() {
       <input class="input" type="number" min="10" max="24" value=${s.fontSize} onChange=${(e) => updateSettings({ fontSize: e.target.value })} /></label>
     <label class="set-row"><span>Sound<small>off by default</small></span>
       <input class="toggle" type="checkbox" checked=${s.sound} onChange=${(e) => updateSettings({ sound: e.target.checked })} /></label>
+    <div class="set-row"><span>Extensions<small>lenses, actions and proxy plugins</small></span>
+      <button type="button" class="btn btn-sm" data-testid="open-extensions" onClick=${() => { overlay.value = 'extensions'; }}>Manage…</button></div>
     <label class="set-row"><span>Notifications<small>when a background session needs you</small></span>
       <input class="toggle" type="checkbox" checked=${s.notifications} onChange=${(e) => setNotifications(e.target.checked)} /></label>
   <//>`;

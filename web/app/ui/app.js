@@ -26,6 +26,14 @@ import { Snippets, installSnippets } from './snippets.js';
 import { DocumentView, ActionList, installActions } from './actions.js';
 import { Drawer } from './drawer.js';
 import './reader.js';
+import './changes.js';
+import './history.js';
+import './stats.js';
+import './session-tab.js';
+import { ExtensionsScreen, installExtensions } from './extensions.js';
+import { PluginSetupHost, installPluginGate, setupOpen, cancelPluginSetup } from './plugin-setup.js';
+import { ClaudeToasts } from './claude.js';
+import { HostPanel, installHosts } from './hosts.js';
 import { drawer, showBoard, boardShown, setGridSize, focusPane, openSession, trackRemoved, ProxyChooserHost } from './session-actions.js';
 
 export { glyphFor, Glyph, ago };
@@ -69,12 +77,13 @@ export function App() {
   const small = narrow.value;
   return html`<${Topbar} />
     ${banner.value ? html`<div class="banner" role="alert">${banner.value}</div>` : null}
-    <div class="main" data-narrow=${small} data-drawer=${!!drawer.value}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} /><${Stage} />`}<${Drawer} /></div>
+    <div class="main" data-narrow=${small} data-drawer=${!!drawer.value} data-drawer-tab=${drawer.value?.tab ?? ''}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} /><${Stage} />`}<${Drawer} /></div>
     <${Footer} />
     ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />`
       : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />`
-      : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />` : null}
-    <${ProxyChooserHost} /><${Modal} /><${Toasts} />`;
+      : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />`
+      : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />` : null}
+    <${PluginSetupHost} /><${ProxyChooserHost} /><${Modal} /><${ClaudeToasts} /><${Toasts} />`;
 }
 
 // ---- focus model: terminal mode forwards everything; app mode owns single keys ----
@@ -92,7 +101,7 @@ function step(delta) {
 export function installFocusModel() {
   defineAction('palette', () => { overlay.value = overlay.value === 'palette' ? null : 'palette'; });
   defineAction('help', () => { overlay.value = 'help'; });
-  defineAction('close-overlay', () => { if (modal.value) closeModal(); else overlay.value = null; });
+  defineAction('close-overlay', () => { if (modal.value) closeModal(); else if (setupOpen()) cancelPluginSetup(); else overlay.value = null; });
   defineAction('rail-next', () => step(1));
   defineAction('rail-prev', () => step(-1));
   // `a`: the first card of the queue, in the focused pane
@@ -120,6 +129,9 @@ export function installFocusModel() {
   installSearch();
   installSnippets();
   installActions();
+  installExtensions();
+  installHosts();
+  installPluginGate();
   onServerEvent(trackRemoved);
   installNotifications();
 
@@ -135,7 +147,7 @@ export function installFocusModel() {
     }
     // Enter on a focused button, row or summary activates it; it is not "type into the terminal".
     if (ev.key === 'Enter' && ev.target instanceof Element && ev.target.closest('button, a, summary, [role="button"], [role="row"]')) return;
-    const ctx = { typing: isTyping(document.activeElement), overlay: overlay.value !== null || modal.value !== null };
+    const ctx = { typing: isTyping(document.activeElement), overlay: overlay.value !== null || modal.value !== null || setupOpen() };
     const action = appAction(ev, ctx);
     if (!action || ev.repeat) return;
     if (action === 'close-overlay' && !ctx.overlay) return;

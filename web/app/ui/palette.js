@@ -27,7 +27,7 @@ export function sessionCommands(s) {
   ];
   if (s.kind === 'claude') {
     cmds.push({ id: `restart:${s.id}`, group: 'Sessions', title: `Restart ${tag} (resume)`, run: () => quiet(req('session.respawn', { sid: s.id, fresh: false, rows: 24, cols: 80 })) });
-    for (const [action, label] of [['reader', 'Reader'], ['changes', 'Changes'], ['stats', 'Stats']]) {
+    for (const [action, label] of [['reader', 'Reader'], ['changes', 'Changes'], ['history', 'History'], ['stats', 'Stats'], ['session', 'Session info']]) {
       cmds.push({ id: `${action}:${s.id}`, group: 'Sessions', title: `${label}: ${tag}`, when: () => hasAction(action), run: () => { selected.value = s.id; runAction(action, s.id); } });
     }
     if (s.proxy) cmds.push({ id: `switch:${s.id}`, group: 'Sessions', title: `Switch subscription: ${tag}`, run: () => quiet(req('proxy.switch', { sid: s.id })) });

@@ -94,6 +94,8 @@ export function FormulasView({ sid }) {
 export function ReaderPanel({ sid }) {
   const s = model.value.sessions[sid];
   const turns = s?.turns ?? null;
+  // an answer lands at Stop: also refresh when the session settles (idle or waiting for input)
+  const settled = s && (s.state === 'idle' || s.state === 'needs_input') ? s.state : 'busy';
   const [data, setData] = useState({ loading: true, answers: [], error: null });
   const [view, setView] = useState('answers');
   const [nonce, setNonce] = useState(0);
@@ -104,7 +106,7 @@ export function ReaderPanel({ sid }) {
       .then((r) => { if (!dead) setData({ loading: false, answers: r.answers ?? [], error: null }); })
       .catch((e) => { if (!dead) setData({ loading: false, answers: [], error: e.message }); });
     return () => { dead = true; };
-  }, [sid, turns, nonce]);
+  }, [sid, turns, settled, nonce]);
   if (!s) return null;
   const lens = model.value.lens[sid];
   const nLens = (lens?.items?.length ?? 0) || (lens?.formulas?.length ?? 0);

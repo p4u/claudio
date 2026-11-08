@@ -41,6 +41,7 @@
   display: flex; flex-direction: column; min-height: 0; min-width: 0;
   background: var(--panel); border-left: var(--bw) solid var(--border-strong);
 }
+.main[data-drawer-tab="changes"], .main[data-drawer-tab="history"] { --drawer-w: clamp(520px, 58vw, 980px); }
 .main[data-narrow="true"] .drawer { position: fixed; inset: var(--topbar-h) 0 var(--footer-h) 0; z-index: 30; border-left: 0; }
 .drawer-head { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3); min-height: 38px; border-bottom: var(--bw) solid var(--border); flex: none; }
 .drawer-tabs { display: flex; gap: 2px; align-self: stretch; }
