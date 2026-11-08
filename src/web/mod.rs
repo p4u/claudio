@@ -28,7 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 pub(crate) const DEFAULT_PORT: u16 = 7337;
 
-const USAGE: &str = "usage: claudio web [--listen 127.0.0.1:7337] [--allow-host NAME]... \
+const USAGE: &str = "usage: claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... \
 [--no-open] [--print-url] [--rotate-token]";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,13 +105,21 @@ fn value(
         .ok_or_else(|| format!("{flag} needs a value"))
 }
 
-/// `[A-Za-z0-9.-]{1,253}`, not starting with `-`.
+/// `[A-Za-z0-9.-]{1,253}`, not starting with `-`, optionally `:<port>`
+/// (1..=65535).
 fn host_name_ok(name: &str) -> bool {
-    (1..=253).contains(&name.len())
-        && !name.starts_with('-')
-        && name
+    let (host, port) = match name.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (name, None),
+    };
+    (1..=253).contains(&host.len())
+        && !host.starts_with('-')
+        && host
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && port.is_none_or(|p| {
+            p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n > 0)
+        })
 }
 
 /// `addr` as a socket address, if it is a loopback one: `127.0.0.0/8`,
@@ -209,7 +217,7 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
     let assets = Arc::new(assets::Assets::load());
     let auth = auth::Auth::new(
         token,
-        auth::Allowed::new(args.listen.port(), &args.allow_hosts),
+        auth::Allowed::new(args.listen, &args.allow_hosts),
         auth::csp(assets.importmap_sha256()),
     )
     .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
@@ -375,6 +383,20 @@ mod tests {
         assert_eq!(a.allow_hosts, vec!["claudio.example", "b.example"]);
         assert!(a.no_open && a.print_url && a.rotate_token);
         assert!(parse_args(&args(&["--allow-host", "bad/host"])).is_err());
+        let a = parse_args(&args(&["--allow-host", "Proxy.Example:8443"])).unwrap();
+        assert_eq!(a.allow_hosts, vec!["proxy.example:8443"]);
+        for bad in [
+            "proxy.example:",
+            "proxy.example:0",
+            "proxy.example:65536",
+            "proxy.example:x",
+            "proxy.example:+8443",
+            ":8443",
+            "a:b:8443",
+            "-x:8443",
+        ] {
+            assert!(parse_args(&args(&["--allow-host", bad])).is_err(), "{bad}");
+        }
         assert!(parse_args(&args(&["--allow-host"])).is_err());
         assert!(parse_args(&args(&["--bogus"])).is_err());
     }

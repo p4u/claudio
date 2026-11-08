@@ -14,6 +14,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -101,10 +102,20 @@ pub(crate) struct Allowed {
 }
 
 impl Allowed {
-    /// The three loopback forms at `port` (also bare when the port is 80),
-    /// and each of `allow_hosts` (lowercase) bare or at `port`.
-    pub(crate) fn new(port: u16, allow_hosts: &[String]) -> Allowed {
-        let mut hosts = Vec::new();
+    /// The listen address itself, the three loopback forms at its port (also
+    /// bare when the port is 80), and each of `allow_hosts` (lowercase) bare
+    /// or at the listen port; an `allow_hosts` entry may carry its own
+    /// `:port`, and is then accepted at that port only.
+    pub(crate) fn new(listen: SocketAddr, allow_hosts: &[String]) -> Allowed {
+        let port = listen.port();
+        // `Display` brackets an IPv6 address: `[::1]:7337`.
+        let mut hosts = vec![listen.to_string()];
+        if port == 80 {
+            hosts.push(match listen.ip() {
+                IpAddr::V4(ip) => ip.to_string(),
+                IpAddr::V6(ip) => format!("[{ip}]"),
+            });
+        }
         for name in ["127.0.0.1", "localhost", "[::1]"] {
             hosts.push(format!("{name}:{port}"));
             if port == 80 {
@@ -113,9 +124,13 @@ impl Allowed {
         }
         for name in allow_hosts {
             let name = name.trim().to_ascii_lowercase();
-            hosts.push(format!("{name}:{port}"));
+            if !name.contains(':') {
+                hosts.push(format!("{name}:{port}"));
+            }
             hosts.push(name);
         }
+        hosts.sort();
+        hosts.dedup();
         Allowed {
             hosts,
             proxied: !allow_hosts.is_empty(),
@@ -426,7 +441,15 @@ mod tests {
     use super::*;
 
     fn auth() -> Auth {
-        Auth::new("ab".repeat(32), Allowed::new(7337, &[]), csp(None)).unwrap()
+        Auth::new("ab".repeat(32), Allowed::new(lo(7337), &[]), csp(None)).unwrap()
+    }
+
+    fn lo(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
@@ -440,7 +463,7 @@ mod tests {
 
     #[test]
     fn hosts_and_origins_accept_only_the_listen_forms_and_allowed_names() {
-        let a = Allowed::new(7337, &["Claudio.Example".to_owned()]);
+        let a = Allowed::new(lo(7337), &["Claudio.Example".to_owned()]);
         for ok in [
             "127.0.0.1:7337",
             "LOCALHOST:7337",
@@ -479,8 +502,62 @@ mod tests {
             assert!(!a.origin_ok(bad), "{bad}");
         }
         assert!(a.secure_cookie());
-        assert!(!Allowed::new(7337, &[]).secure_cookie());
-        assert!(Allowed::new(80, &[]).host_ok("127.0.0.1"));
+        assert!(!Allowed::new(lo(7337), &[]).secure_cookie());
+        assert!(Allowed::new(lo(80), &[]).host_ok("127.0.0.1"));
+    }
+
+    #[test]
+    fn the_listen_address_itself_is_accepted() {
+        let a = Allowed::new("127.0.0.2:7337".parse().unwrap(), &[]);
+        for ok in ["127.0.0.2:7337", "127.0.0.1:7337", "localhost:7337", "[::1]:7337"] {
+            assert!(a.host_ok(ok), "{ok}");
+        }
+        assert!(a.origin_ok("http://127.0.0.2:7337"));
+        for bad in ["127.0.0.2:7338", "127.0.0.2", "127.0.0.3:7337", "evil.example:7337"] {
+            assert!(!a.host_ok(bad), "{bad}");
+        }
+        assert!(!a.origin_ok("http://127.0.0.3:7337"));
+        assert!(!a.secure_cookie());
+        let a = Allowed::new("127.1.2.3:80".parse().unwrap(), &[]);
+        assert!(a.host_ok("127.1.2.3:80") && a.host_ok("127.1.2.3"));
+        let a = Allowed::new("[::1]:9000".parse().unwrap(), &[]);
+        assert!(a.host_ok("[::1]:9000") && !a.host_ok("[::1]"));
+        let a = Allowed::new("[::1]:80".parse().unwrap(), &[]);
+        assert!(a.host_ok("[::1]") && !a.host_ok("::1"));
+    }
+
+    #[test]
+    fn an_allowed_host_may_name_its_port() {
+        let a = Allowed::new(lo(7337), &names(&["Proxy.Example:8443", "bare.example"]));
+        for ok in [
+            "proxy.example:8443",
+            "PROXY.EXAMPLE:8443",
+            "bare.example",
+            "bare.example:7337",
+            "127.0.0.1:7337",
+        ] {
+            assert!(a.host_ok(ok), "{ok}");
+        }
+        for bad in [
+            "proxy.example",
+            "proxy.example:7337",
+            "proxy.example:8444",
+            "bare.example:8443",
+            "evil.example:8443",
+        ] {
+            assert!(!a.host_ok(bad), "{bad}");
+        }
+        assert!(a.origin_ok("https://proxy.example:8443"));
+        assert!(a.origin_ok("https://bare.example"));
+        for bad in [
+            "https://proxy.example",
+            "https://proxy.example:8443/",
+            "https://evil.example:8443",
+            "null",
+        ] {
+            assert!(!a.origin_ok(bad), "{bad}");
+        }
+        assert!(a.secure_cookie());
     }
 
     #[test]

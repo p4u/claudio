@@ -225,7 +225,20 @@ fn http(
     extra: &[(&str, &str)],
     body: &str,
 ) -> Reply {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    http_at("127.0.0.1", port, method, path, host, extra, body)
+}
+
+/// [`http`] to a server listening on `ip`.
+fn http_at(
+    ip: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    host: &str,
+    extra: &[(&str, &str)],
+    body: &str,
+) -> Reply {
+    let mut s = TcpStream::connect((ip, port)).unwrap();
     s.set_read_timeout(Some(WAIT)).unwrap();
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -596,6 +609,68 @@ fn web_allow_host_accepts_the_proxy_name_and_secures_the_cookie() {
         &body,
     );
     assert_eq!(reply.status, 204);
+    assert!(reply.header("set-cookie").unwrap().contains("; Secure"));
+}
+
+#[test]
+fn web_answers_on_its_listen_address_and_a_proxy_port() {
+    // macOS routes only 127.0.0.1 to lo0 unless aliased: nothing to test there.
+    let port = match std::net::TcpListener::bind("127.0.0.2:0") {
+        Ok(l) => l.local_addr().unwrap().port(),
+        Err(_) => return,
+    };
+    let h = ManagerHarness::new();
+    let mut cmd = Command::new(BINARY);
+    cmd.arg("web")
+        .arg("--listen")
+        .arg(format!("127.0.0.2:{port}"))
+        .args(["--no-open", "--allow-host", "proxy.example:8443"]);
+    apply_env(&h, &mut cmd);
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("web.log"))
+        .unwrap();
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(log);
+    let mut child = cmd.spawn().expect("start claudio web");
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let url = lines.next();
+    let token = fs::read_to_string(h.config_home.join("claudio/web-token"))
+        .map(|t| t.trim().to_owned())
+        .unwrap_or_default();
+    // Dropped (killed) on every path from here.
+    let web = Web {
+        h: Some(h),
+        child,
+        port,
+        token,
+    };
+    let url = url.and_then(Result::ok).unwrap_or_default();
+    assert_eq!(
+        url,
+        format!("claudio web: http://127.0.0.2:{port}/#t={}", web.token)
+    );
+    let get = |host: &str| http_at("127.0.0.2", port, "GET", "/", host, &[], "").status;
+    assert_eq!(get(&format!("127.0.0.2:{port}")), 200);
+    assert_eq!(get(&format!("127.0.0.1:{port}")), 200);
+    assert_eq!(get("proxy.example:8443"), 200);
+    assert_eq!(get("proxy.example"), 421);
+    assert_eq!(get(&format!("127.0.0.3:{port}")), 421);
+    let body = json!({"token": web.token}).to_string();
+    let login = |origin: &str| {
+        http_at(
+            "127.0.0.2",
+            port,
+            "POST",
+            "/api/login",
+            "proxy.example:8443",
+            &[("Origin", origin)],
+            &body,
+        )
+    };
+    assert_eq!(login("https://evil.example:8443").status, 403);
+    let reply = login("https://proxy.example:8443");
+    assert_eq!(reply.status, 204, "{reply:?}");
     assert!(reply.header("set-cookie").unwrap().contains("; Secure"));
 }
 
