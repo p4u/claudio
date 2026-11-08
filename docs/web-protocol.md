@@ -146,10 +146,13 @@ a socket path or a hook token.
 `{"seq": number, "kind": string, "message": string, "tool": string|null, "detail": string|null}`.
 `seq` ≥ 1, growing per emitted attention for the life of the session's process. `kind` is one
 of `permission_prompt`, `worker_permission_prompt`, `elicitation_dialog`,
-`elicitation_url_dialog`, `idle_prompt`, `agent_needs_input`, `session_start` (≤ 64 bytes).
+`elicitation_url_dialog`, `idle_prompt`, `agent_needs_input`, `session_start`, `ask_user_question` (state `needs_input`;
+`message` is the question, `detail` its options joined with ` · `) or `plan_approval` (state
+`needs_approval`; never approvable through `session.approve`) (≤ 64 bytes). A client that does not
+know a kind shows its `message` as for any other.
 `message` ≤ 512 bytes, `detail` ≤ 1024 bytes, all one line. `tool`/`detail` are best effort
 (the most recent tool call; may differ from the prompting one in a parallel burst) and are set
-only for the approval kinds. Show `message` first.
+only for the approval kinds and the two kinds above. Show `message` first.
 
 ### GitStatus
 
