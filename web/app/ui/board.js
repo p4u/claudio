@@ -2,26 +2,23 @@
 import { html } from 'htm/preact';
 import { model, selected, focused, fresh } from '../store.js';
 import { orderedSessions } from '../model.js';
-import { Glyph, ago, now, STATE_NAME } from './glyph.js';
+import { Glyph, ago, now, tone, STATE_NAME } from './glyph.js';
 import { Gauge, Branch } from './strip.js';
-import { openSession, dropSession } from './session-actions.js';
+import { openSession, openAndEnter, dropSession } from './session-actions.js';
 import { SID_TYPE } from './rail.js';
-import { toast } from './toasts.js';
 import { narrow } from './narrow.js';
 
 function Row({ s }) {
   const current = selected.value === s.id || focused.value === s.id;
-  const open = () => {
-    openSession(s.id);
-    if (narrow.value) toast({ text: 'Open sessions on a wider screen to see their terminal.', level: 'info' });
-  };
+  const attn = s.attention ? [s.attention.message, s.attention.detail].filter(Boolean).join(' · ') : '';
   return html`<div class="board-row" role="row" tabindex="0" data-testid="board-row" data-sid=${s.id} data-state=${s.state} data-kind=${s.kind}
-    data-fresh=${!!fresh.value[s.id]} aria-current=${current} onClick=${open}
-    onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); open(); } }}>
-    <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${s.state}">${s.kind === 'shell' ? 'terminal' : STATE_NAME[s.state]}</span></span>
+    data-tone=${tone(s)} data-fresh=${!!fresh.value[s.id]} aria-current=${current} aria-selected=${selected.value === s.id} onClick=${() => openSession(s.id)}
+    onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }}>
+    <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${tone(s) ? 'needs_input' : s.state}">${s.kind === 'shell' ? 'terminal' : tone(s) ? 'question' : STATE_NAME[s.state]}</span></span>
     <span class="bcol bcol-label" title=${s.label}>${s.label}</span>
     <span class="bcol bcol-host"><span class="chip">${s.host}</span></span>
     <span class="bcol bcol-repo" title=${s.cwd}>${s.branch ? html`<${Branch} s=${s} />` : html`<span class="muted">${s.cwd}</span>`}</span>
+    <span class="bcol bcol-attn" title=${attn}>${attn}</span>
     <span class="bcol bcol-model">${s.model ?? ''}</span>
     <span class="bcol bcol-ctx">${s.kind === 'claude' ? html`<${Gauge} s=${s} />` : null}</span>
     <span class="bcol bcol-age">${ago(s.state_since, now.value)}</span>
@@ -35,7 +32,7 @@ export function Board() {
     onDrop=${(e) => { const sid = e.dataTransfer.getData(SID_TYPE); if (sid && !narrow.value) { e.preventDefault(); dropSession(model.value.layout.focus, sid); } }}>
     <div class="board-head" role="row">
       <span class="bcol bcol-state">state</span><span class="bcol bcol-label">session</span><span class="bcol bcol-host">host</span>
-      <span class="bcol bcol-repo">repo</span><span class="bcol bcol-model">model</span><span class="bcol bcol-ctx">context</span><span class="bcol bcol-age">age</span>
+      <span class="bcol bcol-repo">repo</span><span class="bcol bcol-attn">needs</span><span class="bcol bcol-model">model</span><span class="bcol bcol-ctx">context</span><span class="bcol bcol-age">age</span>
     </div>
     <div class="board-rows">
       ${list.length === 0 ? html`<div class="pane-empty"><div class="coin">PRESS <kbd>N</kbd> TO START</div>

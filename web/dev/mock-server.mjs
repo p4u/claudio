@@ -88,7 +88,31 @@ function seed() {
   add(session(ids.idle, { label: 'infra', host: 'z6', cwd: '/srv/infra', branch: 'main', state: 'idle', state_since: now() - 1800, model: 'sonnet', proxy: 'work', first_party: false }));
   add(session(ids.shell, { kind: 'shell', label: 'term', cwd: '/home/dev/claudio', state: 'idle', model: null, branch: null, git: null, claude_session_id: null, context_tokens: null, turns: null, output_tokens: null }));
 }
+// MOCK_MANY=1: a crowded list (14 more sessions: repo pairs, singles, a fresh idle one, one that
+// finished after work) to look at the rail with 12+ sessions.
+function seedMany() {
+  const add = (s) => { state.sessions.set(s.id, s); state.order.push(s.id); };
+  const mk = (n, o) => add(session(`aaaaaaaa-0000-4000-8000-${String(n).padStart(12, '0')}`, o));
+  mk(1, { label: 'billing', cwd: '/home/dev/billing', branch: 'main', state: 'working', state_since: now() - 30 });
+  mk(2, { label: 'billing-tests', cwd: '/home/dev/billing', branch: 'tests/e2e', state: 'working', state_since: now() - 70 });
+  mk(3, { label: 'web-ui', cwd: '/home/dev/web', branch: 'feat/rail', state: 'needs_approval', state_since: now() - 20,
+    attention: { seq: 1, kind: 'permission_prompt', message: 'Claude needs your permission to use Write', tool: 'Write', detail: 'web/app/ui/rail.js' } });
+  mk(4, { label: 'web-ui-2', cwd: '/home/dev/web', branch: 'feat/queue', state: 'needs_approval', state_since: now() - 25,
+    attention: { seq: 1, kind: 'permission_prompt', message: 'Claude needs your permission to use Bash', tool: 'Bash', detail: 'npm test' } });
+  mk(5, { label: 'ops', cwd: '/home/dev/ops', branch: 'main', state: 'idle', state_since: now() - 20, turns: 0 }); // fresh: never in the queue
+  mk(6, { label: 'scraper', cwd: '/home/dev/scraper', branch: 'fix/retry', state: 'idle', state_since: now() - 90, turns: 4 }); // finished work: idle rank
+  mk(7, { label: 'sdk', cwd: '/home/dev/sdk', branch: 'main', state: 'idle', state_since: now() - 7200 });
+  mk(8, { label: 'mobile', cwd: '/home/dev/mobile', branch: 'release/2.3', state: 'error', state_since: now() - 200 });
+  mk(9, { label: 'edge', host: 'z6', cwd: '/srv/edge', branch: 'main', state: 'working', state_since: now() - 12 });
+  mk(10, { label: 'edge-canary', host: 'z6', cwd: '/srv/edge', branch: 'canary', state: 'idle', state_since: now() - 5000 });
+  mk(11, { label: 'etl', host: 'z6', cwd: '/srv/etl', branch: 'main', state: 'needs_input', state_since: now() - 60,
+    attention: { seq: 1, kind: 'idle_prompt', message: 'Claude is waiting for your input', tool: null, detail: null } });
+  mk(12, { label: 'notebooks', cwd: '/home/dev/notebooks', branch: 'main', state: 'idle', state_since: now() - 9000 });
+  mk(13, { label: 'blog', cwd: '/home/dev/blog', branch: 'draft/post-12', state: 'working', state_since: now() - 3 });
+  mk(14, { label: 'legacy-api-with-a-very-long-session-name', cwd: '/home/dev/legacy', branch: 'maintenance/2019-branch-that-never-ends', state: 'idle', state_since: now() - 30000 });
+}
 seed();
+if (process.env.MOCK_MANY === '1') seedMany();
 
 const snapshot = () => ({
   t: 'snapshot', hosts: Object.values(state.hosts), sessions: [...state.sessions.values()],
@@ -412,7 +436,8 @@ const OPS = {
     c.attached.add(s.id);
     console.log(`mock: session.attach ${s.id.slice(0, 4)} ${cols}x${rows}`);
     setImmediate(() => {
-      send(c.ws, ev('attached', { sid: s.id, rows, cols }));
+      // MOCK_FOREIGN=1: another client already sized the PTY, so the attach answers a different size
+      send(c.ws, ev('attached', process.env.MOCK_FOREIGN === '1' ? { sid: s.id, rows: 48, cols: 95 } : { sid: s.id, rows, cols }));
       c.ws.send(frame(0x01, s.id, BANNER(s)));
     });
     return {};

@@ -1,8 +1,9 @@
 // User settings in localStorage['claudio.settings'].
 import { signal } from '@preact/signals';
+import { clampDrawer, DRAWER_DEFAULT } from './layout.js';
 
 export const THEMES = ['arcade-dark', 'arcade-light', 'plain-dark', 'plain-light'];
-export const DEFAULTS = { theme: 'arcade-dark', scanlines: true, fontSize: 14, sound: false, notifications: false };
+export const DEFAULTS = { theme: 'arcade-dark', scanlines: true, fontSize: 14, sound: false, notifications: false, drawerWidth: DRAWER_DEFAULT, railCollapsed: false };
 const KEY = 'claudio.settings';
 
 export function sanitize(raw) {
@@ -13,6 +14,8 @@ export function sanitize(raw) {
     scanlines: typeof o.scanlines === 'boolean' ? o.scanlines : DEFAULTS.scanlines,
     fontSize: Number.isFinite(size) ? Math.min(24, Math.max(10, Math.round(size))) : DEFAULTS.fontSize,
     sound: o.sound === true,
+    drawerWidth: clampDrawer(o.drawerWidth ?? DRAWER_DEFAULT),
+    railCollapsed: o.railCollapsed === true,
     notifications: o.notifications === true && globalThis.Notification?.permission === 'granted',
   };
 }
