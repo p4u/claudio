@@ -4,11 +4,20 @@
   --font-ui: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --font-pixel: "Departure Mono", "JetBrains Mono", ui-monospace, monospace;
   --font-prose: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --term-font-size: 14px;
+  --term-font-size: 15px;
+  /* UI text scale: today's sizes plus --fs-add. Normal (+2px) is the default; Small (0) is the old
+     scale, Large (+4px); set by the "Text size" setting through <html data-text>. */
+  --fs-add: 2px;
+  --fs-2xs: calc(10px + var(--fs-add)); --fs-xs: calc(11px + var(--fs-add)); --fs-sm: calc(12px + var(--fs-add));
+  --fs-md: calc(13px + var(--fs-add)); --fs-lg: calc(14px + var(--fs-add)); --fs-xl: calc(16px + var(--fs-add));
+  --fs-2xl: calc(20px + var(--fs-add)); --fs-3xl: calc(22px + var(--fs-add));
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
   --topbar-h: 48px; --footer-h: 28px; --rail-w: 320px;
   --t-fast: 120ms;
 }
+
+:root[data-text="small"] { --fs-add: 0px; }
+:root[data-text="large"] { --fs-add: 4px; }
 
 /* ---- dark base (arcade-dark and plain-dark share the palette) ---- */
 :root,

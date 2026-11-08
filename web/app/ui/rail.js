@@ -1,13 +1,13 @@
-// The rail: the queue on top, then sessions grouped by host and folder, draggable.
+// The rail: sessions grouped by host and folder, draggable. A static list: every card has the same fixed size.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { model, selected, focused, fresh, req } from '../store.js';
 import { orderedSessions, groupSessions, railGroups, applyEvent } from '../model.js';
 import { moveBefore } from '../panes.js';
 import { HostChip, attentionCount } from './topbar.js';
+import { stateClass } from '../queue.js';
 import { Glyph, ago, now, tone } from './glyph.js';
-import { Gauge, Branch } from './strip.js';
-import { Queue } from './queue.js';
+import { infoProps } from './info.js';
 import { openSession, openAndEnter } from './session-actions.js';
 
 export const SID_TYPE = 'application/x-claudio-sid';
@@ -68,24 +68,17 @@ const cardKeys = (s) => (e) => {
   else if (e.key === ' ') { e.preventDefault(); openSession(s.id); }
 };
 
-// One line: glyph, name, host, age. The branch and the context gauge show on hover, selection and focus.
-function SessionCard({ s }) {
+// One fixed-height line: state icon, name, host (only with more than one host), age. Everything
+// else is in the hover info.
+function SessionCard({ s, multiHost }) {
   const mark = dropMark.value?.sid === s.id ? (dropMark.value.after ? 'after' : 'before') : null;
   const current = selected.value === s.id || focused.value === s.id;
-  const attn = attnLine(s);
-  return html`<div class="card" role="button" tabindex="0" data-testid="session-card" data-sid=${s.id} data-state=${s.state} data-kind=${s.kind} data-tone=${tone(s)}
+  return html`<div class="card" role="button" tabindex="0" data-testid="session-card" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
     data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${current}
-    title=${`${s.label} · ${s.cwd}`}
-    onClick=${() => openSession(s.id)} onKeyDown=${cardKeys(s)} ...${dragProps(s)}>
-    <span class="card-row"><${Glyph} s=${s} /><span class="card-label">${s.label}</span>
-      ${s.dormant ? html`<span class="chip chip-quiet">dormant</span>` : null}
-      <span class="chip" title=${`host ${s.host}`}>${s.host}</span><span class="card-age">${ago(s.state_since, now.value)}</span></span>
-    ${attn ? html`<span class="card-attn" title=${attn}>${attn}</span>` : null}
-    <span class="card-meta">
-      ${s.kind === 'shell' ? html`<span class="chip">terminal</span>` : null}
-      ${s.branch ? html`<${Branch} s=${s} />` : null}
-      ${s.kind === 'claude' ? html`<${Gauge} s=${s} />` : null}
-    </span>
+    onClick=${() => openSession(s.id)} onKeyDown=${cardKeys(s)} ...${dragProps(s)} ...${infoProps(s)}>
+    <${Glyph} s=${s} /><span class="card-label">${s.label}</span>
+    ${s.dormant ? html`<span class="chip chip-quiet">dormant</span>` : null}
+    ${multiHost ? html`<span class="chip" title=${`host ${s.host}`}>${s.host}</span>` : null}<span class="card-age">${ago(s.state_since, now.value)}</span>
   </div>`;
 }
 
@@ -97,10 +90,10 @@ function RailStrip({ all }) {
     ${all.map((s) => {
       const attn = attnLine(s);
       const mark = dropMark.value?.sid === s.id ? (dropMark.value.after ? 'after' : 'before') : null;
-      return html`<button type="button" key=${s.id} class="strip-card" data-testid="session-card" data-compact="true" data-sid=${s.id} data-state=${s.state} data-kind=${s.kind} data-tone=${tone(s)}
+      return html`<button type="button" key=${s.id} class="strip-card" data-testid="session-card" data-compact="true" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind} data-tone=${tone(s)}
         data-fresh=${!!fresh.value[s.id]} data-drop=${mark} data-selected=${selected.value === s.id} aria-current=${selected.value === s.id || focused.value === s.id}
-        aria-label=${`${s.label} on ${s.host}${attn ? `: ${attn}` : ''}`} title=${`${s.label} @${s.host}${attn ? `\n${attn}` : ''}`}
-        onClick=${() => openSession(s.id)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${dragProps(s)}>
+        aria-label=${`${s.label} on ${s.host}${attn ? `: ${attn}` : ''}`}
+        onClick=${() => openSession(s.id)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${dragProps(s)} ...${infoProps(s)}>
         <${Glyph} s=${s} />
       </button>`;
     })}
@@ -112,8 +105,8 @@ export function Rail({ strip = false }) {
   const all = orderedSessions(m);
   if (strip) return html`<${RailStrip} all=${all} />`;
   const groups = groupSessions(all);
+  const multiHost = Object.keys(m.hosts).filter((n) => m.hosts[n].connected).length > 1;
   return html`<nav class="rail" data-testid="rail" aria-label="Sessions">
-    <section class="rail-section"><${Queue} /></section>
     <section class="rail-section" style="padding-bottom:0"><div class="section-head"><span>Sessions</span><span class="count">${all.length}</span></div></section>
     <div class="rail-groups">
       ${all.length === 0 ? html`<p class="rail-empty">No sessions yet.</p>` : null}
@@ -122,11 +115,11 @@ export function Rail({ strip = false }) {
         return html`<details class="host-group" open=${!collapsed.value.has(h.host)} key=${h.host}
         onToggle=${(e) => { if (e.target === e.currentTarget) toggleGroup(h.host, e.currentTarget.open); }}>
         <summary><div class="host-title">${m.hosts[h.host] ? html`<${HostChip} host=${m.hosts[h.host]} />` : h.host}<span class="count">${singles.length + repos.reduce((n, g) => n + g.sessions.length, 0)}</span></div></summary>
-        ${singles.length ? html`<div class="cards">${singles.map((s) => html`<${SessionCard} key=${s.id} s=${s} />`)}</div>` : null}
+        ${singles.length ? html`<div class="cards">${singles.map((s) => html`<${SessionCard} key=${s.id} s=${s} multiHost=${multiHost} />`)}</div>` : null}
         ${repos.map((g) => html`<details class="cwd-group" open=${!collapsed.value.has(`${h.host}:${g.cwd}`)} key=${g.cwd}
           onToggle=${(e) => { if (e.target === e.currentTarget) toggleGroup(`${h.host}:${g.cwd}`, e.currentTarget.open); }}>
           <summary><div class="cwd-title" title=${g.cwd}><span></span><span>${g.label}</span><span class="count">${g.sessions.length}</span></div></summary>
-          <div class="cards">${g.sessions.map((s) => html`<${SessionCard} key=${s.id} s=${s} />`)}</div>
+          <div class="cards">${g.sessions.map((s) => html`<${SessionCard} key=${s.id} s=${s} multiHost=${multiHost} />`)}</div>
         </details>`)}
       </details>`;
       })}

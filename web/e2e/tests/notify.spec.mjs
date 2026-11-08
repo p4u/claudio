@@ -28,7 +28,7 @@ test('a hidden session needing approval notifies once', async ({ page, context }
   await srv.fireHook(srv.dirs.a, 'Notification', { notification_type: 'permission_prompt', message: 'first ask' });
   await expect.poll(() => page.evaluate(() => window.__notes.length)).toBe(1);
   await srv.fireHook(srv.dirs.a, 'Notification', { notification_type: 'permission_prompt', message: 'second ask' });
-  await expect(page.getByTestId('queue-card')).toContainText('second ask');
+  await expect(page.locator(`[data-testid="board-row"][data-sid="${sid}"]`)).toContainText('second ask');
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__notes.length)).toBe(1);
 });

@@ -7,7 +7,8 @@ import { createTerm, refitTerminal } from '../term.js';
 import { Glyph } from './glyph.js';
 import { Branch, Strip } from './strip.js';
 import { Composer } from './composer.js';
-import { SessionActions, dropSession, focusPane, resumeSession } from './session-actions.js';
+import { ApproveButtons } from './approve.js';
+import { SessionActions, dropSession, focusPane, resumeSession, closePane } from './session-actions.js';
 import { SID_TYPE } from './rail.js';
 
 export { drawer, openDrawer } from './session-actions.js';
@@ -57,7 +58,8 @@ function PaneSession({ s, i, focus }) {
       <${Branch} s=${s} />
       ${foreign ? html`<span class="badge badge-foreign" data-testid="foreign-size" onClick=${() => { focusPane(i); setTimeout(() => refitTerminal(s.id), 0); }} title=${`Another client set this terminal to ${att.cols}x${att.rows}${fit ? `; this pane fits ${fit.cols}x${fit.rows}` : ''}. Click here to take over its size.`}>PTY ${att.cols}×${att.rows}</span>` : null}
       <span class="topbar-spacer"></span>
-      <${SessionActions} s=${s} />
+      <${ApproveButtons} s=${s} />
+      <${SessionActions} s=${s} pane=${i} />
     </header>
     ${s.dormant ? html`<div class="pane-dormant">
         <div class="coin">DORMANT</div>

@@ -147,9 +147,9 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Wizard: first-party | wizard checkbox | "First-party session" | `session.spawn` (`first_party`) | `web_respawn_without_a_known_proxy_asks` (the rule); the UI box: manual check |
 | Opening prompt | wizard prompt | "Opening prompt" | `session.spawn` (`prompt`) | `web_opening_prompt_is_pasted_after_bracketed_paste_mode` |
 | Rename | `Alt+r` | pencil in the pane header | `session.rename` | `rename, kill and restart a session` |
-| Kill | `Alt+x` | Kill in the pane header (asks) | `session.kill` | `rename, kill and restart a session` |
+| Stop (kill) | `Alt+x` | the stop icon `⏻` in the pane header (asks) | `session.kill` | `rename, kill and restart a session` |
 | Restart (resume / new) | `Alt+e` | Restart / New conversation (asks) | `session.respawn` | `rename, kill and restart a session`; `web_respawn_without_a_known_proxy_asks` |
-| Approve / deny a prompt | (type in the session) | Enter / Esc on the queue card | `session.approve` | `a permission prompt shows its text and Approve resolves it`; `an elicitation card offers Open only`; `web_approve_is_guarded_by_state_kind_and_seq` |
+| Approve / deny a prompt | (type in the session) | Enter / Esc in the pane header or the board row | `session.approve` | `a permission prompt shows its text and Approve resolves it`; `an elicitation row waits for you but offers no Approve`; `web_approve_is_guarded_by_state_kind_and_seq` |
 | Prompt box | (type in the session) | composer under the terminal | `session.paste` | `save and insert a snippet`; `web_paste_reaches_the_pty_bracketed` |
 | Reader with formulas and diagrams | `Alt+u` | `r`: Answers, Formulas | `reader.answers`, `lens`/`latex` events, `extensions.render` | `the reader renders KaTeX and mermaid with no CSP violation` |
 | Git history | `Alt+l` | `g`, History tab | `git.log`, `git.commit`, `git.diff` | manual check (history list and commit view, probed in a browser on a fixture repo) |
@@ -163,7 +163,7 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | claude install / update | update prompt | host chip → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
 | Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
 | Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |
-| Next attention | `Alt+a` | `Alt+a`, `a`, the queue | (client side) | manual check (`a` focuses the session that needs approval); queue: `a permission prompt shows its text…` |
+| Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
 | Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
 | Login and security | n/a | token URL, cookie | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests |
@@ -188,3 +188,19 @@ reload; every build embeds them gzipped (`build.rs`). `make test-web` needs the 
 A file added or removed directly under `web/` is not noticed by cargo until another embedded
 file changes or `build.rs` is touched (`web/` itself is not watched because of
 `web/e2e/node_modules`).
+
+## The list, state icons, hover info and text size
+
+- **Rail**: a static list of sessions (host, then repo when it holds two or more). Every card has
+  one fixed height: state icon, name, host chip (only with more than one host connected) and age.
+  Hover and selection change colours only. There is no "Needs you" queue; `Alt+a`/`a` still jump
+  to the next session that needs you, and Approve/Deny sit in the pane header and the board row.
+- **State icon** (`stateClass` in `web/app/queue.js`): working (cyan spinner), waiting (pulsing
+  amber `?`: a permission prompt, a question, a plan to approve), stopped (green `■`: finished or
+  not running), error (red `✗`). Shell sessions show `$`.
+- **Hover info**: pointing at (or focusing) a rail item or board row for 800 ms shows its facts in
+  a popover beside it; a key press or leaving hides it. Text only.
+- **Pane header**: `✕` closes the pane (the session keeps running, stays in the rail); `⏻` stops
+  the session (asks).
+- **Text size** (Settings): Small, Normal (default), Large scale the interface through the
+  `--fs-*` tokens; the terminal font size (default 15 px) is a separate setting.

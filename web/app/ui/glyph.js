@@ -1,9 +1,8 @@
 // State glyphs and ages shared by the rail, the queue, the board and the panes.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { isElicitation } from '../queue.js';
+import { isElicitation, stateClass } from '../queue.js';
 
-const GLYPH = { working: '⠸', needs_approval: '◆', needs_input: '?', idle: '✓', error: '✗', exited: '○', starting: '·', unknown: '·' };
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 export const STATE_NAME = { working: 'working', needs_approval: 'needs approval', needs_input: 'needs input', idle: 'idle', error: 'error', exited: 'exited', starting: 'starting', unknown: 'reconnecting' };
 
@@ -16,12 +15,19 @@ setInterval(() => { now.value = Date.now(); }, 20000);
 // 'input' for a question the session asks (the amber `?`), else null.
 export const tone = (s) => (s.state === 'needs_approval' && isElicitation(s) ? 'input' : null);
 
+// What each class shows: working = the spinner, waiting = a pulsing `?`, stopped = `■`, error = `✗`.
+const CLASS_GLYPH = { waiting: '?', stopped: '■', error: '✗' };
+export const CLASS_NAME = { working: 'working', waiting: 'waiting for you', stopped: 'stopped', error: 'error' };
+export const CLASS_TIP = {
+  working: 'Working', waiting: 'Waiting for you: claude asks something', stopped: 'Stopped: claude finished or is not running', error: 'Error',
+};
+
 export function glyphFor(s) {
   if (s.kind === 'shell' && s.state !== 'exited') return '$';
-  if (tone(s)) return '?';
   if (s.state === 'unknown') return '⇄';
-  if (s.state === 'working' && !reduced) return SPIN[spin.value];
-  return GLYPH[s.state] ?? '·';
+  const c = stateClass(s);
+  if (c === 'working') return reduced ? '⠸' : SPIN[spin.value];
+  return CLASS_GLYPH[c];
 }
 
 export function ago(sec, nowMs = Date.now()) {
@@ -34,5 +40,7 @@ export function ago(sec, nowMs = Date.now()) {
 }
 
 export function Glyph({ s }) {
-  return html`<span class="glyph" role="img" data-tone=${tone(s)} aria-label=${s.kind === 'shell' ? 'terminal' : tone(s) ? 'question' : STATE_NAME[s.state]}>${glyphFor(s)}</span>`;
+  const c = stateClass(s);
+  const name = s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : CLASS_NAME[c];
+  return html`<span class="glyph" role="img" data-class=${c} data-tone=${tone(s)} aria-label=${name} title=${s.state === 'unknown' ? 'Reconnecting: its host is not connected' : CLASS_TIP[c]}>${glyphFor(s)}</span>`;
 }

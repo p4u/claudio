@@ -16,7 +16,9 @@ test('the wizard starts a session in a chosen dir', async ({ page }) => {
   await page.getByTestId('wizard-start').click();
   const card = page.getByTestId('session-card');
   await expect(card).toHaveCount(1);
-  await expect(card).toHaveAttribute('title', new RegExp(`${srv.dirs.b}$`));
+  // the folder is in the hover info (the card itself shows name, host and age only)
+  await card.hover();
+  await expect(page.getByTestId('session-info')).toContainText(srv.dirs.b);
   await expect(card).toContainText('b');
   await expect(page.locator('[data-testid="pane"][data-focus="true"]').getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');
 });

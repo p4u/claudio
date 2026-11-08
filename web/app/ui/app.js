@@ -20,7 +20,8 @@ import { Glyph, glyphFor, ago } from './glyph.js';
 import { Rail } from './rail.js';
 import { Board } from './board.js';
 import { PaneGrid } from './pane.js';
-import { Queue, queueSessions } from './queue.js';
+import { queueSessions } from './approve.js';
+import { InfoPopover } from './info.js';
 import { NarrowView, narrow } from './narrow.js';
 import { Wizard, installWizard, openWizard } from './wizard.js';
 import { Search, installSearch } from './search.js';
@@ -91,13 +92,14 @@ export function App() {
   const style = small ? null : { '--rail-w': `${plan.railW}px`, '--drawer-w': `${plan.drawerW}px`, '--stage-floor': `${stageFloor(grid)}px` };
   return html`<${Topbar} />
     ${banner.value ? html`<div class="banner" role="alert">${banner.value}</div>` : null}
-    <div class="main" style=${style} data-narrow=${small} data-drawer=${!!drawer.value} data-overlay=${plan.overlay} data-rail=${plan.railCollapsed ? 'strip' : 'full'} data-drawer-tab=${drawer.value?.tab ?? ''}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} strip=${plan.railCollapsed} /><${Stage} railCollapsed=${plan.railCollapsed} railAuto=${plan.railAuto} />`}<${Drawer} plan=${plan} /></div>
+    <div class="main" style=${style} data-narrow=${small} data-drawer=${!!drawer.value} data-overlay=${plan.overlay} data-rail=${plan.railCollapsed ? 'strip' : 'full'} data-drawer-tab=${drawer.value?.tab ?? ''}>${small ? html`<${NarrowView} Board=${Board} />` : html`<${Rail} strip=${plan.railCollapsed} /><${Stage} railCollapsed=${plan.railCollapsed} railAuto=${plan.railAuto} />`}<${Drawer} plan=${plan} /></div>
     <${Footer} />
     ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />`
       : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />`
       : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />`
       : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />` : null}
     <${PluginSetupHost} /><${ProxyChooserHost} /><${Modal} />
+    <${InfoPopover} />
     <div class="toasts" aria-live="polite"><${ClaudeToastList} /><${ToastList} /></div>`;
 }
 

@@ -52,6 +52,30 @@ test('rename, kill and restart a session', async ({ page }) => {
   await expect(page.getByTestId('session-card')).toHaveCount(0);
 });
 
+test('the close icon empties the pane and the stop icon kills the session', async ({ page }) => {
+  const sid = await srv.spawn(srv.dirs.a);
+  await openIn(page, sid);
+  const p = pane(page, 0);
+  await expect(p.getByTestId('close-pane-btn')).toHaveAttribute('title', 'Close this pane (the session keeps running)');
+  await p.getByTestId('close-pane-btn').click();
+  await expect(card(page, sid)).toBeVisible();
+  await expect(page.getByTestId('terminal')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => document.querySelector('[data-testid="board"]') !== null)).toBe(true);
+  await openIn(page, sid);
+  await expect(pane(page, 0).getByTestId('kill-btn')).toHaveAttribute('title', 'Stop this session…');
+});
+
+test('the text size setting scales the interface', async ({ page }) => {
+  await page.goto(srv.url);
+  const size = () => page.evaluate(() => getComputedStyle(document.body).fontSize);
+  expect(await size()).toBe('15px');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByTestId('text-size-select').selectOption('small');
+  expect(await size()).toBe('13px');
+  await page.getByTestId('text-size-select').selectOption('large');
+  expect(await size()).toBe('17px');
+});
+
 test('search finds a fixture conversation', async ({ page }) => {
   writeTranscript(srv.claudeConfig, srv.dirs.b, 'conv-search');
   await page.goto(srv.url);

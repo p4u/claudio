@@ -9,7 +9,7 @@ html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 400 13px/1.45 var(--font-ui);
+  font: 400 var(--fs-md)/1.45 var(--font-ui);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
@@ -46,7 +46,7 @@ code, kbd { font-family: var(--font-ui); }
   box-shadow: var(--popover-shadow);
   padding: var(--space-5);
 }
-.boot-card h1 { font-family: var(--font-head); font-size: 20px; letter-spacing: 0.08em; margin-bottom: var(--space-3); }
+.boot-card h1 { font-family: var(--font-head); font-size: var(--fs-2xl); letter-spacing: 0.08em; margin-bottom: var(--space-3); }
 .boot-card p { color: var(--muted); }
 .boot-card code { color: var(--text); background: var(--panel-2); padding: 1px 6px; border-radius: var(--radius); }
 

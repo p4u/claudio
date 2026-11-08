@@ -91,8 +91,16 @@ export async function renameSession(s) {
   req('session.rename', { sid: s.id, name: name === '' ? null : name }).catch(() => {});
 }
 
+// ✕ in the pane header: the session leaves this pane slot and keeps running (and stays in the rail).
+export function closePane(i) {
+  const lay = model.value.layout;
+  if (!(i >= 0 && i < lay.grid) || !lay.panes[i]) return;
+  showBoard.value = null;
+  return saveLayout({ ...lay, panes: lay.panes.map((p, k) => (k === i ? null : p)) });
+}
+
 export async function killSession(s) {
-  const ok = await confirm({ title: 'Kill session?', body: `${s.label} on ${s.host} stops now. A conversation can be resumed later from its folder.`, yes: 'Kill', no: 'Keep' });
+  const ok = await confirm({ title: 'Stop session?', body: `${s.label} on ${s.host} stops now. A conversation can be resumed later from its folder.`, yes: 'Stop', no: 'Keep' });
   if (ok) req('session.kill', { sid: s.id }).catch(() => {});
 }
 
@@ -168,7 +176,7 @@ export function ProxyChooserHost() {
 // The pane header's actions. Wide: icon buttons. In a narrow pane (container query in layout.css)
 // they fold into one `⋯` button that opens the same buttons as a labelled menu, so every
 // data-testid stays on its real button; open the menu first (`[data-testid="session-menu-btn"]`).
-export function SessionActions({ s }) {
+export function SessionActions({ s, pane = null }) {
   const shell = s.kind === 'shell';
   const [open, setOpen] = useState(false);
   const root = useRef(null);
@@ -191,7 +199,8 @@ export function SessionActions({ s }) {
         ${item('restart-new-btn', '✦', 'New conversation', 'Restart with a new conversation', () => restartSession(s, true))}
         ${item('terminal-tab-btn', '$_', 'Terminal beside', 'Open a terminal in this folder beside this pane', () => openTerminalTab(s))}`}
       <span class="act-sep" role="separator"></span>
-      ${item('kill-btn', '✕', 'Kill', 'Kill session', () => killSession(s), 'danger')}
+      ${item('kill-btn', '⏻', 'Stop session', 'Stop this session…', () => killSession(s), 'danger')}
+      ${pane === null ? null : html`<span class="act-sep act-gap" role="separator"></span>${item('close-pane-btn', '✕', 'Close pane', 'Close this pane (the session keeps running)', () => closePane(pane))}`}
     </div>
   </div>`;
 }

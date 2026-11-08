@@ -2,7 +2,10 @@
 import { html } from 'htm/preact';
 import { model, selected, focused, fresh } from '../store.js';
 import { orderedSessions } from '../model.js';
-import { Glyph, ago, now, tone, STATE_NAME } from './glyph.js';
+import { stateClass } from '../queue.js';
+import { Glyph, ago, now, tone, CLASS_NAME } from './glyph.js';
+import { ApproveButtons } from './approve.js';
+import { infoProps } from './info.js';
 import { Gauge, Branch } from './strip.js';
 import { openSession, openAndEnter, dropSession } from './session-actions.js';
 import { SID_TYPE } from './rail.js';
@@ -11,14 +14,14 @@ import { narrow } from './narrow.js';
 function Row({ s }) {
   const current = selected.value === s.id || focused.value === s.id;
   const attn = s.attention ? [s.attention.message, s.attention.detail].filter(Boolean).join(' · ') : '';
-  return html`<div class="board-row" role="row" tabindex="0" data-testid="board-row" data-sid=${s.id} data-state=${s.state} data-kind=${s.kind}
+  return html`<div class="board-row" role="row" tabindex="0" data-testid="board-row" data-sid=${s.id} data-state=${s.state} data-class=${stateClass(s)} data-kind=${s.kind}
     data-tone=${tone(s)} data-fresh=${!!fresh.value[s.id]} aria-current=${current} aria-selected=${selected.value === s.id} onClick=${() => openSession(s.id)}
-    onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }}>
-    <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${tone(s) ? 'needs_input' : s.state}">${s.kind === 'shell' ? 'terminal' : tone(s) ? 'question' : STATE_NAME[s.state]}</span></span>
+    onKeyDown=${(e) => { if (e.target === e.currentTarget && e.key === 'Enter') { e.preventDefault(); openAndEnter(s.id); } }} ...${infoProps(s, true)}>
+    <span class="bcol bcol-state"><${Glyph} s=${s} /><span class="bstate st-${stateClass(s)}">${s.kind === 'shell' ? 'terminal' : s.state === 'unknown' ? 'reconnecting' : CLASS_NAME[stateClass(s)]}</span></span>
     <span class="bcol bcol-label" title=${s.label}>${s.label}</span>
     <span class="bcol bcol-host"><span class="chip">${s.host}</span></span>
     <span class="bcol bcol-repo" title=${s.cwd}>${s.branch ? html`<${Branch} s=${s} />` : html`<span class="muted">${s.cwd}</span>`}</span>
-    <span class="bcol bcol-attn" title=${attn}>${attn}</span>
+    <span class="bcol bcol-attn"><span class="attn-text" title=${attn}>${attn}</span><${ApproveButtons} s=${s} /></span>
     <span class="bcol bcol-model">${s.model ?? ''}</span>
     <span class="bcol bcol-ctx">${s.kind === 'claude' ? html`<${Gauge} s=${s} />` : null}</span>
     <span class="bcol bcol-age">${ago(s.state_since, now.value)}</span>
