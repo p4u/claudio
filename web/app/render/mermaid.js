@@ -1,50 +1,59 @@
 // mermaid, loaded on first use. securityLevel strict and SVG labels (MERMAID_CONFIG); the theme
-// variables come from the app's CSS tokens so diagrams match arcade-dark/light and the plain themes.
+// variables come from the palette tokens (tokens.css): Carbon nodes, Slate lines, Silver text and a
+// Phosphor accent, on the 'base' theme.
 import { MERMAID_CONFIG } from './markdown.js';
 
 let lib = null;
 let themeKey = null;
 let chain = Promise.resolve(); // mermaid renders one diagram at a time
 
+// Plain palette tokens only: mermaid parses the colours itself.
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 function themeVariables() {
-  const dark = document.documentElement.dataset.theme?.endsWith('dark') !== false;
+  const carbon = css('--carbon');
+  const graphite = css('--graphite');
+  const void_ = css('--void');
+  const line = css('--steel');
+  const border = css('--fog');
+  const text = css('--silver');
+  const strong = css('--bone');
+  const accent = css('--phosphor');
   return {
-    darkMode: dark,
-    background: css('--panel'),
-    fontFamily: css('--font-prose') || 'sans-serif',
+    darkMode: true,
+    background: carbon,
+    fontFamily: css('--font-sans') || 'sans-serif',
     fontSize: '15px',
-    primaryColor: css('--panel-2'),
-    primaryTextColor: css('--text'),
-    primaryBorderColor: css('--accent'),
-    secondaryColor: css('--panel'),
-    secondaryTextColor: css('--text'),
-    secondaryBorderColor: css('--border-strong'),
-    tertiaryColor: css('--bg'),
-    tertiaryTextColor: css('--text'),
-    tertiaryBorderColor: css('--border-strong'),
-    lineColor: css('--muted'),
-    textColor: css('--text'),
-    mainBkg: css('--panel-2'),
-    nodeBorder: css('--accent'),
-    clusterBkg: css('--panel'),
-    clusterBorder: css('--border-strong'),
-    edgeLabelBackground: css('--panel'),
-    noteBkgColor: css('--panel-2'),
-    noteTextColor: css('--text'),
-    noteBorderColor: css('--border-strong'),
-    actorBkg: css('--panel-2'),
-    actorBorder: css('--accent'),
-    actorTextColor: css('--text'),
-    actorLineColor: css('--muted'),
-    signalColor: css('--text'),
-    signalTextColor: css('--text'),
-    labelBoxBkgColor: css('--panel-2'),
-    labelBoxBorderColor: css('--border-strong'),
-    labelTextColor: css('--text'),
-    loopTextColor: css('--text'),
-    titleColor: css('--text'),
+    primaryColor: graphite,
+    primaryTextColor: strong,
+    primaryBorderColor: accent,
+    secondaryColor: carbon,
+    secondaryTextColor: text,
+    secondaryBorderColor: border,
+    tertiaryColor: void_,
+    tertiaryTextColor: text,
+    tertiaryBorderColor: border,
+    lineColor: line,
+    textColor: text,
+    mainBkg: graphite,
+    nodeBorder: accent,
+    clusterBkg: carbon,
+    clusterBorder: border,
+    edgeLabelBackground: carbon,
+    noteBkgColor: graphite,
+    noteTextColor: text,
+    noteBorderColor: border,
+    actorBkg: graphite,
+    actorBorder: accent,
+    actorTextColor: strong,
+    actorLineColor: line,
+    signalColor: text,
+    signalTextColor: text,
+    labelBoxBkgColor: graphite,
+    labelBoxBorderColor: border,
+    labelTextColor: text,
+    loopTextColor: text,
+    titleColor: strong,
   };
 }
 

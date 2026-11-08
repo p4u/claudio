@@ -1,4 +1,4 @@
-// highlight.js (common languages). The token colours are in components.css, driven by the theme.
+// highlight.js (common languages). The token colours are in components.css (--hl-* in tokens.css).
 import hljs from 'highlight.js';
 
 const AUTO_MAX = 20000; // auto-detection tries every language: keep it for short snippets

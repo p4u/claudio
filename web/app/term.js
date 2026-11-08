@@ -29,16 +29,9 @@ export function termSize(sid) {
   return h ? { rows: h.term.rows, cols: h.term.cols } : null;
 }
 
-const ANSI = {
-  dark: {
-    black: '#2a3441', red: '#ff5c5f', green: '#3ddc84', yellow: '#f5b32b', blue: '#6ea8ff', magenta: '#c792ea', cyan: '#22d3ee', white: '#d5dde5',
-    brightBlack: '#5c6b7a', brightRed: '#ff8082', brightGreen: '#6ff0a6', brightYellow: '#ffd36b', brightBlue: '#9cc2ff', brightMagenta: '#dcb4f5', brightCyan: '#6be6f7', brightWhite: '#ffffff',
-  },
-  light: {
-    black: '#1a2028', red: '#c4222a', green: '#12793b', yellow: '#86560a', blue: '#1f58c8', magenta: '#8b3fb5', cyan: '#0a7388', white: '#6b7280',
-    brightBlack: '#566170', brightRed: '#e0393f', brightGreen: '#1a9a4e', brightYellow: '#a06a10', brightBlue: '#3b74e6', brightMagenta: '#a557d1', brightCyan: '#1590a8', brightWhite: '#1a2028',
-  },
-};
+// The ANSI set and the terminal colours live in tokens.css (--ansi-*, --term-*): plain colours,
+// derived from DESIGN.md's palette.
+const ANSI = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'];
 
 function cssVar(name, fallback) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -46,18 +39,24 @@ function cssVar(name, fallback) {
 }
 
 function look() {
-  const light = document.documentElement.dataset.theme?.endsWith('light');
   const size = parseInt(cssVar('--term-font-size', '14'), 10) || 14;
+  const theme = {};
+  for (const c of ANSI) {
+    theme[c] = cssVar(`--ansi-${c}`);
+    theme[`bright${c[0].toUpperCase()}${c.slice(1)}`] = cssVar(`--ansi-bright-${c}`);
+  }
   return {
     fontSize: size,
-    fontFamily: cssVar('--font-ui', 'monospace'),
+    fontFamily: cssVar('--font-mono', 'monospace'),
+    fontWeight: 400,
+    fontWeightBold: 700, // claude's bold output: JetBrains Mono Bold, the only bold in the app
     theme: {
-      ...ANSI[light ? 'light' : 'dark'],
-      background: cssVar('--term-bg', '#0b0f14'),
-      foreground: cssVar('--text', '#e6edf3'),
-      cursor: cssVar('--accent', '#8b7bff'),
-      cursorAccent: cssVar('--term-bg', '#0b0f14'),
-      selectionBackground: light ? 'rgba(91,67,224,0.28)' : 'rgba(139,123,255,0.38)',
+      ...theme,
+      background: cssVar('--term-bg'),
+      foreground: cssVar('--term-fg'),
+      cursor: cssVar('--term-cursor'),
+      cursorAccent: cssVar('--term-bg'),
+      selectionBackground: cssVar('--term-selection'),
     },
   };
 }

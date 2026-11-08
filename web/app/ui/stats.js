@@ -6,7 +6,8 @@ import { useEffect, useState } from 'preact/hooks';
 import { model, conn, focused, req, reqQuiet } from '../store.js';
 import { defineAction } from '../palette.js';
 import { linearScale, niceTicks, barLayout, formatTokens } from '../charts.js';
-import { segments, level } from '../gauge.js';
+import { level } from '../gauge.js';
+import { SegBar } from './strip.js';
 import { registerDrawerTab, toggleDrawer } from './drawer.js';
 import { confirm } from './modal.js';
 import { toast } from './toasts.js';
@@ -38,7 +39,7 @@ export function SegGauge({ pct, n = 16, testid, label }) {
   if (pct == null || !Number.isFinite(pct)) return html`<span class="gauge gauge-wide muted" data-testid=${testid}>${label ? html`<span class="gauge-label">${label}</span>` : null}–</span>`;
   const f = Math.min(1, Math.max(0, pct / 100));
   return html`<span class="gauge gauge-wide" data-testid=${testid} data-level=${level(f)} title=${`${label ?? ''} ${Math.round(pct)}%`.trim()}>
-    ${label ? html`<span class="gauge-label">${label}</span>` : null}<span class="gauge-bar" aria-hidden="true">${segments(f, n)}</span><span class="gauge-pct">${Math.round(pct)}%</span></span>`;
+    ${label ? html`<span class="gauge-label">${label}</span>` : null}<${SegBar} f=${f} n=${n} /><span class="gauge-pct">${Math.round(pct)}%</span></span>`;
 }
 
 // The focused session's 5h / 7d usage for the top bar.
@@ -57,7 +58,7 @@ const M = { l: 46, r: 10, t: 18, b: 40 };
 
 const shortModel = (m) => String(m).replace(/^claude-/, '');
 
-// Output tokens per model as bars. Pure SVG: no canvas, no library.
+// Output tokens per model as bars: Graphite with a Slate hairline and a 2px Phosphor top. Pure SVG.
 export function BarChart({ rows }) {
   const pw = W - M.l - M.r;
   const ph = H - M.t - M.b;
@@ -72,7 +73,8 @@ export function BarChart({ rows }) {
       ${bars.map((b, i) => {
         const h = ph - y(values[i]);
         return html`<g key=${rows[i].model} class="chart-bar"><title>${`${rows[i].model}: ${values[i].toLocaleString()} output tokens, ${rows[i].requests.toLocaleString()} requests`}</title>
-          <rect x=${Math.round(b.x)} y=${Math.round(ph - h)} width=${Math.round(b.w)} height=${Math.max(values[i] > 0 ? 1 : 0, Math.round(h))} />
+          <rect x=${Math.round(b.x) + 0.5} y=${Math.round(ph - h) + 0.5} width=${Math.max(0, Math.round(b.w) - 1)} height=${Math.max(0, Math.round(h) - 0.5)} />
+          ${values[i] > 0 ? html`<rect class="chart-cap" x=${Math.round(b.x)} y=${Math.round(ph - h)} width=${Math.round(b.w)} height="2" />` : null}
           <text class="chart-value" x=${b.x + b.w / 2} y=${ph - h - 5} text-anchor="middle">${formatTokens(values[i])}</text>
           <text class="chart-label" x=${b.x + b.w / 2} y=${ph + 16} text-anchor="middle">${shortModel(rows[i].model)}</text>
         </g>`;
