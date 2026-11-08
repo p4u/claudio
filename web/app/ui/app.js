@@ -20,7 +20,13 @@ import { Board } from './board.js';
 import { PaneGrid } from './pane.js';
 import { Queue, queueSessions } from './queue.js';
 import { NarrowView, narrow } from './narrow.js';
-import { showBoard, boardShown, setGridSize, focusPane, openSession, trackRemoved, ProxyChooserHost } from './session-actions.js';
+import { Wizard, installWizard, openWizard } from './wizard.js';
+import { Search, installSearch } from './search.js';
+import { Snippets, installSnippets } from './snippets.js';
+import { DocumentView, ActionList, installActions } from './actions.js';
+import { Drawer } from './drawer.js';
+import './reader.js';
+import { drawer, showBoard, boardShown, setGridSize, focusPane, openSession, trackRemoved, ProxyChooserHost } from './session-actions.js';
 
 export { glyphFor, Glyph, ago };
 
@@ -32,6 +38,8 @@ export function attentionSessions(m) {
 function StageBar({ board }) {
   const lay = model.value.layout;
   return html`<div class="stage-bar">
+    <button class="btn btn-sm btn-primary" data-testid="new-session-btn" title="New session (n)" onClick=${() => openWizard({ kind: 'claude' })}>+ New</button>
+    <span class="stage-sep"></span>
     <button class="btn btn-sm" data-testid="board-btn" aria-pressed=${board} title="Show every session as a row" onClick=${() => { showBoard.value = !board; }}>Board</button>
     <span class="stage-sep"></span>
     <span class="stage-label">Panes</span>
@@ -61,9 +69,11 @@ export function App() {
   const small = narrow.value;
   return html`<${Topbar} />
     ${banner.value ? html`<div class="banner" role="alert">${banner.value}</div>` : null}
-    <div class="main" data-narrow=${small}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} /><${Stage} />`}</div>
+    <div class="main" data-narrow=${small} data-drawer=${!!drawer.value}>${small ? html`<${NarrowView} Queue=${Queue} Board=${Board} />` : html`<${Rail} /><${Stage} />`}<${Drawer} /></div>
     <${Footer} />
-    ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />` : null}
+    ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />`
+      : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />`
+      : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />` : null}
     <${ProxyChooserHost} /><${Modal} /><${Toasts} />`;
 }
 
@@ -106,6 +116,10 @@ export function installFocusModel() {
     }
     if (focused.value && focusTerminal(focused.value)) setMode('terminal');
   });
+  installWizard();
+  installSearch();
+  installSnippets();
+  installActions();
   onServerEvent(trackRemoved);
   installNotifications();
 

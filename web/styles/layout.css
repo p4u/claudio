@@ -34,6 +34,25 @@
 
 /* ---- main: rail + board ---- */
 .main { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); min-height: 0; }
+.main[data-drawer="true"]:not([data-narrow="true"]) { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--drawer-w, clamp(420px, 46vw, 780px)); }
+
+/* ---- drawer: reader, changes, history, stats, session ---- */
+.drawer {
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  background: var(--panel); border-left: var(--bw) solid var(--border-strong);
+}
+.main[data-narrow="true"] .drawer { position: fixed; inset: var(--topbar-h) 0 var(--footer-h) 0; z-index: 30; border-left: 0; }
+.drawer-head { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3); min-height: 38px; border-bottom: var(--bw) solid var(--border); flex: none; }
+.drawer-tabs { display: flex; gap: 2px; align-self: stretch; }
+.drawer-tab {
+  background: none; border: 0; border-bottom: 3px solid transparent; padding: 0 var(--space-3);
+  font-family: var(--font-head); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+}
+.drawer-tab:hover { color: var(--text); }
+.drawer-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.drawer-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; text-align: right; }
+.drawer-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
 .rail {
   display: flex; flex-direction: column; min-height: 0;
   background: var(--panel);

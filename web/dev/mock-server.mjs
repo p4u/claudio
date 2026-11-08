@@ -65,8 +65,10 @@ const state = {
     { name: 'latex', description: 'Renders <latex> formulas', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [{ name: 'latex', kind: 'tag' }], actions: [] },
     { name: 'search', description: 'Search past conversations', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [{ id: 'search', title: 'Search', input: 'query' }] },
     { name: 'snippets', description: 'Prompt snippets', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [] },
+    { name: 'tasks', description: 'Task notes (fixture extension)', enabled: true, source: 'external', profile: null, refused: null, lenses: [{ name: 'todo', kind: 'tag' }],
+      actions: [{ id: 'summary', title: 'Summary document', input: null }, { id: 'note', title: 'Add a note', input: 'note text' }, { id: 'pick', title: 'Pick a task', input: null }, { id: 'insert', title: 'Insert checklist', input: null }, { id: 'resume', title: 'Resume the last chat', input: null }] },
   ],
-  snippets: [{ name: 'review', text: 'Review the diff for bugs.' }],
+  snippets: [{ name: 'review', text: 'Review the diff for bugs.' }, { name: 'explain', text: 'Explain this code as if I were new to the project.\nName the files you read.' }],
   plugins: [{ name: 'vocdoni-internal', version: '1.2.0', profile: 'work', enabled: true, refused: null, choices_saved: false, manifest: 'ready', manifest_error: null, description: 'Internal tools' }],
   seq: new Map(),
 };
@@ -90,6 +92,99 @@ const snapshot = () => ({
   t: 'snapshot', hosts: Object.values(state.hosts), sessions: [...state.sessions.values()],
   profiles: state.profiles, layout: state.layout, order: state.order,
 });
+
+
+// ---- reader fixtures (Task 9): a rich answer, an XSS answer that must render inert, a plain one ----
+const RICH_ANSWER = [
+  '## Why the rotation matrix preserves length',
+  '',
+  'A rotation by an angle <latex>\\theta</latex> acts on the plane through the matrix below. Because its columns are orthonormal, every vector keeps its length: the norm squared is <latex>\\lVert Rv \\rVert^2 = v^\\top R^\\top R\\, v = \\lVert v \\rVert^2</latex>, which is the whole argument.',
+  '',
+  '<latex>R(\\theta) = \\begin{pmatrix} \\cos\\theta & -\\sin\\theta \\\\ \\sin\\theta & \\cos\\theta \\end{pmatrix}</latex>',
+  '',
+  'The same idea gives the Gaussian integral, a classic display equation:',
+  '',
+  '<latex>\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}</latex>',
+  '',
+  '### How the pieces fit',
+  '',
+  '```mermaid',
+  'flowchart LR',
+  '  A[Prompt] --> B{Needs a tool?}',
+  '  B -- yes --> C[Run the tool]',
+  '  B -- no --> D[Answer]',
+  '  C --> D',
+  '```',
+  '',
+  '| Layer | Owns | Notes |',
+  '|---|---|---|',
+  '| Daemon | PTYs, journal | one per host |',
+  '| Hub | attach refcount, fan-out | in `claudio web` |',
+  '| Browser | xterm, reader | no build step |',
+  '',
+  'Parsing a line in Rust looks like this:',
+  '',
+  '```rust',
+  'fn parse(line: &str) -> Result<u32, std::num::ParseIntError> {',
+  '    // trim first, then parse',
+  '    line.trim().parse::<u32>()',
+  '}',
+  '```',
+  '',
+  '```python',
+  'def norm2(v):',
+  '    return sum(x * x for x in v)',
+  '```',
+  '',
+  '- Rotations are **isometries**.',
+  '- Their determinant is `+1`, unlike reflections.',
+  '- See [the notes](https://example.com/rotations) for more.',
+  '',
+  '> Tags inside code stay text: `<latex>x</latex>`.',
+  '',
+].join('\n');
+
+const XSS_ANSWER = [
+  'This answer is a hostile fixture. Nothing below may run.',
+  '',
+  '<img src=x onerror=alert(1)>',
+  '',
+  '<script>window.__pwned = 1</script>',
+  '',
+  '[click me](javascript:alert(1))',
+  '',
+  '<a href="javascript:alert(2)" onclick="alert(3)">second link</a>',
+  '',
+  '<iframe src="https://example.com"></iframe><style>body{display:none}</style>',
+  '',
+  '<latex>\\href{javascript:alert(1)}{x}</latex> and <latex>\\unknownmacro{</latex>',
+  '',
+  'Forged placeholder: \uE000deadbeef:0\uE001 and x:0',
+  '',
+  '```mermaid',
+  'graph TD',
+  '  A[Start] --> B[End]',
+  '  click A href "javascript:alert(1)"',
+  '  click B call alert(1)',
+  '```',
+  '',
+  '```mermaid',
+  'notADiagramType',
+  '  x --> y',
+  '```',
+  '',
+].join('\n');
+
+const ANSWERS = [
+  { prompt: 'Explain why a rotation matrix preserves length, show the matrix and a diagram of the flow.\nKeep it short.', text: RICH_ANSWER },
+  { prompt: 'Show me something hostile', text: XSS_ANSWER },
+  { prompt: 'List the steps', text: '1. Build\n2. Test\n3. Ship\n' },
+];
+const LENS = [
+  { tag: 'latex', text: 'E = mc^2' },
+  { tag: 'latex', text: '\\int_0^1 x^2\\,dx = \\tfrac{1}{3}' },
+  { tag: 'todo', text: 'wire the reader to the lens feed' },
+];
 
 // ---- clients and broadcast ----
 const clients = new Set();
@@ -168,6 +263,7 @@ const OPS = {
   'hosts.connect': (a) => {
     const name = need(a, 'host');
     if (name === 'local') throw new OpError('local is always connected');
+    if (name === 'edge-1') throw new OpError('ssh: connect to host edge-1 port 22: Connection timed out\nbootstrap failed');
     if (!state.hosts[name]) {
       state.hosts[name] = { name, connected: true, connecting: false, error: null, outdated: false, hostname: name, os: 'linux', arch: 'x86_64', claude: { path: '/usr/bin/claude', version: '2.1.0' }, features: ['lens', 'search'], version: VERSION };
       broadcast(ev('host', { host: state.hosts[name] }));
@@ -285,18 +381,15 @@ const OPS = {
       { id: uuid(), title: 'Fix flaky test', last_prompt: 'why does it fail on CI', modified: now() - 90000, messages: 8 },
     ] };
   },
-  'reader.answers': (a) => {
-    sess(a);
-    return { answers: [
-      { prompt: 'Explain the energy formula', text: '# Energy\n\nThe famous relation is <latex>E = mc^2</latex>.\n\n```mermaid\ngraph TD; A-->B;\n```\n\n```rust\nfn main() {}\n```\n' },
-      { prompt: 'List the steps', text: '1. Build\n2. Test\n3. Ship\n' },
-    ] };
-  },
+  'reader.answers': (a) => { sess(a); return { answers: ANSWERS }; },
   'reader.last_prompt': (a) => { sess(a); return { prompt: 'split tokens into a module', cut: false }; },
   search: (a) => {
-    need(a, 'query');
-    return { failed: [], truncated: false, hits: [
-      { host: 'local', conversation: uuid(), cwd: '/home/dev/claudio', modified: now() - 3000, title: 'Refactor the lexer', snippet: `…the ${a.query} appears here…`, matches: 2 },
+    const q = need(a, 'query');
+    const live = state.sessions.get(ids.working);
+    return { failed: [{ host: 'z6', error: 'search busy' }], truncated: false, hits: [
+      { host: 'local', conversation: live.claude_session_id, cwd: live.cwd, modified: now() - 1200, title: 'Refactor the lexer', snippet: `…we split the lexer so that ${q} is handled in one place…`, matches: 3 },
+      { host: 'local', conversation: uuid(), cwd: '/home/dev/api', modified: now() - 86400 * 2, title: 'Fix flaky CI test', snippet: `…the flaky test mentions ${q} in its setup…`, matches: 1 },
+      { host: 'z6', conversation: uuid(), cwd: '/srv/infra', modified: now() - 86400 * 9, title: 'Rotate the TLS certificates', snippet: `…certbot renew, then reload nginx (${q})…`, matches: 2 },
     ] };
   },
   'git.status': (a) => { const s = sess(a); needHostFeature(state.hosts[s.host], 'worktree'); return GIT_STATUS; },
@@ -342,9 +435,19 @@ const OPS = {
     const e = state.extensions.find((x) => x.name === need(a, 'ext'));
     if (!e) throw new OpError('no such extension');
     if (e.source === 'builtin') throw new OpError('not an external extension');
-    return { result: { kind: 'notice', text: 'done' } };
+    switch (a.action) {
+      case 'summary': return { result: { kind: 'document', title: 'Task summary', markdown: '# Tasks\n\nTwo open, one done. The estimate is <latex>T = \\sum_i t_i</latex>.\n\n| Task | State |\n|---|---|\n| Reader | done |\n| Wizard | open |\n' } };
+      case 'note': return { result: { kind: 'notice', text: `Noted: ${a.input ?? ''}` } };
+      case 'insert': return { result: { kind: 'paste', text: '- [ ] write tests\n- [ ] ship it' } };
+      case 'resume': return { result: { kind: 'resume', host: 'local', cwd: '/home/dev/api', conversation: uuid() } };
+      case 'pick': return { result: { kind: 'list', title: 'Tasks', items: [
+        { label: 'Write the reader', detail: 'in progress', result: { kind: 'notice', text: 'Opened: Write the reader' } },
+        { label: 'Resume the API chat', detail: '/home/dev/api', result: { kind: 'resume', host: 'local', cwd: '/home/dev/api', conversation: uuid() } },
+      ] } };
+      default: throw new OpError('no such action');
+    }
   },
-  'extensions.render': (a) => { need(a, 'lens'); need(a, 'kind'); need(a, 'source'); return { inline: null, block: null }; },
+  'extensions.render': (a) => { const lens = need(a, 'lens'); need(a, 'kind'); const src = need(a, 'source'); return lens === 'todo' ? { inline: null, block: ['[ ] ' + src, '    (from the conversation)'] } : { inline: null, block: null }; },
   'plugins.list': () => ({ plugins: state.plugins }),
   'plugins.items': (a) => {
     const p = state.plugins.find((x) => x.name === need(a, 'name'));
@@ -471,6 +574,10 @@ wss.on('connection', (ws) => {
   clients.add(c);
   send(ws, { t: 'hello', v: 1, version: VERSION, features: [] });
   send(ws, snapshot());
+  for (const sid of [ids.working, ids.idle]) {
+    send(ws, ev('lens', { sid, seq: 1, items: LENS }));
+    send(ws, ev('latex', { sid, seq: 1, formulas: LENS.filter((x) => x.tag === 'latex').map((x) => x.text) }));
+  }
   for (const h of Object.values(state.hosts)) send(ws, ev('host_stats', { host: h.name, cpu: 12, mem_used: 6e9, mem_total: 16e9 }));
   ws.on('message', (data, isBinary) => {
     if (isBinary) {

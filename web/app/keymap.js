@@ -8,6 +8,7 @@ export const BINDINGS = [
   { keys: 'a', action: 'next-attention', help: 'jump to the next session that needs you', ev: E('a') },
   { keys: 'n', action: 'new-session', help: 'new claude session', ev: E('n') },
   { keys: 't', action: 'new-terminal', help: 'new terminal tab', ev: E('t') },
+  { keys: '/', action: 'search', help: 'search conversations', ev: E('/') },
   { keys: '1', action: 'focus-pane-1', help: 'focus pane 1', ev: E('1') },
   { keys: '2', action: 'focus-pane-2', help: 'focus pane 2', ev: E('2') },
   { keys: '3', action: 'focus-pane-3', help: 'focus pane 3', ev: E('3') },
@@ -23,7 +24,7 @@ export const BINDINGS = [
 ];
 
 const SINGLE = {
-  k: 'palette', a: 'next-attention', n: 'new-session', t: 'new-terminal',
+  '/': 'search', k: 'palette', a: 'next-attention', n: 'new-session', t: 'new-terminal',
   1: 'focus-pane-1', 2: 'focus-pane-2', 3: 'focus-pane-3', 4: 'focus-pane-4',
   ArrowDown: 'rail-next', ArrowUp: 'rail-prev', r: 'reader', g: 'changes',
   '?': 'help', Enter: 'enter-terminal', Escape: 'close-overlay',
