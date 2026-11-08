@@ -1806,6 +1806,10 @@ impl Hub {
             .filter(|s| !s.ephemeral)
             .map(|s| (s.id, s))
             .collect();
+        // Sessions that ended while no web was running had no view to remove.
+        if self.web.forget_unlisted(host, |sid| listed.contains_key(sid)) {
+            self.dirty = true;
+        }
         let gone: Vec<SessionId> = self
             .sessions
             .values()

@@ -65,6 +65,21 @@ impl Layout {
     }
 }
 
+impl WebState {
+    /// Forget the records of `host`'s sessions that `listed` (the daemon's
+    /// list) does not name: they ended while no web was watching. Whether
+    /// any went.
+    pub(crate) fn forget_unlisted(
+        &mut self,
+        host: &str,
+        listed: impl Fn(&SessionId) -> bool,
+    ) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|sid, m| m.host != host || listed(sid));
+        self.sessions.len() != before
+    }
+}
+
 pub(crate) fn path() -> PathBuf {
     paths::config_dir().join("web-state.json")
 }
@@ -114,6 +129,28 @@ mod tests {
         let d = crate::paths::socket_test_dir(tag);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn records_of_sessions_a_host_no_longer_lists_are_forgotten() {
+        let meta = |host: &str| SessionMeta {
+            host: host.into(),
+            proxy: None,
+            first_party: false,
+        };
+        let (kept, gone, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut s = WebState::default();
+        s.sessions.insert(kept, meta("local"));
+        s.sessions.insert(gone, meta("local"));
+        s.sessions.insert(other, meta("z6"));
+        assert!(s.forget_unlisted("local", |sid| *sid == kept));
+        assert_eq!(
+            s.sessions.keys().copied().collect::<Vec<_>>().len(),
+            2,
+            "{s:?}"
+        );
+        assert!(s.sessions.contains_key(&kept) && s.sessions.contains_key(&other));
+        assert!(!s.forget_unlisted("local", |sid| *sid == kept), "nothing left to drop");
     }
 
     #[test]
