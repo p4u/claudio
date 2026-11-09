@@ -57,13 +57,14 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
 }
 
 /// A token attempt: its slot first (local ones are exempt from the global
-/// window), then the constant-time compare.
+/// window), then the rule (with `--remote`, local requests only) and the
+/// constant-time compare. A refused token counts like a wrong one.
 fn token_login(auth: &Auth, caller: &Caller, token: &str, now: Instant) -> Result<(), StatusCode> {
     let slot = auth
         .limiter
         .reserve(caller.key, !caller.local, now)
         .map_err(|()| StatusCode::TOO_MANY_REQUESTS)?;
-    if auth.token_ok(token) {
+    if auth.token_allowed(caller) && auth.token_ok(token) {
         auth.limiter.release(slot);
         Ok(())
     } else {
@@ -110,6 +111,29 @@ mod tests {
         );
         let t61 = t0 + Duration::from_secs(61);
         assert_eq!(token_login(&a, &LOCAL, &right, t61), Ok(()));
+    }
+
+    #[test]
+    fn with_remote_a_non_local_token_is_refused_and_counts() {
+        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
+        let a = Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None)).unwrap();
+        let right = "ab".repeat(32);
+        let remote = Caller {
+            local: false,
+            key: PeerKey::V4(1),
+        };
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(
+                token_login(&a, &remote, &right, t0),
+                Err(StatusCode::UNAUTHORIZED)
+            );
+        }
+        assert_eq!(
+            token_login(&a, &remote, &right, t0),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(token_login(&a, &LOCAL, &right, t0), Ok(()));
     }
 
     #[test]

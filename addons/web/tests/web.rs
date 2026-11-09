@@ -15,6 +15,7 @@ use common::{ManagerHarness, BINARY, WAIT};
 use futures::SinkExt;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
+use web_harness::tls::*;
 use web_harness::*;
 
 // ── AC1: loopback only ────────────────────────────────────────────────────────
@@ -314,6 +315,157 @@ fn web_set_password_refuses_a_pipe() {
     assert!(err.contains("terminal"), "{err}");
     assert!(!err.contains("a-long-enough-password"), "never echoed");
     assert!(!h.config_home.join("claudio/web-password").exists());
+}
+
+// ── --remote: TLS (AC2, AC4, AC6) ────────────────────────────────────────────
+
+#[test]
+fn web_remote_refuses_to_start_without_a_password() {
+    let h = ManagerHarness::new();
+    let port = free_port();
+    let mut cmd = Command::new(BINARY);
+    cmd.arg("web")
+        .arg("--remote")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--no-open");
+    apply_env(&h, &mut cmd);
+    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--set-password"), "{err}");
+    assert!(out.stdout.is_empty(), "no URL: nothing served");
+    assert!(
+        !h.config_home.join("claudio/web-tls").exists(),
+        "no certificate made"
+    );
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "nothing bound"
+    );
+}
+
+#[test]
+fn web_remote_arguments_are_checked() {
+    let h = ManagerHarness::new();
+    for (args, needle) in [
+        (&["--remote", "--listen", "127.0.0.1:7999"][..], "--listen"),
+        (&["--rotate-cert"][..], "needs --remote"),
+        (&["--remote", "fe80::1"][..], "brackets"),
+        (
+            &["--remote", ":7999", "--allow-host", "a.example:8443"][..],
+            "one port",
+        ),
+        (&["--print-cert", "--no-open"][..], "no other argument"),
+    ] {
+        let mut cmd = Command::new(BINARY);
+        cmd.arg("web").args(args);
+        apply_env(&h, &mut cmd);
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(needle), "{args:?}: {err}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_serves_tls_with_a_kept_certificate() {
+    let r = RemoteWeb::start(ManagerHarness::new(), &[], |_| {});
+    let page = r.req("GET", "/", &[], "").await;
+    assert_eq!(page.status, 200);
+    assert!(page.header("content-security-policy").is_some());
+    assert_eq!(page.header("strict-transport-security"), None, "no HSTS");
+    let other = request_text("GET", "/", &r.host(), &[], "");
+    assert!(
+        https_from("127.0.0.1", r.web.port, "00:11", &other)
+            .await
+            .is_err(),
+        "another pin fails"
+    );
+    let plain = http(r.web.port, "GET", "/", &r.host(), &[], "");
+    assert_eq!(plain.status, 0, "plain HTTP gets no HTTP answer: {plain:?}");
+    let dir = r.web.h().config_home.join("claudio/web-tls");
+    let mode = |p: std::path::PathBuf| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(dir.clone()), 0o700);
+    assert_eq!(mode(dir.join("cert.pem")), 0o600);
+    assert_eq!(mode(dir.join("key.pem")), 0o600);
+    let first = r.fingerprint.clone();
+    let h = r.web.stop();
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--print-cert"]);
+    apply_env(&h, &mut cmd);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(printed, fs::read_to_string(dir.join("cert.pem")).unwrap());
+    assert!(!printed.contains("PRIVATE KEY"));
+    let r = RemoteWeb::start(h, &[], |_| {});
+    assert_eq!(r.fingerprint, first, "kept across restarts");
+    let h = r.web.stop();
+    let r = RemoteWeb::start(h, &["--rotate-cert"], |_| {});
+    assert_ne!(r.fingerprint, first, "replaced by --rotate-cert");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_guard_holds_over_tls() {
+    let r = RemoteWeb::start(
+        ManagerHarness::new(),
+        &["--allow-host", "claudio.test"],
+        |_| {},
+    );
+    let port = r.web.port;
+    for (host, status) in [
+        (format!("evil.example:{port}"), 421),
+        (format!("claudio.test:{port}"), 200),
+        (format!("10.1.2.3:{port}"), 200),
+        (format!("[fd00::1]:{port}"), 200),
+        (format!("0.0.0.0:{port}"), 421),
+        (format!("10.1.2.3:{}", port + 1), 421),
+    ] {
+        let reply = r.req_as("127.0.0.1", &host, "GET", "/", &[], "").await;
+        assert_eq!(reply.status, status, "{host}");
+    }
+    let token = json!({"token": r.web.token});
+    let http_origin = format!("http://127.0.0.1:{port}");
+    let refused = r
+        .req(
+            "POST",
+            "/api/login",
+            &[("Origin", &http_origin)],
+            &token.to_string(),
+        )
+        .await;
+    assert_eq!(refused.status, 403, "no http:// Origin with --remote");
+    let ok = r.login(&token).await;
+    assert_eq!(ok.status, 204, "{ok:?}");
+    let set = ok.header("set-cookie").unwrap();
+    for flag in ["HttpOnly", "SameSite=Strict", "Path=/", "Secure"] {
+        assert!(set.contains(flag), "{set}");
+    }
+    let cookie = cookie_of(set);
+    let hello = wss_hello(port, &r.fingerprint, &cookie, &r.origin()).await;
+    assert_eq!(hello.unwrap()["t"], "hello");
+    let refused = wss_hello(port, &r.fingerprint, &cookie, &http_origin).await;
+    assert_eq!(refused.err(), Some(403));
+    // A loopback peer that names this machine is not local: no token.
+    let host = format!("claudio.test:{port}");
+    let origin = format!("https://claudio.test:{port}");
+    let rep = r
+        .req_as(
+            "127.0.0.1",
+            &host,
+            "POST",
+            "/api/login",
+            &[("Origin", &origin)],
+            &token.to_string(),
+        )
+        .await;
+    assert_eq!(rep.status, 401);
+    let me = r
+        .req_as("127.0.0.1", &host, "GET", "/api/me", &[], "")
+        .await;
+    assert_eq!(me.status, 401);
+    let body: Value = serde_json::from_str(&me.body).unwrap();
+    assert_eq!(body["login"], json!([]), "no password login yet: none");
 }
 
 // ── Frames ────────────────────────────────────────────────────────────────────

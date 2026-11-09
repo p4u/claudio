@@ -96,9 +96,15 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 pub(crate) struct Allowed {
     /// Every accepted `host[:port]`, lowercase.
     hosts: Vec<String>,
-    /// The loopback forms at the listen port: a loopback peer that used one
-    /// of these sent a local request.
+    /// The loopback forms at the listen port (and the listen address when
+    /// it is itself loopback): a loopback peer that used one of these sent
+    /// a local request.
     local_hosts: Vec<String>,
+    /// `--remote`: any IP literal at this port is accepted too (an address
+    /// typed by hand cannot be the target of DNS rebinding).
+    ip_port: Option<u16>,
+    /// `--remote`: TLS only (`https://` Origins, a `Secure` cookie).
+    tls: bool,
     /// Any `--allow-host` given: cookies then get `Secure`.
     proxied: bool,
 }
@@ -127,11 +133,9 @@ impl Allowed {
     /// `:port`, and is then accepted at that port only.
     pub(crate) fn new(listen: SocketAddr, allow_hosts: &[String]) -> Allowed {
         let port = listen.port();
-        let mut local_hosts = at_port(&host_ip(listen.ip()), port, 80);
-        for name in ["127.0.0.1", "localhost", "[::1]"] {
-            local_hosts.extend(at_port(name, port, 80));
-        }
+        let local_hosts = local_forms(listen, 80);
         let mut hosts = local_hosts.clone();
+        hosts.extend(at_port(&host_ip(listen.ip()), port, 80));
         for name in allow_hosts {
             let name = name.trim().to_ascii_lowercase();
             if !name.contains(':') {
@@ -139,6 +143,34 @@ impl Allowed {
             }
             hosts.push(name);
         }
+        Allowed::sorted(hosts, local_hosts, None, false, !allow_hosts.is_empty())
+    }
+
+    /// `--remote`: the loopback forms (local), the listen address when it is
+    /// a specific one, any IP literal, and `names` (this machine's host
+    /// names and each `--allow-host`, whose port, if any, is the listen
+    /// port), all at the listen port (also bare when it is 443).
+    pub(crate) fn remote(listen: SocketAddr, names: &[String]) -> Allowed {
+        let port = listen.port();
+        let local_hosts = local_forms(listen, 443);
+        let mut hosts = local_hosts.clone();
+        if !listen.ip().is_unspecified() {
+            hosts.extend(at_port(&host_ip(listen.ip()), port, 443));
+        }
+        for name in names {
+            let bare = name.split(':').next().unwrap_or_default();
+            hosts.extend(at_port(&bare.trim().to_ascii_lowercase(), port, 443));
+        }
+        Allowed::sorted(hosts, local_hosts, Some(port), true, false)
+    }
+
+    fn sorted(
+        mut hosts: Vec<String>,
+        mut local_hosts: Vec<String>,
+        ip_port: Option<u16>,
+        tls: bool,
+        proxied: bool,
+    ) -> Allowed {
         for list in [&mut hosts, &mut local_hosts] {
             list.sort();
             list.dedup();
@@ -146,7 +178,9 @@ impl Allowed {
         Allowed {
             hosts,
             local_hosts,
-            proxied: !allow_hosts.is_empty(),
+            ip_port,
+            tls,
+            proxied,
         }
     }
 
@@ -157,16 +191,19 @@ impl Allowed {
 
     pub(crate) fn host_ok(&self, host: &str) -> bool {
         let host = host.trim().to_ascii_lowercase();
-        !host.is_empty() && self.hosts.contains(&host)
+        !host.is_empty()
+            && (self.hosts.contains(&host) || self.ip_port.is_some_and(|p| ip_literal_at(&host, p)))
     }
 
-    /// `http://` or `https://` and an accepted host, nothing after it.
-    /// `null` and every other scheme are refused.
+    /// `https://` (and, without `--remote`, `http://`) and an accepted host,
+    /// nothing after it. `null` and every other scheme are refused.
     pub(crate) fn origin_ok(&self, origin: &str) -> bool {
         let origin = origin.trim().to_ascii_lowercase();
-        let rest = origin
-            .strip_prefix("http://")
-            .or_else(|| origin.strip_prefix("https://"));
+        let rest = match origin.strip_prefix("https://") {
+            Some(rest) => Some(rest),
+            None if !self.tls => origin.strip_prefix("http://"),
+            None => None,
+        };
         match rest {
             Some(host) if !host.contains('/') => self.host_ok(host),
             _ => false,
@@ -174,8 +211,52 @@ impl Allowed {
     }
 
     pub(crate) fn secure_cookie(&self) -> bool {
-        self.proxied
+        self.proxied || self.tls
     }
+
+    pub(crate) fn tls(&self) -> bool {
+        self.tls
+    }
+}
+
+/// The local `Host` forms: `127.0.0.1`, `localhost` and `[::1]` at the
+/// listen port (also bare at `default`), and the listen address the same
+/// way only when it is itself loopback. A non-loopback address a loopback
+/// peer names is not local.
+fn local_forms(listen: SocketAddr, default: u16) -> Vec<String> {
+    let port = listen.port();
+    let mut forms = Vec::new();
+    if listen.ip().to_canonical().is_loopback() {
+        forms.extend(at_port(&host_ip(listen.ip()), port, default));
+    }
+    for name in ["127.0.0.1", "localhost", "[::1]"] {
+        forms.extend(at_port(name, port, default));
+    }
+    forms
+}
+
+/// `host` (lowercase) is an IPv4 or bracketed IPv6 literal at `port` (bare
+/// at 443), neither unspecified nor multicast.
+fn ip_literal_at(host: &str, port: u16) -> bool {
+    let ip = match host.parse::<SocketAddr>() {
+        Ok(sock) if sock.port() == port => sock.ip(),
+        Ok(_) => return false,
+        Err(_) if port == 443 => {
+            let v6 = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+            match v6 {
+                Some(v6) => match v6.parse::<std::net::Ipv6Addr>() {
+                    Ok(ip) => IpAddr::V6(ip),
+                    Err(_) => return false,
+                },
+                None => match host.parse::<std::net::Ipv4Addr>() {
+                    Ok(ip) => IpAddr::V4(ip),
+                    Err(_) => return false,
+                },
+            }
+        }
+        Err(_) => return false,
+    };
+    !ip.is_unspecified() && !ip.is_multicast()
 }
 
 /// The CSP: `'self'` only, plus the hash of the one inline script allowed,
@@ -231,6 +312,23 @@ pub(crate) struct Auth {
     /// `/dev/urandom`, opened once at start: a login opens no file on the
     /// executor. Read under its own lock, never held across an `.await`.
     urandom: Mutex<File>,
+    /// [`test_remote_peer`]: a loopback address that counts as remote.
+    test_remote_peer: Option<IpAddr>,
+}
+
+/// `CLAUDIO_TEST_REMOTE_PEER=<ip>`, debug builds only: that loopback address
+/// then counts as a remote peer, the one way a hermetic suite gets one
+/// through the real listener. It can only take the token away from a peer,
+/// never give access. A release build has no such function body: the
+/// variable is not read, and `make static`'s final check greps for its name.
+#[cfg(debug_assertions)]
+fn test_remote_peer() -> Option<IpAddr> {
+    std::env::var("CLAUDIO_TEST_REMOTE_PEER").ok()?.parse().ok()
+}
+
+#[cfg(not(debug_assertions))]
+fn test_remote_peer() -> Option<IpAddr> {
+    None
 }
 
 impl Auth {
@@ -243,6 +341,7 @@ impl Auth {
             csp: HeaderValue::from_str(&csp).expect("an ASCII CSP"),
             inner: Mutex::new(Inner::default()),
             urandom: Mutex::new(File::open("/dev/urandom")?),
+            test_remote_peer: test_remote_peer(),
         })
     }
 
@@ -265,10 +364,28 @@ impl Auth {
                 key: PeerKey::Unknown,
             };
         };
+        let ip = peer.ip();
+        let forced = self.test_remote_peer == Some(ip);
+        let key = if forced { PeerKey::of(ip) } else { peer.key() };
         Caller {
-            local: peer.ip().is_loopback() && self.allowed.is_local_host(host),
-            key: peer.key(),
+            local: ip.is_loopback() && !forced && self.allowed.is_local_host(host),
+            key,
         }
+    }
+
+    /// Whether a token login is open to this caller: always without
+    /// `--remote` (every peer is loopback), else to local requests only.
+    pub(crate) fn token_allowed(&self, caller: &Caller) -> bool {
+        !self.allowed.tls() || caller.local
+    }
+
+    /// The login methods `/api/me` lists for this caller.
+    pub(crate) fn login_methods(&self, caller: &Caller) -> Vec<&'static str> {
+        let mut methods = Vec::new();
+        if self.token_allowed(caller) {
+            methods.push("token");
+        }
+        methods
     }
 
     /// Whether `token` is the token, in constant time.
@@ -398,7 +515,8 @@ pub(crate) async fn guard(State(auth): State<Arc<Auth>>, req: Request, next: Nex
     let mut res = match check(&auth, &req) {
         Ok(()) => next.run(req).await,
         Err(StatusCode::UNAUTHORIZED) if path == "/api/me" => {
-            let body = serde_json::json!({ "login": ["token"] });
+            let caller = auth.caller(peer_of(&req), host_of(&req));
+            let body = serde_json::json!({ "login": auth.login_methods(&caller) });
             (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()
         }
         Err(status) => status.into_response(),
@@ -608,6 +726,125 @@ mod tests {
         let a = Allowed::new("127.0.0.2:80".parse().unwrap(), &[]);
         assert!(a.is_local_host("127.0.0.2") && a.is_local_host("127.0.0.2:80"));
         assert!(a.is_local_host("localhost") && !a.is_local_host("127.0.0.3:80"));
+    }
+
+    fn remote_allowed() -> Allowed {
+        Allowed::remote(
+            "0.0.0.0:7337".parse().unwrap(),
+            &names(&["box", "box.local", "claudio.test:7337"]),
+        )
+    }
+
+    #[test]
+    fn remote_hosts_are_loopback_names_ip_literals_and_this_machines_names() {
+        let a = remote_allowed();
+        for ok in [
+            "127.0.0.1:7337",
+            "localhost:7337",
+            "[::1]:7337",
+            "box:7337",
+            "BOX.local:7337",
+            "claudio.test:7337",
+            "192.168.1.20:7337",
+            "[fd00::1]:7337",
+        ] {
+            assert!(a.host_ok(ok), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0:7337",
+            "[::]:7337",
+            "224.0.0.1:7337",
+            "192.168.1.20:7338",
+            "box",
+            "evil.example:7337",
+            "claudio.test",
+            "127.0.0.1",
+            "[fd00::1",
+        ] {
+            assert!(!a.host_ok(bad), "{bad}");
+        }
+        assert!(a.origin_ok("https://box.local:7337"));
+        assert!(a.origin_ok("https://192.168.1.20:7337"));
+        for bad in ["http://127.0.0.1:7337", "http://box:7337", "null"] {
+            assert!(!a.origin_ok(bad), "{bad}");
+        }
+        assert!(a.secure_cookie() && a.tls());
+        assert!(a.is_local_host("localhost:7337"));
+        assert!(!a.is_local_host("box:7337") && !a.is_local_host("192.168.1.20:7337"));
+        let a = Allowed::remote("0.0.0.0:443".parse().unwrap(), &names(&["box"]));
+        for ok in ["box", "10.0.0.1", "[fd00::1]", "127.0.0.1", "box:443"] {
+            assert!(a.host_ok(ok), "{ok}");
+        }
+        assert!(a.origin_ok("https://box"));
+        let a = Allowed::remote("192.168.1.20:7337".parse().unwrap(), &[]);
+        assert!(a.host_ok("192.168.1.20:7337"));
+    }
+
+    /// R11: only loopback forms are local. A specific non-loopback listen
+    /// address is accepted as a `Host`, but a loopback peer naming it did
+    /// not send a local request.
+    #[test]
+    fn a_non_loopback_listen_address_is_never_a_local_host() {
+        let listen: SocketAddr = "192.168.1.20:7337".parse().unwrap();
+        let a = Allowed::remote(listen, &[]);
+        assert!(a.host_ok("192.168.1.20:7337"));
+        assert!(!a.is_local_host("192.168.1.20:7337"));
+        assert!(a.is_local_host("127.0.0.1:7337") && a.is_local_host("[::1]:7337"));
+        let auth = Auth::new("ab".repeat(32), a, csp(None)).unwrap();
+        let c = auth.caller(peer("127.0.0.1:1"), "192.168.1.20:7337");
+        assert!(!c.local && !auth.token_allowed(&c));
+        let a = Allowed::new(listen, &[]);
+        assert!(a.host_ok("192.168.1.20:7337") && !a.is_local_host("192.168.1.20:7337"));
+        let a = Allowed::remote("127.0.0.2:7337".parse().unwrap(), &[]);
+        assert!(
+            a.is_local_host("127.0.0.2:7337"),
+            "a loopback listen address is local"
+        );
+        let a = Allowed::remote("[::1]:443".parse().unwrap(), &[]);
+        assert!(a.is_local_host("[::1]") && a.is_local_host("localhost"));
+    }
+
+    #[test]
+    fn with_remote_the_token_is_for_local_requests_only() {
+        let a = Auth::new("ab".repeat(32), remote_allowed(), csp(None)).unwrap();
+        for (p, host) in [
+            ("127.0.0.1:1", "127.0.0.1:7337"),
+            ("[::ffff:127.0.0.1]:1", "localhost:7337"),
+        ] {
+            let c = a.caller(peer(p), host);
+            assert!(c.local && a.token_allowed(&c), "{p} {host}");
+            assert_eq!(a.login_methods(&c), ["token"]);
+        }
+        for (p, host) in [
+            (peer("127.0.0.1:1"), "box:7337"),
+            (peer("192.168.1.5:1"), "127.0.0.1:7337"),
+            (None, "127.0.0.1:7337"),
+        ] {
+            let c = a.caller(p, host);
+            assert!(!c.local && !a.token_allowed(&c), "{p:?} {host}");
+            assert!(a.login_methods(&c).is_empty());
+        }
+        assert_eq!(
+            a.caller(peer("[2001:db8::1]:1"), "x").key,
+            a.caller(peer("[2001:db8::ffff]:2"), "x").key
+        );
+        let plain = auth();
+        let c = plain.caller(None, "proxy.example");
+        assert!(
+            plain.token_allowed(&c),
+            "without --remote the token is for all"
+        );
+        assert_eq!(plain.login_methods(&c), ["token"]);
+    }
+
+    #[test]
+    fn the_test_peer_hook_only_takes_the_token_away() {
+        let mut a = Auth::new("ab".repeat(32), remote_allowed(), csp(None)).unwrap();
+        a.test_remote_peer = Some("127.0.0.2".parse().unwrap());
+        let c = a.caller(peer("127.0.0.2:1"), "127.0.0.1:7337");
+        assert!(!c.local);
+        assert_eq!(c.key, PeerKey::V4(0x7f00_0002));
+        assert!(a.caller(peer("127.0.0.1:1"), "127.0.0.1:7337").local);
     }
 
     #[test]
