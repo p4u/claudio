@@ -8,6 +8,7 @@
 
 mod ctx;
 mod events;
+mod reload;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -67,6 +68,9 @@ pub(crate) struct Limits {
     pub tick: Duration,
     /// The config file's poll period (with `watch_config`).
     pub watch: Duration,
+    /// A pause after each config read before its result is applied; zero
+    /// but in tests of the reload's ordering.
+    pub reload_pause: Duration,
 }
 
 impl Default for Limits {
@@ -77,6 +81,7 @@ impl Default for Limits {
             request_timeout: Duration::from_secs(170),
             tick: Duration::from_secs(1),
             watch: Duration::from_secs(5),
+            reload_pause: Duration::ZERO,
         }
     }
 }
@@ -104,8 +109,10 @@ struct Host {
 struct State {
     hosts: BTreeMap<String, Host>,
     sessions: Vec<SessionSnap>,
-    /// config.toml as last read.
+    /// config.toml as last read (or edited by an addon).
     config: toml::Table,
+    /// The config re-reads (single flight, coalesced, generation-checked).
+    reload: reload::Reload,
 }
 
 /// Every task the runtime owns, aborted at shutdown.
@@ -270,20 +277,9 @@ impl AddonRuntime {
     }
 
     /// Re-read config.toml (off the executor) and send `ConfigChanged`.
+    /// One read runs at a time; calls meanwhile coalesce into one more.
     pub fn config_changed(&self) {
-        let weak = Arc::downgrade(&self.inner);
-        self.inner.spawn_internal(async move {
-            let Some(path) = weak.upgrade().map(|i| i.opts.config_path.clone()) else {
-                return;
-            };
-            let Some(config) = events::load_config(path).await else {
-                return;
-            };
-            if let Some(inner) = weak.upgrade() {
-                inner.state().config = config;
-                inner.event(AddonEvent::ConfigChanged);
-            }
-        });
+        reload::request(&self.inner);
     }
 
     /// Abort every addon task and the event, tick and watch tasks; the

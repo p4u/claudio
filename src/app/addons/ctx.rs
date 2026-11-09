@@ -184,18 +184,27 @@ impl AddonCtx for Ctx {
         Box::pin(async move {
             let _edit = inner.edit.lock().await;
             let path = inner.opts.config_path.clone();
+            let name = section.clone();
             let edited = tokio::task::spawn_blocking(move || {
-                crate::app::config_edit::edit_section(&path, &section, edit)
-                    .map_err(|e| e.to_string())
+                // The section as written: the file's `[section]` parses to
+                // exactly this (edit_section checks it).
+                let mut after = toml::Table::new();
+                let edited = crate::app::config_edit::edit_section(&path, &name, |t| {
+                    edit(t);
+                    after = t.clone();
+                });
+                edited.map(|edited| edited.then_some(after))
             })
             .await
-            .map_err(|_| "the config edit stopped".to_owned())??;
-            if edited {
-                if let Some(config) =
-                    super::events::load_config(inner.opts.config_path.clone()).await
-                {
-                    inner.state().config = config;
-                }
+            .map_err(|_| "the config edit stopped".to_owned())?
+            .map_err(|e| e.to_string())?;
+            // Applied as written, with no second read of the file: a read
+            // in flight is older and is dropped (generation check).
+            if let Some(after) = edited {
+                let mut state = inner.state();
+                state.config.insert(section, toml::Value::Table(after));
+                state.reload.edited();
+                drop(state);
                 inner.event(addon::AddonEvent::ConfigChanged);
             }
             Ok(())

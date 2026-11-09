@@ -129,12 +129,22 @@ async fn deliver_all(inner: Weak<Inner>, mut rx: mpsc::Receiver<AddonEvent>) {
     let Some(path) = inner.upgrade().map(|i| i.opts.config_path.clone()) else {
         return;
     };
-    let config = load_config(path).await.unwrap_or_default();
+    let Some((gen, pause)) = inner
+        .upgrade()
+        .map(|i| (i.state().reload.begin(), i.limits.reload_pause))
+    else {
+        return;
+    };
+    let config = super::reload::load(path, pause).await.unwrap_or_default();
     let ctxs: Vec<(String, Arc<dyn AddonCtx>)> = {
         let Some(strong) = inner.upgrade() else {
             return;
         };
-        strong.state().config = config;
+        let mut state = strong.state();
+        if state.reload.accept(gen) {
+            state.config = config;
+        }
+        drop(state);
         strong
             .addons
             .iter()
@@ -188,26 +198,5 @@ async fn watch(inner: Weak<Inner>) {
             Some(strong) => super::AddonRuntime { inner: strong }.config_changed(),
             None => return,
         }
-    }
-}
-
-/// config.toml as a table (empty when missing), off the executor; `None`
-/// (with a warning) when it cannot be read or parsed: the last good one
-/// stays.
-pub(super) async fn load_config(path: PathBuf) -> Option<toml::Table> {
-    let read = tokio::task::spawn_blocking(move || match std::fs::read_to_string(&path) {
-        Ok(text) => text
-            .parse::<toml::Table>()
-            .map_err(|e| e.message().to_owned()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(e) => Err(e.to_string()),
-    });
-    match read.await {
-        Ok(Ok(table)) => Some(table),
-        Ok(Err(why)) => {
-            tracing::warn!(%why, "config.toml not read for the addons");
-            None
-        }
-        Err(_) => None,
     }
 }

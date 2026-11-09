@@ -465,3 +465,120 @@ async fn dropping_the_last_handle_stops_the_runtime() {
     assert!(ctx.sessions().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Config reads started so far (the first is the one before `Started`).
+fn reads(rt: &AddonRuntime) -> usize {
+    rt.inner.state().reload.reads
+}
+
+/// The `ConfigChanged` events `addon` has seen.
+fn config_changes(addon: &TestAddon) -> usize {
+    events(addon)
+        .iter()
+        .filter(|e| *e == "ConfigChanged")
+        .count()
+}
+
+/// A runtime whose config reads pause `pause` before their result is
+/// applied, with its `Started` seen.
+async fn slow_reads(text: &str, pause: u64) -> (PathBuf, PathBuf, Arc<TestAddon>, AddonRuntime) {
+    let (dir, path) = scratch(text);
+    let echo = Arc::new(TestAddon::new("echo").sections(&["team"]));
+    let limits = Limits {
+        reload_pause: Duration::from_millis(pause),
+        ..Limits::default()
+    };
+    let (rt, _rx) = runtime(vec![echo.clone()], &path, limits);
+    seen(&echo, 1).await;
+    (dir, path, echo, rt)
+}
+
+/// Ten notifications while a read runs make one more read, not ten
+/// (single flight, coalesced; A10, R16).
+#[tokio::test]
+async fn config_reloads_are_single_flight_and_coalesced() {
+    let (dir, path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 100).await;
+    std::fs::write(&path, "[team]\nurl = \"b\"\n").unwrap();
+    for _ in 0..10 {
+        rt.config_changed();
+    }
+    until("two re-reads applied", || config_changes(&echo) == 2).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(reads(&rt), 3, "the first read, then one, then one more");
+    assert_eq!(config_changes(&echo), 2);
+    assert_eq!(rt.ctx("echo").config("team")["url"].as_str(), Some("b"));
+    // Idle again: the next notification reads again.
+    rt.config_changed();
+    until("a third re-read", || config_changes(&echo) == 3).await;
+    assert_eq!(reads(&rt), 4);
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A read that started before an addon's edit finishes after it: its
+/// older file is dropped (generation check), never put back over the
+/// edit, and one more read follows.
+#[tokio::test]
+async fn an_older_read_never_overwrites_a_newer_edit() {
+    let (dir, _path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 300).await;
+    let ctx = rt.ctx("echo");
+    rt.config_changed();
+    until("the read started", || reads(&rt) == 2).await;
+    tokio::time::sleep(Duration::from_millis(50)).await; // it has read "a"
+    ctx.edit_config(
+        "team",
+        Box::new(|t| {
+            t.insert("url".into(), toml::Value::String("b".into()));
+        }),
+    )
+    .await
+    .unwrap();
+    // Through the stale read's end and the next read's.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(900);
+    while tokio::time::Instant::now() < deadline {
+        assert_eq!(ctx.config("team")["url"].as_str(), Some("b"), "stale");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(reads(&rt), 3, "one more read after the edit");
+    assert_eq!(config_changes(&echo), 2, "the edit, then the fresh read");
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A config over the 1 MiB cap is not read: the last good table stays and
+/// no `ConfigChanged` goes out (C2).
+#[tokio::test]
+async fn an_oversized_config_keeps_the_last_good_one() {
+    let (dir, path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 0).await;
+    let mut big = String::from("[team]\nurl = \"big\"\n");
+    while big.len() as u64 <= reload::CONFIG_MAX {
+        big.push_str("# padding padding padding padding padding padding padding\n");
+    }
+    std::fs::write(&path, big).unwrap();
+    rt.config_changed();
+    until("the read ran", || {
+        reads(&rt) == 2 && !rt.inner.state().reload.is_running()
+    })
+    .await;
+    assert_eq!(rt.ctx("echo").config("team")["url"].as_str(), Some("a"));
+    assert_eq!(config_changes(&echo), 0);
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Shutdown during a read: its result is never applied and later
+/// notifications read nothing.
+#[tokio::test]
+async fn shutdown_drops_a_reload_in_flight() {
+    let (dir, path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 200).await;
+    std::fs::write(&path, "[team]\nurl = \"b\"\n").unwrap();
+    rt.config_changed();
+    until("the read started", || reads(&rt) == 2).await;
+    rt.shutdown();
+    rt.config_changed();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(reads(&rt), 2);
+    assert_eq!(config_changes(&echo), 0);
+    assert_eq!(rt.ctx("echo").config("team")["url"].as_str(), Some("a"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
