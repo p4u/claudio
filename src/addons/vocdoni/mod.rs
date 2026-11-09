@@ -3,6 +3,9 @@
 pub mod daemon;
 pub mod plugins;
 pub mod proxy;
+// P3.8a: the state lands before its runner (P3.8b), which removes this.
+#[allow(dead_code)]
+pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 
