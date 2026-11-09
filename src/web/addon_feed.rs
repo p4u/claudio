@@ -12,8 +12,9 @@ use crate::addon::SessionSnap;
 use crate::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
 
 /// Follow the hub's host events into `runtime` (from a resync of the hosts
-/// connected already), send the runtime's notices to every tab, and an
-/// addon's change through `feed` (the v1 plugin events, until P3.14).
+/// connected already), send the runtime's notices to every tab, an addon's
+/// change through `feed` (its rows, and the v1 plugin events until P3.16),
+/// and a re-read config.toml to the extensions.
 pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, mut feed: Feed) {
     // Subscribed before the hosts are read: no HostUp is missed.
     let events = hub.subscribe();
@@ -28,7 +29,8 @@ pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, m
                     hub.broadcast(ev("notice", fields));
                 }
                 RuntimeOut::Changed { .. } => feed.changed().await,
-                RuntimeOut::Offer { .. } | RuntimeOut::ConfigChanged => {}
+                RuntimeOut::ConfigChanged => feed.config_changed().await,
+                RuntimeOut::Offer { .. } => {}
             }
         }
     });

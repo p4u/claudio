@@ -180,14 +180,30 @@ fn the_v1_panel_lists_the_plugins_and_each_hosts_answer() {
     s.plugins
         .applies
         .insert(("local".into(), "kb".into()), apply);
+    let mut secret = sample("vault");
+    secret.env = vec![("VAULT_TOKEN".into(), "plugin-SECRET-value".into())];
+    let list = PluginList {
+        profile: "home".into(),
+        fetched_at: 1,
+        plugins: vec![secret.clone()],
+    };
+    s.on_list("home", PluginsFetch::Listed(list));
     let panel = crate::addons::vocdoni::v1::panel(&s);
+    let text = serde_json::to_string(&panel).unwrap();
+    assert!(
+        !text.contains("plugin-SECRET-value"),
+        "no env value: {text}"
+    );
+    assert!(!text.contains(&secret.bundle_url), "no bundle URL: {text}");
     let table = |page: usize, block: usize| match &panel.pages[page].blocks[block] {
         Block::Table { rows, .. } => rows.clone(),
         other => panic!("{other:?}"),
     };
-    let plugins = table(0, 0);
-    assert_eq!(plugins[0][..4], ["kb", "1.4.0", "work", "fetching"]);
-    assert_eq!(plugins[1][3..5], ["failed", "name taken"]);
+    // Lists in profile order: `home` before `work`.
+    let mut plugins = table(0, 0);
+    assert_eq!(plugins.remove(0)[0], "vault");
+    assert_eq!(plugins[0][..5], ["kb", "1.4.0", "work", "", "fetching"]);
+    assert_eq!(plugins[1][3..6], ["name taken", "failed", "name taken"]);
     assert_eq!(table(1, 0)[0][..3], ["local", "kb", "ready"]);
     assert_eq!(
         table(1, 1),

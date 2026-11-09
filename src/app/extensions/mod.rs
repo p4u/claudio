@@ -15,7 +15,7 @@ pub mod protocol;
 
 use std::collections::BTreeMap;
 
-use crate::addons::vocdoni::proxy::plugins::PluginList;
+use crate::addon::ExtensionRow;
 use crate::proto::{LensKind, LensSpec, SessionExtensions, MAX_INSTRUCTIONS, MAX_LENSES};
 
 /// The diagram extension's instruction (spec §7).
@@ -81,11 +81,15 @@ pub enum Source {
     BuiltIn,
     /// A program the extension host runs.
     External(manifest::Program),
-    /// A proxy plugin of `profile`: a manifest its sessions get, and env. No
-    /// lenses or actions. `refused` says why it is not used, if it is not.
-    Plugin {
-        profile: String,
+    /// A row of addon `addon` (docs/addons.md, "Extension rows"): no lenses
+    /// or actions here. `refused` says why it is not used, if it is not;
+    /// `details` are the addon's lines about it; `setup` the checklist
+    /// Enter opens.
+    Addon {
+        addon: &'static str,
         refused: Option<String>,
+        details: Vec<String>,
+        setup: Option<String>,
     },
 }
 
@@ -104,8 +108,8 @@ impl Extension {
         matches!(self.source, Source::External(_))
     }
 
-    pub fn is_plugin(&self) -> bool {
-        matches!(self.source, Source::Plugin { .. })
+    pub fn is_addon(&self) -> bool {
+        matches!(self.source, Source::Addon { .. })
     }
 }
 
@@ -206,29 +210,40 @@ impl Registry {
         Registry { extensions }
     }
 
-    /// Replace the proxy plugins with those of `lists`, after the built-ins
-    /// and the externals, with `[extensions]` (`enabled`) applied. A plugin
-    /// [`PluginList::checked`] refuses, or whose name another extension
-    /// (or an earlier list) has, is listed as refused and off.
-    pub fn set_plugins(&mut self, lists: &[&PluginList], enabled: &BTreeMap<String, bool>) {
-        self.extensions.retain(|e| !e.is_plugin());
-        for list in lists {
-            for (p, why) in list.checked() {
-                let taken = self.extensions.iter().any(|e| e.name == p.name);
-                let refused = why.or_else(|| taken.then(|| "name taken".to_owned()));
-                let on = refused.is_none() && enabled.get(&p.name).copied().unwrap_or(true);
-                self.extensions.push(Extension {
-                    name: p.name.clone(),
-                    description: format!("{} · {}", p.version, list.profile),
-                    enabled: on,
-                    lenses: Vec::new(),
-                    actions: Vec::new(),
-                    source: Source::Plugin {
-                        profile: list.profile.clone(),
-                        refused,
-                    },
-                });
-            }
+    /// Replace the addons' rows with `rows`, after the built-ins and the
+    /// externals, in order. A row whose name is not a valid `[extensions]`
+    /// key, or is held by another extension or an earlier row, is listed
+    /// refused; a row is on when `enabled` (`[extensions]`) says so, else
+    /// when it is on by default, and never while refused.
+    pub fn set_addon_rows(
+        &mut self,
+        rows: &[(&'static str, ExtensionRow)],
+        enabled: &BTreeMap<String, bool>,
+    ) {
+        self.extensions.retain(|e| !e.is_addon());
+        for (addon, row) in rows {
+            let taken = self.extensions.iter().any(|e| e.name == row.name);
+            let refused = if !crate::addon::name_ok(&row.name) {
+                Some("not a valid extension name".to_owned())
+            } else if taken {
+                Some("name taken".to_owned())
+            } else {
+                row.refused.clone()
+            };
+            let on = enabled.get(&row.name).copied().unwrap_or(row.default_on);
+            self.extensions.push(Extension {
+                name: row.name.clone(),
+                description: row.description.clone(),
+                enabled: refused.is_none() && on,
+                lenses: Vec::new(),
+                actions: Vec::new(),
+                source: Source::Addon {
+                    addon,
+                    refused,
+                    details: row.details.clone(),
+                    setup: row.setup.clone(),
+                },
+            });
         }
     }
 
@@ -417,37 +432,45 @@ mod tests {
         assert!(!r.set_enabled("nope", true));
     }
 
+    fn row(name: &str, refused: Option<&str>) -> (&'static str, ExtensionRow) {
+        let row = ExtensionRow {
+            name: name.into(),
+            description: format!("1.4.0 · {name}"),
+            default_on: true,
+            refused: refused.map(str::to_owned),
+            details: vec!["details".into()],
+            setup: Some(name.into()),
+        };
+        ("team", row)
+    }
+
     #[test]
-    fn plugins_follow_the_others_and_a_taken_name_is_refused() {
-        use crate::addons::vocdoni::proxy::plugins::sample;
+    fn addon_rows_follow_the_others_and_a_taken_name_is_refused() {
         let ext = vec![external("keys", "keys", 'k')];
         let mut r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
-        let work = PluginList {
-            profile: "work".into(),
-            fetched_at: 1,
-            plugins: vec![sample("kb"), sample("keys"), sample("latex"), sample("off")],
-        };
-        let mut bad = sample("evil");
-        bad.bundle_url = "http://e.org/x.zip".into();
-        let home = PluginList {
-            profile: "home".into(),
-            fetched_at: 1,
-            plugins: vec![sample("kb"), bad],
-        };
+        let rows = [
+            row("kb", None),
+            row("keys", None),
+            row("latex", None),
+            row("off", None),
+            row("kb", None),
+            row("evil", Some("bundle URL is not https")),
+            row("Bad Name", None),
+        ];
         let enabled = BTreeMap::from([("off".to_owned(), false)]);
-        r.set_plugins(&[&work, &home], &enabled);
-        let plugins: Vec<(&str, bool, Option<&str>)> = r
+        r.set_addon_rows(&rows, &enabled);
+        let listed: Vec<(&str, bool, Option<&str>)> = r
             .extensions
             .iter()
             .filter_map(|e| match &e.source {
-                Source::Plugin { refused, .. } => {
+                Source::Addon { refused, .. } => {
                     Some((e.name.as_str(), e.enabled, refused.as_deref()))
                 }
                 _ => None,
             })
             .collect();
         assert_eq!(
-            plugins,
+            listed,
             [
                 ("kb", true, None),
                 ("keys", false, Some("name taken")),
@@ -455,13 +478,26 @@ mod tests {
                 ("off", false, None),
                 ("kb", false, Some("name taken")),
                 ("evil", false, Some("bundle URL is not https")),
+                ("Bad Name", false, Some("not a valid extension name")),
             ]
         );
-        assert_eq!(r.extensions[5].description, "1.4.0 · work");
-        // Plugins bring no lenses or actions; a new list replaces the old.
+        assert_eq!(r.extensions[5].description, "1.4.0 · kb");
+        let Source::Addon { addon, setup, .. } = &r.extensions[5].source else {
+            panic!("{:?}", r.extensions[5]);
+        };
+        assert_eq!((*addon, setup.as_deref()), ("team", Some("kb")));
+        // Rows bring no lenses or actions; new rows replace the old.
         assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
-        r.set_plugins(&[], &enabled);
+        r.set_addon_rows(&[], &enabled);
         assert_eq!(r.extensions.len(), 5);
+        // A row off by default stays off until `[extensions]` says on.
+        let mut quiet = row("quiet", None);
+        quiet.1.default_on = false;
+        r.set_addon_rows(std::slice::from_ref(&quiet), &BTreeMap::new());
+        assert!(!r.extensions[5].enabled);
+        let on = BTreeMap::from([("quiet".to_owned(), true)]);
+        r.set_addon_rows(&[quiet], &on);
+        assert!(r.extensions[5].enabled);
     }
 
     #[test]

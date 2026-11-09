@@ -206,13 +206,8 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The plugin lists cached for the profiles there are (read now, for
-    // the launches' routing too); fetched again once the loop runs.
-    let profiles = addon_runner::read_profiles(&addons);
-    let cached_plugins: Vec<_> = proxy::plugins::load_all()
-        .into_iter()
-        .filter(|l| profiles.contains(&l.profile))
-        .collect();
+    // The plugin lists cached: their names are no unknown extensions.
+    let cached_plugins = proxy::plugins::load_all();
     let registry = extension_registry(&config, &cached_plugins, &mut key_notices);
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() {
@@ -238,6 +233,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
         addons: Arc::clone(&addons),
     });
     app.extensions = registry;
+    app.extension_config = config.extensions.clone();
     let runner = addon_runner::start(addons, &mut app);
     runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
@@ -818,7 +814,7 @@ fn run_effect(
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
-        e @ (Effect::Bridge(_) | Effect::Addon(_)) => addon_runner::run(e, app, runtime, ev_tx),
+        e @ Effect::Addon(_) => addon_runner::run(e, app, runtime, ev_tx),
         Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.

@@ -4,12 +4,8 @@ use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{AddonResult, App, AppConfig, BridgeCall, Effect, LaunchCall, Mode};
+use super::app::{AddonResult, App, AppConfig, Effect, LaunchCall, Mode};
 use super::keymap::Keymap;
-use crate::addons::vocdoni::bridge::Bridge;
-use crate::addons::vocdoni::plugins::manifest::Manifest;
-use crate::addons::vocdoni::plugins::state::PluginsFetch;
-use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
 use crate::app::state::{ClientState, SavedSession};
 use crate::proto::{Msg, SessionInfo};
 
@@ -155,62 +151,24 @@ pub fn finish_launches(app: &mut App, effects: &[Effect]) -> Vec<Effect> {
     app.take_effects()
 }
 
-// ── The Vocdoni addon's plugin state, through its bridge ─────────────────────
+// ── Addon rows ───────────────────────────────────────────────────────────────
 
-/// `app`'s Vocdoni bridge (each test app has its own addon).
-pub fn bridge(app: &App) -> Bridge {
-    Bridge::of(&app.addons).expect("the vocdoni addon")
-}
-
-/// The runtime's `Changed` after a transition: `App` re-reads the state.
-pub fn changed(app: &mut App) {
-    let addon = crate::addons::vocdoni::NAME;
-    app.on_addon(AddonResult::Changed { addon });
-}
-
-/// `host` connected, with a daemon that serves the addon.
-pub fn plugin_host(app: &mut App, host: &str) {
-    bridge(app).state().host_up(host, true);
-    changed(app);
-}
-
-/// Profile `profile` serves the sample plugins `names` (fetched). The
-/// addon knows the names `app`'s own extensions hold, as at start.
-pub fn serve(app: &mut App, profile: &str, names: &[&str]) {
-    let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
-    bridge(app).set_taken(own.map(|e| e.name.clone()).collect());
-    let list = PluginList {
-        profile: profile.into(),
-        fetched_at: 1,
-        plugins: names.iter().map(|n| sample(n)).collect(),
-    };
-    bridge(app)
-        .state()
-        .on_list(profile, PluginsFetch::Listed(list));
-    changed(app);
-}
-
-/// Plugin `name`'s manifest `m` arrived at hash `aaa…`.
-pub fn manifest_arrives(app: &mut App, name: &str, m: Manifest) {
-    bridge(app)
-        .state()
-        .on_manifest(name, &"a".repeat(64), Ok(m));
-    changed(app);
-}
-
-/// Run the bridge calls among `app`'s effects as `addon_runner::bridge`
-/// does (their I/O is dropped: no runtime) and the `Changed` that follows;
-/// the other effects.
-pub fn run_bridge(app: &mut App) -> Vec<Effect> {
-    let b = bridge(app);
-    let mut rest = Vec::new();
-    for effect in app.take_effects() {
-        match effect {
-            Effect::Bridge(BridgeCall::SetEnabled { name, on }) => b.set_enabled(&name, on),
-            Effect::Bridge(BridgeCall::Refresh) => b.refresh(),
-            other => rest.push(other),
-        }
-    }
-    changed(app);
-    rest
+/// Addon `addon`'s rows as the runtime would send them: `names`, each a
+/// plugin of profile `work` at 1.4.0 with `details`; `refused` ones say why.
+pub fn rows(app: &mut App, addon: &'static str, names: &[(&str, Option<&str>)], details: &[&str]) {
+    let rows = names
+        .iter()
+        .map(|(name, refused)| {
+            let row = crate::addon::ExtensionRow {
+                name: (*name).to_owned(),
+                description: "1.4.0 · work".to_owned(),
+                default_on: true,
+                refused: refused.map(str::to_owned),
+                details: details.iter().map(|d| (*d).to_owned()).collect(),
+                setup: Some((*name).to_owned()),
+            };
+            (addon, row)
+        })
+        .collect();
+    app.on_addon(AddonResult::Rows(rows));
 }

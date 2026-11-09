@@ -5,10 +5,9 @@
 use std::collections::HashMap;
 
 use crate::addon::{
-    ActionRequest, Checklist, ChecklistAnswer, LaunchOption, Notice, Panel, PanelRequest, Segment,
+    ActionRequest, Checklist, ChecklistAnswer, ExtensionRow, LaunchOption, Notice, Panel,
+    PanelRequest, Segment,
 };
-use crate::addons::vocdoni::bridge::Bridge;
-use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::app::launch::ReviewAnswer;
 use crate::proto::SessionId;
 
@@ -61,6 +60,15 @@ pub enum AddonCall {
         addon: &'static str,
         req: ActionRequest,
     },
+    /// The member toggled `addon`'s row `name`: `[extensions]` written,
+    /// then the addon told (D10).
+    ToggleRow {
+        addon: &'static str,
+        name: String,
+        on: bool,
+    },
+    /// `r` on the extensions screen: every addon with rows refreshes them.
+    RefreshRows,
 }
 
 /// What the addon runtime and the runner tell `App` (`addon_runner`).
@@ -94,19 +102,16 @@ pub enum AddonResult {
     },
     /// Every session's addon segments, cleaned (C2): the status bar's.
     Segments(HashMap<SessionId, Vec<(&'static str, Segment)>>),
+    /// Every addon's extension rows, cleaned (C2), in registry order.
+    Rows(Vec<(&'static str, ExtensionRow)>),
 }
 
 impl App {
-    /// The Vocdoni addon's plugin state, when this build has the addon
-    /// (the extension rows', until they are the addon's rows).
-    pub(super) fn bridge(&self) -> Option<Bridge> {
-        Bridge::of(&self.addons)
-    }
-
     /// What the addon runtime says.
     pub fn on_addon(&mut self, result: AddonResult) {
         match result {
-            AddonResult::Changed { .. } => self.on_plugins_changed(),
+            AddonResult::Changed { .. } => {}
+            AddonResult::Rows(rows) => self.on_rows(&rows),
             AddonResult::Options(options) => self.on_launch_options(options),
             AddonResult::Checklist {
                 addon,
@@ -125,14 +130,10 @@ impl App {
         }
     }
 
-    /// The plugin state changed: the registry's plugin rows.
-    fn on_plugins_changed(&mut self) {
-        let Some(bridge) = self.bridge() else {
-            return;
-        };
-        let lists = bridge.lists();
-        let lists: Vec<&PluginList> = lists.iter().collect();
-        self.extensions.set_plugins(&lists, &bridge.enabled());
-        self.redraw = true;
+    /// The addons' rows, with `[extensions]` as this run has it.
+    fn on_rows(&mut self, rows: &[(&'static str, ExtensionRow)]) {
+        let before = self.extensions.clone();
+        self.extensions.set_addon_rows(rows, &self.extension_config);
+        self.redraw |= self.extensions != before;
     }
 }

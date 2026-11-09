@@ -280,40 +280,29 @@ async fn serve(
 
 /// The server's state: the hub (from config.toml, both state files and the
 /// proxy profiles, read off the executor), the extensions and the spawn
-/// context, and the addon runtime they feed. The Vocdoni addon runs the
-/// web's plugins (its runner is activated before the runtime starts, so its
-/// start is not missed; transitional bridge, until P3.13).
+/// context, and the addon runtime they feed. The runtime watches
+/// config.toml (D15) and says when it re-read it.
 async fn build_state(
     auth: auth::Auth,
     assets: Arc<assets::Assets>,
     addons: Arc<crate::addon::Addons>,
 ) -> Result<AppState, String> {
-    let bridge = crate::addons::vocdoni::bridge::Bridge::of(&addons);
-    if let Some(bridge) = &bridge {
-        bridge.activate();
-    }
-    // The web's own config poll (`ext`) tells the runtime until P3.13 (F20).
     let opts = crate::app::addons::RuntimeOptions {
         config_path: crate::paths::config_file(),
-        watch_config: false,
+        watch_config: true,
     };
     let (runtime, rt_rx) = crate::app::addons::AddonRuntime::start(addons, opts);
     // Files, before the hub starts: off the executor.
     let state_path = state::path();
     let hub_cfg = {
-        let (state_path, runtime, bridge) = (state_path.clone(), runtime.clone(), bridge.clone());
-        tokio::task::spawn_blocking(move || {
-            if let Some(bridge) = &bridge {
-                bridge.read_profiles();
-            }
-            hub::HubConfig {
-                config: crate::config::load(),
-                tui_state: crate::app::state::ClientState::load(&crate::paths::client_state()),
-                web: state::load(&state_path),
-                profiles: plugins::profiles(&runtime),
-                state_path,
-                runtime,
-            }
+        let (state_path, runtime) = (state_path.clone(), runtime.clone());
+        tokio::task::spawn_blocking(move || hub::HubConfig {
+            config: crate::config::load(),
+            tui_state: crate::app::state::ClientState::load(&crate::paths::client_state()),
+            web: state::load(&state_path),
+            profiles: plugins::profiles(&runtime),
+            state_path,
+            runtime,
         })
         .await
         .map_err(|e| format!("cannot read the configuration: {e}"))?
@@ -321,21 +310,9 @@ async fn build_state(
     let (config, profiles) = (hub_cfg.config.clone(), hub_cfg.profiles.clone());
     let hub = hub::start(hub_cfg);
     let ext = ext::Extensions::load(&config, &hub).await;
-    if let Some(bridge) = &bridge {
-        let registry = ext.registry();
-        let registry = registry.lock().unwrap_or_else(|p| p.into_inner());
-        let own = registry.extensions.iter().filter(|e| !e.is_plugin());
-        bridge.set_taken(own.map(|e| e.name.clone()).collect());
-    }
-    {
-        let registry = ext.registry();
-        let registry = registry.lock().unwrap_or_else(|p| p.into_inner());
-        let own = registry.extensions.iter().filter(|e| !e.is_plugin());
-        runtime.set_core_extensions(own.map(|e| e.name.clone()).collect());
-    }
-    let feed = plugins::Feed::new(hub.clone(), ext.registry(), runtime.clone(), profiles);
+    runtime.set_core_extensions(ext.own_names());
+    let feed = plugins::Feed::new(hub.clone(), Arc::clone(&ext), runtime.clone(), profiles);
     addon_feed::follow(hub.clone(), runtime.clone(), rt_rx, feed);
-    ext.watch_config(hub.clone(), runtime.clone());
     let ctx = Arc::new(spawn::SpawnCtx {
         hub: hub.clone(),
         ext: Arc::clone(&ext),

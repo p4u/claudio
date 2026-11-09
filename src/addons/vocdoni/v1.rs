@@ -13,10 +13,11 @@ use crate::addon::{Block, Page, Panel};
 pub const PANEL: &str = "plugins-v1";
 
 /// The `plugins` table's columns.
-pub const PLUGINS: [&str; 7] = [
+pub const PLUGINS: [&str; 8] = [
     "name",
     "version",
     "profile",
+    "refused",
     "manifest",
     "manifest_error",
     "choices_saved",
@@ -92,6 +93,7 @@ fn plugin_rows(state: &State) -> Vec<Vec<String>> {
             p.name.clone(),
             p.version.clone(),
             row.profile.to_owned(),
+            row.refused.clone().unwrap_or_default(),
             manifest.to_owned(),
             error,
             saved.to_string(),

@@ -14,15 +14,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::addon_calls::{AddonCall, Origin};
-use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mode, ReplyTo};
+use super::app::{AddonResult, App, Effect, LaunchCall, Launched, Mode, ReplyTo};
 use super::HostEvent;
 use crate::addon::{
     checklist as clean_checklist, error_panel, line, notice as clean_notice,
     option as clean_option, panel as clean_panel, segment as clean_segment, ActionRequest, Addons,
     Checklist, ChecklistAnswer, Frontend, LaunchOp, LaunchOption, Level, Notice, PanelRequest,
-    Pick, Segment, SessionSnap, TEXT_BYTES,
+    Segment, SessionSnap, TEXT_BYTES,
 };
-use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
 use crate::app::launch::{self, LaunchSpec, Parked, ReviewAnswer, Step};
@@ -103,30 +102,19 @@ struct Waiting {
     pending: Pending,
 }
 
-/// The proxy profiles' names, read now (blocking, at the start): the
-/// launches' routing has them from the first launch on.
-pub(super) fn read_profiles(addons: &Addons) -> Vec<String> {
-    Bridge::of(addons).map_or_else(Vec::new, |b| b.read_profiles())
-}
-
 /// The runtime for `addons`, reading the TUI's config.toml. The TUI does
-/// not watch the file (D15). The Vocdoni addon runs the TUI's plugins:
-/// it learns the names `app`'s own extensions hold first. `app` gets the
-/// launch options.
+/// not watch the file (D15). The addons learn the names `app`'s own
+/// extensions hold; `app` gets the launch options and the addons' rows.
 pub(super) fn start(addons: Arc<Addons>, app: &mut App) -> Runner {
-    if let Some(bridge) = Bridge::of(&addons) {
-        let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
-        bridge.set_taken(own.map(|e| e.name.clone()).collect());
-        bridge.activate();
-    }
     let opts = RuntimeOptions {
         config_path: paths::config_file(),
         watch_config: false,
     };
     let (rt, rx) = AddonRuntime::start(addons, opts);
-    let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
+    let own = app.extensions.extensions.iter().filter(|e| !e.is_addon());
     rt.set_core_extensions(own.map(|e| e.name.clone()).collect());
     app.on_addon(AddonResult::Options(options(&rt)));
+    app.on_addon(AddonResult::Rows(rt.extension_rows()));
     Runner {
         runtime: Edge::new(rt),
         rx,
@@ -184,22 +172,9 @@ pub(super) fn on_reply(app: &mut App, runtime: &AddonRuntime, to: ReplyTo, reply
 }
 
 /// The sessions as `App` has them now, its active one focused. The runtime
-/// sends events only for what changed; the Vocdoni addon learns the
-/// options they (and the run's flags) use. When they changed, or a second
+/// sends events only for what changed. When they changed, or a second
 /// passed, `App` gets every session's segments again.
 pub(super) fn sync(edge: &Edge, app: &mut App) {
-    if let Some(bridge) = Bridge::of(edge.addons()) {
-        let mut used: Vec<(String, String)> = app
-            .sessions
-            .iter()
-            .filter_map(|v| v.launch.as_ref())
-            .map(|c| (c.addon.clone(), c.option.clone()))
-            .collect();
-        if let Pick::Option { addon, option } = &app.launch_default.pick {
-            used.push((addon.clone(), option.clone()));
-        }
-        bridge.use_launches(&used);
-    }
     let snaps = snaps(app);
     let due = {
         let mut shown = edge.shown.lock().unwrap_or_else(|e| e.into_inner());
@@ -264,6 +239,7 @@ pub(super) fn on_out(app: &mut App, runtime: &AddonRuntime, out: RuntimeOut) {
         RuntimeOut::Notice { addon, notice } => app.notify(format!("{addon}: {}", notice.text)),
         RuntimeOut::Changed { addon } => {
             app.on_addon(AddonResult::Changed { addon });
+            app.on_addon(AddonResult::Rows(runtime.extension_rows()));
             app.on_addon(AddonResult::Segments(segments(runtime, &snaps(app))));
             for (shown, id) in app.checklists_shown() {
                 if let Some(c) = checklist_of(runtime, shown, &id).filter(|_| shown == addon) {
@@ -291,10 +267,9 @@ fn checklist_of(runtime: &AddonRuntime, addon: &'static str, id: &str) -> Option
     Some(clean_checklist(checklist))
 }
 
-/// Run an addon effect: a bridge call, or an [`AddonCall`].
+/// Run an [`AddonCall`].
 pub(super) fn run(effect: Effect, app: &mut App, edge: &Edge, tx: &mpsc::Sender<HostEvent>) {
     match effect {
-        Effect::Bridge(call) => bridge(call, edge),
         Effect::Addon(AddonCall::OpenChecklist { addon, id, origin }) => {
             match checklist_of(edge, addon, &id) {
                 Some(checklist) => app.on_addon(AddonResult::Checklist {
@@ -317,6 +292,10 @@ pub(super) fn run(effect: Effect, app: &mut App, edge: &Edge, tx: &mpsc::Sender<
         }
         Effect::Addon(AddonCall::Panel { gen, addon, req }) => panel(edge, (gen, addon), req, tx),
         Effect::Addon(AddonCall::Action { addon, req }) => action(edge, addon, req, tx),
+        Effect::Addon(AddonCall::ToggleRow { addon, name, on }) => {
+            toggle_row(edge, (addon, name, on), tx)
+        }
+        Effect::Addon(AddonCall::RefreshRows) => refresh_rows(edge, tx),
         _ => {}
     }
 }
@@ -383,16 +362,39 @@ fn action(edge: &Edge, addon: &'static str, req: ActionRequest, tx: &mpsc::Sende
     });
 }
 
-/// Run a call into the Vocdoni addon's plugin state: the transition is
-/// immediate, its I/O runs on the runtime's tasks.
-fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
-    let Some(bridge) = Bridge::of(runtime.addons()) else {
-        return;
-    };
-    match call {
-        BridgeCall::SetEnabled { name, on } => bridge.set_enabled(&name, on),
-        BridgeCall::Refresh => bridge.refresh(),
-    }
+/// The member toggled `addon`'s row `name` (D10), on a task: written,
+/// then the addon told; the outcome is a notice.
+fn toggle_row(
+    edge: &Edge,
+    (addon, name, on): (&'static str, String, bool),
+    tx: &mpsc::Sender<HostEvent>,
+) {
+    let (rt, tx) = (edge.rt.clone(), tx.clone());
+    tokio::spawn(async move {
+        let state = if on { "on" } else { "off" };
+        let shown = line(&name, 64);
+        let text = match rt.toggle_row(addon, name, on).await {
+            Ok(Some(notice)) => notice.text,
+            Ok(None) => format!("extension {shown} {state} (saved)"),
+            Err(why) => why,
+        };
+        let _ = tx.send(HostEvent::Notice(text)).await;
+    });
+}
+
+/// `r` on the extensions screen, on a task: a failure is a notice.
+fn refresh_rows(edge: &Edge, tx: &mpsc::Sender<HostEvent>) {
+    let (rt, tx) = (edge.rt.clone(), tx.clone());
+    tokio::spawn(async move {
+        for result in rt.refresh_rows().await {
+            let text = match result {
+                Ok(Some(notice)) => notice.text,
+                Ok(None) => continue,
+                Err(why) => why,
+            };
+            let _ = tx.send(HostEvent::Notice(text)).await;
+        }
+    });
 }
 
 /// Save the member's answer to `addon`'s checklist `id` on a task (15 s);

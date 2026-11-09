@@ -2,29 +2,27 @@
 //! deleted with the v1 ops in P3.16): the `proxy.*` and `plugins.*` ops,
 //! the v1 `proxy`/`first_party`/`skip_plugins` of a spawn as a launch
 //! select, and the `plugin_status`, `profiles` and `extensions_changed`
-//! events. Everything is read from the addon's state through its bridge
-//! (`addons::vocdoni::bridge`): the web keeps no plugin state or proxy
-//! cache of its own (A5). The DTOs name plugins, versions, ids and
-//! reasons, never an env value.
+//! events. Everything comes through the addon API: its rows and
+//! checklists, and the tables of its v1-only panel (`vocdoni::v1`); the
+//! web keeps no plugin state or proxy cache of its own (A5). The DTOs name
+//! plugins, versions, ids and reasons, never an env value.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::ext::Extensions;
 use super::hub::HubHandle;
 use super::spawn::ProxyArg;
 use super::ws::parse;
 use super::AppState;
-use crate::addon::{LaunchSelect, Pick};
-use crate::addons::vocdoni::bridge::Bridge;
+use crate::addon::{Block, Checklist, ChecklistAnswer, LaunchSelect, PanelRequest, Pick};
 use crate::addons::vocdoni::daemon as apply;
 use crate::addons::vocdoni::launch::FIRST_PARTY_FLAG;
-use crate::addons::vocdoni::plugins::choices::{choices_for, PluginChoices};
-use crate::addons::vocdoni::plugins::manifest::Manifest;
-use crate::addons::vocdoni::plugins::state::{Apply, ApplyState, ManifestState};
-use crate::addons::vocdoni::proxy::plugins::PluginList;
+use crate::addons::vocdoni::v1::{PANEL, PLUGINS, SKIPPED, STATUS};
 use crate::addons::vocdoni::NAME;
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::{Registry, Source};
@@ -32,6 +30,8 @@ use crate::proto::SessionId;
 
 /// The most disabled ids a save takes (the daemon's cap).
 const MAX_DISABLED: usize = 256;
+/// The v1 panel's bound (an addon panel's, D13).
+const PANEL_WAIT: Duration = Duration::from_secs(10);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -59,101 +59,154 @@ pub(crate) fn extensions_changed() -> Value {
     json!({"t": "ev", "ev": "extensions_changed"})
 }
 
-/// One `plugin_status` entry (the event minus `t`/`ev`): what `host`
-/// answered for plugin `name`. Of an `Applied`, only the ids, reasons and
-/// dropped flags.
-pub(crate) fn status_dto(host: &str, name: &str, apply: &Apply) -> Value {
-    let (state, applied, error) = match &apply.state {
-        ApplyState::Pending => ("pending", None, None),
-        ApplyState::Ready(a) => ("ready", Some(a.as_ref()), None),
-        ApplyState::Failed(why) => ("failed", None, Some(clean(why, 300))),
-        ApplyState::TooOld => ("too_old", None, None),
+/// The tables of the addon's v1 panel, cleaned (C2): each row a map of
+/// its columns.
+#[derive(Debug, Default)]
+pub(crate) struct Tables {
+    plugins: Vec<BTreeMap<&'static str, String>>,
+    status: Vec<BTreeMap<&'static str, String>>,
+    skipped: Vec<BTreeMap<&'static str, String>>,
+}
+
+/// The rows of `block` (a table) keyed by `cols`.
+fn keyed(block: Option<&Block>, cols: &[&'static str]) -> Vec<BTreeMap<&'static str, String>> {
+    let Some(Block::Table { rows, .. }) = block else {
+        return Vec::new();
     };
-    let ids = |list: &[String]| -> Vec<String> { list.iter().map(|i| clean(i, 300)).collect() };
-    let skipped: Vec<Value> = applied
-        .map(|a| {
-            a.skipped
-                .iter()
-                .map(|(id, reason)| {
-                    json!({
-                        "id": clean(id, 300),
-                        "reason": clean(reason, 300),
-                        "retry_secs": apply::retry_secs(reason),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    json!({
-        "host": host,
-        "name": name,
-        "state": state,
-        "installed": applied.map(|a| ids(&a.installed)).unwrap_or_default(),
-        "present": applied.map(|a| ids(&a.present)).unwrap_or_default(),
-        "skipped": skipped,
-        "dropped": applied.map(|a| ids(&a.dropped)).unwrap_or_default(),
-        "error": error,
+    rows.iter()
+        .map(|r| cols.iter().copied().zip(r.iter().cloned()).collect())
+        .collect()
+}
+
+/// The addon's v1 panel, within 10 s, through the API.
+pub(crate) async fn tables(rt: &AddonRuntime) -> Result<Tables, String> {
+    let entry = rt.addons().get(NAME).cloned();
+    let entry = entry.ok_or_else(|| "no plugins in this build".to_owned())?;
+    let ui = entry
+        .ui()
+        .ok_or_else(|| "no plugins in this build".to_owned())?;
+    let req = PanelRequest {
+        id: PANEL.to_owned(),
+        page: 0,
+        window: None,
+        sid: None,
+    };
+    let panel = tokio::time::timeout(PANEL_WAIT, ui.panel(req, rt.ctx(NAME)))
+        .await
+        .map_err(|_| "the plugins did not answer".to_owned())?;
+    let panel = crate::addon::panel(panel);
+    let page = |title: &str| panel.pages.iter().find(|p| p.title == title);
+    let (plugins, status) = (page("plugins"), page("status"));
+    if plugins.is_none() || status.is_none() {
+        return Err("the plugins could not be listed".to_owned());
+    }
+    fn blocks(p: Option<&crate::addon::Page>, i: usize) -> Option<&Block> {
+        p.and_then(|p| p.blocks.get(i))
+    }
+    Ok(Tables {
+        plugins: keyed(blocks(plugins, 0), &PLUGINS),
+        status: keyed(blocks(status, 0), &STATUS),
+        skipped: keyed(blocks(status, 1), &SKIPPED),
     })
 }
 
-/// The `plugins.items` reply for manifest `m`: every item, checked unless
-/// the saved choices turn it off (all checked without choices).
-pub(crate) fn items_dto(m: &Manifest, choices: Option<&PluginChoices>) -> Value {
-    let items: Vec<Value> = m
-        .items()
-        .into_iter()
+/// A column of a row, `""` when absent.
+fn col<'a>(row: &'a BTreeMap<&'static str, String>, name: &str) -> &'a str {
+    row.get(name).map_or("", String::as_str)
+}
+
+/// Words of a space-joined list.
+fn words(s: &str) -> Vec<String> {
+    s.split(' ')
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `""` as null.
+fn or_null(s: &str) -> Value {
+    if s.is_empty() {
+        Value::Null
+    } else {
+        Value::String(s.to_owned())
+    }
+}
+
+/// Every `plugin_status` entry (the event minus `t`/`ev`), by `(host,
+/// plugin)`: ids, reasons and dropped flags only.
+pub(crate) fn statuses(t: &Tables) -> BTreeMap<(String, String), Value> {
+    let mut out = BTreeMap::new();
+    for row in &t.status {
+        let (host, name) = (col(row, "host"), col(row, "name"));
+        let skipped: Vec<Value> = t
+            .skipped
+            .iter()
+            .filter(|k| col(k, "host") == host && col(k, "name") == name)
+            .map(|k| {
+                let reason = col(k, "reason");
+                json!({"id": col(k, "id"), "reason": reason, "retry_secs": apply::retry_secs(reason)})
+            })
+            .collect();
+        let dto = json!({
+            "host": host,
+            "name": name,
+            "state": col(row, "state"),
+            "installed": words(col(row, "installed")),
+            "present": words(col(row, "present")),
+            "skipped": skipped,
+            "dropped": words(col(row, "dropped")),
+            "error": or_null(col(row, "error")),
+        });
+        out.insert((host.to_owned(), name.to_owned()), dto);
+    }
+    out
+}
+
+/// The `plugins.items` reply for checklist `c` (plugin `version`).
+pub(crate) fn items_dto(c: &Checklist, version: &str) -> Value {
+    let items: Vec<Value> = c
+        .items
+        .iter()
         .map(|i| {
-            let checked = !choices.is_some_and(|c| c.disabled.contains(&i.id));
             json!({
-                "id": clean(&i.id, 300),
-                "section": i.section.heading(),
-                "title": clean(&i.title, 300),
-                "checked": checked,
+                "id": i.id,
+                "section": i.section.clone().unwrap_or_default(),
+                "title": i.label,
+                "checked": i.on,
             })
         })
         .collect();
-    json!({
-        "name": clean(&m.name, 80),
-        "version": clean(&m.version, 80),
-        "items": items,
-    })
+    json!({"name": c.id, "version": version, "items": items})
 }
 
 /// The `plugins.list` reply: every plugin of every list (refused ones too),
 /// with its name, version and profile, never its env or bundle URL.
-pub(crate) fn list_dto(bridge: &Bridge, registry: &Registry) -> Value {
-    let mut out = Vec::new();
-    for list in bridge.lists() {
-        let profile = &list.profile;
-        for (p, refused) in list.checked() {
-            let enabled = registry.extensions.iter().any(|e| {
-                e.name == p.name
-                    && e.enabled
-                    && matches!(&e.source, Source::Plugin { profile: q, refused: None } if q == profile)
-            });
-            let (manifest, error, description) = match (&refused, bridge.manifest_at(&p.name)) {
-                (Some(why), _) => ("failed", Some(clean(why, 300)), String::new()),
-                (None, Some((sha, ManifestState::Ready(m)))) if sha == p.bundle_sha256 => {
-                    ("ready", None, clean(&m.description, 1000))
-                }
-                (None, Some((_, ManifestState::Failed(why)))) => {
-                    ("failed", Some(clean(&why, 300)), String::new())
-                }
-                (None, _) => ("fetching", None, String::new()),
-            };
-            out.push(json!({
-                "name": clean(&p.name, 80),
-                "version": clean(&p.version, 80),
-                "profile": clean(profile, 80),
-                "enabled": enabled,
-                "refused": refused.map(|r| clean(&r, 300)),
-                "choices_saved": bridge.choices(&p.name).is_some(),
-                "manifest": manifest,
-                "manifest_error": error,
-                "description": description,
-            }));
-        }
-    }
+pub(crate) fn list_dto(t: &Tables, registry: &Registry) -> Value {
+    let on = |name: &str| {
+        registry.extensions.iter().any(|e| {
+            e.name == name
+                && e.enabled
+                && matches!(&e.source, Source::Addon { addon, refused: None, .. } if *addon == NAME)
+        })
+    };
+    let out: Vec<Value> = t
+        .plugins
+        .iter()
+        .map(|p| {
+            let name = col(p, "name");
+            json!({
+                "name": name,
+                "version": col(p, "version"),
+                "profile": col(p, "profile"),
+                "enabled": col(p, "refused").is_empty() && on(name),
+                "refused": or_null(col(p, "refused")),
+                "choices_saved": col(p, "choices_saved") == "true",
+                "manifest": col(p, "manifest"),
+                "manifest_error": or_null(col(p, "manifest_error")),
+                "description": col(p, "description"),
+            })
+        })
+        .collect();
     json!({ "plugins": out })
 }
 
@@ -195,7 +248,7 @@ pub(crate) fn profiles(rt: &AddonRuntime) -> (Vec<String>, Option<String>) {
 /// `Changed` of the addon, what differs is sent.
 pub(crate) struct Feed {
     hub: HubHandle,
-    registry: Arc<Mutex<Registry>>,
+    ext: Arc<Extensions>,
     runtime: AddonRuntime,
     /// Each `(host, plugin)`'s last `plugin_status`.
     applies: BTreeMap<(String, String), Value>,
@@ -206,58 +259,47 @@ impl Feed {
     /// Starting from `profiles`, as the hub's snapshot has them.
     pub(crate) fn new(
         hub: HubHandle,
-        registry: Arc<Mutex<Registry>>,
+        ext: Arc<Extensions>,
         runtime: AddonRuntime,
         profiles: (Vec<String>, Option<String>),
     ) -> Feed {
         Feed {
             hub,
-            registry,
+            ext,
             runtime,
             applies: BTreeMap::new(),
             profiles,
         }
     }
 
-    /// The addon's state changed: the registry's plugin rows (then
+    /// An addon's data changed: the registry's addon rows (then
     /// `extensions_changed`), every changed `plugin_status`, the `profiles`.
     pub(crate) async fn changed(&mut self) {
-        let Some(bridge) = Bridge::of(self.runtime.addons()) else {
-            return;
-        };
-        let lists = bridge.lists();
-        let lists: Vec<&PluginList> = lists.iter().collect();
-        let rows = {
-            let mut registry = lock(&self.registry);
-            let before = registry.clone();
-            registry.set_plugins(&lists, &bridge.enabled());
-            *registry != before
-        };
-        if rows {
+        if self.ext.set_rows(&self.runtime.extension_rows()) {
             self.hub.broadcast(extensions_changed());
         }
-        let now: BTreeMap<(String, String), Value> = bridge
-            .apply_states()
-            .into_iter()
-            .map(|(host, name, a)| {
-                let dto = status_dto(&host, &name, &a);
-                ((host, name), dto)
-            })
-            .collect();
-        for (key, dto) in &now {
-            if self.applies.get(key) != Some(dto) {
-                let mut v = dto.clone();
-                v["t"] = "ev".into();
-                v["ev"] = "plugin_status".into();
-                self.hub.broadcast(v);
+        if let Ok(t) = tables(&self.runtime).await {
+            let now = statuses(&t);
+            for (key, dto) in &now {
+                if self.applies.get(key) != Some(dto) {
+                    let mut v = dto.clone();
+                    v["t"] = "ev".into();
+                    v["ev"] = "plugin_status".into();
+                    self.hub.broadcast(v);
+                }
             }
+            self.applies = now;
         }
-        self.applies = now;
         let profiles = profiles(&self.runtime);
         if profiles != self.profiles {
             self.profiles = profiles.clone();
             self.hub.set_profiles(profiles.0, profiles.1).await;
         }
+    }
+
+    /// config.toml was re-read: the registry follows it.
+    pub(crate) async fn config_changed(&self) {
+        self.ext.reread(&self.hub).await;
     }
 }
 
@@ -293,8 +335,7 @@ struct PluginSaveArgs {
 
 /// The v1 `proxy.*` and `plugins.*` ops (docs/web-protocol.md §5).
 pub(crate) async fn dispatch_v1(state: &AppState, op: &str, args: Value) -> Result<Value, String> {
-    let bridge =
-        || Bridge::of(state.addons.addons()).ok_or_else(|| "no plugins in this build".to_owned());
+    let rt = &state.addons;
     match op {
         "proxy.stats" => {
             let a: StatsArgs = parse(args)?;
@@ -312,28 +353,44 @@ pub(crate) async fn dispatch_v1(state: &AppState, op: &str, args: Value) -> Resu
         }
         "plugins.list" => {
             parse::<NoArgs>(args)?;
+            let t = tables(rt).await?;
             let registry = state.ctx.ext.registry();
             let registry = lock(&registry);
-            Ok(list_dto(&bridge()?, &registry))
+            Ok(list_dto(&t, &registry))
         }
         "plugins.items" => {
             let a: NameArgs = parse(args)?;
-            let (m, choices) = bridge()?.items(&a.name)?;
-            Ok(items_dto(&m, choices.as_ref()))
+            let (c, version) = checklist(rt, &a.name).await?;
+            Ok(items_dto(&c, &version))
         }
         "plugins.save" => {
             let a: PluginSaveArgs = parse(args)?;
-            save(&bridge()?, &a.name, a.disabled)
-                .await
-                .map(|()| json!({}))
+            save(rt, &a.name, a.disabled).await.map(|()| json!({}))
         }
         "plugins.status" => {
             parse::<NoArgs>(args)?;
-            let states = bridge()?.apply_states();
-            let status: Vec<Value> = states.iter().map(|(h, n, a)| status_dto(h, n, a)).collect();
+            let status: Vec<Value> = statuses(&tables(rt).await?).into_values().collect();
             Ok(json!({ "status": status }))
         }
         _ => Err("unknown op".to_owned()),
+    }
+}
+
+/// Plugin `name`'s checklist (its manifest's items, cleaned) and version,
+/// or why there is none yet.
+async fn checklist(rt: &AddonRuntime, name: &str) -> Result<(Checklist, String), String> {
+    let t = tables(rt).await?;
+    let row = t.plugins.iter().find(|p| col(p, "name") == name);
+    let row = row.ok_or_else(|| "no such plugin".to_owned())?;
+    let entry = rt.addons().get(NAME).cloned();
+    let found = entry
+        .as_ref()
+        .and_then(|e| e.ui())
+        .and_then(|ui| ui.checklist(name, rt.ctx(NAME).as_ref()));
+    match (found, col(row, "manifest")) {
+        (Some(c), _) => Ok((crate::addon::checklist(c), col(row, "version").to_owned())),
+        (None, "failed") => Err(format!("manifest: {}", col(row, "manifest_error"))),
+        (None, _) => Err("the manifest is still being fetched".to_owned()),
     }
 }
 
@@ -351,23 +408,34 @@ async fn session_proxy(hub: &HubHandle, sid: SessionId) -> Result<(String, Strin
     Ok((profile, conversation))
 }
 
-/// `plugins.save`: the ids checked against the manifest, the choices
-/// written to `[plugins.<name>]` by the addon (awaited), every host asked
-/// again.
-async fn save(bridge: &Bridge, name: &str, disabled: Vec<String>) -> Result<(), String> {
-    let (m, earlier) = bridge.items(name)?;
+/// `plugins.save`: the ids checked against the manifest's items, the
+/// choices saved by the addon (awaited: `[plugins.<name>]`), every host
+/// asked again.
+async fn save(rt: &AddonRuntime, name: &str, disabled: Vec<String>) -> Result<(), String> {
+    let (c, _) = checklist(rt, name).await?;
     if disabled.len() > MAX_DISABLED {
         return Err(format!("bad request: disabled: at most {MAX_DISABLED} ids"));
     }
-    let ids = m.ids();
-    if let Some(bad) = disabled.iter().find(|d| !ids.contains(d)) {
+    if let Some(bad) = disabled
+        .iter()
+        .find(|d| !c.items.iter().any(|i| &i.id == *d))
+    {
         return Err(format!(
             "bad request: disabled: no item {:?}",
             clean(bad, 80)
         ));
     }
-    let choices = choices_for(&m, &disabled, earlier.as_ref());
-    bridge.save(name, choices).await?;
+    let entry = rt.addons().get(NAME).cloned();
+    let ui = entry.as_ref().and_then(|e| e.ui());
+    let ui = ui.ok_or_else(|| "no plugins in this build".to_owned())?;
+    let answer = ChecklistAnswer::Save {
+        revision: c.revision,
+        off: disabled,
+    };
+    let saving = ui.save_checklist(name.to_owned(), answer, rt.ctx(NAME));
+    tokio::time::timeout(Duration::from_secs(15), saving)
+        .await
+        .map_err(|_| "the save timed out".to_owned())??;
     tracing::info!(op = "plugins.save", plugin = name, "web op");
     Ok(())
 }
@@ -375,137 +443,114 @@ async fn save(bridge: &Bridge, name: &str, disabled: Vec<String>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::vocdoni::daemon::Applied;
-    use crate::addons::vocdoni::plugins::state::PluginsFetch;
+    use crate::addon::{ChecklistItem, ExtensionRow, Page, Panel};
 
-    const MANIFEST: &str = r#"format = 1
-name = "vocdoni-test"
-version = "1.0.0"
-description = "Test setup"
-instructions = "Manifest instructions for the test."
-
-[[mcp]]
-name = "kb"
-type = "http"
-url = "https://kb.example.org/mcp"
-headers = { Authorization = "Bearer ${VOCDONI_TEST_TOKEN}" }
-secrets = ["VOCDONI_TEST_TOKEN"]
-
-[[agent]]
-name = "reviewer"
-description = "Reviews"
-prompt = "Review the change."
-"#;
-
-    #[test]
-    fn items_mark_disabled_ids_unchecked() {
-        let m = Manifest::parse(MANIFEST).unwrap();
-        let choices = PluginChoices {
-            disabled: vec!["mcp:kb".into()],
-            ..Default::default()
-        };
-        let v = items_dto(&m, Some(&choices));
-        assert_eq!(v["name"], "vocdoni-test");
-        assert_eq!(v["version"], "1.0.0");
-        let items = v["items"].as_array().unwrap();
-        assert!(items.len() >= 3, "{v}");
-        for item in items {
-            assert_eq!(item["checked"], item["id"] != "mcp:kb", "{item}");
+    fn table(cols: &[&str], rows: &[&[&str]]) -> Block {
+        Block::Table {
+            header: cols.iter().map(|c| (*c).to_owned()).collect(),
+            rows: rows
+                .iter()
+                .map(|r| r.iter().map(|c| (*c).to_owned()).collect())
+                .collect(),
         }
-        let kb = items.iter().find(|i| i["id"] == "mcp:kb").unwrap();
-        assert_eq!(kb["section"], "MCP servers");
-        let v = items_dto(&m, None);
-        assert!(v["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|i| i["checked"] == true));
+    }
+
+    fn sample_tables() -> Tables {
+        let plugins = table(
+            &PLUGINS,
+            &[&["kb", "1.4.0", "env", "", "ready", "", "true", "KB"]],
+        );
+        let status = table(
+            &STATUS,
+            &[&["local", "kb", "ready", "plugin:a@m", "", "--agents", ""]],
+        );
+        let skipped = table(
+            &SKIPPED,
+            &[
+                &["local", "kb", "plugin:b@m", "down (retrying in 15 s)"],
+                &["local", "kb", "plugin:c@m", "installing"],
+            ],
+        );
+        let panel = Panel {
+            title: PANEL.into(),
+            pages: vec![
+                Page {
+                    title: "plugins".into(),
+                    blocks: vec![plugins],
+                },
+                Page {
+                    title: "status".into(),
+                    blocks: vec![status, skipped],
+                },
+            ],
+            actions: Vec::new(),
+            updated: None,
+        };
+        let page = |i: usize| panel.pages[i].blocks.clone();
+        Tables {
+            plugins: keyed(page(0).first(), &PLUGINS),
+            status: keyed(page(1).first(), &STATUS),
+            skipped: keyed(page(1).get(1), &SKIPPED),
+        }
     }
 
     #[test]
-    fn status_dto_carries_retry_seconds() {
-        let applied = Applied {
-            name: "team".into(),
-            version: "1.0.0".into(),
-            mcp_config: None,
-            agents: None,
-            instructions: String::new(),
-            env: vec![("REGION".into(), "eu-secret-ish".into())],
-            installed: vec!["plugin:a@m".into()],
-            present: vec![],
-            skipped: vec![
-                ("plugin:b@m".into(), "down (retrying in 15 s)".into()),
-                ("plugin:c@m".into(), "installing".into()),
-            ],
-            dropped: vec!["--agents".into()],
-        };
-        let apply = Apply {
-            sha: "a".repeat(64),
-            state: ApplyState::Ready(Box::new(applied)),
-            asked: 0,
-        };
-        let v = status_dto("local", "team", &apply);
+    fn statuses_carry_ids_and_retry_seconds() {
+        let all = statuses(&sample_tables());
+        let v = &all[&("local".to_owned(), "kb".to_owned())];
         assert_eq!(v["state"], "ready");
         assert_eq!(v["skipped"][0]["retry_secs"], 15);
         assert!(v["skipped"][1]["retry_secs"].is_null());
         assert_eq!(v["installed"], json!(["plugin:a@m"]));
+        assert_eq!(v["present"], json!([]));
         assert_eq!(v["dropped"], json!(["--agents"]));
         assert!(v["error"].is_null());
-        assert!(!v.to_string().contains("eu-secret-ish"), "no env value");
-        let failed = Apply {
-            state: ApplyState::Failed("boom".into()),
-            ..apply.clone()
-        };
-        let v = status_dto("local", "team", &failed);
-        assert_eq!(
-            (v["state"].as_str(), v["error"].as_str()),
-            (Some("failed"), Some("boom"))
-        );
-        let old = Apply {
-            state: ApplyState::TooOld,
-            ..apply
-        };
-        assert_eq!(status_dto("h", "team", &old)["state"], "too_old");
     }
 
     #[test]
-    fn list_dto_has_no_env() {
-        let mut p = crate::addons::vocdoni::proxy::plugins::sample("vocdoni-test");
-        p.env = vec![("VOCDONI_TEST_TOKEN".into(), "plugin-SECRET-value".into())];
-        let list = PluginList {
-            profile: "env".into(),
-            fetched_at: 0,
-            plugins: vec![p.clone()],
-        };
-        let addons = crate::addon::Addons::new(crate::addons::all()).unwrap();
-        let bridge = Bridge::of(&addons).unwrap();
-        bridge
-            .state()
-            .on_list("env", PluginsFetch::Listed(list.clone()));
+    fn list_and_items_rebuild_the_v1_shapes() {
         let mut registry = Registry::default();
-        registry.set_plugins(&[&list], &BTreeMap::new());
-        let v = list_dto(&bridge, &registry);
-        let text = v.to_string();
-        assert!(!text.contains("plugin-SECRET-value"), "{text}");
-        assert!(!text.contains(&p.bundle_url), "{text}");
+        let row = ExtensionRow {
+            name: "kb".into(),
+            description: "1.4.0 · env".into(),
+            default_on: true,
+            refused: None,
+            details: Vec::new(),
+            setup: Some("kb".into()),
+        };
+        registry.set_addon_rows(&[(NAME, row)], &BTreeMap::new());
+        let v = list_dto(&sample_tables(), &registry);
         let row = &v["plugins"][0];
-        assert_eq!(row["name"], "vocdoni-test");
+        assert_eq!(row["name"], "kb");
         assert_eq!(row["profile"], "env");
         assert_eq!(row["enabled"], true);
-        assert_eq!(row["choices_saved"], false);
-        assert_eq!(row["manifest"], "fetching");
-        let m = Manifest::parse(MANIFEST).unwrap();
-        let mut state = bridge.state();
-        state
-            .plugins
-            .choices
-            .insert("vocdoni-test".into(), PluginChoices::default());
-        state.on_manifest("vocdoni-test", &p.bundle_sha256, Ok(m));
-        drop(state);
-        let v = list_dto(&bridge, &registry);
-        assert_eq!(v["plugins"][0]["choices_saved"], true);
-        assert_eq!(v["plugins"][0]["manifest"], "ready");
-        assert_eq!(v["plugins"][0]["description"], "Test setup");
+        assert!(row["refused"].is_null());
+        assert_eq!(row["choices_saved"], true);
+        assert_eq!(row["manifest"], "ready");
+        assert!(row["manifest_error"].is_null());
+        assert_eq!(row["description"], "KB");
+        let c = Checklist {
+            id: "kb".into(),
+            revision: "a".repeat(64),
+            title: "Set up kb 1.4.0".into(),
+            intro: String::new(),
+            items: vec![ChecklistItem {
+                id: "mcp:kb".into(),
+                label: "kb".into(),
+                detail: None,
+                section: Some("MCP servers".into()),
+                on: false,
+            }],
+        };
+        let v = items_dto(&c, "1.4.0");
+        assert_eq!(
+            (v["name"].as_str(), v["version"].as_str()),
+            (Some("kb"), Some("1.4.0"))
+        );
+        assert_eq!(
+            v["items"][0],
+            json!({"id": "mcp:kb", "section": "MCP servers", "title": "kb", "checked": false})
+        );
     }
 
     #[test]

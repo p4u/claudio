@@ -1,17 +1,18 @@
 //! The extensions registry, the external extension host, snippets and the
 //! config.toml re-read, for the web. The registry is the TUI's
-//! (`tui::extensions::Registry`): built-ins, external extensions (their
-//! programs run by `ExtensionHost`) and the proxy plugins' rows.
+//! (`app::extensions::Registry`): built-ins, external extensions (their
+//! programs run by `ExtensionHost`) and the addons' rows. config.toml is
+//! watched by the addon runtime, which says when it was re-read.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
 use super::hub::HubHandle;
 use super::plugins::{extensions_changed, notice_event};
-use crate::addons::vocdoni::bridge::Bridge;
+use crate::addon::ExtensionRow;
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::host::ExtensionHost;
 use crate::app::extensions::protocol::SessionContext;
@@ -19,8 +20,6 @@ use crate::app::extensions::{manifest, ActionResult, Extension, Registry, Source
 use crate::config::Config;
 use crate::proto::{LensKind, SessionExtensions, SessionId};
 
-/// How often config.toml's mtime is checked.
-const CONFIG_POLL: Duration = Duration::from_secs(5);
 /// The longest action input and render source, in bytes.
 const INPUT_MAX: usize = 64 * 1024;
 /// The longest snippet, in bytes.
@@ -30,22 +29,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// What config.toml's file looks like: its mtime and size.
-type Stamp = Option<(SystemTime, u64)>;
-
-fn stamp(path: &std::path::Path) -> Stamp {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
-
 pub(crate) struct Extensions {
     registry: Arc<Mutex<Registry>>,
     host: Arc<ExtensionHost>,
     config_path: PathBuf,
-    last: Mutex<Stamp>,
-    /// Held by a toggle (registry, then config.toml) and by a re-read, so a
-    /// re-read never sees the registry ahead of the file.
-    edit: tokio::sync::Mutex<()>,
+    /// `[extensions]` as config.toml had it at start, with the toggles
+    /// since: the addon rows' on/off.
+    choices: Mutex<BTreeMap<String, bool>>,
 }
 
 impl Extensions {
@@ -54,11 +44,10 @@ impl Extensions {
     /// ExtensionHost::new; its notices become `notice` events.
     pub(crate) async fn load(config: &Config, hub: &HubHandle) -> Arc<Extensions> {
         let config_path = crate::paths::config_file();
-        let path = config_path.clone();
-        let (external, mut notices, last) = tokio::task::spawn_blocking(move || {
+        let (external, mut notices) = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let external = manifest::load(&manifest::dir(), &mut notices);
-            (external, notices, stamp(&path))
+            (external, notices)
         })
         .await
         .unwrap_or_default();
@@ -83,9 +72,24 @@ impl Extensions {
             registry: Arc::new(Mutex::new(registry)),
             host: Arc::new(host),
             config_path,
-            last: Mutex::new(last),
-            edit: tokio::sync::Mutex::new(()),
+            choices: Mutex::new(config.extensions.clone()),
         })
+    }
+
+    /// The names the registry's own extensions hold (built-in, external).
+    pub(crate) fn own_names(&self) -> Vec<String> {
+        let registry = lock(&self.registry);
+        let own = registry.extensions.iter().filter(|e| !e.is_addon());
+        own.map(|e| e.name.clone()).collect()
+    }
+
+    /// The addons' rows now; whether the registry changed.
+    pub(crate) fn set_rows(&self, rows: &[(&'static str, ExtensionRow)]) -> bool {
+        let choices = lock(&self.choices).clone();
+        let mut registry = lock(&self.registry);
+        let before = registry.clone();
+        registry.set_addon_rows(rows, &choices);
+        *registry != before
     }
 
     pub(crate) fn registry(&self) -> Arc<Mutex<Registry>> {
@@ -103,6 +107,9 @@ impl Extensions {
         json!({ "extensions": list })
     }
 
+    /// Turn extension `name` on or off: the registry at once, the host for
+    /// an external one, `[extensions]` in config.toml (an addon's row: the
+    /// runtime writes it, then tells the addon, D10).
     pub(crate) async fn toggle(
         &self,
         addons: &AddonRuntime,
@@ -110,7 +117,6 @@ impl Extensions {
         name: &str,
         on: bool,
     ) -> Result<(), String> {
-        let _edit = self.edit.lock().await;
         let source = {
             let mut registry = lock(&self.registry);
             let ext = registry
@@ -118,7 +124,7 @@ impl Extensions {
                 .iter()
                 .find(|e| e.name == name)
                 .ok_or_else(|| "no such extension".to_owned())?;
-            if let Source::Plugin {
+            if let Source::Addon {
                 refused: Some(why), ..
             } = &ext.source
             {
@@ -128,22 +134,31 @@ impl Extensions {
             registry.set_enabled(name, on);
             source
         };
-        match source {
-            Source::External(_) => self.host.set_enabled(name, on).await,
-            Source::Plugin { .. } => {
-                if let Some(bridge) = Bridge::of(addons.addons()) {
-                    bridge.set_enabled(name, on);
-                }
+        lock(&self.choices).insert(name.to_owned(), on);
+        let saved = match source {
+            Source::Addon { addon, .. } => {
+                let told = addons.toggle_row(addon, name.to_owned(), on).await;
+                told.map(|notice| {
+                    if let Some(n) = notice {
+                        hub.broadcast(notice_event(&n.text, "info"));
+                    }
+                })
             }
-            Source::BuiltIn => {}
-        }
-        let (path, owned) = (self.config_path.clone(), name.to_owned());
-        let saved =
-            tokio::task::spawn_blocking(move || crate::config::save_extension(&path, &owned, on))
+            other => {
+                if let Source::External(_) = other {
+                    self.host.set_enabled(name, on).await;
+                }
+                let (path, owned) = (self.config_path.clone(), name.to_owned());
+                let saved = tokio::task::spawn_blocking(move || {
+                    crate::config::save_extension(&path, &owned, on)
+                })
                 .await
                 .map_err(|_| "cannot write config.toml".to_owned())?;
+                saved.map_err(|e| e.to_string())
+            }
+        };
         hub.broadcast(extensions_changed());
-        saved.map_err(|e| e.to_string())
+        saved
     }
 
     pub(crate) async fn action(
@@ -214,43 +229,14 @@ impl Extensions {
         Ok(json!({ "inline": inline, "block": block }))
     }
 
-    /// Every 5 s: config.toml's mtime (spawn_blocking); on a change, `config::load`
-    /// (spawn_blocking) and apply [extensions] and [claude], then
-    /// `extensions_changed`; the addons re-read their sections (the runtime's
-    /// `ConfigChanged`: the Vocdoni addon's profiles and `[plugins]`).
-    pub(crate) fn watch_config(self: &Arc<Self>, hub: HubHandle, addons: AddonRuntime) {
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(CONFIG_POLL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if this.reread(&hub).await {
-                    addons.config_changed();
-                }
-            }
-        });
-    }
-
-    /// Re-read config.toml if it changed since the last look; whether it did.
-    async fn reread(&self, hub: &HubHandle) -> bool {
-        let _edit = self.edit.lock().await;
-        let path = self.config_path.clone();
-        let now = tokio::task::spawn_blocking(move || stamp(&path))
-            .await
-            .unwrap_or(None);
-        {
-            let mut last = lock(&self.last);
-            if *last == now {
-                return false;
-            }
-            *last = now;
-        }
+    /// config.toml was re-read by the addon runtime: `config::load`
+    /// (spawn_blocking), `[extensions]` and `[claude]` applied to the
+    /// built-ins and external extensions, then `extensions_changed`.
+    pub(crate) async fn reread(&self, hub: &HubHandle) {
         let path = self.config_path.clone();
         let Ok(config) = tokio::task::spawn_blocking(move || crate::config::load_from(&path)).await
         else {
-            return false;
+            return;
         };
         tracing::debug!("web: config.toml re-read");
         let before = lock(&self.registry).clone();
@@ -258,7 +244,7 @@ impl Extensions {
         let flips: Vec<(String, bool)> = {
             let mut registry = lock(&self.registry);
             let mut flips = Vec::new();
-            for ext in registry.extensions.iter_mut().filter(|e| !e.is_plugin()) {
+            for ext in registry.extensions.iter_mut().filter(|e| !e.is_addon()) {
                 let mut on = config.extensions.get(&ext.name).copied().unwrap_or(true);
                 if ext.name == "latex" && !config.claude.latex {
                     on = false;
@@ -279,7 +265,6 @@ impl Extensions {
         if *lock(&self.registry) != before {
             hub.broadcast(extensions_changed());
         }
-        true
     }
 
     /// ExtensionHost::shutdown
@@ -293,7 +278,7 @@ fn extension_dto(e: &Extension) -> Value {
     let (source, profile, refused) = match &e.source {
         Source::BuiltIn => ("builtin", None, None),
         Source::External(_) => ("external", None, None),
-        Source::Plugin { profile, refused } => ("plugin", Some(profile.clone()), refused.clone()),
+        Source::Addon { refused, .. } => ("plugin", None::<String>, refused.clone()),
     };
     let lenses: Vec<Value> = e
         .lenses

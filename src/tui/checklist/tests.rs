@@ -297,14 +297,8 @@ fn a_review_takes_over_the_offer_of_the_same_checklist() {
 
 #[test]
 fn enter_on_a_plugin_row_opens_its_checklist_and_esc_goes_back() {
-    use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
     let mut app = idle_app();
-    let list = PluginList {
-        profile: "work".into(),
-        fetched_at: 1,
-        plugins: vec![sample("team")],
-    };
-    app.extensions.set_plugins(&[&list], &Default::default());
+    crate::tui::test_support::rows(&mut app, "vocdoni", &[("team", None)], &[]);
     let row = app
         .extensions
         .extensions

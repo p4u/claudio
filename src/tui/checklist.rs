@@ -227,23 +227,29 @@ impl App {
         }));
     }
 
-    /// Enter on the extensions screen's plugin row `index`: its setup
-    /// (the addon's checklist), over (and back to) the extensions screen.
+    /// Enter on the extensions screen's addon row `index`: its setup (the
+    /// addon's checklist), over (and back to) the extensions screen.
     pub(super) fn open_plugin_setup(&mut self, index: usize, back: ExtensionsView) {
         let Some(ext) = self.extensions.extensions.get(index) else {
             return;
         };
-        let name = ext.name.clone();
-        if let Source::Plugin {
-            refused: Some(why), ..
+        let Source::Addon {
+            addon,
+            refused,
+            setup: Some(setup),
+            ..
         } = &ext.source
-        {
+        else {
+            return;
+        };
+        if let Some(why) = refused {
+            let name = crate::addon::line(&ext.name, 64);
             self.notify(format!("plugin {name} is refused: {why}"));
             return;
         }
         let call = AddonCall::OpenChecklist {
-            addon: crate::addons::vocdoni::bridge::ADDON,
-            id: name,
+            addon: *addon,
+            id: setup.clone(),
             origin: Origin::Row {
                 back: Box::new(back),
             },

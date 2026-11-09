@@ -1,20 +1,22 @@
 //! The extensions screen (Alt+i, or `e` in the leader popup): one row per
 //! extension (built-ins first, then the external ones that loaded, then the
-//! proxy plugins, on or off) with its kind, keys and lenses; below the list,
-//! the selected one's description, actions and lenses (for a plugin, its
-//! manifest and its state on each host). Space turns it on or off, as
-//! Enter does on every row but a plugin's, where Enter opens its setup
-//! (the addon's checklist, `checklist.rs`); `r` fetches the plugin lists
-//! again.
+//! addons' rows, on or off) with its kind, keys and lenses; below the list,
+//! the selected one's description, actions and lenses (for an addon's row,
+//! the addon's lines about it). Space turns it on or off, as Enter does on
+//! every row but an addon's with a setup, where Enter opens that checklist
+//! (`checklist.rs`); `r` has every addon refresh its rows.
 //!
 //! Pure, like `app.rs`: a toggle changes the registry at once and returns
 //! [`Effect::SaveExtension`] (the event loop writes `config.toml`) and, for
 //! an external extension, [`Effect::SetExtension`] (the extension host
-//! refuses or stops its program). Drawn by `ui/extensions.rs`.
+//! refuses or stops its program); an addon's row is
+//! [`AddonCall::ToggleRow`] (written, then the addon told). Drawn by
+//! `ui/extensions.rs`.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::app::{App, BridgeCall, Effect, Mode};
+use super::addon_calls::AddonCall;
+use super::app::{App, Effect, Mode};
 use super::interaction::Modal;
 use super::keymap::Action;
 use crate::app::extensions::{ActionDecl, Extension, Source};
@@ -185,7 +187,7 @@ impl App {
                 let kind = match ext.source {
                     Source::BuiltIn => "built-in",
                     Source::External(_) => "external",
-                    Source::Plugin { .. } => "plugin",
+                    Source::Addon { .. } => "plugin",
                 };
                 Row {
                     name: clean(&ext.name),
@@ -227,9 +229,18 @@ impl App {
         if ext.name == "latex" && !self.claude_policy.latex {
             lines.push("also off by [claude] latex = false".to_owned());
         }
-        if let Source::Plugin { profile, refused } = &ext.source {
-            let details = self.plugin_details(&ext.name, profile, refused.as_deref());
-            lines.extend(details.iter().map(|l| clean(l)));
+        if let Source::Addon {
+            refused, details, ..
+        } = &ext.source
+        {
+            // Refused by the core (a name taken): the addon's lines do not
+            // say so, the screen does.
+            match refused {
+                Some(why) if !details.iter().any(|l| l.contains(why.as_str())) => {
+                    lines.push(format!("refused: {}", clean(why)))
+                }
+                _ => lines.extend(details.iter().map(|l| clean(l))),
+            }
         }
         lines
     }
@@ -246,30 +257,20 @@ impl App {
             Outcome::Close => self.modal = None,
             Outcome::Toggle(index) => self.toggle_extension(index),
             Outcome::Enter(index) => match self.extensions.extensions.get(index) {
-                Some(ext) if ext.is_plugin() => self.open_plugin_setup(index, back),
+                Some(Extension {
+                    source: Source::Addon { setup: Some(_), .. },
+                    ..
+                }) => self.open_plugin_setup(index, back),
                 _ => self.toggle_extension(index),
             },
-            Outcome::Refresh => self.refresh_plugins(),
+            Outcome::Refresh => self.refresh_rows(),
         }
         self.redraw = true;
     }
 
-    /// What the extensions screen says about plugin `name` of `profile`.
-    pub(super) fn plugin_details(
-        &self,
-        name: &str,
-        profile: &str,
-        refused: Option<&str>,
-    ) -> Vec<String> {
-        self.bridge()
-            .map(|b| b.plugin_details(name, profile, refused, self.now))
-            .unwrap_or_default()
-    }
-
-    /// `r` on the extensions screen: every list, manifest and host answer
-    /// again.
-    pub(super) fn refresh_plugins(&mut self) {
-        self.emit(Effect::Bridge(BridgeCall::Refresh));
+    /// `r` on the extensions screen: every addon refreshes its rows.
+    pub(super) fn refresh_rows(&mut self) {
+        self.emit(Effect::Addon(AddonCall::RefreshRows));
         self.notify("refreshing plugins…");
     }
 
@@ -281,20 +282,21 @@ impl App {
             return;
         };
         let (name, on, external) = (ext.name.clone(), !ext.enabled, ext.is_external());
-        if let Source::Plugin { refused, .. } = &ext.source {
+        if let Source::Addon { addon, refused, .. } = &ext.source {
             if let Some(why) = refused {
-                self.notify(format!("plugin {} is refused: {why}", clean(&name)));
+                self.notify(format!(
+                    "plugin {} is refused: {}",
+                    clean(&name),
+                    clean(why)
+                ));
                 return;
             }
-            // The addon keeps it for a list that comes later; on, the hosts
-            // get its manifest and its setup is due if it was never set up.
+            // Written to `[extensions]` first, then the addon is told: it
+            // keeps it for rows that come later.
+            let addon = *addon;
             self.extensions.extensions[index].enabled = on;
-            let call = BridgeCall::SetEnabled {
-                name: name.clone(),
-                on,
-            };
-            self.emit(Effect::Bridge(call));
-            self.emit(Effect::SaveExtension { name, on });
+            self.extension_config.insert(name.clone(), on);
+            self.emit(Effect::Addon(AddonCall::ToggleRow { addon, name, on }));
             self.redraw = true;
             return;
         }
@@ -313,8 +315,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addon::AddonError;
-    use crate::addons::vocdoni::daemon::Applied;
     use crate::app::extensions::{manifest::Program, Lens, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
@@ -355,7 +355,7 @@ mod tests {
             .map(|e| match e {
                 Effect::SetExtension { name, on } => ("host", name, on),
                 Effect::SaveExtension { name, on } => ("save", name, on),
-                Effect::Bridge(BridgeCall::SetEnabled { name, on }) => ("addon", name, on),
+                Effect::Addon(AddonCall::ToggleRow { addon, name, on }) => (addon, name, on),
                 other => ("other", format!("{other:?}"), false),
             })
             .collect()
@@ -552,124 +552,72 @@ mod tests {
         assert!(details[0].contains("next"), "on one line: {details:?}");
     }
 
-    /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
-    /// and `latex` (a taken name), and `local` connected.
-    fn app_with_plugins() -> App {
-        use crate::tui::test_support::{plugin_host, serve};
+    /// [`app_with_fake`] with addon `team`'s rows `kb` and `latex` (a name
+    /// the core holds, refused by the registry).
+    fn app_with_rows(details: &[&str]) -> App {
+        use crate::tui::test_support::rows;
         let mut app = app_with_fake("");
-        plugin_host(&mut app, "local");
-        serve(&mut app, "work", &["kb", "latex"]);
+        rows(&mut app, "team", &[("kb", None), ("latex", None)], details);
         app.take_effects();
         app
     }
 
     #[test]
-    fn plugins_are_listed_with_their_state_on_each_host() {
-        use crate::addons::vocdoni::plugins::choices::PluginChoices;
-        use crate::tui::test_support::{bridge, changed, manifest_arrives};
-        let mut app = app_with_plugins();
+    fn addon_rows_are_listed_with_the_addons_details() {
+        let details = [
+            "turning it on or off applies to new sessions",
+            "local: applying",
+        ];
+        let app = app_with_rows(&details);
         let lines = row_lines(&app.extension_rows());
         assert_eq!(lines[5], "[x] kb        plugin    —          —");
         assert_eq!(lines[6], "[ ] latex     plugin    —          —");
-        let details = |app: &App, i| app.extension_details(i);
         assert_eq!(
-            details(&app, 5),
+            app.extension_details(5),
             [
                 "1.4.0 · work",
                 "turning it on or off applies to new sessions",
-                "manifest: fetching",
+                "local: applying",
             ]
         );
-        let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
-        let manifest = crate::addons::vocdoni::plugins::manifest::Manifest::parse(src).unwrap();
-        let sha = "a".repeat(64);
-        let b = bridge(&app);
-        b.state()
-            .plugins
-            .choices
-            .insert("kb".into(), PluginChoices::default());
-        manifest_arrives(&mut app, "kb", manifest);
+        // Refused by the core: the addon's lines do not apply.
         assert_eq!(
-            details(&app, 5)[2..],
-            [
-                "KB",
-                "0 items disabled (Enter to change)",
-                "local: applying"
-            ]
+            app.extension_details(6),
+            ["1.4.0 · work", "refused: name taken"]
         );
-        let ready = Applied {
-            name: "kb".into(),
-            version: "1.4.0".into(),
-            ..Default::default()
-        };
-        b.state().on_applied("local", "kb", &sha, Ok(ready));
-        changed(&mut app);
-        assert_eq!(
-            details(&app, 5)[4],
-            "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
+        // The addon's own refusal is in its lines.
+        let mut app = app_with_fake("");
+        let own = ["refused: bundle URL is not https"];
+        crate::tui::test_support::rows(
+            &mut app,
+            "team",
+            &[("evil", Some("bundle URL is not https"))],
+            &own,
         );
-        let failed = AddonError::Daemon("manifest kb: download failed: HTTP 404".into());
-        b.state().on_applied("local", "kb", &sha, Err(failed));
-        changed(&mut app);
-        assert_eq!(
-            details(&app, 5)[4],
-            "local: failed: download failed: HTTP 404"
-        );
-        assert!(
-            app.notice.is_none(),
-            "a manifest error is shown here, not as a notice"
-        );
-        assert_eq!(
-            details(&app, 6),
-            [
-                "1.4.0 · work",
-                "turning it on or off applies to new sessions",
-                "refused: name taken",
-            ]
-        );
+        assert_eq!(app.extension_details(5), ["1.4.0 · work", own[0]]);
     }
 
     #[test]
-    fn a_plugin_toggle_is_saved_and_kept_for_later_lists() {
-        use crate::tui::test_support::{bridge, run_bridge, serve};
-        let mut app = app_with_plugins();
+    fn a_row_toggle_is_kept_for_later_rows_and_told_to_the_addon() {
+        use crate::tui::test_support::rows;
+        let mut app = app_with_rows(&[]);
         app.on_terminal(alt('i'));
         for _ in 0..5 {
             app.on_terminal(press(KeyCode::Down));
         }
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(
-            toggles(&mut app),
-            [
-                ("addon", "kb".to_owned(), false),
-                ("save", "kb".to_owned(), false)
-            ]
-        );
-        app.emit(Effect::Bridge(BridgeCall::SetEnabled {
-            name: "kb".into(),
-            on: false,
-        }));
-        run_bridge(&mut app);
-        let parts = bridge(&app).state().plugin_parts("local", "work", &[]).0;
-        assert!(parts.is_empty());
-        assert_eq!(bridge(&app).enabled().get("kb"), Some(&false));
-        // Kept for a list that comes later.
-        serve(&mut app, "work", &["kb", "latex"]);
+        // One call: the runner writes `[extensions]`, then tells the addon.
+        assert_eq!(toggles(&mut app), [("team", "kb".to_owned(), false)]);
+        assert_eq!(app.extension_config.get("kb"), Some(&false));
+        // Kept for rows that come later.
+        rows(&mut app, "team", &[("kb", None), ("latex", None)], &[]);
         assert!(!app
             .extensions
             .extensions
             .iter()
             .any(|e| e.name == "kb" && e.enabled));
-        // Back on: saved, and the addon asks the hosts for its manifest
-        // again only when they have no answer at its hash.
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(
-            toggles(&mut app),
-            [
-                ("addon", "kb".to_owned(), true),
-                ("save", "kb".to_owned(), true)
-            ]
-        );
+        assert_eq!(toggles(&mut app), [("team", "kb".to_owned(), true)]);
         // A refused one does not toggle.
         app.on_terminal(press(KeyCode::Down));
         app.on_terminal(press(KeyCode::Char(' ')));
@@ -679,10 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn r_fetches_the_plugin_lists_again() {
-        use crate::addons::vocdoni::state::Task;
-        use crate::tui::test_support::bridge;
-        let mut app = app_with_plugins();
+    fn r_refreshes_the_addons_rows() {
+        let mut app = app_with_rows(&[]);
         app.on_terminal(alt('i'));
         app.on_terminal(press(KeyCode::Char('r')));
         let calls: Vec<String> = app
@@ -690,22 +636,9 @@ mod tests {
             .into_iter()
             .map(|e| format!("{e:?}"))
             .collect();
-        assert_eq!(calls, ["Bridge(Refresh)"]);
+        assert_eq!(calls, ["Addon(RefreshRows)"]);
         assert_eq!(app.notice.as_ref().unwrap().text, "refreshing plugins…");
         assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
-        // The addon fetches every list in use again (the default's too).
-        let b = bridge(&app);
-        b.state().default = Some("home".into());
-        let fetched: Vec<String> = b
-            .state()
-            .refresh()
-            .into_iter()
-            .filter_map(|t| match t {
-                Task::FetchList { profile } => Some(profile),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(fetched, ["home", "work"]);
     }
 
     #[test]

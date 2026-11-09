@@ -133,20 +133,8 @@ pub enum Effect {
         id: SessionId,
         answers: Vec<crate::proto::Answer>,
     },
-    /// A call into the Vocdoni addon's plugin state (`addon_runner::run`).
-    Bridge(BridgeCall),
     /// A call into an addon (`addon_runner::run`).
     Addon(AddonCall),
-}
-
-/// What the extensions screen asks of the Vocdoni addon's plugin state
-/// (temporary: P3.13 replaces them).
-#[derive(Debug, Clone, PartialEq)]
-pub enum BridgeCall {
-    /// Turn a plugin on or off.
-    SetEnabled { name: String, on: bool },
-    /// `r`: every list, manifest and host answer again.
-    Refresh,
 }
 
 /// A launch for the event loop's runner (`addon_runner::launch`). It holds
@@ -329,13 +317,15 @@ pub struct App {
     /// The extensions (built-in and external) this client runs with; the
     /// event loop sets the configured ones at start.
     pub extensions: crate::app::extensions::Registry,
+    /// `[extensions]` as config.toml had it at start, with this run's
+    /// toggles: the addon rows' on/off.
+    pub extension_config: std::collections::BTreeMap<String, bool>,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
     /// The external extensions the extension host disabled after
     /// failures (until claudio restarts), by name.
     pub failed_extensions: Vec<String>,
-    /// The addons this run has: `App` only queries them (the Vocdoni
-    /// bridge's plugin state).
+    /// The addons this run has: `App` only reads their declarations.
     pub addons: std::sync::Arc<crate::addon::Addons>,
     /// `--plain`'s session while claude's install holds it.
     pub(super) plain_pending: Option<super::plain::PlainStart>,
@@ -425,6 +415,7 @@ impl App {
             ),
             pending_action: None,
             failed_extensions: Vec::new(),
+            extension_config: Default::default(),
             addons: cfg.addons,
             plain_pending: None,
         }
