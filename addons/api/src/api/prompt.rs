@@ -54,7 +54,7 @@ pub fn flatten(messages: &[Message]) -> FlatPrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::api::api::types::Content;
+    use crate::api::types::Content;
 
     fn msg(role: &str, text: &str) -> Message {
         Message {

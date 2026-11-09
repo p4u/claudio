@@ -7,5 +7,5 @@ pub fn completion_id() -> String {
 
 /// Current Unix time in seconds (for the `created` field).
 pub fn now_secs() -> u64 {
-    crate::paths::unix_now()
+    claudio_core::paths::unix_now()
 }

@@ -21,8 +21,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::addons::api::cli::WrapperEnv;
-use crate::addons::api::print::driver::PtySession;
+use crate::cli::WrapperEnv;
+use crate::print::driver::PtySession;
 
 use super::backend::RawResult;
 use super::error::{AppError, AppResult};
@@ -86,10 +86,8 @@ impl Slot {
         env: &WrapperEnv,
         base_forward: &[String],
         prompt: &str,
-    ) -> Result<
-        (crate::addons::api::print::session::Summary, Option<String>),
-        crate::addons::api::print::driver::DriverError,
-    > {
+    ) -> Result<(crate::print::session::Summary, Option<String>), crate::print::driver::DriverError>
+    {
         if !self.is_live() {
             self.live = None; // drop any dead session
             let mut forward = vec![
@@ -214,9 +212,9 @@ impl SessionPool {
             );
             let prompt = build_delta_prompt(delta, system, reinject);
 
-            if crate::addons::api::msglog::enabled() {
-                crate::addons::api::msglog::record(
-                    crate::addons::api::msglog::Dir::ClaudioToClaude,
+            if crate::msglog::enabled() {
+                crate::msglog::record(
+                    crate::msglog::Dir::ClaudioToClaude,
                     corr,
                     &format!(
                         "DELTA · session {} · turn {} · reinject={reinject}",
@@ -275,9 +273,9 @@ impl SessionPool {
         let mut session = PtySession::start(env, &forward, &csid, None)
             .map_err(|e| AppError::Internal(format!("failed to start claude session: {e}")))?;
 
-        if crate::addons::api::msglog::enabled() {
-            crate::addons::api::msglog::record(
-                crate::addons::api::msglog::Dir::ClaudioToClaude,
+        if crate::msglog::enabled() {
+            crate::msglog::record(
+                crate::msglog::Dir::ClaudioToClaude,
                 corr,
                 &format!("NEW · session {} · model {model}", short(&csid)),
                 prompt,
@@ -417,11 +415,8 @@ impl SessionPool {
     }
 }
 
-/// Convert a driver [`crate::addons::api::print::session::Summary`] into a [`RawResult`].
-fn shape(
-    summary: crate::addons::api::print::session::Summary,
-    failure: Option<String>,
-) -> AppResult<RawResult> {
+/// Convert a driver [`crate::print::session::Summary`] into a [`RawResult`].
+fn shape(summary: crate::print::session::Summary, failure: Option<String>) -> AppResult<RawResult> {
     if let Some(reason) = failure.as_deref() {
         if summary.final_text.is_empty() {
             return Err(AppError::Upstream(format!("claude turn failed ({reason})")));
@@ -445,7 +440,7 @@ fn short(id: &str) -> String {
 }
 
 /// Map a driver turn error to an HTTP-shaped error: timeouts → 504, else 502.
-fn map_turn_err(e: crate::addons::api::print::driver::DriverError) -> AppError {
+fn map_turn_err(e: crate::print::driver::DriverError) -> AppError {
     let msg = e.to_string();
     if msg.contains("timed out") {
         AppError::Timeout(msg)
@@ -558,7 +553,7 @@ fn cumulative_hashes(messages: &[Message]) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::api::api::types::Content;
+    use crate::api::types::Content;
 
     fn msg(role: &str, text: &str) -> Message {
         Message {
@@ -596,10 +591,10 @@ mod tests {
     #[test]
     fn delta_renders_tool_results_skips_assistant() {
         let mut a = msg("assistant", "");
-        a.tool_calls = Some(vec![crate::addons::api::api::types::ToolCall {
+        a.tool_calls = Some(vec![crate::api::types::ToolCall {
             id: "c1".into(),
             r#type: "function".into(),
-            function: crate::addons::api::api::types::FunctionCall {
+            function: crate::api::types::FunctionCall {
                 name: "read".into(),
                 arguments: "{}".into(),
             },

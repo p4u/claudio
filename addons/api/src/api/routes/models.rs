@@ -5,9 +5,9 @@ use axum::extract::Path;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::addons::api::api::error::AppError;
-use crate::addons::api::api::types::{Model, ModelList};
-use crate::addons::api::api::util::now_secs;
+use crate::api::error::AppError;
+use crate::api::types::{Model, ModelList};
+use crate::api::util::now_secs;
 
 const MODEL_IDS: &[&str] = &[
     "opus",
