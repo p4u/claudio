@@ -2,6 +2,7 @@
 //! of the claudio daemons (local socket, remote ssh bridge), like the TUI.
 //! See docs/specs/2026-11-08-web-ui-design.md and docs/web-protocol.md.
 
+mod addon;
 mod addon_feed;
 mod addons;
 pub(crate) mod assets;
@@ -30,6 +31,8 @@ use axum::extract::FromRef;
 use axum::routing::{get, post};
 use axum::{middleware, Router};
 use tracing_subscriber::EnvFilter;
+
+pub use addon::WebAddon;
 
 pub(crate) const DEFAULT_PORT: u16 = 7337;
 

@@ -11,6 +11,28 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+/// The core's diag words (`__bootstrap`, `__connect-check`,
+/// `__remote-session`, `__ssh-hosts`); `None` for any other word.
+pub fn dispatch(argv: &[String]) -> Option<ExitCode> {
+    let arg = |i: usize| argv.get(i).map(String::as_str);
+    let code = match (arg(1)?, arg(2), arg(3)) {
+        ("__bootstrap", Some(host), _) => bootstrap_cmd(host),
+        ("__connect-check", Some(host), _) => connect_check_cmd(host),
+        ("__remote-session", Some(host), Some(cwd)) => remote_session_cmd(host, cwd),
+        ("__ssh-hosts", _, _) => ssh_hosts_cmd(),
+        ("__bootstrap", ..) => usage("__bootstrap <host>"),
+        ("__connect-check", ..) => usage("__connect-check <host>"),
+        ("__remote-session", ..) => usage("__remote-session <host> <cwd>"),
+        _ => return None,
+    };
+    Some(code)
+}
+
+fn usage(words: &str) -> ExitCode {
+    eprintln!("usage: claudio {words}");
+    ExitCode::FAILURE
+}
+
 /// Build a single-threaded Tokio runtime (factored out to avoid the same
 /// boilerplate in every command).
 fn make_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
@@ -24,7 +46,7 @@ fn make_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
 ///
 /// Runs `ensure_remote(host)` and prints the result in a human-readable form.
 /// Exits 0 on success, 1 on error.
-pub fn bootstrap_cmd(host: &str) -> ExitCode {
+fn bootstrap_cmd(host: &str) -> ExitCode {
     let rt = match make_runtime() {
         Ok(r) => r,
         Err(code) => return code,
@@ -58,7 +80,7 @@ pub fn bootstrap_cmd(host: &str) -> ExitCode {
 ///
 /// Connects via SSH (which performs the handshake and reads the Welcome), then
 /// prints the Welcome fields as JSON to stdout. Exits 0 on success, 1 on error.
-pub fn connect_check_cmd(host: &str) -> ExitCode {
+fn connect_check_cmd(host: &str) -> ExitCode {
     let rt = match make_runtime() {
         Ok(r) => r,
         Err(code) => return code,
@@ -100,7 +122,7 @@ pub fn connect_check_cmd(host: &str) -> ExitCode {
 /// Spawns a session in `CWD` on `HOST`, attaches, waits for a terminal data
 /// frame (the session output), kills the session, and exits. Prints a summary
 /// to stdout.
-pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
+fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
     let rt = match make_runtime() {
         Ok(r) => r,
         Err(code) => return code,
@@ -202,110 +224,8 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
     })
 }
 
-/// The Vocdoni addon's `apply` op for `__remote-manifest`, as plain JSON so
-/// this diag-only path imports no addon (transitional; P3.17 moves it).
-fn apply_request(name: &str, sha256: &str, secret: &str) -> crate::proto::Msg {
-    let body = serde_json::json!({"name": name, "url": "https://127.0.0.1:9/never.toml",
-        "sha256": sha256, "secrets": [secret], "disabled": []});
-    crate::proto::Msg::AddonOp {
-        addon: "vocdoni".to_owned(),
-        op: "apply".to_owned(),
-        body,
-    }
-}
-
-/// `claudio __remote-manifest HOST CWD NAME SHA256 SECRET`
-///
-/// Asks `HOST`'s daemon to apply plugin `NAME`'s manifest with hash
-/// `SHA256` (from a URL nothing listens on, so only a pre-seeded cache
-/// answers), with `SECRET` the name of the one secret it is given; prints
-/// the `vocdoni/apply` reply (an `Applied`) as JSON, then spawns claude in `CWD` with what it
-/// applied (its flags, its env, the secret set to `t9-secret`, its
-/// instructions), prints `pid=<pid>`, keeps the session 5 s (for the caller
-/// to look at its argv) and kills it.
-pub fn remote_manifest_cmd(
-    host: &str,
-    cwd: &str,
-    name: &str,
-    sha256: &str,
-    secret: &str,
-) -> ExitCode {
-    use crate::proto::{Msg, SessionExtensions, SpawnSpec};
-    let rt = match make_runtime() {
-        Ok(r) => r,
-        Err(code) => return code,
-    };
-    rt.block_on(async move {
-        // As the TUI does: the branch binary on the host, its daemon current.
-        if let Err(e) = super::bootstrap::ensure_remote(host).await {
-            eprintln!("ensure_remote({host}) failed: {e}");
-            return ExitCode::FAILURE;
-        }
-        let client = match crate::client::connect_ssh(host).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("connect_ssh({host}) failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let request = apply_request(name, sha256, secret);
-        let applied = match client.request(request).await {
-            Ok(Msg::AddonReply { body }) => body,
-            Ok(other) => {
-                eprintln!("unexpected apply reply: {other:?}");
-                return ExitCode::FAILURE;
-            }
-            Err(e) => {
-                eprintln!("apply request failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        println!("{applied}");
-        let text = |key: &str| applied[key].as_str().map(str::to_owned);
-        let mut args = Vec::new();
-        if let Some(agents) = text("agents") {
-            args.extend(["--agents".to_owned(), agents]);
-        }
-        if let Some(mcp) = text("mcp_config") {
-            args.extend(["--mcp-config".to_owned(), mcp]);
-        }
-        let mut env: Vec<(String, String)> =
-            serde_json::from_value(applied["env"].clone()).unwrap_or_default();
-        env.push((secret.to_owned(), "t9-secret".to_owned()));
-        let id = uuid::Uuid::new_v4();
-        let spec = SpawnSpec {
-            id,
-            cwd: cwd.to_owned(),
-            args,
-            env,
-            rows: 24,
-            cols: 80,
-            ephemeral: true,
-            extensions: Some(SessionExtensions {
-                instructions: text("instructions").unwrap_or_default(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        match client.request(Msg::Spawn(spec)).await {
-            Ok(Msg::Spawned { pid, .. }) => {
-                println!("pid={}", pid.unwrap_or(0));
-            }
-            other => {
-                eprintln!("Spawn failed: {other:?}");
-                return ExitCode::FAILURE;
-            }
-        }
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let _ = client.request(Msg::Kill { id }).await;
-        ExitCode::SUCCESS
-    })
-}
-
 /// `claudio __ssh-hosts` — print all known SSH host aliases, one per line.
-pub fn ssh_hosts_cmd() -> ExitCode {
+fn ssh_hosts_cmd() -> ExitCode {
     let hosts = super::hosts::candidates();
     for h in &hosts {
         println!("{h}");

@@ -1,6 +1,8 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
 pub mod daemon;
+#[cfg(feature = "diag")]
+mod diag;
 pub mod launch;
 pub mod panel;
 pub mod plugins;
@@ -13,9 +15,10 @@ pub mod state;
 pub(crate) mod test_support;
 pub mod ui;
 
+use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps, Launch, Ui};
+use crate::addon::{Addon, AddonCtx, AddonEvent, Addons, Commands, DaemonOps, Launch, Ui};
 
 /// The addon's name: its config sections' owner and its daemon ops' prefix.
 pub const NAME: &str = "vocdoni";
@@ -60,6 +63,10 @@ impl Addon for Vocdoni {
         &["proxy", "plugins"]
     }
 
+    fn commands(&self) -> Option<&dyn Commands> {
+        Some(self)
+    }
+
     fn launch(&self) -> Option<&dyn Launch> {
         Some(self)
     }
@@ -74,5 +81,15 @@ impl Addon for Vocdoni {
 
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
         self.runner.on_event(event, ctx);
+    }
+}
+
+impl Commands for Vocdoni {
+    fn dispatch(&self, argv: &[String], _addons: &Arc<Addons>) -> Option<ExitCode> {
+        #[cfg(feature = "diag")]
+        if let Some(code) = diag::dispatch(argv) {
+            return Some(code);
+        }
+        proxy::cmd::dispatch(argv.get(1..).unwrap_or_default())
     }
 }

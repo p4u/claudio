@@ -2117,7 +2117,7 @@ async fn web_addons_ops_refuse_unknown_addons_and_bad_args() {
         ),
         (
             "addons.checklist",
-            json!({"addon": "web", "checklist": "x"}),
+            json!({"addon": "nobody", "checklist": "x"}),
             "bad request: addon: no such addon",
         ),
         ("addons.nope", json!({}), "unknown op"),

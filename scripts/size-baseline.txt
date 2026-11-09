@@ -25,7 +25,6 @@ fn src/daemon/mod.rs::spawn_reserved 98
 fn src/daemon/server.rs::request 142
 fn src/daemon/session.rs::run 86
 fn src/daemon/session.rs::spawn 105
-fn src/main.rs::main 241
 fn src/addons/api/print/driver.rs::start 184
 fn src/addons/api/print/driver.rs::turn 82
 fn src/remote/bootstrap.rs::upload_bytes 108

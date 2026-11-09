@@ -11,7 +11,12 @@ use crate::addon::Addon;
 
 /// The addons this build registers, in registry order.
 pub fn all() -> Vec<Arc<dyn Addon>> {
-    vec![Arc::new(vocdoni::Vocdoni::new())]
+    // The API addon parses every remaining argv (`cli::parse`), so it is last.
+    vec![
+        Arc::new(vocdoni::Vocdoni::new()),
+        Arc::new(web::WebAddon),
+        Arc::new(api::ApiAddon),
+    ]
 }
 
 #[cfg(test)]
