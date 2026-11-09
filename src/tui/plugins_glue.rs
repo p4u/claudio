@@ -1,17 +1,17 @@
 //! The TUI's glue for proxy plugins: `impl App` turns profile lists, manifests
 //! and host answers into state changes and [`Effect`]s. The pure state it
-//! works on is [`crate::plugins::state`].
+//! works on is [`crate::addons::vocdoni::plugins::state`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::addons::vocdoni::plugins::manifest::Manifest;
+use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
 use crate::app::extensions::Source;
 use crate::config::PluginChoices;
-use crate::plugins::manifest::Manifest;
 use crate::proto::{Applied, Msg};
-use crate::proxy::plugins::{Plugin, PluginList};
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};
-use crate::plugins::state::{
+use crate::addons::vocdoni::plugins::state::{
     reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, PluginsFetch, INSTALLING,
 };
 
@@ -498,8 +498,8 @@ fn ready_lines(host: &str, a: &Applied) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::state::{applied, compose, with_plugins};
-    use crate::proxy::plugins::sample;
+    use crate::addons::vocdoni::plugins::state::{applied, compose, with_plugins};
+    use crate::addons::vocdoni::proxy::plugins::sample;
     use crate::tui::app::LaunchCall;
     use crate::tui::test_support::app_with;
 

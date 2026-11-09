@@ -538,8 +538,8 @@ mod tests {
     /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
     /// and `latex` (a taken name), and `local` connected.
     fn app_with_plugins() -> App {
-        use crate::plugins::state::PluginsFetch;
-        use crate::proxy::plugins::{sample, PluginList};
+        use crate::addons::vocdoni::plugins::state::PluginsFetch;
+        use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
         let mut app = app_with_fake("");
         app.on_plugin_host("local");
         let list = PluginList {
@@ -568,7 +568,7 @@ mod tests {
             ]
         );
         let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
-        let manifest = crate::plugins::manifest::Manifest::parse(src).unwrap();
+        let manifest = crate::addons::vocdoni::plugins::manifest::Manifest::parse(src).unwrap();
         let sha = "a".repeat(64);
         app.plugins.choices.insert("kb".into(), Default::default());
         app.on_manifest("kb", &sha, Ok(manifest));

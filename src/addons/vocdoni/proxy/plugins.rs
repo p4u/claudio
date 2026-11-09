@@ -1,6 +1,6 @@
 //! Session plugins served by a proxy profile (`GET /v1/claudio/plugins`).
 //!
-//! A plugin is a pinned manifest (`crate::plugins::manifest`: what its
+//! A plugin is a pinned manifest (`crate::addons::vocdoni::plugins::manifest`: what its
 //! sessions get, and the plugins it installs) and the env its MCP servers
 //! need. The env holds secrets: the list is cached per profile in
 //! `~/.config/claudio/plugins.json` (mode 0600, like `config.toml`), so a
@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use super::api::{build_client, ApiError};
 use super::profile::Profile;
+use crate::addons::vocdoni::plugins::manifest::{key_ok, name_ok};
 use crate::paths;
-use crate::plugins::manifest::{key_ok, name_ok};
 
 /// At most this many plugins per list are used.
 pub const MAX_PLUGINS: usize = 32;
@@ -257,7 +257,7 @@ const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// most 256 KiB, whose SHA-256 is `sha256`; its text. Kept in memory only.
 /// The reason names no value.
 pub async fn fetch_manifest(url: &str, sha256: &str) -> Result<String, String> {
-    use crate::plugins::manifest::MAX_BYTES;
+    use crate::addons::vocdoni::plugins::manifest::MAX_BYTES;
     use sha2::{Digest, Sha256};
     let plain_ok = test_http_ok(url);
     if !url.starts_with("https://") && !plain_ok {

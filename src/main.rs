@@ -24,10 +24,8 @@ mod freshness;
 mod msglog;
 mod paths;
 mod plain;
-mod plugins;
 mod print;
 mod proto;
-mod proxy;
 mod release;
 mod remote;
 mod term;
@@ -165,7 +163,7 @@ fn main() -> std::process::ExitCode {
     }
 
     // `claudio proxy <subcommand>` — proxy profile management.
-    if let Some(code) = proxy::cmd::dispatch(&argv[1..]) {
+    if let Some(code) = addons::vocdoni::proxy::cmd::dispatch(&argv[1..]) {
         return code;
     }
 
@@ -196,7 +194,7 @@ fn main() -> std::process::ExitCode {
         return tui::run(addons);
     }
     if matches!(argv[1].as_str(), "--proxy" | "--no-proxy" | "--first-party") {
-        return match proxy::resolve::split_launch_flags(&argv[1..]) {
+        return match addons::vocdoni::proxy::resolve::split_launch_flags(&argv[1..]) {
             Ok(flags) if flags.rest.is_empty() => {
                 tui::run_with_proxy(addons, flags.choice, flags.first_party)
             }

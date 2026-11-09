@@ -301,11 +301,11 @@ async fn build_state(
                 config: crate::config::load(),
                 tui_state: crate::app::state::ClientState::load(&crate::paths::client_state()),
                 web: state::load(&state_path),
-                profiles: crate::proxy::resolve::load_proxy_profiles(),
+                profiles: crate::addons::vocdoni::proxy::resolve::load_proxy_profiles(),
                 state_path,
                 runtime,
             };
-            (cfg, crate::proxy::plugins::load_all())
+            (cfg, crate::addons::vocdoni::proxy::plugins::load_all())
         })
         .await
         .map_err(|e| format!("cannot read the configuration: {e}"))?

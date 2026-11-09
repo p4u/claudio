@@ -5,7 +5,7 @@ file src/daemon/git.rs 978
 file src/daemon/manifest.rs 872
 file src/daemon/server.rs 914
 file src/daemon/session.rs 1036
-file src/plugins/manifest.rs 828
+file src/addons/vocdoni/plugins/manifest.rs 828
 file src/proto.rs 1042
 file src/tui/app.rs 911
 file src/tui/interaction.rs 1032
@@ -28,11 +28,11 @@ fn src/daemon/server.rs::request 156
 fn src/daemon/session.rs::run 86
 fn src/daemon/session.rs::spawn 105
 fn src/main.rs::main 258
-fn src/plugins/manifest.rs::check 130
-fn src/plugins/manifest.rs::check#2 99
+fn src/addons/vocdoni/plugins/manifest.rs::check 130
+fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
 fn src/print/driver.rs::start 184
 fn src/print/driver.rs::turn 82
-fn src/proxy/cmd.rs::cmd_login 173
+fn src/addons/vocdoni/proxy/cmd.rs::cmd_login 173
 fn src/remote/bootstrap.rs::upload_bytes 108
 fn src/remote/bootstrap.rs::upload_release 91
 fn src/remote/diag.rs::remote_manifest_cmd 84
@@ -63,5 +63,5 @@ fn src/web/ws.rs::tab 103
 unwrap src/api/pool.rs 9
 unwrap src/daemon/host.rs 4
 unwrap src/print/hooks.rs 3
-unwrap src/proxy/cmd.rs 2
+unwrap src/addons/vocdoni/proxy/cmd.rs 2
 unwrap src/tui/keymap.rs 2

@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::proxy::stats::Window;
+use crate::addons::vocdoni::proxy::stats::Window;
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 

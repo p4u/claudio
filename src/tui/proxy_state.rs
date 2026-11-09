@@ -1,11 +1,13 @@
 //! Proxy status cache. Profile loading and env
-//! building live in [`crate::proxy::resolve`], shared with `--plain`.
+//! building live in [`crate::addons::vocdoni::proxy::resolve`], shared with `--plain`.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::proxy::api::{ModelsResponse, PoolHealthResponse, SessionCredential, StatsResponse};
-use crate::proxy::stats::Window;
+use crate::addons::vocdoni::proxy::api::{
+    ModelsResponse, PoolHealthResponse, SessionCredential, StatsResponse,
+};
+use crate::addons::vocdoni::proxy::stats::Window;
 
 /// Live proxy data per profile, shown in the stats popup (Alt+s).
 #[derive(Debug, Clone, Default)]

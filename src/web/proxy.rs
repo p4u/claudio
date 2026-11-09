@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::proxy::api::{
+use crate::addons::vocdoni::proxy::api::{
     self, ApiError, ConfigResponse, PoolHealthResponse, SessionCredential, StatsResponse,
     SwitchError, SwitchOutcome,
 };
-use crate::proxy::profile::Profile;
-use crate::proxy::stats::Window;
+use crate::addons::vocdoni::proxy::profile::Profile;
+use crate::addons::vocdoni::proxy::stats::Window;
 
 /// How long a profile's `/v1/claudio/config` is kept.
 const CONFIG_TTL: Duration = Duration::from_secs(300);
@@ -37,11 +37,13 @@ impl ProxyCache {
     /// `find_profile` in spawn_blocking; `"proxy profile '<name>' not found"`.
     pub(crate) async fn profile(name: &str) -> Result<Profile, String> {
         let owned = name.to_owned();
-        tokio::task::spawn_blocking(move || crate::proxy::resolve::find_profile(&owned))
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("proxy profile '{}' not found", clean(name)))
+        tokio::task::spawn_blocking(move || {
+            crate::addons::vocdoni::proxy::resolve::find_profile(&owned)
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("proxy profile '{}' not found", clean(name)))
     }
 
     /// `/v1/claudio/config` of `name`, cached 300 s; a failure (5 s timeout) is `None`
@@ -72,7 +74,7 @@ fn clean(name: &str) -> String {
     crate::text::sanitize(name).chars().take(80).collect()
 }
 
-/// "24h"|"7d"|"30d" via crate::proxy::stats::Window::param, else "bad request: window".
+/// "24h"|"7d"|"30d" via crate::addons::vocdoni::proxy::stats::Window::param, else "bad request: window".
 pub(crate) fn window_param(window: &str) -> Result<&'static str, String> {
     Window::ALL
         .iter()
@@ -219,7 +221,7 @@ pub(crate) async fn switch(profile: &str, claude_session_id: &str) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::api::{
+    use crate::addons::vocdoni::proxy::api::{
         CredentialInfo, CredentialUtilization, ProviderHealth, StatsModel, StatsTotals,
     };
 

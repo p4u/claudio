@@ -18,15 +18,17 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 use super::hub::{daemon_error, HubEvent, HubHandle};
-use crate::app::extensions::{Registry, Source};
-use crate::config::PluginChoices;
-use crate::plugins::manifest::Manifest;
-use crate::plugins::state::{
+use crate::addons::vocdoni::plugins::choices::choices_for;
+use crate::addons::vocdoni::plugins::manifest::Manifest;
+use crate::addons::vocdoni::plugins::state::{
     reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
 };
+use crate::addons::vocdoni::proxy::api::ApiError;
+use crate::addons::vocdoni::proxy::plugins::{self as cache, Plugin, PluginList};
+use crate::addons::vocdoni::proxy::resolve::load_proxy_profiles;
+use crate::app::extensions::{Registry, Source};
+use crate::config::PluginChoices;
 use crate::proto::{retry_secs, Applied, Msg};
-use crate::proxy::api::ApiError;
-use crate::proxy::plugins::{Plugin, PluginList};
 
 /// How long a spawn waits for a host to answer its plugin manifests.
 const MANIFEST_WAIT: Duration = Duration::from_secs(20);
@@ -420,8 +422,7 @@ impl Plugins {
         for p in wanted {
             let this = self.clone();
             tokio::spawn(async move {
-                let fetched =
-                    crate::proxy::plugins::fetch_manifest(&p.bundle_url, &p.bundle_sha256).await;
+                let fetched = cache::fetch_manifest(&p.bundle_url, &p.bundle_sha256).await;
                 let result = fetched.and_then(|text| Manifest::parse_named(&text, &p.name));
                 this.on_manifest(&p.name, &p.bundle_sha256, result);
             });
@@ -451,7 +452,7 @@ impl Plugins {
 
     /// Fetch the list of every profile listed, used, or the default.
     async fn fetch_lists(&self) {
-        let (_, default) = tokio::task::spawn_blocking(crate::proxy::resolve::load_proxy_profiles)
+        let (_, default) = tokio::task::spawn_blocking(load_proxy_profiles)
             .await
             .unwrap_or_default();
         let mut profiles: BTreeSet<String> = lock(&self.state).lists.keys().cloned().collect();
@@ -466,7 +467,6 @@ impl Plugins {
     /// Fetch `profile`'s list and keep plugins.json in step: a list is
     /// saved, a 401/403 drops the profile's entry (its secrets).
     async fn fetch_list(&self, profile: &str) {
-        use crate::proxy::plugins as cache;
         let fetch = match super::proxy::ProxyCache::profile(profile).await {
             Err(_) => Fetch::Unreachable,
             Ok(p) => match cache::fetch(profile, &p).await {
@@ -820,7 +820,7 @@ impl Plugins {
             ));
         }
         let earlier = lock(&self.state).choices.get(name).cloned();
-        let choices = crate::plugins::choices::choices_for(&m, &disabled, earlier.as_ref());
+        let choices = choices_for(&m, &disabled, earlier.as_ref());
         let (owned, saved) = (name.to_owned(), choices.clone());
         tokio::task::spawn_blocking(move || {
             crate::config::save_plugin_choices(&crate::paths::config_file(), &owned, &saved)
@@ -974,7 +974,7 @@ prompt = "Review the change."
 
     #[test]
     fn list_dto_has_no_env() {
-        let mut p = crate::proxy::plugins::sample("vocdoni-test");
+        let mut p = crate::addons::vocdoni::proxy::plugins::sample("vocdoni-test");
         p.env = vec![("VOCDONI_TEST_TOKEN".into(), "plugin-SECRET-value".into())];
         let list = PluginList {
             profile: "env".into(),

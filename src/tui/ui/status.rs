@@ -18,8 +18,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use crate::addons::vocdoni::proxy::api::SessionCredential;
 use crate::proto::{GitStatus, SessionKind, SessionState};
-use crate::proxy::api::SessionCredential;
 
 use super::super::app::{App, HostStatsSample};
 use super::super::fmt::{
@@ -569,7 +569,9 @@ fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::api::{CredentialInfo, CredentialUtilization, ModelEntry, ModelsResponse};
+    use crate::addons::vocdoni::proxy::api::{
+        CredentialInfo, CredentialUtilization, ModelEntry, ModelsResponse,
+    };
     use crate::tui::proxy_state::{ProxyStatus, SessionCred};
 
     fn plain(spans: &[Span<'_>]) -> String {

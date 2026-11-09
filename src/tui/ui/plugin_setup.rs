@@ -96,7 +96,7 @@ pub fn draw_plugin_setup(frame: &mut Frame, setup: &PluginSetup) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::manifest::Manifest;
+    use crate::addons::vocdoni::plugins::manifest::Manifest;
     use ratatui::{backend::TestBackend, Terminal};
 
     fn setup() -> PluginSetup {

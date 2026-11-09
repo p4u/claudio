@@ -110,7 +110,7 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::api::ConfigResponse;
+    use crate::addons::vocdoni::proxy::api::ConfigResponse;
 
     fn profile(url: &str, token: &str) -> Profile {
         Profile {

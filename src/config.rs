@@ -1,7 +1,7 @@
 //! Global configuration from `~/.config/claudio/config.toml`.
 //!
 //! Only the sections claudio itself defines are parsed here; the proxy section
-//! lives in [`crate::proxy::profile`], which reads the same file. Unknown
+//! lives in [`crate::addons::vocdoni::proxy::profile`], which reads the same file. Unknown
 //! sections are preserved on write via a `flatten` map.
 //!
 //! ```toml
@@ -443,7 +443,7 @@ pub fn save_plugin_choices(
     choices: &PluginChoices,
 ) -> Result<(), SaveError> {
     use std::os::unix::fs::PermissionsExt;
-    if !crate::plugins::manifest::name_ok(name) {
+    if !crate::addons::vocdoni::plugins::manifest::name_ok(name) {
         return Err(SaveError::BadName);
     }
     let _edit = config_edit::lock(path)?;

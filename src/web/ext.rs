@@ -59,7 +59,7 @@ impl Extensions {
         let (external, mut notices, last, profiles) = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let external = manifest::load(&manifest::dir(), &mut notices);
-            let profiles = crate::proxy::resolve::load_proxy_profiles();
+            let profiles = crate::addons::vocdoni::proxy::resolve::load_proxy_profiles();
             (external, notices, stamp(&path), profiles)
         })
         .await
@@ -254,7 +254,7 @@ impl Extensions {
         let Ok((config, profiles)) = tokio::task::spawn_blocking(move || {
             (
                 crate::config::load_from(&path),
-                crate::proxy::resolve::load_proxy_profiles(),
+                crate::addons::vocdoni::proxy::resolve::load_proxy_profiles(),
             )
         })
         .await

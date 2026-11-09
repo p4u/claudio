@@ -8,9 +8,11 @@ use super::app::{App, Effect, Modal, PendingManifest, ReplyTo};
 use super::proxy_state::{ProxyFetch, SessionCred};
 use super::sessions::SessionView;
 use super::HostEvent;
-use crate::plugins::state::{compose, with_plugins, PluginPart};
+use crate::addons::vocdoni::plugins::state::{compose, with_plugins, PluginPart};
+use crate::addons::vocdoni::proxy::api::{
+    ConfigResponse, SessionCredential, SwitchError, SwitchOutcome,
+};
 use crate::proto::{Msg, SessionId};
-use crate::proxy::api::{ConfigResponse, SessionCredential, SwitchError, SwitchOutcome};
 
 impl App {
     /// A proxy answer from a background fetch: config, stats, a session's
@@ -199,7 +201,7 @@ impl App {
         proxy_name: Option<&str>,
         first_party: bool,
     ) -> Result<Vec<(String, String)>, String> {
-        crate::proxy::resolve::proxy_env_for(
+        crate::addons::vocdoni::proxy::resolve::proxy_env_for(
             proxy_name,
             proxy_name.and_then(|n| self.proxy_config_cached(n)),
             first_party,

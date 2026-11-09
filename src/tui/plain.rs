@@ -129,9 +129,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::addon::{LaunchOp, LaunchSelect};
+    use crate::addons::vocdoni::proxy::ProxyChoice;
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
-    use crate::proxy::ProxyChoice;
     use crate::tui::app::{AppConfig, Effect, ReplyTo};
     use crate::tui::interaction::Modal;
     use crate::tui::keymap::Keymap;

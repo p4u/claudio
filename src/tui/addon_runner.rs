@@ -241,21 +241,25 @@ pub(super) fn spawn_with_proxy(
                 part.applied = ready.remove(&part.name);
             }
         }
-        let composed = crate::plugins::state::compose(&parts);
+        let composed = crate::addons::vocdoni::plugins::state::compose(&parts);
         for text in composed.notices.clone() {
             let _ = notices.send(HostEvent::Notice(text)).await;
         }
 
         // Build env from profile + (possibly fresh) config.
-        let env =
-            crate::proxy::resolve::proxy_env_for(Some(&proxy_name), cfg.as_ref(), first_party);
+        let env = crate::addons::vocdoni::proxy::resolve::proxy_env_for(
+            Some(&proxy_name),
+            cfg.as_ref(),
+            first_party,
+        );
         match env {
             Err(e) => {
                 let _ = tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
             }
             Ok(env) => match client {
                 Some(c) => {
-                    let msg = crate::plugins::state::with_plugins(msg, composed).merge_env(env);
+                    let msg = crate::addons::vocdoni::plugins::state::with_plugins(msg, composed)
+                        .merge_env(env);
                     let reply = c.request(msg);
                     let _ = tx.send((to, reply.await));
                 }
@@ -276,9 +280,9 @@ pub(super) fn spawn_with_proxy(
 /// `cached`, else `name`'s config fetched with a 5 s timeout, so the first
 /// spawn uses the real model/rate-limit overrides, not fallback defaults.
 async fn proxy_config(
-    cached: Option<crate::proxy::api::ConfigResponse>,
+    cached: Option<crate::addons::vocdoni::proxy::api::ConfigResponse>,
     name: &str,
-) -> Option<crate::proxy::api::ConfigResponse> {
+) -> Option<crate::addons::vocdoni::proxy::api::ConfigResponse> {
     match cached {
         Some(cfg) => Some(cfg),
         None => tokio::time::timeout(Duration::from_secs(5), fetch_proxy_config(name))

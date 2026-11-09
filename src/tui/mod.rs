@@ -74,12 +74,12 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::Addons;
+use crate::addons::vocdoni::{plugins::manifest::Manifest, plugins::state as plugin_state, proxy};
 use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
 use crate::app::state::ClientState;
-use crate::plugins::state as plugin_state;
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
 use plain::PlainStart;
 
@@ -122,12 +122,12 @@ fn copy_to_clipboard(text: &str) {
 enum Entry {
     /// The session manager, with a startup proxy override for new sessions.
     Manager {
-        proxy: crate::proxy::ProxyChoice,
+        proxy: proxy::ProxyChoice,
         first_party: bool,
     },
     /// `claudio --plain`: one bare session; `args` go to claude.
     Plain {
-        proxy: crate::proxy::ProxyChoice,
+        proxy: proxy::ProxyChoice,
         first_party: bool,
         args: Vec<String>,
     },
@@ -146,7 +146,7 @@ enum Start {
 
 /// Run the manager until the user quits.
 pub fn run(addons: Arc<Addons>) -> ExitCode {
-    run_with_proxy(addons, crate::proxy::ProxyChoice::Default, false)
+    run_with_proxy(addons, proxy::ProxyChoice::Default, false)
 }
 
 /// Like [`run`] but applies a startup proxy override to every new session.
@@ -158,7 +158,7 @@ pub fn run(addons: Arc<Addons>) -> ExitCode {
 /// `first_party` (--first-party) makes every session of this run first-party.
 pub fn run_with_proxy(
     addons: Arc<Addons>,
-    proxy_override: crate::proxy::ProxyChoice,
+    proxy_override: proxy::ProxyChoice,
     first_party: bool,
 ) -> ExitCode {
     let entry = Entry::Manager {
@@ -173,7 +173,7 @@ pub fn run_with_proxy(
 /// and reset keys work; the rest of the keyboard is claude's.
 pub fn run_plain(
     addons: Arc<Addons>,
-    proxy: crate::proxy::ProxyChoice,
+    proxy: proxy::ProxyChoice,
     first_party: bool,
     args: Vec<String>,
 ) -> ExitCode {
@@ -249,10 +249,10 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
+    let (proxy_profiles, proxy_default) = proxy::resolve::load_proxy_profiles();
     // The plugin lists cached for the profiles there are; fetched again
     // once the loop runs.
-    let cached_plugins: Vec<_> = crate::proxy::plugins::load_all()
+    let cached_plugins: Vec<_> = proxy::plugins::load_all()
         .into_iter()
         .filter(|l| proxy_profiles.contains(&l.profile))
         .collect();
@@ -353,7 +353,7 @@ async fn finish(
 /// out is a notice.
 fn extension_registry(
     config: &crate::config::Config,
-    cached_plugins: &[crate::proxy::plugins::PluginList],
+    cached_plugins: &[proxy::plugins::PluginList],
     key_notices: &mut Vec<String>,
 ) -> extensions::Registry {
     // External extensions are read once, at start.
@@ -478,7 +478,7 @@ enum HostEvent {
     /// Proxy config fetched (or failed).
     ProxyConfig {
         profile_name: String,
-        config: Option<crate::proxy::api::ConfigResponse>,
+        config: Option<proxy::api::ConfigResponse>,
     },
     /// Proxy stats, pool health and model catalogue fetched (or failed).
     ProxyStats {
@@ -489,12 +489,12 @@ enum HostEvent {
     SessionCredential {
         session: crate::proto::SessionId,
         claude_session_id: String,
-        result: Result<Option<crate::proxy::api::SessionCredential>, String>,
+        result: Result<Option<proxy::api::SessionCredential>, String>,
     },
     /// The proxy answered a subscription switch request.
     SubscriptionSwitch {
         session: crate::proto::SessionId,
-        result: Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError>,
+        result: Result<proxy::api::SwitchOutcome, proxy::api::SwitchError>,
     },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
@@ -536,7 +536,7 @@ enum HostEvent {
     Manifest {
         name: String,
         sha256: String,
-        result: Result<crate::plugins::manifest::Manifest, String>,
+        result: Result<Manifest, String>,
     },
     /// A notice from a background task.
     Notice(String),
@@ -817,7 +817,7 @@ async fn event_loop(
                 // feed the status bar, which `--plain` does not have).
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
                 if let Some(name) = proxy_name.filter(|_| manager) {
-                    app.schedule_proxy_stats(&name, vec![crate::proxy::stats::Window::H24]);
+                    app.schedule_proxy_stats(&name, vec![proxy::stats::Window::H24]);
                 }
             }
             _ = plugins_tick.tick() => app.fetch_plugin_lists(),
@@ -962,9 +962,8 @@ fn run_effect(
         Effect::FetchManifest { name, url, sha256 } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
-                let fetched = crate::proxy::plugins::fetch_manifest(&url, &sha256).await;
-                let result = fetched
-                    .and_then(|text| crate::plugins::manifest::Manifest::parse_named(&text, &name));
+                let fetched = proxy::plugins::fetch_manifest(&url, &sha256).await;
+                let result = fetched.and_then(|text| Manifest::parse_named(&text, &name));
                 let _ = tx
                     .send(HostEvent::Manifest {
                         name,
@@ -1093,10 +1092,10 @@ async fn wait_manifests(
 /// is saved, a 401/403 drops the profile's entry (its secrets), anything
 /// else leaves it. A failed write is a notice.
 async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_state::PluginsFetch {
-    use crate::proxy::api::ApiError;
-    use crate::proxy::plugins as cache;
     use plugin_state::PluginsFetch;
-    let Some(p) = crate::proxy::resolve::find_profile(profile) else {
+    use proxy::api::ApiError;
+    use proxy::plugins as cache;
+    let Some(p) = proxy::resolve::find_profile(profile) else {
         return PluginsFetch::Unreachable;
     };
     let (fetch, write) = match cache::fetch(profile, &p).await {
@@ -1123,9 +1122,9 @@ async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_st
 }
 
 /// Fetch proxy config for a named profile. Returns `None` on any error.
-async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::ConfigResponse> {
-    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)?;
-    match crate::proxy::api::fetch_config(&url, &token).await {
+async fn fetch_proxy_config(profile_name: &str) -> Option<proxy::api::ConfigResponse> {
+    let (url, token) = proxy::resolve::resolve_profile(profile_name)?;
+    match proxy::api::fetch_config(&url, &token).await {
         Ok(Some(cfg)) => Some(cfg),
         Ok(None) => None,
         Err(_) => None,
@@ -1137,12 +1136,12 @@ async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::Con
 /// well inside the proxy's per-user rate limit (1 req/s, burst 10).
 async fn fetch_proxy_stats(
     profile_name: &str,
-    windows: &[crate::proxy::stats::Window],
+    windows: &[proxy::stats::Window],
     models: bool,
 ) -> proxy_state::ProxyFetch {
-    use crate::proxy::api;
+    use proxy::api;
     let mut out = proxy_state::ProxyFetch::default();
-    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
+    let Some((url, token)) = proxy::resolve::resolve_profile(profile_name) else {
         let err = format!("proxy profile '{profile_name}' not found");
         out.stats = windows.iter().map(|w| (*w, Err(err.clone()))).collect();
         return out;
@@ -1165,10 +1164,10 @@ async fn fetch_proxy_stats(
 async fn fetch_session_credential(
     profile_name: &str,
     claude_session_id: &str,
-) -> Result<Option<crate::proxy::api::SessionCredential>, String> {
-    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)
+) -> Result<Option<proxy::api::SessionCredential>, String> {
+    let (url, token) = proxy::resolve::resolve_profile(profile_name)
         .ok_or_else(|| format!("proxy profile '{profile_name}' not found"))?;
-    crate::proxy::api::fetch_session(&url, &token, claude_session_id)
+    proxy::api::fetch_session(&url, &token, claude_session_id)
         .await
         .map_err(describe_api_error)
 }
@@ -1177,19 +1176,19 @@ async fn fetch_session_credential(
 async fn switch_subscription(
     profile_name: &str,
     claude_session_id: &str,
-) -> Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError> {
-    use crate::proxy::api::{ApiError, SwitchError};
-    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
+) -> Result<proxy::api::SwitchOutcome, proxy::api::SwitchError> {
+    use proxy::api::{ApiError, SwitchError};
+    let Some((url, token)) = proxy::resolve::resolve_profile(profile_name) else {
         return Err(SwitchError::Api(ApiError::Http(
             reqwest::StatusCode::UNAUTHORIZED,
         )));
     };
-    crate::proxy::api::switch_session(&url, &token, claude_session_id).await
+    proxy::api::switch_session(&url, &token, claude_session_id).await
 }
 
 /// A one-line, user-facing description of a proxy API error.
-fn describe_api_error(e: crate::proxy::api::ApiError) -> String {
-    use crate::proxy::api::ApiError;
+fn describe_api_error(e: proxy::api::ApiError) -> String {
+    use proxy::api::ApiError;
     match e {
         ApiError::Http(s) if s.as_u16() == 403 => {
             "stats need a user token (admin and anonymous tokens are refused)".to_owned()

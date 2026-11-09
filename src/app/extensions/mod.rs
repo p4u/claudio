@@ -15,8 +15,8 @@ pub mod protocol;
 
 use std::collections::BTreeMap;
 
+use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::proto::{LensKind, LensSpec, SessionExtensions, MAX_INSTRUCTIONS, MAX_LENSES};
-use crate::proxy::plugins::PluginList;
 
 /// The diagram extension's instruction (spec §7).
 pub const DIAGRAM_CONTEXT: &str = "This terminal draws Mermaid diagrams. When a diagram \
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn plugins_follow_the_others_and_a_taken_name_is_refused() {
-        use crate::proxy::plugins::sample;
+        use crate::addons::vocdoni::proxy::plugins::sample;
         let ext = vec![external("keys", "keys", 'k')];
         let mut r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
         let work = PluginList {

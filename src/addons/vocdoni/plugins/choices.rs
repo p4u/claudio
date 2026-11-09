@@ -1,7 +1,7 @@
 //! What a member saves for a plugin from its setup screen (TUI and web).
 
+use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::config::PluginChoices;
-use crate::plugins::manifest::Manifest;
 
 /// The choices to save for `m` from a screen whose off ids are `off`:
 /// `disabled` keeps the earlier disabled ids `m` no longer has (so one that

@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::addon::Addons;
-use crate::proxy::resolve::split_launch_flags;
-use crate::proxy::ProxyChoice;
+use crate::addons::vocdoni::proxy::resolve::split_launch_flags;
+use crate::addons::vocdoni::proxy::ProxyChoice;
 use crate::tui;
 
 pub fn run(args: &[String], addons: Arc<Addons>) -> ExitCode {

@@ -17,10 +17,10 @@ use super::plugins::{notice_event, Plugins};
 use super::proxy::ProxyCache;
 use super::state::SessionMeta;
 use crate::addon::{Frontend, LaunchOp, LaunchSelect};
+use crate::addons::vocdoni::plugins::state::{compose, with_plugins, PluginPart};
 use crate::app::addons::AddonRuntime;
 use crate::app::launch::{self, LaunchSpec, Step};
 use crate::client::Client;
-use crate::plugins::state::{compose, with_plugins, PluginPart};
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,7 +152,7 @@ pub(crate) fn pick_profile(arg: &ProxyArg, default: Option<&str>) -> Option<Stri
 async fn resolve(arg: &ProxyArg) -> Result<Option<String>, String> {
     let default = match arg {
         ProxyArg::Default => {
-            tokio::task::spawn_blocking(crate::proxy::resolve::load_proxy_profiles)
+            tokio::task::spawn_blocking(crate::addons::vocdoni::proxy::resolve::load_proxy_profiles)
                 .await
                 .map_err(|_| "cannot read config.toml".to_owned())?
                 .1
@@ -183,7 +183,11 @@ async fn proxy_env(
     drop(p);
     let name = profile.to_owned();
     tokio::task::spawn_blocking(move || {
-        crate::proxy::resolve::proxy_env_for(Some(&name), config.as_ref(), first_party)
+        crate::addons::vocdoni::proxy::resolve::proxy_env_for(
+            Some(&name),
+            config.as_ref(),
+            first_party,
+        )
     })
     .await
     .map_err(|_| "cannot read config.toml".to_owned())?

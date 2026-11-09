@@ -14,11 +14,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::addons::vocdoni::plugins::manifest::Manifest;
+use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::config::PluginChoices;
 use crate::envmerge::merge_env_pairs;
-use crate::plugins::manifest::Manifest;
 use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
-use crate::proxy::plugins::PluginList;
 
 /// `--agents`, `--mcp-config` (the daemon drops them for a claude without).
 const AGENTS: &str = "--agents";

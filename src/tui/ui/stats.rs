@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
+use crate::addons::vocdoni::proxy::api::{PoolStatus, SessionCredential, StatsModel, StatsTotals};
 
 use super::super::app::{App, ProxyStatus, SessionView};
 use super::super::fmt::{
@@ -21,7 +21,7 @@ use super::super::fmt::{
 };
 use super::super::stats_view::{Page, StatsView};
 use super::{centered, popup};
-use crate::proxy::stats::Window;
+use crate::addons::vocdoni::proxy::stats::Window;
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;
@@ -1000,10 +1000,10 @@ fn bold() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::SessionState;
-    use crate::proxy::api::{
+    use crate::addons::vocdoni::proxy::api::{
         LimitInfo, ModelEntry, ModelsResponse, PoolHealthResponse, ProviderHealth, StatsResponse,
     };
+    use crate::proto::SessionState;
     use crate::tui::app::Modal;
     use crate::tui::proxy_state::ProxyFetch;
     use ratatui::backend::TestBackend;
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn credential_shows_on_overview_and_sessions_pages() {
-        use crate::proxy::api::{CredentialInfo, CredentialUtilization};
+        use crate::addons::vocdoni::proxy::api::{CredentialInfo, CredentialUtilization};
         let mut app = app_with_stats();
         let id = app.sessions[0].id;
         app.sessions[0].claude_session_id = Some("c1".into());

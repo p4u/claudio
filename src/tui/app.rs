@@ -24,17 +24,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::addon::{LaunchChoice, LaunchOp, LaunchSelect};
+use crate::addons::vocdoni::proxy::api::ConfigResponse;
+use crate::addons::vocdoni::proxy::ProxyChoice;
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::ConfigResponse;
-use crate::proxy::ProxyChoice;
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::keymap::Keymap;
 use super::proxy_state::{SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS};
 use super::selection::{Clicks, Selection};
 use super::stats_view::{StatsOutcome, StatsView};
+use crate::addons::vocdoni::proxy::stats::Window;
 use crate::app::state::{ClientState, KillTombstone};
-use crate::proxy::stats::Window;
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
 pub use super::interaction::Modal;
@@ -133,7 +133,7 @@ pub enum Effect {
     /// Spawn (or respawn) a session with proxy config: the effect runner
     /// fetches the proxy config (with a 5 s timeout) unless it is cached,
     /// waits up to 20 s for `pending` (asking `host` for each), adds the
-    /// plugins' share ([`crate::plugins::state::compose`]) and the proxy env, then
+    /// plugins' share ([`crate::addons::vocdoni::plugins::state::compose`]) and the proxy env, then
     /// sends the request. This avoids silently using fallback model
     /// defaults when the proxy-config cache is cold, and starting a session
     /// without a plugin whose manifest a host has not answered for yet.
@@ -146,7 +146,7 @@ pub enum Effect {
         first_party: bool,
         to: ReplyTo,
         /// The profile's enabled plugins, in registry order.
-        plugins: Vec<crate::plugins::state::PluginPart>,
+        plugins: Vec<crate::addons::vocdoni::plugins::state::PluginPart>,
         /// The `Manifest` requests of the plugins `host` has not answered.
         pending: Vec<PendingManifest>,
     },
@@ -426,7 +426,7 @@ pub struct App {
     pub failed_extensions: Vec<String>,
     /// The proxy plugins: lists, saved choices, manifests, each host's
     /// answers.
-    pub plugins: crate::plugins::state::Plugins,
+    pub plugins: crate::addons::vocdoni::plugins::state::Plugins,
     /// `--plain`'s session while plugin setup holds it: what to start, its
     /// proxy profile, and until when (Unix seconds) manifests are awaited.
     pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
@@ -823,10 +823,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::vocdoni::proxy::api::{SessionCredential, SwitchError, SwitchOutcome};
     use crate::app::state::SavedSession;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
-    use crate::proxy::api::{SessionCredential, SwitchError, SwitchOutcome};
     use crate::tui::confirm::Choice;
     use crate::tui::proxy_state::ProxyFetch;
     use crate::tui::test_support::{self, alt, app_with, info, key, press, shell_info};
@@ -2176,7 +2176,7 @@ mod tests {
 
     fn work_max() -> SessionCredential {
         SessionCredential {
-            credential: crate::proxy::api::CredentialInfo {
+            credential: crate::addons::vocdoni::proxy::api::CredentialInfo {
                 label: "work-max".into(),
                 plan: "max".into(),
                 ..Default::default()
@@ -2358,7 +2358,7 @@ mod tests {
 
     #[test]
     fn switch_outcomes_become_notices() {
-        use crate::proxy::api::{ApiError, SwitchCredential};
+        use crate::addons::vocdoni::proxy::api::{ApiError, SwitchCredential};
         let cred = |l: &str| SwitchCredential {
             label: l.into(),
             ..Default::default()

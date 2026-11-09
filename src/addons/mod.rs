@@ -1,13 +1,15 @@
 //! The addons this build registers (docs/addons.md). The core never names
 //! them; `main` hands `all()` to `addon::Addons::new`.
 
+pub mod vocdoni;
+
 use std::sync::Arc;
 
 use crate::addon::Addon;
 
 /// The addons this build registers, in registry order.
 pub fn all() -> Vec<Arc<dyn Addon>> {
-    Vec::new()
+    vec![Arc::new(vocdoni::Vocdoni)]
 }
 
 #[cfg(test)]
