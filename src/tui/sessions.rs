@@ -12,13 +12,12 @@ use crate::proto::{
 };
 use crate::term::screen::Screen;
 
-use super::app::{App, Effect, Mode, PendingManifest, ReplyTo, PROJECTS_LIMIT};
+use super::app::{App, Effect, Mode, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
 use super::wizard::{self, Wizard};
 use crate::app::label::sanitize_label;
 use crate::app::state::{self, ClientState, KillTombstone, SavedSession};
-use crate::plugins::state::{compose, with_plugins, PluginPart};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 
@@ -426,52 +425,6 @@ impl App {
             plugins,
             pending,
         )
-    }
-
-    /// Send `msg` (a `Spawn` or `Respawn` without the plugins' share or any
-    /// env) to `host` with the share of `plugins` ([`compose`]) and the env
-    /// of `proxy` added. A cold proxy-config cache, or `pending` manifests
-    /// still to come, go through the effect runner, which fetches the
-    /// config and waits for them first and answers with
-    /// [`ReplyTo::deferred`]. Fails when the profile cannot be resolved.
-    #[allow(clippy::too_many_arguments)]
-    fn send_with_proxy(
-        &mut self,
-        host: &str,
-        msg: Msg,
-        proxy: Option<&str>,
-        first_party: bool,
-        to: ReplyTo,
-        plugins: Vec<PluginPart>,
-        pending: Vec<PendingManifest>,
-    ) -> Result<(), String> {
-        match proxy {
-            Some(name) if self.proxy_config_cached(name).is_none() || !pending.is_empty() => {
-                if !pending.is_empty() {
-                    let names: Vec<&str> = pending.iter().map(|b| b.name.as_str()).collect();
-                    self.notify(format!("applying plugin {}…", names.join(", ")));
-                }
-                self.emit(Effect::SpawnWithProxy {
-                    host: host.to_owned(),
-                    msg,
-                    proxy_name: name.to_owned(),
-                    first_party,
-                    to: to.deferred(),
-                    plugins,
-                    pending,
-                });
-            }
-            _ => {
-                let profile_env = self.proxy_env_for(proxy, first_party)?;
-                let composed = compose(&plugins);
-                for notice in &composed.notices {
-                    self.notify(notice.clone());
-                }
-                let msg = with_plugins(msg, composed).merge_env(profile_env);
-                self.request(host, msg, to);
-            }
-        }
-        Ok(())
     }
 
     // ── Close (Alt+x) ─────────────────────────────────────────────────────────

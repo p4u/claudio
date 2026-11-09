@@ -5,11 +5,12 @@
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::app::{App, ReplyTo};
-use super::HostEvent;
+use super::app::{App, Effect, ReplyTo};
+use super::{fetch_proxy_config, wait_manifests, HostEvent};
 use crate::addon::{Addons, SessionSnap};
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
@@ -124,9 +125,99 @@ pub(super) fn save_extension(name: String, on: bool, tx: &mpsc::Sender<HostEvent
     });
 }
 
+/// Run a [`Effect::SpawnWithProxy`]: fetch the profile's config unless it
+/// is cached (5 s), wait for the pending manifests, compose the plugins'
+/// share and the proxy env, then send the request; the reply goes to
+/// `reply_tx`, notices to `ev_tx`.
+pub(super) fn spawn_with_proxy(
+    effect: Effect,
+    app: &App,
+    conns: &Connections,
+    reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
+    ev_tx: &mpsc::Sender<HostEvent>,
+) {
+    let Effect::SpawnWithProxy {
+        host,
+        msg,
+        proxy_name,
+        first_party,
+        to,
+        plugins: mut parts,
+        pending,
+    } = effect
+    else {
+        return;
+    };
+    // Resolve the client now (synchronous, cheap) so we can move it
+    // into the async task. Client is Clone + Send + 'static.
+    let client = conns.client(&host).cloned();
+    let cached = app.proxy_config_cached(&proxy_name).cloned();
+    let tx = reply_tx.clone();
+    let notices = ev_tx.clone();
+    tokio::spawn(async move {
+        // Meanwhile, wait for the plugin manifests.
+        let config = proxy_config(cached, &proxy_name);
+        let waits = wait_manifests(client.as_ref(), pending, &tx);
+        let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
+        if !left_out.is_empty() {
+            let names = left_out.join(", ");
+            let text = format!("plugin {names} left out: not ready on {host}");
+            let _ = notices.send(HostEvent::Notice(text)).await;
+        }
+        for part in &mut parts {
+            if part.applied.is_none() {
+                part.applied = ready.remove(&part.name);
+            }
+        }
+        let composed = crate::plugins::state::compose(&parts);
+        for text in composed.notices.clone() {
+            let _ = notices.send(HostEvent::Notice(text)).await;
+        }
+
+        // Build env from profile + (possibly fresh) config.
+        let env =
+            crate::proxy::resolve::proxy_env_for(Some(&proxy_name), cfg.as_ref(), first_party);
+        match env {
+            Err(e) => {
+                let _ = tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
+            }
+            Ok(env) => match client {
+                Some(c) => {
+                    let msg = crate::plugins::state::with_plugins(msg, composed).merge_env(env);
+                    let reply = c.request(msg);
+                    let _ = tx.send((to, reply.await));
+                }
+                None => {
+                    let _ = tx.send((
+                        to,
+                        Err(io::Error::new(
+                            io::ErrorKind::NotConnected,
+                            format!("{host}: not connected"),
+                        )),
+                    ));
+                }
+            },
+        }
+    });
+}
+
+/// `cached`, else `name`'s config fetched with a 5 s timeout, so the first
+/// spawn uses the real model/rate-limit overrides, not fallback defaults.
+async fn proxy_config(
+    cached: Option<crate::proxy::api::ConfigResponse>,
+    name: &str,
+) -> Option<crate::proxy::api::ConfigResponse> {
+    match cached {
+        Some(cfg) => Some(cfg),
+        None => tokio::time::timeout(Duration::from_secs(5), fetch_proxy_config(name))
+            .await
+            .ok()
+            .flatten(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
     use crate::addon::test_support::TestAddon;

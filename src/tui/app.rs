@@ -24,14 +24,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::proto::{Msg, SessionId, SessionState};
-use crate::proxy::api::{ConfigResponse, SessionCredential, SwitchError, SwitchOutcome};
+use crate::proxy::api::ConfigResponse;
 use crate::proxy::ProxyChoice;
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::keymap::Keymap;
-use super::proxy_state::{
-    ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
-};
+use super::proxy_state::{SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS};
 use super::selection::{Clicks, Selection};
 use super::stats_view::{StatsOutcome, StatsView};
 use crate::app::state::{ClientState, KillTombstone};
@@ -318,7 +316,7 @@ pub struct App {
     /// Profiles whose model catalogue has been requested once for the stats
     /// popup's Models page (a failed fetch is asked again on the next look;
     /// Alt+s fetches it again anyway).
-    models_requested: HashSet<String>,
+    pub(super) models_requested: HashSet<String>,
     /// The upstream credential each proxied session last used, as reported by
     /// the proxy. Only the active session is polled; the rest is a cache.
     pub session_creds: HashMap<SessionId, SessionCred>,
@@ -526,133 +524,6 @@ impl App {
 
     // ── Proxy ─────────────────────────────────────────────────────────────────
 
-    /// Called when a `FetchProxyConfig` effect completes.
-    pub fn on_proxy_config(&mut self, profile_name: String, cfg: ConfigResponse) {
-        self.proxy_config
-            .insert(profile_name, (cfg, Instant::now()));
-        self.redraw = true;
-    }
-
-    /// Called when a `FetchProxyStats` effect completes.
-    pub fn on_proxy_stats(&mut self, profile_name: String, fetch: ProxyFetch) {
-        if let Some(Modal::ProxyStats(view)) = &mut self.modal {
-            if view.profile.as_deref() == Some(profile_name.as_str()) {
-                view.on_fetched();
-            }
-        }
-        let status = self.proxy_status.entry(profile_name.clone()).or_default();
-        status.apply(fetch);
-        // A failed catalogue fetch is asked again on the next look.
-        if status.models.is_none() {
-            self.models_requested.remove(&profile_name);
-        }
-        self.redraw = true;
-    }
-
-    /// Look up the credential of the active session when it uses a proxy and
-    /// has a claude session id. A changed claude session id always fetches;
-    /// otherwise a lookup newer than `min_age` seconds is reused.
-    pub(super) fn refresh_session_cred(&mut self, min_age: u64) {
-        let Some(v) = self.active_view() else { return };
-        let (Some(profile), Some(csid)) = (v.proxy.clone(), v.claude_session_id.clone()) else {
-            return;
-        };
-        if v.kind != crate::proto::SessionKind::Claude || csid.is_empty() {
-            return;
-        }
-        let id = v.id;
-        let now = self.now;
-        self.request_models_once(&profile);
-        let fresh = self.session_creds.get(&id).is_some_and(|c| {
-            c.claude_session_id == csid && now.saturating_sub(c.asked_at) < min_age
-        });
-        if fresh {
-            return;
-        }
-        let cred = match self.session_creds.remove(&id) {
-            Some(old) if old.claude_session_id == csid => old.cred,
-            _ => None,
-        };
-        self.session_creds.insert(
-            id,
-            SessionCred {
-                claude_session_id: csid.clone(),
-                cred,
-                asked_at: now,
-            },
-        );
-        self.effects.push(Effect::FetchSessionCredential {
-            profile_name: profile,
-            session: id,
-            claude_session_id: csid,
-        });
-    }
-
-    /// Called when a `FetchSessionCredential` effect completes. `result` is
-    /// `Ok(None)` when the proxy does not know the conversation (yet); an
-    /// error (rate limit, network) keeps what is cached.
-    pub fn on_session_credential(
-        &mut self,
-        session: SessionId,
-        claude_session_id: &str,
-        result: Result<Option<SessionCredential>, String>,
-    ) {
-        let Some(entry) = self.session_creds.get_mut(&session) else {
-            return;
-        };
-        // A reply for a conversation the session has since left.
-        if entry.claude_session_id != claude_session_id {
-            return;
-        }
-        if let Ok(cred) = result {
-            entry.cred = cred;
-            self.redraw = true;
-        }
-    }
-
-    /// Fetch a profile's model catalogue (no stats windows) the first time a
-    /// session on it is looked at, so the stats popup's Models page has it.
-    fn request_models_once(&mut self, profile: &str) {
-        let cached = self
-            .proxy_status
-            .get(profile)
-            .is_some_and(|s| s.models.is_some());
-        if cached || !self.models_requested.insert(profile.to_owned()) {
-            return;
-        }
-        self.schedule_proxy_stats(profile, Vec::new());
-    }
-
-    /// The credential to show for a session: cached, and for its current
-    /// claude session id.
-    pub fn session_credential(&self, v: &SessionView) -> Option<&SessionCredential> {
-        let entry = self.session_creds.get(&v.id)?;
-        if v.claude_session_id.as_deref() != Some(entry.claude_session_id.as_str()) {
-            return None;
-        }
-        entry.cred.as_ref()
-    }
-
-    /// Proxy config for a profile, if cached and fresh (5 min).
-    pub fn proxy_config_cached(&self, name: &str) -> Option<&ConfigResponse> {
-        self.proxy_config.get(name).and_then(|(cfg, when)| {
-            if when.elapsed().as_secs() < 300 {
-                Some(cfg)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Schedule a proxy config fetch if the cache is stale.
-    pub fn maybe_fetch_proxy_config(&mut self, name: &str) {
-        if self.proxy_config_cached(name).is_none() {
-            self.effects.push(Effect::FetchProxyConfig {
-                profile_name: name.to_owned(),
-            });
-        }
-    }
-
     /// Schedule a proxy stats fetch for the named profile. The model
     /// catalogue is fetched along when it is not cached yet.
     pub fn schedule_proxy_stats(&mut self, name: &str, windows: Vec<Window>) {
@@ -771,48 +642,6 @@ impl App {
         });
     }
 
-    /// Called when a `SwitchSubscription` effect completes: say what the
-    /// proxy answered, and look the credential up again so the status bar
-    /// follows once the switch happens.
-    pub fn on_switch_result(
-        &mut self,
-        session: SessionId,
-        result: Result<SwitchOutcome, SwitchError>,
-    ) {
-        match result {
-            Ok(o) => {
-                let from = o.from.name().unwrap_or("current subscription");
-                let to =
-                    o.to.as_ref()
-                        .and_then(|t| t.name())
-                        .unwrap_or("next available");
-                self.notify(format!(
-                    "switch scheduled: {from} → {to} (on the next message)"
-                ));
-                let active = self.active_view().map(|v| v.id) == Some(session);
-                if active {
-                    self.refresh_session_cred(0);
-                }
-            }
-            Err(SwitchError::Api(e)) => self.notify(format!("switch failed: {e}")),
-            Err(e) => self.notify(e.to_string()),
-        }
-    }
-
-    /// Build the `SpawnSpec.env` for a proxy profile name. Fails when a
-    /// profile is selected but cannot be resolved.
-    pub(super) fn proxy_env_for(
-        &self,
-        proxy_name: Option<&str>,
-        first_party: bool,
-    ) -> Result<Vec<(String, String)>, String> {
-        crate::proxy::resolve::proxy_env_for(
-            proxy_name,
-            proxy_name.and_then(|n| self.proxy_config_cached(n)),
-            first_party,
-        )
-    }
-
     // ── Geometry ──────────────────────────────────────────────────────────────
 
     /// The pane size as `(rows, cols)`.
@@ -915,7 +744,9 @@ mod tests {
     use crate::app::state::SavedSession;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
+    use crate::proxy::api::{SessionCredential, SwitchError, SwitchOutcome};
     use crate::tui::confirm::Choice;
+    use crate::tui::proxy_state::ProxyFetch;
     use crate::tui::test_support::{self, alt, app_with, info, key, press, shell_info};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;

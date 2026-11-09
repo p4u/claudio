@@ -1026,83 +1026,8 @@ fn run_effect(
                     .await;
             });
         }
-        Effect::SpawnWithProxy {
-            host,
-            msg,
-            proxy_name,
-            first_party,
-            to,
-            plugins: mut parts,
-            pending,
-        } => {
-            // Resolve the client now (synchronous, cheap) so we can move it
-            // into the async task. Client is Clone + Send + 'static.
-            let client = conns.client(&host).cloned();
-            let cached = app.proxy_config_cached(&proxy_name).cloned();
-            let tx = reply_tx.clone();
-            let notices = ev_tx.clone();
-            tokio::spawn(async move {
-                // Fetch proxy config with a 5 s timeout so the first spawn
-                // uses the real model/rate-limit overrides, not fallback
-                // defaults; meanwhile, wait for the plugin manifests.
-                let config = async {
-                    match cached {
-                        Some(cfg) => Some(cfg),
-                        None => tokio::time::timeout(
-                            Duration::from_secs(5),
-                            fetch_proxy_config(&proxy_name),
-                        )
-                        .await
-                        .ok()
-                        .flatten(),
-                    }
-                };
-                let waits = wait_manifests(client.as_ref(), pending, &tx);
-                let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
-                if !left_out.is_empty() {
-                    let names = left_out.join(", ");
-                    let text = format!("plugin {names} left out: not ready on {host}");
-                    let _ = notices.send(HostEvent::Notice(text)).await;
-                }
-                for part in &mut parts {
-                    if part.applied.is_none() {
-                        part.applied = ready.remove(&part.name);
-                    }
-                }
-                let composed = plugin_state::compose(&parts);
-                for text in composed.notices.clone() {
-                    let _ = notices.send(HostEvent::Notice(text)).await;
-                }
-
-                // Build env from profile + (possibly fresh) config.
-                let env = crate::proxy::resolve::proxy_env_for(
-                    Some(&proxy_name),
-                    cfg.as_ref(),
-                    first_party,
-                );
-                match env {
-                    Err(e) => {
-                        let _ =
-                            tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
-                    }
-                    Ok(env) => match client {
-                        Some(c) => {
-                            let msg = plugin_state::with_plugins(msg, composed).merge_env(env);
-                            let reply = c.request(msg);
-                            let _ = tx.send((to, reply.await));
-                        }
-                        None => {
-                            let _ = tx.send((
-                                to,
-                                Err(io::Error::new(
-                                    io::ErrorKind::NotConnected,
-                                    format!("{host}: not connected"),
-                                )),
-                            ));
-                        }
-                    },
-                }
-            });
+        effect @ Effect::SpawnWithProxy { .. } => {
+            addon_runner::spawn_with_proxy(effect, app, conns, reply_tx, ev_tx)
         }
     }
 }
