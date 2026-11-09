@@ -52,6 +52,9 @@ static:
 	@echo "→ $(DIST)/$(BIN)"
 	@file $(DIST)/$(BIN) || true
 	@echo "static check:"; ldd $(DIST)/$(BIN) 2>&1 || true
+	@# R8: the debug-only test peer hook never ships.
+	@if grep -q CLAUDIO_TEST_REMOTE_PEER $(DIST)/$(BIN); then \
+	  echo "error: the debug-only test hook is in the release binary"; exit 1; fi
 
 ## Reproducible static build with zero host toolchain — uses a musl container.
 ## Works on any machine with Docker.
