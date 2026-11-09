@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use crate::client::Incoming;
 use crate::proto::{Msg, SessionEvent, SessionId, SessionKind, SessionState};
-use crate::term::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 use crate::term::screen::{MouseMode, Screen};
+use crate::tui::keys::{encode_focus, encode_key, encode_mouse, encode_paste};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;

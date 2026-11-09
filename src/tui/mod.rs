@@ -22,6 +22,7 @@ use hosts::{
 };
 mod interaction;
 mod keymap;
+mod keys;
 mod leader;
 mod notifications;
 mod panel_view;

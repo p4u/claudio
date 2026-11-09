@@ -3,8 +3,6 @@
 pub mod probe;
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub mod keys;
-#[cfg_attr(not(test), allow(dead_code))]
 pub mod screen;
 
 /// Strip CSI / OSC / DCS escape sequences so plain-text matching is robust

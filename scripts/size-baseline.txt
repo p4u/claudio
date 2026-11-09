@@ -29,7 +29,7 @@ fn src/addons/api/print/driver.rs::turn 82
 fn src/remote/bootstrap.rs::upload_bytes 108
 fn src/remote/bootstrap.rs::upload_release 91
 fn src/remote/diag.rs::remote_session_cmd 101
-fn src/term/keys.rs::encode_key 127
+fn src/tui/keys.rs::encode_key 127
 fn src/term/screen.rs::snapshot 149
 fn src/tui/interaction.rs::modal_key 113
 fn src/tui/interaction.rs::on_event 91

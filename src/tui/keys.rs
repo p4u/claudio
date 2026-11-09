@@ -9,7 +9,7 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use super::screen::{Modes, MouseMode};
+use crate::term::screen::{Modes, MouseMode};
 
 // ── Key encoding ──────────────────────────────────────────────────────────────
 

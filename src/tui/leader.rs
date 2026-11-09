@@ -392,7 +392,7 @@ impl App {
         if !v.attached || !modes.bracketed_paste {
             return self.notify("paste needs claude's prompt (bracketed paste is off)");
         }
-        let bytes = crate::term::keys::encode_paste(&text, &modes);
+        let bytes = crate::tui::keys::encode_paste(&text, &modes);
         let id = v.id;
         self.emit(Effect::Input(id, bytes));
     }
