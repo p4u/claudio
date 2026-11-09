@@ -306,22 +306,53 @@ async fn spawned_tasks_are_bounded_timed_out_and_aborted_at_shutdown() {
 }
 
 #[tokio::test]
-async fn extension_on_maps_claude_latex_false_onto_latex() {
+async fn the_claude_latex_alias_turns_the_row_and_the_lens_off_together() {
     let text = "[claude]\nlatex = false\n[extensions]\nlatex = true\ndiagram = true\n";
     let (dir, path) = scratch(text);
     let echo = Arc::new(TestAddon::new("echo"));
     let (rt, _rx) = runtime(vec![echo.clone()], &path, Limits::default());
     seen(&echo, 1).await; // Started: the config is read
     let ctx = rt.ctx("echo");
-    // The alias wins over `[extensions] latex`, and only for latex.
-    assert_eq!(ctx.extension_on("latex"), Some(false));
+    // An explicit `[extensions] latex` wins over the alias.
+    assert_eq!(ctx.extension_on("latex"), Some(true));
     assert_eq!(ctx.extension_on("diagram"), Some(true));
-    std::fs::write(&path, "[claude]\nlatex = true\n").unwrap();
+    // The alias alone answers for latex, and only for latex.
+    std::fs::write(&path, "[claude]\nlatex = false\n").unwrap();
     rt.config_changed();
     assert_eq!(seen(&echo, 2).await[1], "ConfigChanged");
-    assert_eq!(ctx.extension_on("latex"), None);
+    assert_eq!(ctx.extension_on("latex"), Some(false));
+    assert_eq!(ctx.extension_on("diagram"), None);
+    // A row whose default is `extension_on` (as the addon that holds latex
+    // builds it), under the raw `[extensions]` a front-end holds: off, as
+    // the lens is.
+    let row = crate::addon::ExtensionRow {
+        name: "latex".into(),
+        description: String::new(),
+        default_on: ctx.extension_on("latex") != Some(false),
+        refused: None,
+        details: Vec::new(),
+        setup: None,
+    };
+    let mut registry = crate::app::extensions::Registry::new(&Default::default(), Vec::new());
+    registry.set_addon_rows(&[("echo", row)], &Default::default());
+    let latex = registry.extensions.iter().find(|e| e.name == "latex");
+    assert!(latex.is_some_and(|e| !e.enabled));
     rt.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn extension_choice_takes_extensions_then_the_claude_alias() {
+    use super::ctx::extension_choice;
+    let table = |text: &str| -> toml::Table { text.parse().unwrap() };
+    let both = table("[claude]\nlatex = false\n[extensions]\nlatex = true\n");
+    assert_eq!(extension_choice(&both, "latex"), Some(true));
+    let alias = table("[claude]\nlatex = false\n");
+    assert_eq!(extension_choice(&alias, "latex"), Some(false));
+    assert_eq!(extension_choice(&alias, "diagram"), None);
+    let on = table("[claude]\nlatex = true\n");
+    assert_eq!(extension_choice(&on, "latex"), Some(true));
+    assert_eq!(extension_choice(&table(""), "latex"), None);
 }
 
 #[tokio::test]

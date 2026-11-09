@@ -93,7 +93,7 @@ request, config read and edit is attributed to it.
 | `sessions()` | a snapshot of the sessions (`SessionSnap`) |
 | `config(section)` | a declared section of `config.toml` (empty when undeclared) |
 | `edit_config(section, edit)` | an atomic, minimal edit of a declared section (below) |
-| `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None`; `[claude] latex = false` answers `Some(false)` for `latex` (its documented alias) |
+| `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None`; for `latex` without one, `[claude] latex` (its documented alias) |
 | `core_extensions()` | the names the core's own extensions hold (built-in and external): an addon row of such a name is refused, so the addon must not use it either |
 | `notify(text)` | a notice in the front-end |
 | `changed()` | segments, rows, options or an open panel changed: front-ends re-read them |
@@ -300,8 +300,8 @@ composition (tools disabled, no addon's share).
 every launch, from every front-end: `prepare` gives the `latex` tag lens (with the
 `<latex>` instruction) unless `extension_on("latex")` is false, and the `mermaid` fence lens
 (with the diagram instruction) unless `extension_on("diagram")` is false, so the daemon
-extracts what the page renders. `[claude] latex = false` is an alias of `[extensions] latex =
-false` (the runtime maps it, and it wins). Its `Ui` lists the `latex` and `diagram` extension
+extracts what the page renders. `[claude] latex` is an alias of `[extensions] latex` (the runtime
+maps it; an explicit `[extensions] latex` wins). Its `Ui` lists the `latex` and `diagram` extension
 rows (on by default); their toggles are the core's to write. A build without the web addon asks
 claude for no tags.
 

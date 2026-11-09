@@ -71,9 +71,7 @@ The choice is saved in `config.toml` as `name = true|false` under
 `[extensions]`: the line is replaced, or added to that table, or the table
 is appended. Comments, other sections and the file's mode stay as they
 were. If `config.toml` is not valid TOML, nothing is written and the status
-bar says so (the change still applies until claudio exits). With
-`[claude] latex = false`, the latex row says `also off by [claude] latex =
-false`: that setting turns latex off again at the next start.
+bar says so (the change still applies until claudio exits).
 
 Each lens comes with an instruction that tells claude how to write for it. It
 reaches claude through a `SessionStart` hook that reads a private file of the
@@ -90,8 +88,10 @@ as `latx`) gets a notice, `config.toml [extensions]: no extension named
 'latx'`: in the TUI's status bar, in `web.log` for the web UI.
 
 `[claude] latex = false` still turns math off. On the client it is an alias
-of `[extensions] latex = false` (and wins over it); on a host it keeps the
-latex instruction out of that host's sessions, and its daemon extracts no
+of `[extensions] latex`, with one rule for the latex row and the latex lens
+alike: an explicit `[extensions] latex` wins, else `[claude] latex`, else
+latex is on. On a host, `[claude] latex = false` keeps the latex
+instruction out of that host's sessions, and its daemon extracts no
 `<latex>` tags for the web UI.
 
 ### Proxy plugins

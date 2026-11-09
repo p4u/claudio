@@ -316,7 +316,7 @@ remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "
 install = "auto"                # install claude where a host has none: "auto" | "ask" | "off"
 latex = true                    # this host's sessions may carry the <latex> instruction (the web
                                 # addon's; `claudio daemon restart` after a change); on the client,
-                                # `false` is an alias of `[extensions] latex = false`
+                                # an alias of `[extensions] latex`, which wins when set
 
 [extensions]                    # every extension is on unless turned off here
 diagram = false                 # e.g. no Mermaid instruction or drawing (the web addon's row)

@@ -203,8 +203,8 @@ impl App {
     }
 
     /// What the screen says about extension `index`: its description, a
-    /// line per action (`Alt+z <key>  <title>`), a line per lens with its
-    /// kind, and for latex turned off by `[claude] latex = false`, that.
+    /// line per action (`Alt+z <key>  <title>`) and a line per lens with
+    /// its kind.
     pub fn extension_details(&self, index: usize) -> Vec<String> {
         let Some(ext) = self.extensions.extensions.get(index) else {
             return Vec::new();
@@ -226,9 +226,6 @@ impl App {
                 _ => "tag lens (the web UI)",
             };
             lines.push(format!("{}  {kind}", lens_label(&lens.name, lens.kind)));
-        }
-        if ext.name == "latex" && !self.claude_policy.latex {
-            lines.push("also off by [claude] latex = false".to_owned());
         }
         if let Source::Addon {
             refused, details, ..
@@ -495,23 +492,6 @@ mod tests {
             ]
         );
         assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
-    }
-
-    #[test]
-    fn latex_turned_off_in_claude_config_says_so() {
-        // The latex row is the web addon's.
-        let mut app = app_with_fake("");
-        crate::tui::test_support::rows(&mut app, "web", &[("latex", None)], &[]);
-        assert!(!app
-            .extension_details(3)
-            .iter()
-            .any(|l| l.contains("[claude] latex")));
-        app.claude_policy.latex = false;
-        let details = app.extension_details(3);
-        assert_eq!(
-            details.last().map(String::as_str),
-            Some("also off by [claude] latex = false")
-        );
     }
 
     #[test]

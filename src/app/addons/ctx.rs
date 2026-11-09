@@ -35,6 +35,18 @@ impl Ctx {
     }
 }
 
+/// `[extensions] <name>` as `config` has it. `[claude] latex` is the
+/// documented alias of `[extensions] latex`, mapped here once: an explicit
+/// `[extensions] latex` wins, else `[claude] latex`, else `None` (the
+/// extension's default).
+pub(super) fn extension_choice(config: &toml::Table, name: &str) -> Option<bool> {
+    let explicit = config
+        .get("extensions")
+        .and_then(|t| t.get(name)?.as_bool());
+    let alias = || config.get("claude")?.get("latex")?.as_bool();
+    explicit.or_else(|| (name == "latex").then(alias).flatten())
+}
+
 /// A finished request: `err` now.
 fn failed<T: Send + 'static>(err: T) -> BoxFuture<'static, T> {
     Box::pin(async move { err })
@@ -197,13 +209,7 @@ impl AddonCtx for Ctx {
     fn extension_on(&self, name: &str) -> Option<bool> {
         let inner = self.inner.upgrade()?;
         let state = inner.state();
-        // `[claude] latex = false` is the documented alias of
-        // `[extensions] latex = false`, mapped here once (and it wins).
-        let claude_latex = || state.config.get("claude")?.get("latex")?.as_bool();
-        if name == "latex" && claude_latex() == Some(false) {
-            return Some(false);
-        }
-        state.config.get("extensions")?.get(name)?.as_bool()
+        extension_choice(&state.config, name)
     }
 
     fn core_extensions(&self) -> Vec<String> {
