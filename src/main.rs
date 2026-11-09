@@ -131,8 +131,7 @@ fn main() -> std::process::ExitCode {
     }
 
     // SessionStart context hook: `claudio __context file <path>` prints the
-    // session's extension instructions; `__context latex` (sessions of an
-    // older daemon) the one to wrap math in `<latex>` tags.
+    // session's extension instructions (any other kind prints nothing).
     if argv.get(1).map(String::as_str) == Some("__context") {
         return claude::hooks::context(
             argv.get(2).map(String::as_str),

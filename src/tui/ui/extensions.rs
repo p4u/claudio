@@ -138,8 +138,8 @@ mod tests {
             "[x] latex     built-in  —          <latex>",
             "[x] diagram   built-in  —          ```mermaid",
             "[x] snippets  built-in  Alt+z p/P  —",
-            "Mermaid diagrams drawn in the reader",
-            "```mermaid  fence lens (the reader)",
+            "Mermaid diagrams drawn in the web UI",
+            "```mermaid  fence lens (the web UI)",
             FOOTER,
         ] {
             assert!(shown.contains(expected), "{expected} missing:\n{shown}");

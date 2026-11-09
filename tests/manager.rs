@@ -2245,12 +2245,15 @@ exec cat
     .unwrap();
 }
 
-/// A formula in claude's answer is rendered in place of its `<latex>` tag
-/// and listed by the reader view's formulas list (Alt+u, Tab); a TUI
-/// started later gets it from the daemon's replay on attach. The default
-/// config gives the session the context-file SessionStart hook.
+/// G5: a formula in claude's answer stays in the pane as claude printed
+/// it, `<latex>` tags and all (formulas render in the web UI only), also
+/// after the daemon has sent its formula list and in a TUI started later
+/// (which gets the list replayed on attach). The reader has no formulas
+/// list any more: Tab changes nothing. The default config still gives the
+/// session the context-file SessionStart hook (the web UI needs the tags).
 #[test]
-fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
+fn test_latex_formula_is_shown_as_claude_printed_it() {
+    const PRINTED: &str = "Energy: <latex>E = mc^2</latex> as promised.";
     let h = ManagerHarness::new();
     // The default test config has no `latex` key: the hook is on by default.
     let settings = h.root.join("settings.json");
@@ -2259,26 +2262,34 @@ fn test_latex_formula_is_rendered_in_the_pane_and_the_reader_list() {
     {
         let mut tui = h.start_tui();
         wizard_pick_dir(&mut tui, &h.dirs[0]);
-        tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
-        assert!(!tui.screen_text(Region::Pane).contains("<latex>"));
+        tui.wait_for(PRINTED, Region::Pane, DAEMON_WAIT);
         let hooks = fs::read_to_string(&settings).unwrap();
         assert!(hooks.contains("__context file"), "{hooks}");
+        // The daemon read the transcript (its formula list is sent by
+        // now): the pane is unchanged.
+        thread::sleep(Duration::from_millis(1500));
+        assert!(tui.screen_text(Region::Pane).contains(PRINTED));
+        assert!(!tui.screen_text(Region::Pane).contains("mc²"));
 
-        // The transcript has no prompt, so no answer; Tab lists the formula.
+        // The transcript has no prompt, so no answer; Tab lists nothing.
         tui.send_keys(ALT_U);
         tui.wait_for("No answers yet", Region::Pane, WAIT);
         tui.send_keys(TAB);
-        tui.wait_for("E = mc^2", Region::Pane, WAIT);
+        thread::sleep(Duration::from_millis(300));
+        let pane = tui.screen_text(Region::Pane);
+        assert!(pane.contains("No answers yet"), "{pane}");
+        assert!(!pane.contains("formulas"), "{pane}");
         tui.send_keys(ALT_U);
-        tui.wait_until(|s| !s.contains("E = mc^2", Region::Pane), WAIT);
+        tui.wait_for(PRINTED, Region::Pane, WAIT);
         tui.send_keys(ALT_Q);
         tui.wait_exit(WAIT);
     }
 
-    // Nothing changes in the conversation now, so only the attach replay
-    // can bring the formula to a new TUI.
+    // A new TUI gets the daemon's replay on attach: still claude's text.
     let tui = h.start_tui();
-    tui.wait_for("Energy: E = mc² as promised.", Region::Pane, DAEMON_WAIT);
+    tui.wait_for(PRINTED, Region::Pane, DAEMON_WAIT);
+    thread::sleep(Duration::from_millis(1000));
+    assert!(tui.screen_text(Region::Pane).contains(PRINTED));
 }
 
 // ── Reader view ───────────────────────────────────────────────────────────────
@@ -2336,12 +2347,12 @@ exec cat
     .unwrap();
 }
 
-/// AC10: Alt+u opens the reader on the newest answer, rendered from the
-/// transcript: its prompt in the header, text with the inline formula
-/// typeset, the display formula in 2D, the list; ← shows the older one,
-/// and Esc closes it.
+/// AC10: Alt+u opens the reader on the newest answer, laid out from the
+/// transcript: its prompt in the header, text with the inline formula and
+/// the display formula as their `<latex>` source (G5: formulas render in
+/// the web UI only), the list; ← shows the older one, and Esc closes it.
 #[test]
-fn test_reader_shows_the_answers_with_formulas_in_2d() {
+fn test_reader_shows_the_answers_with_formulas_as_source() {
     let h = ManagerHarness::new();
     write_answers_fake_claude(&h);
     let mut tui = h.start_tui();
@@ -2353,15 +2364,15 @@ fn test_reader_shows_the_answers_with_formulas_in_2d() {
         Region::Pane,
         DAEMON_WAIT,
     );
-    tui.wait_for("The roots of ax² + bx + c = 0 are", Region::Pane, WAIT);
+    tui.wait_for(
+        "The roots of <latex>ax^2 + bx + c = 0</latex> are",
+        Region::Pane,
+        WAIT,
+    );
     let pane = tui.screen_text(Region::Pane);
-    for row in [
-        "      -b ± √(b² - 4ac)",
-        "  x = ────────────────",
-        "             2a",
-    ] {
-        assert!(pane.contains(row), "missing {row:?} in:\n{pane}");
-    }
+    let display = "<latex>x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}</latex>";
+    assert!(pane.contains(display), "missing {display:?} in:\n{pane}");
+    assert!(!pane.contains("ax²") && !pane.contains('─'), "{pane}");
     assert!(
         pane.contains("• first item") && pane.contains("• second item"),
         "{pane}"
@@ -2490,13 +2501,14 @@ done
     .unwrap();
 }
 
-/// AC2, AC5, AC6, AC7: an external extension's tag lens is rendered by its
-/// program in the pane and in the reader; its instruction reaches claude
-/// through the context file only; Alt+z lists the built-in and external
-/// actions, Esc closes it with nothing sent, Alt+z u is the reader; the
-/// program's paste reaches claude without Enter (and is refused once
-/// bracketed paste is off), its list picks, its document shows (its own
-/// lens rendered), and a hanging action times out with a notice.
+/// AC2, AC6, AC7: an external extension's tag lens leaves the pane and the
+/// reader alone (G5: lenses render in the web UI only, the tag text is
+/// shown unchanged); its instruction reaches claude through the context
+/// file only; Alt+z lists the built-in and external actions, Esc closes it
+/// with nothing sent, Alt+z u is the reader; the program's paste reaches
+/// claude without Enter (and is refused once bracketed paste is off), its
+/// list picks, its document shows (its own tag as written), and a hanging
+/// action times out with a notice.
 #[test]
 fn test_external_extension_lens_leader_and_actions() {
     let h = ManagerHarness::new();
@@ -2506,8 +2518,20 @@ fn test_external_extension_lens_leader_and_actions() {
     let mut tui = h.start_tui();
     wizard_pick_dir(&mut tui, &h.dirs[0]);
 
-    // AC5: the pane shows the program's rendering of the tag.
-    tui.wait_for("Press ⌨ Ctrl+C to stop.", Region::Pane, DAEMON_WAIT);
+    // G5: the pane shows the tag text unchanged, also once the daemon has
+    // sent its lens list.
+    tui.wait_for(
+        "Press <keys>Ctrl+C</keys> to stop.",
+        Region::Pane,
+        DAEMON_WAIT,
+    );
+    thread::sleep(Duration::from_millis(1500));
+    let pane = tui.screen_text(Region::Pane);
+    assert!(
+        pane.contains("Press <keys>Ctrl+C</keys> to stop."),
+        "{pane}"
+    );
+    assert!(!pane.contains('⌨'), "{pane}");
 
     // AC2: the hook has the context file's path; the text is only in it.
     let hooks = fs::read_to_string(&settings).unwrap();
@@ -2525,10 +2549,10 @@ fn test_external_extension_lens_leader_and_actions() {
     assert!(context[0].contains("EXT-INSTRUCTION"), "{context:?}");
     assert!(context[0].contains("<latex>"), "the built-in lenses too");
 
-    // AC5: the reader renders it as well.
+    // G5: the reader shows it as written too.
     tui.send_keys(ALT_U);
     tui.wait_for("answer 1/1 · How do I stop it?", Region::Pane, DAEMON_WAIT);
-    tui.wait_for("Press ⌨ Ctrl+C to stop.", Region::Pane, WAIT);
+    tui.wait_for("Press <keys>Ctrl+C</keys> to stop.", Region::Pane, WAIT);
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
 
@@ -2581,12 +2605,12 @@ fn test_external_extension_lens_leader_and_actions() {
     tui.send_keys(ENTER);
     tui.wait_for("PICKED-SECOND", Region::Pane, WAIT);
 
-    // A document, its own lens rendered by the program.
+    // A document, its own tag as written.
     tui.send_keys(ALT_Z);
     tui.wait_for("show a document", Region::Screen, WAIT);
     tui.send_keys(b"d");
     tui.wait_for("Fake doc", Region::Pane, WAIT);
-    tui.wait_for("Press ⌨ Esc now.", Region::Pane, WAIT);
+    tui.wait_for("Press <keys>Esc</keys> now.", Region::Pane, WAIT);
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("Fake doc", Region::Pane), WAIT);
 
@@ -2673,10 +2697,10 @@ fn assistant_record(text: &str, cwd: &std::path::Path) -> serde_json::Value {
     })
 }
 
-/// AC8: a ```mermaid answer is drawn with box characters in the reader;
-/// its source is not shown.
+/// G5: a ```mermaid answer is its source in the reader, a code block
+/// (diagrams are drawn in the web UI only).
 #[test]
-fn test_reader_draws_a_mermaid_diagram() {
+fn test_reader_shows_a_mermaid_diagram_as_its_source() {
     let h = ManagerHarness::new();
     let cwd = fs::canonicalize(&h.dirs[0]).unwrap();
     let answer = "Here it is:\n\n```mermaid\nflowchart LR\n  alpha --> beta\n```\n";
@@ -2688,13 +2712,12 @@ fn test_reader_draws_a_mermaid_diagram() {
 
     tui.send_keys(ALT_U);
     tui.wait_for("answer 1/1 · Draw it", Region::Pane, DAEMON_WAIT);
-    tui.wait_for("alpha", Region::Pane, WAIT);
+    tui.wait_for("  flowchart LR", Region::Pane, WAIT);
     let pane = tui.screen_text(Region::Pane);
-    assert!(pane.contains("beta"), "{pane}");
-    assert!(pane.contains('┌') || pane.contains('╭'), "boxes:\n{pane}");
+    assert!(pane.contains("    alpha --> beta"), "{pane}");
     assert!(
-        !pane.contains("flowchart LR"),
-        "the source is not shown:\n{pane}"
+        !pane.contains('┌') && !pane.contains('╭'),
+        "no boxes:\n{pane}"
     );
     tui.send_keys(ESC);
     tui.wait_until(|s| !s.contains("answer 1/1", Region::Pane), WAIT);
@@ -2844,7 +2867,7 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
 
     // Space on diagram: off now, and saved.
     tui.send_keys(DOWN_ARROW);
-    tui.wait_for("Mermaid diagrams drawn in the reader", Region::Screen, WAIT);
+    tui.wait_for("Mermaid diagrams drawn in the web UI", Region::Screen, WAIT);
     tui.send_keys(b" ");
     tui.wait_for("[ ] diagram", Region::Screen, WAIT);
     tui.wait_for("extension diagram off (saved)", Region::StatusBar, WAIT);

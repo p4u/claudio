@@ -1,14 +1,13 @@
-//! The extension registry: what claudio renders (lenses) and what the
-//! leader key (Alt+z) offers (actions), from built-in extensions and from
-//! external ones (`~/.config/claudio/extensions/<name>/`, see
-//! [`manifest`]).
+//! The extension registry: the lenses a session's spawn asks for (the web
+//! UI renders their tags; the console TUI shows claude's text as written)
+//! and what the leader key (Alt+z) offers (actions), from built-in
+//! extensions and from external ones
+//! (`~/.config/claudio/extensions/<name>/`, see [`manifest`]).
 //!
-//! Pure: the manifests are read by `tui/mod.rs` at start, external programs
-//! run in the extension host it drives, and built-in renderers on the
-//! render worker. Everything else in the TUI asks the registry: which tag
-//! lenses the pane and the reader render, which fence lenses the reader
-//! draws, the context a spawn carries ([`Registry::session_extensions`]) and
-//! the leader's actions.
+//! Pure: the manifests are read by `tui/mod.rs` at start, and external
+//! programs run in the extension host it drives. Everything else asks the
+//! registry: the context a spawn carries
+//! ([`Registry::session_extensions`]) and the leader's actions.
 
 pub mod host;
 pub mod manifest;
@@ -137,7 +136,7 @@ pub fn builtins() -> Vec<Extension> {
         LensKind::Tag,
         crate::claude::hooks::LATEX_CONTEXT,
     )];
-    let mut diagram = builtin("diagram", "Mermaid diagrams drawn in the reader");
+    let mut diagram = builtin("diagram", "Mermaid diagrams drawn in the web UI");
     diagram.lenses = vec![lens("mermaid", LensKind::Fence, DIAGRAM_CONTEXT)];
     let mut search = builtin("search", "search claude conversations");
     search.actions = vec![action(
@@ -249,33 +248,6 @@ impl Registry {
         self.extensions.iter().filter(|e| e.enabled)
     }
 
-    /// The enabled lenses of `kind`, with their extension, in order.
-    pub fn lenses(&self, kind: LensKind) -> Vec<(&Extension, &Lens)> {
-        self.enabled()
-            .flat_map(|e| e.lenses.iter().map(move |l| (e, l)))
-            .filter(|(_, l)| l.kind == kind)
-            .collect()
-    }
-
-    /// The names of the enabled tag lenses.
-    pub fn tag_lenses(&self) -> Vec<&str> {
-        let lenses = self.lenses(LensKind::Tag);
-        lenses.into_iter().map(|(_, l)| l.name.as_str()).collect()
-    }
-
-    /// The names of the enabled fence lenses.
-    pub fn fence_lenses(&self) -> Vec<&str> {
-        let lenses = self.lenses(LensKind::Fence);
-        lenses.into_iter().map(|(_, l)| l.name.as_str()).collect()
-    }
-
-    /// The external extension that owns enabled lens `name`, if one does.
-    pub fn external_lens(&self, name: &str) -> Option<&Extension> {
-        self.enabled()
-            .find(|e| e.lenses.iter().any(|l| l.name == name))
-            .filter(|e| e.is_external())
-    }
-
     /// The session context a claude spawn carries: the enabled lenses in
     /// registry order, within the protocol's caps (a lens that would break
     /// them is left out, so the daemon never refuses the spawn).
@@ -372,8 +344,6 @@ mod tests {
     #[test]
     fn the_builtins_give_latex_and_mermaid_and_the_leader_actions() {
         let r = Registry::default();
-        assert_eq!(r.tag_lenses(), ["latex"]);
-        assert_eq!(r.fence_lenses(), ["mermaid"]);
         let ext = r.session_extensions();
         assert_eq!(names(&ext), ["latex", "mermaid"]);
         assert_eq!(
@@ -384,7 +354,7 @@ mod tests {
         assert_eq!(ext.validate(), Ok(()));
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s', 'p', 'P']);
-        assert!(r.external_lens("latex").is_none());
+        assert!(!r.extensions.iter().any(Extension::is_external));
     }
 
     #[test]
@@ -397,7 +367,6 @@ mod tests {
         ]);
         let r = Registry::new(&enabled, true, vec![], &mut notices);
         assert_eq!(names(&r.session_extensions()), ["latex"]);
-        assert!(r.fence_lenses().is_empty());
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s']);
         assert_eq!(
@@ -406,7 +375,6 @@ mod tests {
         );
         // `[claude] latex = false` is the latex extension off.
         let r = Registry::new(&BTreeMap::new(), false, vec![], &mut notices);
-        assert!(r.tag_lenses().is_empty());
         assert_eq!(names(&r.session_extensions()), ["mermaid"]);
     }
 
@@ -415,12 +383,8 @@ mod tests {
         let mut notices = Vec::new();
         let ext = vec![external("keys", "keys", 'k')];
         let r = Registry::new(&BTreeMap::new(), true, ext, &mut notices);
-        assert_eq!(r.tag_lenses(), ["latex", "keys"]);
         assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
-        assert_eq!(
-            r.external_lens("keys").map(|e| e.name.as_str()),
-            Some("keys")
-        );
+        assert!(r.extensions[4].is_external() && r.extensions[4].name == "keys");
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s', 'p', 'P', 'k']);
         let off = BTreeMap::from([("keys".to_owned(), false)]);
@@ -430,7 +394,7 @@ mod tests {
             vec![external("keys", "keys", 'k')],
             &mut notices,
         );
-        assert!(r.external_lens("keys").is_none());
+        assert_eq!(names(&r.session_extensions()), ["latex", "mermaid"]);
         assert!(notices.is_empty());
     }
 
@@ -440,9 +404,6 @@ mod tests {
         let mut r = Registry::new(&BTreeMap::new(), true, ext, &mut Vec::new());
         assert!(r.set_enabled("keys", false));
         assert!(r.set_enabled("diagram", false));
-        assert_eq!(r.tag_lenses(), ["latex"]);
-        assert!(r.fence_lenses().is_empty());
-        assert!(r.external_lens("keys").is_none());
         assert_eq!(names(&r.session_extensions()), ["latex"]);
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s', 'p', 'P']);
@@ -453,7 +414,6 @@ mod tests {
         assert_eq!(names(&r.session_extensions()), ["latex", "mermaid", "keys"]);
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s', 'p', 'P', 'k']);
-        assert!(r.external_lens("keys").is_some());
         assert!(!r.set_enabled("nope", true));
     }
 

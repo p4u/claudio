@@ -152,22 +152,6 @@ pub enum Effect {
     },
     /// Put this text on the outer terminal's clipboard (OSC 52).
     CopyToClipboard(String),
-    /// Render session `id`'s formulas, as of `seq`, on the `latex-render`
-    /// worker; they come back through [`App::on_latex_rendered`].
-    RenderLatex {
-        host: String,
-        id: SessionId,
-        seq: u64,
-        srcs: Vec<String>,
-    },
-    /// Render session `id`'s external tag-lens items of list `seq` with the
-    /// extension host; they come back through [`App::on_external_rendered`].
-    RenderExternal {
-        host: String,
-        id: SessionId,
-        seq: u64,
-        items: Vec<crate::proto::LensItem>,
-    },
     /// Read the snippets (off the UI thread); they go to
     /// [`App::on_snippets`] with `gen`.
     LoadSnippets { gen: u64 },
@@ -189,8 +173,8 @@ pub enum Effect {
     /// Write `[extensions] name = on` to config.toml; the outcome is a
     /// notice.
     SaveExtension { name: String, on: bool },
-    /// Render the answers of session `id` for the reader view opened under
-    /// `gen`, on the `latex-render` worker; they come back through
+    /// Parse the answers of session `id` for the reader view opened under
+    /// `gen`, off the UI thread; they come back through
     /// [`App::on_answers_rendered`].
     RenderAnswers {
         gen: u64,
@@ -395,10 +379,6 @@ pub struct App {
     /// The extensions (built-in and external) this client runs with; the
     /// event loop sets the configured ones at start.
     pub extensions: super::extensions::Registry,
-    /// Hosts whose daemon has the `lens` feature: their `Lens` events are
-    /// taken and their `Latex` events ignored (an older daemon's `Latex`
-    /// events are taken as `latex` items instead).
-    pub(super) lens_hosts: HashSet<String>,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
     /// The external extensions the extension host disabled after
@@ -500,20 +480,10 @@ impl App {
                 Vec::new(),
                 &mut Vec::new(),
             ),
-            lens_hosts: HashSet::new(),
             pending_action: None,
             failed_extensions: Vec::new(),
             plugins: Default::default(),
             plain_pending: None,
-        }
-    }
-
-    /// What `host`'s daemon said it can do (its `Welcome.features`).
-    pub fn set_host_features(&mut self, host: &str, features: &[String]) {
-        if features.iter().any(|f| f == "lens") {
-            self.lens_hosts.insert(host.to_owned());
-        } else {
-            self.lens_hosts.remove(host);
         }
     }
 

@@ -216,14 +216,9 @@ is idle (checked every 2 min).
 - `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
   `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
   notifications (`ESC ] 9 ; … BEL`) for background sessions that need
-  attention. Runs the `latex-render` worker thread (`Effect::RenderLatex` →
-  `HostEvent::LatexRendered`). It renders each formula on a scratch thread
-  (32 MiB stack) within a 150 ms budget, at most 2 abandoned at a time, and
-  caches by source (LRU 1024). The same thread renders the reader's
-  answers (`Effect::RenderAnswers` → `HostEvent::AnswersRendered`):
-  markdown into a `reader::doc::Doc`, formulas through the same guard and
-  cache. Its panic hook stays silent for panics on threads flagged
-  `QUIET_PANIC`.
+  attention. Parses the reader's answers off the UI thread
+  (`Effect::RenderAnswers` → `spawn_blocking` → `HostEvent::AnswersRendered`):
+  markdown into a `reader::doc::Doc`.
 - `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
   state transitions and returns `Effect` values. No I/O here; all I/O is in
   `mod.rs`. `Mode::Manager` or `Mode::Plain`.
@@ -236,28 +231,20 @@ is idle (checked every 2 min).
 - `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
   machine, and its `App` glue.
 - `stats_view.rs` — the multi-page proxy stats popup (Alt+s).
-- `latex.rs` — `<latex>` formulas, pure: `Formula` (source, one-line form,
-  display- and text-style layouts, match keys), the `too_complex`
-  pre-check, `render` (the `typeset` engine; `aligned`-like environments
-  row by row, aligned on their first `&`) and `overlay`. The overlay swaps matched on-screen tags for
-  their one-line rendering in the pane's buffer, cell by cell, and moves
-  no row.
-- `typeset/` — the 2D layout engine, pure: TeX's display and text styles
-  over the rust-latex-parser tree (`typeset`), the `\sqrt[n]` rewrite, the
-  rows of `aligned`/`gather`/`array`, the math-font tables (`mathfont.rs`,
-  ported from term-maths) and the v0.4.0 one-line walk (`walk.rs`).
 - `reader/` — the reader view (Alt+u): `doc.rs` (an answer as markdown
-  blocks with formula placeholders; runs on the worker), `layout.rs` (a
-  `Doc` wrapped to a width, line boxes for formulas) and `mod.rs`
-  (`ReaderView`: answer, scroll, Tab list, layout cache). Drawn by
-  `ui/reader.rs`.
-- `formulas.rs` — the lines of the reader's formulas list (Tab).
+  blocks; a `<latex>` tag is kept as written, as inline code, through
+  placeholders; parsed off the UI thread), `layout.rs` (a `Doc` wrapped to
+  a width) and `mod.rs` (`ReaderView`: answer, scroll, layout cache).
+  Drawn by `ui/reader.rs`. The console draws claude's text as claude wrote
+  it: no formulas, diagrams or lens renderings (spec G5; those are the web
+  UI's).
 - `extensions/` — the extension registry (`mod.rs`: built-ins latex,
   diagram, search, snippets; `Registry`, `ActionResult`; the proxy plugins
   as `Source::Plugin` rows, `Registry::set_plugins`), external
   manifests (`manifest.rs`: `~/.config/claudio/extensions/<name>/`, the
   HTML-tag rule, admission, at most 16), protocol v1 (`protocol.rs`: request
-  lines, result caps and sanitizing) and the extension host (`host.rs`: one
+  lines, result caps and sanitizing; `render` serves only the web UI's
+  `extensions.render`) and the extension host (`host.rs`: one
   program per extension, lazy start, scrubbed env, own process group,
   ≤ 16 in flight, render 1 s / action 15 s, 3 failures in 5 min disable it,
   killed on exit; it knows every loaded external extension, and one turned
@@ -393,8 +380,8 @@ Reasons name ids and fields, never values.
 - `hooks.rs` — `__hook <Event> <socket> <token>` relay: sends the hook payload
   to the daemon socket. Also `__context file <path>`, the SessionStart hook
   that prints the session's context file (the extensions' instructions: no
-  symlinks, a regular file of the uid, 16 KiB, sanitized) as one JSON line,
-  and `__context latex` for sessions of older daemons; neither touches the
+  symlinks, a regular file of the uid, 16 KiB, sanitized) as one JSON line;
+  any other kind (the pre-0.6 `latex`) prints nothing. It never touches the
   socket.
 - `latex.rs` — `lens_tags` (the items of any tag lenses in an assistant
   text, code excluded, with their byte ranges), `extract_latex` and
@@ -503,14 +490,15 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 - **`app.rs` is pure; I/O is only in `tui/mod.rs`.** `App::update` takes
   events and returns `Effect` values. `mod.rs` drives the effects. Don't add
   I/O to `app.rs`.
-- **Formulas are never rendered on the UI thread.** On hostile input inside
-  the 2048-byte cap, rust-latex-parser can take a minute or overflow a
-  2 MiB stack. Call `latex::render` only through `render_formula` in
-  `tui/mod.rs` (pre-check, scratch thread, budget, abandon cap), never from
-  `App`, a draw, or a test with hostile input (unit tests may call it on
-  benign formulas only). The same goes for the `typeset` engine, and the
-  reader's markdown is parsed on the worker too; `App` and the drawing only
-  lay out what the worker made.
+- **The console TUI stays plain (A7, spec G5).** The pane shows claude's
+  screen as claude drew it, and the reader shows formulas and diagrams as
+  their source. Formulas, diagrams and lenses render in the web UI only;
+  the TUI still sends the registry's lenses with every spawn, because the
+  web UI renders them from the daemon's `Lens`/`Latex` events. Don't add an
+  overlay or renderer to the TUI.
+- **The reader's markdown is parsed off the UI thread** (`spawn_blocking`):
+  the transcript is attacker-influenced. `App` and the drawing only lay out
+  the parsed `Doc`.
 
 ### Non-obvious constraints (don't "fix" these — web)
 

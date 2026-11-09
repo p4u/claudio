@@ -1,11 +1,11 @@
-//! The reader view (Alt+u): the session's recent answers, rendered by
-//! claudio from the transcript, with their formulas typeset. Its state and
-//! keys are here (pure); drawing is in `ui/reader.rs`.
+//! The reader view (Alt+u): the session's recent answers, laid out by
+//! claudio from the transcript as markdown; formulas and diagrams are
+//! their source (they render in the web UI only). Its state and keys are
+//! here (pure); drawing is in `ui/reader.rs`.
 //!
-//! - [`doc`] — an answer as markdown blocks (on the render worker).
+//! - [`doc`] — an answer as markdown blocks (parsed off the UI thread).
 //! - [`layout`] — such blocks wrapped to the view's width.
-//! - [`ReaderView`] — which answer, how far down, and the formulas list
-//!   (Tab: the v0.4.0 popup's content).
+//! - [`ReaderView`] — which answer, and how far down.
 
 pub mod doc;
 pub mod layout;
@@ -18,10 +18,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use super::extensions::protocol::Rendering;
-use super::formulas;
-use super::latex::{Formula, Rendered};
-use super::sessions::SessionView;
 use crate::proto::SessionId;
 use layout::{Line, Seg};
 
@@ -34,34 +30,24 @@ const TOO_NARROW: &str = "too narrow";
 const LOADING: &str = "Loading…";
 const NO_ANSWERS: &str = "No answers yet";
 
-/// One answer, ready to lay out: from the render worker.
+/// One answer, ready to lay out: parsed off the UI thread.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedAnswer {
     /// The prompt, as the daemon sent it.
     pub prompt: String,
     pub doc: doc::Doc,
-    /// The formulas the doc's indices point at.
-    pub formulas: Vec<Formula>,
 }
 
-/// Where an external lens's rendering goes in an answer.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Slot {
-    /// Formula `i` (a tag lens's item).
-    Formula(usize),
-    /// The `n`th fence-lens block, in `Doc::each_lens` order.
-    Fence(usize),
-}
-
-/// An external lens's item or block in the answers: the extension host
-/// renders it after the render worker, into `slot` of answer `answer`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct External {
-    pub answer: usize,
-    pub slot: Slot,
-    pub lens: String,
-    pub kind: crate::proto::LensKind,
-    pub source: String,
+/// `answers` as the reader shows them: each a markdown document. Run off
+/// the UI thread (the text is attacker-influenced).
+pub fn render(answers: &[crate::proto::Answer]) -> Vec<RenderedAnswer> {
+    answers
+        .iter()
+        .map(|answer| RenderedAnswer {
+            prompt: answer.prompt.clone(),
+            doc: doc::parse(&answer.text),
+        })
+        .collect()
 }
 
 /// What the view has to show.
@@ -91,8 +77,6 @@ pub struct ReaderView {
     pub content: Content,
     /// The answer shown (an index into `Ready`).
     answer: usize,
-    /// Showing the formulas list (Tab) instead of an answer.
-    list: bool,
     scroll: u16,
     /// The largest useful scroll, known once drawn (see `ui/reader.rs`).
     max_scroll: Cell<u16>,
@@ -110,7 +94,6 @@ impl ReaderView {
             title: None,
             content: Content::Loading,
             answer: 0,
-            list: false,
             scroll: 0,
             max_scroll: Cell::new(u16::MAX),
             layouts: RefCell::new((0, HashMap::new())),
@@ -131,55 +114,7 @@ impl ReaderView {
         self.answer = answers.len().saturating_sub(1);
         self.content = Content::Ready(answers);
         self.layouts.borrow_mut().1.clear();
-        if !self.list {
-            self.scroll = 0;
-        }
-    }
-
-    /// Put an external lens's rendering (from the extension host) at
-    /// `slot` of answer `answer`, whose source is `src`: a formula's
-    /// renderings, or a fence block's rows. `None` leaves it as it is.
-    pub fn set_external(
-        &mut self,
-        answer: usize,
-        slot: &Slot,
-        src: &str,
-        rendering: Option<Rendering>,
-    ) {
-        let Some((inline, block)) = rendering else {
-            return;
-        };
-        let Content::Ready(answers) = &mut self.content else {
-            return;
-        };
-        let Some(a) = answers.get_mut(answer) else {
-            return;
-        };
-        match slot {
-            Slot::Formula(i) => {
-                if let Some(f) = a.formulas.get_mut(*i) {
-                    let text = None;
-                    *f = Formula::new(
-                        src,
-                        Rendered {
-                            inline,
-                            block,
-                            text,
-                        },
-                    );
-                }
-            }
-            Slot::Fence(n) => {
-                let mut k = 0;
-                a.doc.each_lens(&mut |_, _, rows| {
-                    if k == *n {
-                        *rows = block.as_ref().map(|b| b.rows.clone());
-                    }
-                    k += 1;
-                });
-            }
-        }
-        self.layouts.borrow_mut().1.remove(&answer);
+        self.scroll = 0;
     }
 
     /// Show why there are no answers.
@@ -219,22 +154,13 @@ impl ReaderView {
             KeyCode::PageUp => at.saturating_sub(PAGE),
             KeyCode::Home | KeyCode::Char('g') => 0,
             KeyCode::End | KeyCode::Char('G') => u16::MAX,
-            KeyCode::Left | KeyCode::Char('h') if !self.list && self.answer > 0 => {
+            KeyCode::Left | KeyCode::Char('h') if self.answer > 0 => {
                 self.answer -= 1;
                 0
             }
-            KeyCode::Right | KeyCode::Char('l') if !self.list && self.answer + 1 < answers => {
+            KeyCode::Right | KeyCode::Char('l') if self.answer + 1 < answers => {
                 self.answer += 1;
                 0
-            }
-            KeyCode::Tab => {
-                self.list = !self.list;
-                // The list opens on its newest formulas, an answer on its top.
-                if self.list {
-                    u16::MAX
-                } else {
-                    0
-                }
             }
             _ => at,
         };
@@ -262,7 +188,6 @@ impl ReaderView {
             })
         };
         match &self.content {
-            _ if self.list => push(&mut line, "formulas", Style::default()),
             _ if self.title.is_some() => {
                 let title = self.title.as_deref().unwrap_or_default();
                 push(&mut line, &fit(title, width), Style::default());
@@ -287,8 +212,8 @@ impl ReaderView {
     }
 
     /// The body's lines at `width`: the answer laid out (cached for the
-    /// width), the formulas list of `session`, or a message.
-    pub fn body(&self, session: Option<&SessionView>, width: usize) -> Rc<Vec<Line>> {
+    /// width), or a message.
+    pub fn body(&self, width: usize) -> Rc<Vec<Line>> {
         let message = |text: &str| {
             let dim = Style::default().add_modifier(Modifier::DIM);
             Rc::new(vec![Line(vec![Seg {
@@ -298,9 +223,6 @@ impl ReaderView {
         };
         if width < MIN_WIDTH {
             return message(TOO_NARROW);
-        }
-        if self.list {
-            return Rc::new(session.map(list_lines).unwrap_or_default());
         }
         let answers = match &self.content {
             Content::Loading => return message(LOADING),
@@ -317,7 +239,7 @@ impl ReaderView {
         let laid = layouts
             .1
             .entry(self.answer)
-            .or_insert_with(|| Rc::new(layout::layout(&answer.doc, &answer.formulas, width)));
+            .or_insert_with(|| Rc::new(layout::layout(&answer.doc, width)));
         Rc::clone(laid)
     }
 }
@@ -338,38 +260,18 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
-/// The formulas list (Tab): the v0.4.0 popup's lines for `session`.
-fn list_lines(session: &SessionView) -> Vec<Line> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    formulas::lines(session)
-        .into_iter()
-        .map(|line| {
-            let (text, style) = match line {
-                formulas::Line::Formula(text) => (text, Style::default()),
-                formulas::Line::Source(text) => (text, dim),
-                formulas::Line::Hint(text) => (text.to_owned(), dim),
-                formulas::Line::Blank => return Line::default(),
-            };
-            Line(vec![Seg { text, style }])
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::SessionKind;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn answer(prompt: &str, markdown: &str) -> RenderedAnswer {
-        let prepared = doc::prepare(markdown);
         RenderedAnswer {
             prompt: prompt.into(),
-            doc: doc::parse(&prepared),
-            formulas: Vec::new(),
+            doc: doc::parse(markdown),
         }
     }
 
@@ -387,7 +289,7 @@ mod tests {
     fn it_opens_on_the_newest_answer_and_moves_between_them() {
         let mut view = ready(vec![answer("first", "one"), answer("second", "two")]);
         assert_eq!(view.header(40).text(), "answer 2/2 · second");
-        assert_eq!(texts(&view.body(None, 40)), ["two"]);
+        assert_eq!(texts(&view.body(40)), ["two"]);
         view.set_max_scroll(5);
         view.on_key(&key(KeyCode::Down));
         assert_eq!(view.scroll(), 1);
@@ -449,76 +351,48 @@ mod tests {
     #[test]
     fn the_body_says_what_it_is_waiting_for() {
         let mut view = ReaderView::new(uuid::Uuid::nil(), "local", 1);
-        assert_eq!(texts(&view.body(None, 40)), [LOADING]);
+        assert_eq!(texts(&view.body(40)), [LOADING]);
         let old = "daemon on local is older: run `claudio daemon restart`";
         view.set_failed(old);
-        assert_eq!(texts(&view.body(None, 60)), [old]);
+        assert_eq!(texts(&view.body(60)), [old]);
         view.set_answers(Vec::new());
-        assert_eq!(texts(&view.body(None, 40)), [NO_ANSWERS]);
+        assert_eq!(texts(&view.body(40)), [NO_ANSWERS]);
         assert_eq!(view.header(40).text(), "reader");
         let view = ready(vec![answer("p", "text")]);
-        assert_eq!(texts(&view.body(None, MIN_WIDTH - 1)), [TOO_NARROW]);
+        assert_eq!(texts(&view.body(MIN_WIDTH - 1)), [TOO_NARROW]);
     }
 
     #[test]
     fn a_layout_is_kept_for_its_width_only() {
         let view = ready(vec![answer("p", "a long line of words to wrap")]);
-        let first = view.body(None, 40);
-        assert!(Rc::ptr_eq(&first, &view.body(None, 40)), "cached");
-        let narrow = view.body(None, 20);
+        let first = view.body(40);
+        assert!(Rc::ptr_eq(&first, &view.body(40)), "cached");
+        let narrow = view.body(20);
         assert_eq!(texts(&narrow), ["a long line of words", "to wrap"]);
-        assert!(
-            !Rc::ptr_eq(&first, &view.body(None, 40)),
-            "a resize starts over"
-        );
+        assert!(!Rc::ptr_eq(&first, &view.body(40)), "a resize starts over");
         assert_eq!(view.layouts.borrow().1.len(), 1);
     }
 
+    /// Formulas and diagrams are their source; Tab is not the view's
+    /// any more (the formulas list went with the TUI's typesetting).
     #[test]
-    fn tab_shows_the_sessions_formulas_list() {
-        let size = (24, 80);
-        let mut v = SessionView::new(uuid::Uuid::nil(), "local", "/w", SessionKind::Claude, size);
-        v.latex_srcs = vec!["x^2".into()];
-        let rendered = Rendered {
-            inline: Some("x²".into()),
-            ..Rendered::default()
-        };
-        v.latex = vec![Formula::new("x^2", rendered)];
-        let mut view = ready(vec![answer("p", "text")]);
-        view.on_key(&key(KeyCode::Tab));
-        assert_eq!(view.header(40).text(), "formulas");
-        assert_eq!(texts(&view.body(Some(&v), 40)), ["x²", "x^2"]);
-        assert_eq!(view.scroll, u16::MAX, "the list opens on its newest");
-        // ←/→ stay put in the list; Tab goes back to the answer's top.
-        view.on_key(&key(KeyCode::Left));
-        view.on_key(&key(KeyCode::Tab));
-        assert_eq!(texts(&view.body(Some(&v), 40)), ["text"]);
-        assert_eq!(view.scroll(), 0);
-    }
-
-    #[test]
-    fn external_renderings_fill_their_slots() {
-        use crate::tui::typeset::Laid;
-        let text = "<keys>k</keys>\n\n```abc\nsrc\n```\n";
-        let prepared = doc::prepare_lenses(text, &["keys"], &["abc"]);
-        let answer = RenderedAnswer {
+    fn formulas_and_diagrams_are_shown_as_their_source() {
+        let text = "E is <latex>E = mc^2</latex>\n\n```mermaid\nflowchart LR\n  a --> b\n```";
+        let mut view = ready(render(&[crate::proto::Answer {
             prompt: "p".into(),
-            doc: doc::parse(&prepared),
-            formulas: vec![Formula::raw("k")],
-        };
-        let mut view = ReaderView::new(uuid::Uuid::nil(), "local", 1);
-        view.set_answers(vec![answer]);
-        let before: Vec<String> = view.body(None, 40).iter().map(|l| l.text()).collect();
-        // Alone in its paragraph: display style, two columns in.
-        assert_eq!(before, ["  k", "", "  src"]);
-        let block = Laid {
-            rows: vec!["[abc]".into()],
-            baseline: 0,
-        };
-        view.set_external(0, &Slot::Formula(0), "k", Some((Some("⌨k".into()), None)));
-        view.set_external(0, &Slot::Fence(0), "src", Some((None, Some(block))));
-        view.set_external(0, &Slot::Fence(5), "x", None);
-        let after: Vec<String> = view.body(None, 40).iter().map(|l| l.text()).collect();
-        assert_eq!(after, ["  ⌨k", "", "  [abc]"]);
+            text: text.into(),
+        }]));
+        let want = [
+            "E is <latex>E = mc^2</latex>",
+            "",
+            "  flowchart LR",
+            "    a --> b",
+        ];
+        assert_eq!(texts(&view.body(40)), want);
+        view.set_max_scroll(5);
+        view.on_key(&key(KeyCode::Tab));
+        assert_eq!(view.header(40).text(), "answer 1/1 · p");
+        assert_eq!(view.scroll(), 0);
+        assert_eq!(texts(&view.body(40)), want);
     }
 }

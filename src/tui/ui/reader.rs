@@ -1,23 +1,22 @@
 //! The reader view (Alt+u) over the session pane; its state and lines are
 //! in `tui/reader/`.
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Clear;
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::claude::latex::sanitize;
-use crate::tui::app::App;
-use crate::tui::latex::text_cells;
+use crate::claude::latex::{is_unsafe, sanitize};
 use crate::tui::reader::layout::{safe, Line};
 use crate::tui::reader::ReaderView;
 
 /// Draw the view over `pane` (the tab and status bars stay): its header on
 /// the first row, then the body from where `view` is scrolled. Every line
 /// is written cell by cell, sanitized again, and cut at the pane's edge.
-pub fn draw_reader(frame: &mut Frame, app: &App, view: &ReaderView, pane: Rect) {
+pub fn draw_reader(frame: &mut Frame, view: &ReaderView, pane: Rect) {
     frame.render_widget(Clear, pane);
     if pane.height == 0 {
         return;
@@ -30,8 +29,7 @@ pub fn draw_reader(frame: &mut Frame, app: &App, view: &ReaderView, pane: Rect) 
         buf[(x, pane.y)].set_style(bar);
     }
     draw_line(buf, pane, pane.y, &header, bar);
-    let session = app.sessions.iter().find(|v| v.id == view.session);
-    let lines = view.body(session, width);
+    let lines = view.body(width);
     let rows = pane.height - 1;
     let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     view.set_max_scroll(total.saturating_sub(rows));
@@ -61,16 +59,42 @@ fn draw_line(buf: &mut Buffer, area: Rect, y: u16, line: &Line, base: Style) {
     }
 }
 
+/// `text` as cells in `style`: one grapheme cluster per cell, a wide one
+/// followed by the blank cell it covers (as `Buffer::set_string` lays them
+/// out). Clusters of width 0, or holding a character [`sanitize`] removes,
+/// are dropped; `None` when one is wider than two columns.
+fn text_cells(text: &str, style: Style) -> Option<Vec<Cell>> {
+    let mut cells = Vec::with_capacity(text.len());
+    for cluster in text.graphemes(true) {
+        if cluster
+            .chars()
+            .any(|c| is_unsafe(c) || c == '\n' || c == '\t')
+        {
+            continue;
+        }
+        let mut cell = Cell::default();
+        cell.set_symbol(cluster).set_style(style);
+        match cluster.width() {
+            0 => {}
+            1 => cells.push(cell),
+            2 => cells.extend([cell, Cell::default()]),
+            _ => return None,
+        }
+    }
+    Some(cells)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::text_cells;
     use crate::proto::{Answer, Msg};
     use crate::tui::app::{App, AppConfig, Effect, Modal, Mode, ReplyTo};
+    use crate::tui::reader::render;
     use crate::tui::test_support::{self, alt, app_with, info, press};
-    use crate::tui::{render_answers, RenderCache};
     use crossterm::event::KeyCode;
+    use ratatui::buffer::Cell;
+    use ratatui::style::Style;
     use ratatui::{backend::TestBackend, Terminal};
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
 
     /// The screen's rows after drawing `app`, trailing blanks dropped.
     fn screen(app: &App) -> Vec<String> {
@@ -86,7 +110,7 @@ mod tests {
     }
 
     /// Open the reader on `app`'s first session and answer it with
-    /// `answers`, rendered as the worker would (benign formulas only).
+    /// `answers`, parsed as the event loop would.
     fn open_with(app: &mut App, answers: Vec<Answer>) {
         app.on_terminal(alt('u'));
         let (gen, id) = match app.take_effects().as_slice() {
@@ -103,9 +127,7 @@ mod tests {
             Some(Effect::RenderAnswers { answers, .. }) => answers,
             other => panic!("{other:?}"),
         };
-        let running = Arc::new(AtomicUsize::new(0));
-        let rendered = render_answers(&answers, &mut RenderCache::default(), &running);
-        app.on_answers_rendered(gen, id, rendered);
+        app.on_answers_rendered(gen, id, render(&answers));
     }
 
     fn answer(prompt: &str, text: &str) -> Answer {
@@ -116,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reader_covers_the_pane_and_typesets_the_answer() {
+    fn the_reader_covers_the_pane_and_shows_formulas_as_their_source() {
         let mut app = app_with(&[info(Some(1), None)]);
         let text = "Energy is <latex>E = mc^2</latex>, and\n\n<latex>\\frac{a}{b}</latex>";
         open_with(&mut app, vec![answer("old", "first"), answer("why?", text)]);
@@ -124,8 +146,12 @@ mod tests {
         assert_eq!(rows[0], " 1 ✓ app", "the tab bar stays");
         assert_eq!(rows[1], "answer 2/2 · why?");
         assert_eq!(
-            rows[2..7],
-            ["Energy is E = mc², and", "", "  a", "  ─", "  b"]
+            rows[2..5],
+            [
+                "Energy is <latex>E = mc^2</latex>, and",
+                "",
+                "<latex>\\frac{a}{b}</latex>"
+            ]
         );
         assert!(rows[28].starts_with(" /srv/app"), "the status bar stays");
         assert!(rows[29].ends_with("Alt+h help"), "{}", rows[29]);
@@ -135,14 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_shows_the_formulas_list_and_how_to_get_formulas() {
-        let mut app = app_with(&[info(Some(1), None)]);
-        open_with(&mut app, vec![answer("p", "text")]);
-        app.on_terminal(press(KeyCode::Tab));
-        let text = screen(&app).join("\n");
-        assert!(text.contains("formulas"), "{text}");
-        assert!(text.contains("No formulas yet."), "{text}");
-        assert!(text.contains("claudio daemon restart"), "{text}");
+    fn unsafe_clusters_never_become_cells() {
+        let style = Style::default();
+        let cells = text_cells("a\u{202e}b\u{1b}c\u{200b}", style).unwrap();
+        let text: String = cells.iter().map(Cell::symbol).collect();
+        assert_eq!(text, "abc");
+        // A wide cluster takes its cell and the one it covers.
+        assert_eq!(text_cells("漢", style).unwrap().len(), 2);
     }
 
     #[test]

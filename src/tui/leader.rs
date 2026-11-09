@@ -359,7 +359,7 @@ impl App {
         self.redraw = true;
     }
 
-    /// `markdown` in a reader view of its own, rendered on the worker like
+    /// `markdown` in a reader view of its own, parsed off the UI thread like
     /// an answer.
     pub(super) fn open_document(&mut self, title: String, markdown: String) {
         self.modal_gen += 1;
