@@ -1298,3 +1298,24 @@ fn short_tmp_root() -> PathBuf {
     let id = format!("{:08x}", h.finish() as u32);
     std::env::temp_dir().join(format!("cl-{id}"))
 }
+
+// ── Shared by several suites ─────────────────────────────────────────────────
+
+/// Minimal scope guard: runs `f` when dropped.
+pub struct ScopeGuard<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for ScopeGuard<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+pub fn scopeguard<F: FnOnce()>(f: F) -> ScopeGuard<F> {
+    ScopeGuard(Some(f))
+}
+
+pub const ALT_Z: &[u8] = b"\x1bz";
+
+pub const ALT_I: &[u8] = b"\x1bi";
