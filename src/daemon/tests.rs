@@ -170,6 +170,7 @@ impl TestDaemon {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         }
     }
 
@@ -994,6 +995,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         ephemeral: false,
         extensions: None,
         env_remove: None,
+        optional: vec![],
     };
 
     // spawner handles the Spawn/Spawned handshake; observer watches events.
@@ -1090,6 +1092,7 @@ async fn immediate_exit_leaves_session_dormant() {
         ephemeral: false,
         extensions: None,
         env_remove: None,
+        optional: vec![],
     };
     c.spawn(spec).await;
 
@@ -3121,22 +3124,31 @@ async fn the_cache_keeps_at_most_32_manifests() {
 
 /// A claude that does not know `--plugin-dir` (the fake's `--help` is
 /// empty) still starts: the daemon leaves the pairs out of its argv, and
-/// the journal keeps them for a claude that does.
+/// the journal keeps them for a claude that does. A generic flag the spawn
+/// marks optional is treated the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_dirs_are_dropped_for_an_old_claude_but_journaled() {
-    let d = TestDaemon::start().await;
+    let d = TestDaemon::start_logging_argv().await;
     let mut c = d.client().await;
     let id = Uuid::new_v4();
     let mut spec = d.spec(id);
-    spec.args = vec!["--plugin-dir".into(), "/c/plugins/kb.zip".into()];
+    spec.args = vec![
+        "--plugin-dir".into(),
+        "/c/plugins/kb.zip".into(),
+        "--x-test=1".into(),
+    ];
+    spec.optional = vec!["--x-test".into()];
     c.spawn(spec).await;
     c.attach_until(id, BANNER).await;
     assert!(!d.daemon.claude_flags().knows("--plugin-dir"));
+    assert!(!d.daemon.claude_flags().knows("--x-test"));
+    assert_eq!(d.runs()[0], ["-n", "test"]);
     let entry = &d.journal()["sessions"][0];
     assert_eq!(
         entry["args"],
-        serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip"])
+        serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip", "--x-test=1"])
     );
+    assert_eq!(entry["optional"], serde_json::json!(["--x-test"]));
 }
 
 // ── Working tree (the web's Changes view) ────────────────────────────────────

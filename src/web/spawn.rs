@@ -231,6 +231,7 @@ pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<Sessio
         ephemeral: false,
         extensions: Some(ctx.ext.session_extensions()),
         env_remove: None,
+        optional: Vec::new(),
     };
     let msg = with_proxy(
         ctx,

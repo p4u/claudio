@@ -11,7 +11,9 @@ use crate::proto::{LensKind, LensSpec, RespawnSpec, SessionExtensions, SessionKi
 /// Refuse a spawn whose request breaks a cap, before anything is reserved.
 pub(super) fn check_spawn(spec: &SpawnSpec) -> io::Result<()> {
     check_extensions(spec.extensions.as_ref())?;
-    check_env_remove(spec.env_remove.as_deref())
+    check_env_remove(spec.env_remove.as_deref())?;
+    command::optional_ok(&spec.optional)
+        .map_err(|why| io::Error::other(format!("bad optional: {why}")))
 }
 
 /// Refuse a respawn whose request breaks a cap, before anything is stopped.

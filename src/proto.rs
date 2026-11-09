@@ -1190,6 +1190,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         });
         let merged = spawn
             .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
@@ -1324,6 +1325,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         };
         let dbg = format!("{spec:?}");
         assert!(dbg.contains("ANTHROPIC_AUTH_TOKEN"));
@@ -1921,6 +1923,7 @@ mod tests {
             ephemeral: false,
             extensions: Some(ext.clone()),
             env_remove: None,
+            optional: vec![],
         };
         let shown = format!("{spec:?}");
         assert!(

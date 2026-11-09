@@ -109,8 +109,10 @@ pub const AGENTS: &str = "--agents";
 /// Loads MCP servers for one session (JSON files or strings; variadic).
 pub const MCP_CONFIG: &str = "--mcp-config";
 
-/// The plugin flags a session's args may carry although this claude lacks
-/// them: the daemon drops such a flag and its value (P3.3 makes this generic).
+/// compat(v0.10): the flags the daemon treats as optional although the
+/// spawn's `optional` does not name them, as the previous release did: an
+/// older client marks none, and its sessions still start on a claude
+/// without them.
 pub const LEGACY_OPTIONAL: [&str; 3] = [PLUGIN_DIR, AGENTS, MCP_CONFIG];
 
 /// The plugin flags this claude lacks (`--mcp-config`, `--agents`): what a

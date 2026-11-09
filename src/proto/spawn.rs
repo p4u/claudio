@@ -40,6 +40,12 @@ pub struct SpawnSpec {
     /// `Some(list)`: exactly `claude::SESSION_MARKERS` plus `list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_remove: Option<Vec<String>>,
+    /// Flags of `args` the session can do without (docs/daemon-protocol.md,
+    /// "Optional args"): the daemon drops one, with its value, when this
+    /// host's claude does not list it in `--help`. Journaled with the args.
+    /// An old daemon ignores it (and drops only its own fixed three).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional: Vec<String>,
 }
 
 /// How to restart a session. Everything else (cwd, name, claude arguments,
@@ -237,6 +243,7 @@ impl std::fmt::Debug for SpawnSpec {
             .field("ephemeral", &self.ephemeral)
             .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
             .field("env_remove", &self.env_remove)
+            .field("optional", &self.optional)
             .finish()
     }
 }

@@ -20,12 +20,13 @@ use crate::proto::SpawnSpec;
 /// `--resume`, resume-retry), rather than in `spec.args`, so the journal never
 /// stores it. It is left out when the args already choose a permissions flag.
 ///
-/// A `--plugin-dir`, `--agents` or `--mcp-config` pair (or `--flag=value`)
-/// of the args is dropped when this claude lacks the flag (`flags`), so an
-/// old claude still starts; exactly one value goes with the flag. The
-/// journal keeps them for a newer claude. The args keep their order, and
-/// `-n <name>` follows them: the client puts the plugin flags last, so the
-/// variadic `--mcp-config` is always followed by a flag or nothing.
+/// An optional flag of the args (one `spec.optional` names, or one of
+/// [`host::LEGACY_OPTIONAL`]) is dropped with its value (the next argument,
+/// or `--flag=value`) when this claude lacks it (`flags`), so an old claude
+/// still starts; exactly one value goes with the flag. The journal keeps
+/// them for a newer claude. The args keep their order, and `-n <name>`
+/// follows them: the client puts the plugin flags last, so the variadic
+/// `--mcp-config` is always followed by a flag or nothing.
 pub(super) fn command(
     cfg: &super::Config,
     spec: &SpawnSpec,
@@ -47,7 +48,10 @@ pub(super) fn command(
     {
         cmd.arg(host::ALLOW_SKIP_PERMISSIONS);
     }
-    let unknown = |flag: &str| host::LEGACY_OPTIONAL.contains(&flag) && !flags.knows(flag);
+    let optional = |flag: &str| {
+        spec.optional.iter().any(|o| o == flag) || host::LEGACY_OPTIONAL.contains(&flag)
+    };
+    let unknown = |flag: &str| optional(flag) && !flags.knows(flag);
     let mut args = spec.args.iter();
     while let Some(a) = args.next() {
         if unknown(a) {
@@ -147,6 +151,30 @@ pub(super) fn env_remove_ok(list: &[String]) -> Result<(), String> {
     };
     match list.iter().position(|name| !ok(name)) {
         Some(i) => Err(format!("name {} is not an env var name", i + 1)),
+        None => Ok(()),
+    }
+}
+
+/// At most this many flags in a spawn's `optional`.
+const MAX_OPTIONAL: usize = 16;
+
+/// Why a spawn's `optional` is refused: more than [`MAX_OPTIONAL`] flags,
+/// or one that is not `--[a-z0-9][a-z0-9-]{0,39}`.
+pub(super) fn optional_ok(list: &[String]) -> Result<(), String> {
+    if list.len() > MAX_OPTIONAL {
+        return Err(format!("more than {MAX_OPTIONAL} flags"));
+    }
+    let ok = |flag: &str| {
+        let name = flag.strip_prefix("--").unwrap_or_default();
+        let mut chars = name.chars();
+        name.len() <= 40
+            && chars
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    match list.iter().position(|flag| !ok(flag)) {
+        Some(i) => Err(format!("flag {} is not --[a-z0-9][a-z0-9-]*", i + 1)),
         None => Ok(()),
     }
 }
@@ -308,6 +336,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         };
         let flags = ClaudeFlags::default();
         let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, &flags, None);
@@ -387,6 +416,7 @@ mod tests {
                 ephemeral: false,
                 extensions: None,
                 env_remove: None,
+                optional: vec![],
             };
             let flags = ClaudeFlags::default();
             let argv = argv_of(&command(
@@ -434,6 +464,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         };
         let argv = |plugin_dir: bool| {
             let flags = knowing(&[("--plugin-dir", plugin_dir)]);
@@ -492,6 +523,7 @@ mod tests {
             ephemeral: false,
             extensions: None,
             env_remove: None,
+            optional: vec![],
         };
         let argv = |agents: bool, mcp_config: bool| {
             let flags = knowing(&[("--agents", agents), ("--mcp-config", mcp_config)]);
@@ -518,6 +550,97 @@ mod tests {
             ["--resume", "abc", "--agents", agents, "--agents", agents, "-n", "s1"]
         );
         assert_eq!(&argv(false, false)[3..], ["--resume", "abc", "-n", "s1"]);
+    }
+
+    /// A flag the spawn marks optional goes, with its value, only when this
+    /// claude lacks it; a flag it does not mark (and that is not one of the
+    /// legacy three) is always passed.
+    #[test]
+    fn optional_flags_are_dropped_only_when_unknown() {
+        let cfg = super::super::Config {
+            socket: "/run/d.sock".into(),
+            lock: "/run/d.lock".into(),
+            journal: "/j.json".into(),
+            claude: "/bin/claude".into(),
+            claudio: "/bin/claudio".into(),
+            skip_permissions: false,
+            latex: false,
+            build: None,
+            path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
+        };
+        let spec = SpawnSpec {
+            args: vec![
+                "--x-test".into(),
+                "v".into(),
+                "--x-test=w".into(),
+                "--y-test".into(),
+                "u".into(),
+            ],
+            optional: vec!["--x-test".into()],
+            ..Default::default()
+        };
+        let argv = |help: &str| {
+            let flags = ClaudeFlags::from_help(help);
+            argv_of(&command(
+                &cfg,
+                &spec,
+                Path::new("/"),
+                "t",
+                false,
+                &flags,
+                None,
+            ))[3..]
+                .to_vec()
+        };
+        assert_eq!(argv(""), ["--y-test", "u"]);
+        assert_eq!(argv("  --x-test <v>  A test flag"), spec.args);
+        // Not marked: passed whether claude lists it or not.
+        let unmarked = SpawnSpec {
+            optional: Vec::new(),
+            ..spec.clone()
+        };
+        let flags = ClaudeFlags::default();
+        let got = argv_of(&command(
+            &cfg,
+            &unmarked,
+            Path::new("/"),
+            "t",
+            false,
+            &flags,
+            None,
+        ));
+        assert_eq!(&got[3..], &unmarked.args[..]);
+    }
+
+    #[test]
+    fn optional_is_capped_and_holds_flags_only() {
+        let flags = |list: &[&str]| list.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        assert!(optional_ok(&[]).is_ok());
+        assert!(optional_ok(&flags(&[
+            "--agents",
+            "--x-1",
+            &format!("--{}", "a".repeat(40))
+        ]))
+        .is_ok());
+        for bad in [
+            "agents",
+            "-a",
+            "--",
+            "--Agents",
+            "--a_b",
+            "--a=b",
+            "---a",
+            &format!("--{}", "a".repeat(41)),
+        ] {
+            let why = optional_ok(&flags(&["--ok", bad])).unwrap_err();
+            assert_eq!(why, "flag 2 is not --[a-z0-9][a-z0-9-]*", "{bad}");
+        }
+        assert_eq!(
+            optional_ok(&vec!["--a".to_owned(); 17]).unwrap_err(),
+            "more than 16 flags"
+        );
+        assert!(optional_ok(&vec!["--a".to_owned(); 16]).is_ok());
     }
 
     /// A builder whose inherited env holds `vars`.

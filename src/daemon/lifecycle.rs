@@ -31,6 +31,7 @@ impl Daemon {
                     ephemeral: e.ephemeral,
                     extensions: e.extensions.clone(),
                     env_remove: None,
+                    optional: e.optional.clone(),
                 };
                 (spec, e.kind)
             })
@@ -191,9 +192,9 @@ impl Daemon {
     }
 }
 
-/// What a respawn starts: the journaled cwd, name and args (resuming the
-/// journaled conversation unless `fresh`), with the request's env, size and
-/// extensions (else the journaled extensions).
+/// What a respawn starts: the journaled cwd, name, args and optional flags
+/// (resuming the journaled conversation unless `fresh`), with the request's
+/// env, size and extensions (else the journaled extensions).
 fn respawn_spec(entry: Entry, req: RespawnSpec) -> SpawnSpec {
     let mut args = without_conversation(&entry.args);
     if let Some(conversation) = entry.claude_session_id.filter(|_| !req.fresh) {
@@ -210,6 +211,7 @@ fn respawn_spec(entry: Entry, req: RespawnSpec) -> SpawnSpec {
         ephemeral: entry.ephemeral,
         extensions: req.extensions.or(entry.extensions),
         env_remove: req.env_remove,
+        optional: entry.optional,
     }
 }
 
