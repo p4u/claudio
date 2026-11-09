@@ -46,7 +46,7 @@ Also: one, two or four panes, terminal tabs, search across every conversation (`
 
 ### From another machine
 
-`claudio web` listens on loopback only. Two ways to reach it from a laptop or a phone:
+By default (without `--remote`), `claudio web` listens on loopback only. Two ways to reach it from a laptop or a phone:
 
 - **An SSH tunnel.** `ssh -L 7337:127.0.0.1:7337 host`, then open the URL `claudio web` printed on the host.
 - **`--remote`.** Set a password once with `claudio web --set-password`, then run `claudio web --remote`. It serves HTTPS on the network (port 7337 by default) with a self-signed certificate made on the first start and kept. The terminal prints the certificate's SHA-256 fingerprint at every start: check it against the one your browser shows before you accept the certificate. Remote browsers sign in with the password; the token link works only from the machine itself. `claudio web --print-cert` prints the certificate, to install it as trusted on the devices you use.
