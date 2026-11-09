@@ -33,7 +33,7 @@ introduces this shape is `docs/specs/2026-11-09-core-addons-design.md`.
 make                 # release build → target/release/claudio
 make static          # static musl binary → dist/claudio (ARCH=aarch64 for cross)
 make dev             # install this checkout to ~/.local/bin for testing, no release (make dev-undo reverts)
-make check           # acceptance checks (ACCEPTANCE.md): fmt, clippy -D warnings, rules, core-only build, unit tests
+make check           # acceptance checks (ACCEPTANCE.md): fmt, clippy -D warnings, rules, core-only build, unit tests (workspace, then each crate alone)
 make matrix          # the feature matrix: core only, each addon alone, all (make features FEATURES=web for one cell)
 make test-unit       # unit tests only: cargo test --locked --workspace --lib --bins (no claude needed)
 make test-manager    # manager integration tests (fake claude, no API key required)

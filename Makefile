@@ -105,6 +105,10 @@ check:
 	python3 scripts/check_rules.py
 	$(CHECK_CARGO) build --locked --no-default-features
 	$(CHECK_CARGO) test --locked --workspace --lib --bins
+	@# Each crate on its own too (E5): the workspace build unifies features, so a
+	@# crate missing one it needs would pass above and fail alone.
+	@for p in claudio-core claudio-tui claudio-api claudio-web claudio-vocdoni; do \
+		$(CHECK_CARGO) test --locked -p $$p --lib || exit 1; done
 
 ## One cell of the feature matrix (ACCEPTANCE E5). FEATURES="" is the core alone (A4),
 ## which also runs the TUI's manager suite against that binary.
