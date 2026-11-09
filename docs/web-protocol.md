@@ -17,8 +17,11 @@ P3.14-P3.15), the server serves both op sets under `"v": 1`: the `addons.*` ops,
 and events (`profiles` in the snapshot, `proxy`/`proxy_known`/`first_party` in the Session,
 `plugin_status`, `profiles`; version 1's text is in git history). A request giving both a
 version-1 arg (`proxy`, `first_party`, `skip_plugins`) and `launch`/`defer` answers
-`"bad request: launch: not with proxy, first_party or skip_plugins"`. P3.16 removes the version-1
-set and the hello says `"v": 2`.
+`"bad request: launch: not with proxy, first_party or skip_plugins"`; a spawn giving neither is
+launched as `{"pick":"default"}`, a `review` reply comes only to a spawn that gave `launch` or
+`defer` (one without them still leaves a plugin to review out, with a notice), and a respawn
+giving neither of an unknown session answers version 1's `"proxy unknown"`. P3.16 removes the
+version-1 set and the hello says `"v": 2`.
 
 ## 1. HTTP surface
 
