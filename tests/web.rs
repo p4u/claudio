@@ -2190,6 +2190,266 @@ async fn web_session_dto_has_launch_and_segments() {
     assert_eq!(ev["session"]["segments"], json!([]));
 }
 
+/// A v2 spawn in `dir` (the addons' default route), with `defer`.
+fn v2_spawn(dir: &std::path::Path, defer: &[&str]) -> Value {
+    let defer: Vec<Value> = defer
+        .iter()
+        .map(|id| json!({"addon": "vocdoni", "id": id}))
+        .collect();
+    json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+        "launch": {"pick": "default"}, "defer": defer})
+}
+
+/// The plugin's checklist, once its manifest is here.
+async fn plugin_checklist(tab: &mut Tab) -> Value {
+    let args = json!({"addon": "vocdoni", "checklist": PLUGIN});
+    until_req(tab, "addons.checklist", args, |_| true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_spawn_with_launch_needs_review_then_defer_spawns_without_the_plugin() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dir = h.dirs[0].clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let checklist = plugin_checklist(&mut tab).await;
+    let reply = tab.req("session.spawn", v2_spawn(&dir, &[])).await.unwrap();
+    assert_eq!(
+        reply,
+        json!({"review": {"addon": "vocdoni", "id": PLUGIN, "revision": checklist["revision"]}})
+    );
+    assert!(!env_file.exists(), "nothing started before the review");
+    let reply = tab
+        .req("session.spawn", v2_spawn(&dir, &[PLUGIN]))
+        .await
+        .expect("spawn deferring the plugin");
+    assert!(reply["sid"].is_string(), "{reply}");
+    let env = launched_env(&env_file).await;
+    assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
+    assert!(!env.contains(PLUGIN_SECRET), "deferred: left out");
+    // v1 and v2 args together, and flags without an option in effect.
+    let mut both = v2_spawn(&dir, &[]);
+    both["proxy"] = json!({"kind": "default"});
+    assert_eq!(
+        tab.req("session.spawn", both).await,
+        Err("bad request: launch: not with proxy, first_party or skip_plugins".to_owned())
+    );
+    let mut alone = v2_spawn(&dir, &[]);
+    alone["launch"] = json!({"pick": "direct", "flags": ["first-party"]});
+    assert_eq!(
+        tab.req("session.spawn", alone).await,
+        Err("bad request: launch: flags need an addon's option".to_owned())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_checklist_save_then_spawn_gets_the_plugin() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dir = h.dirs[0].clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let checklist = plugin_checklist(&mut tab).await;
+    assert!(checklist["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["id"] == "agent:reviewer" && i["on"] == true));
+    let save = json!({"addon": "vocdoni", "checklist": PLUGIN, "revision": checklist["revision"],
+        "answer": {"off": ["agent:reviewer"]}});
+    tab.req("addons.checklist.save", save).await.expect("save");
+    let config = fs::read_to_string(web.h().config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains(&format!("[plugins.{PLUGIN}]")), "{config}");
+    assert!(
+        config.contains("disabled = [\"agent:reviewer\"]"),
+        "{config}"
+    );
+    let reply = tab
+        .req("session.spawn", v2_spawn(&dir, &[]))
+        .await
+        .expect("spawn");
+    assert!(reply["sid"].is_string(), "saved: no review: {reply}");
+    let env = launched_env(&env_file).await;
+    assert!(
+        env.contains(&format!("VOCDONI_TEST_TOKEN={PLUGIN_SECRET}")),
+        "saved: the plugin's secret is in"
+    );
+    // Its row: toggled off through the core, then on.
+    let rows = tab.req("addons.rows", json!({})).await.unwrap();
+    let row = &rows["rows"][0];
+    assert_eq!(
+        (row["addon"].as_str(), row["name"].as_str()),
+        (Some("vocdoni"), Some(PLUGIN))
+    );
+    assert_eq!(
+        (row["on"].as_bool(), row["setup"].as_str()),
+        (Some(true), Some(PLUGIN))
+    );
+    let toggle =
+        |on: bool| json!({"addon": "vocdoni", "name": PLUGIN, "action": "toggle", "on": on});
+    tab.req("addons.row_action", toggle(false))
+        .await
+        .expect("off");
+    let config = fs::read_to_string(web.h().config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains(&format!("{PLUGIN} = false")), "{config}");
+    let rows = tab.req("addons.rows", json!({})).await.unwrap();
+    assert_eq!(rows["rows"][0]["on"], false);
+    tab.req("addons.row_action", toggle(true))
+        .await
+        .expect("on");
+    let refresh = json!({"addon": "vocdoni", "name": PLUGIN, "action": "refresh"});
+    tab.req("addons.row_action", refresh)
+        .await
+        .expect("refresh");
+    for (args, want) in [
+        (
+            json!({"addon": "vocdoni", "name": PLUGIN, "action": "toggle"}),
+            "bad request: on: a toggle needs it",
+        ),
+        (
+            json!({"addon": "vocdoni", "name": "diagram", "action": "refresh"}),
+            "bad request: name: no such row",
+        ),
+        (
+            json!({"addon": "vocdoni", "name": PLUGIN, "action": "drop"}),
+            "bad request: action: toggle or refresh",
+        ),
+    ] {
+        assert_eq!(
+            tab.req("addons.row_action", args).await,
+            Err(want.to_owned())
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_checklist_save_refuses_a_stale_revision() {
+    let proxy = fake_proxy();
+    let web = web_with_proxy(ManagerHarness::new(), &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let checklist = plugin_checklist(&mut tab).await;
+    let save = |revision: &Value, answer: Value| json!({"addon": "vocdoni", "checklist": PLUGIN, "revision": revision, "answer": answer});
+    let old = json!("0".repeat(64));
+    assert_eq!(
+        tab.req("addons.checklist.save", save(&old, json!({"off": []})))
+            .await,
+        Err("stale".to_owned())
+    );
+    let now = &checklist["revision"];
+    for (answer, want) in [
+        (
+            json!({"off": ["plugin:nope@x"]}),
+            "bad request: answer: no item plugin:nope@x",
+        ),
+        (
+            json!("later"),
+            r#"bad request: answer: {"off": [ids]} or "defer""#,
+        ),
+    ] {
+        assert_eq!(
+            tab.req("addons.checklist.save", save(now, answer)).await,
+            Err(want.to_owned())
+        );
+    }
+    let err = tab
+        .req(
+            "addons.checklist.save",
+            save(now, json!({"off": [], "on": []})),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("bad request"), "{err}");
+    tab.req("addons.checklist.save", save(now, json!("defer")))
+        .await
+        .expect("defer");
+    let config = fs::read_to_string(web.h().config_home.join("claudio/config.toml")).unwrap();
+    assert!(
+        !config.contains("[plugins."),
+        "deferred: nothing saved: {config}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_addons_action_switch_uses_server_state() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dirs = h.dirs.clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let proxied = tab
+        .req("session.spawn", v2_spawn(&dirs[0], &[PLUGIN]))
+        .await
+        .expect("spawn");
+    let proxied = proxied["sid"].as_str().unwrap().to_owned();
+    let mut direct = v2_spawn(&dirs[1], &[]);
+    direct["launch"] = json!({"pick": "direct"});
+    let direct = tab
+        .req("session.spawn", direct)
+        .await
+        .expect("spawn direct");
+    let direct = direct["sid"].as_str().unwrap().to_owned();
+    let switch =
+        |sid: &str| json!({"addon": "vocdoni", "panel": "proxy", "action": "switch", "sid": sid});
+    // The profile comes from the server's record of the session: this one
+    // is proxied (it only lacks a conversation yet), that one is direct.
+    let deadline = std::time::Instant::now() + WAIT;
+    let err = loop {
+        let err = tab
+            .req("addons.action", switch(&proxied))
+            .await
+            .unwrap_err();
+        if err != "vocdoni: no such session" || std::time::Instant::now() > deadline {
+            break err;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(err, "vocdoni: this session has no conversation yet");
+    let deadline = std::time::Instant::now() + WAIT;
+    let err = loop {
+        let err = tab.req("addons.action", switch(&direct)).await.unwrap_err();
+        if err != "vocdoni: no such session" || std::time::Instant::now() > deadline {
+            break err;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(err, "vocdoni: this session runs direct");
+    let mut forged = switch(&direct);
+    forged["profile"] = json!("env");
+    let err = tab.req("addons.action", forged).await.unwrap_err();
+    assert!(err.starts_with("bad request"), "{err}");
+    let unknown = switch("6f1c0000-0000-4000-8000-000000000000");
+    assert_eq!(
+        tab.req("addons.action", unknown).await,
+        Err("no such session".to_owned())
+    );
+    let mut bad = switch(&proxied);
+    bad["action"] = json!("drop");
+    assert_eq!(
+        tab.req("addons.action", bad).await,
+        Err("vocdoni: no such action".to_owned())
+    );
+    // A respawn names its launch the v2 way.
+    let again = json!({"sid": direct, "fresh": true, "rows": 24, "cols": 80,
+        "launch": {"pick": "direct"}});
+    let reply = tab.req("session.respawn", again).await.expect("respawn");
+    assert_eq!(reply["sid"], direct.as_str());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_proxy_stats_render_the_fixture() {
     let proxy = fake_proxy();

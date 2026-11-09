@@ -83,3 +83,79 @@ fn labelled_flags_are_the_select_flags_the_wizard_shows() {
         [json!({"name": "first-party", "label": "First-party session"})]
     );
 }
+
+fn arg(v: Value) -> LaunchArg {
+    serde_json::from_value(v).unwrap()
+}
+
+#[test]
+fn a_v2_launch_is_checked_into_a_select() {
+    let addons = addons();
+    let select = select_of(
+        &addons,
+        &arg(json!({"pick": "option", "addon": "vocdoni", "option": "work", "flags": ["first-party"]})),
+    )
+    .unwrap();
+    assert_eq!(
+        select.pick,
+        Pick::Option {
+            addon: "vocdoni".into(),
+            option: "work".into()
+        }
+    );
+    assert_eq!(select.flags, ["first-party"]);
+    assert_eq!(
+        select_of(&addons, &arg(json!({"pick": "default"}))).unwrap(),
+        LaunchSelect::default()
+    );
+    assert_eq!(
+        select_of(&addons, &arg(json!({"pick": "direct"})))
+            .unwrap()
+            .pick,
+        Pick::Direct
+    );
+    for (bad, why) in [
+        (
+            json!({"pick": "option", "addon": "nope", "option": "w"}),
+            "no such addon",
+        ),
+        (
+            json!({"pick": "option", "addon": "vocdoni", "option": ""}),
+            "option: 1..=128 bytes",
+        ),
+        (
+            json!({"pick": "option", "addon": "vocdoni"}),
+            "addon and option go with \"option\" only",
+        ),
+        (
+            json!({"pick": "direct", "addon": "vocdoni"}),
+            "addon and option go with \"option\" only",
+        ),
+        (
+            json!({"pick": "anything"}),
+            "pick: default, direct or option",
+        ),
+        (
+            json!({"pick": "default", "flags": ["--first-party"]}),
+            "no flag --first-party",
+        ),
+    ] {
+        assert_eq!(
+            select_of(&addons, &arg(bad.clone())),
+            Err(format!("bad request: launch: {why}")),
+            "{bad}"
+        );
+    }
+    let defer: Vec<DeferArg> =
+        serde_json::from_value(json!([{"addon": "vocdoni", "id": "kb"}])).unwrap();
+    assert_eq!(
+        deferred_of(&addons, &defer),
+        Ok(vec![("vocdoni".to_owned(), "kb".to_owned())])
+    );
+    let defer: Vec<DeferArg> =
+        serde_json::from_value(json!([{"addon": "vocdoni", "id": "../kb"}])).unwrap();
+    assert_eq!(
+        deferred_of(&addons, &defer),
+        Err("bad request: defer: not an id".to_owned())
+    );
+}

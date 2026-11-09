@@ -18,14 +18,21 @@ use crate::addon::{
     self, error_panel, line, ActionRequest, Addons, FlagArg, LaunchChoice, LegacyChoice, PanelDecl,
     PanelRequest, Segment, SessionSnap, Ui, TEXT_BYTES,
 };
+use crate::addon::{ChecklistAnswer, LaunchSelect, Pick, RowAction};
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::Source;
 use crate::proto::SessionId;
 
 /// An addon's panel (D13).
 const PANEL_WAIT: Duration = Duration::from_secs(10);
-/// An addon's panel action (D13).
+/// An addon's panel action, checklist save or row action (D13).
 const ACTION_WAIT: Duration = Duration::from_secs(15);
+/// The most item ids a checklist save turns off, and their length.
+const OFF_MAX: usize = 256;
+const OFF_BYTES: usize = 128;
+/// The most checklists a spawn defers, and launch flags it gives.
+const DEFER_MAX: usize = 16;
+const FLAGS_MAX: usize = 16;
 
 /// What the hub shows of the addons for one session.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -148,6 +155,113 @@ struct ActionArgs {
     sid: Option<SessionId>,
 }
 
+/// A v2 `launch` (docs/web-protocol.md §4, LaunchSelect).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaunchArg {
+    pick: String,
+    #[serde(default)]
+    addon: Option<String>,
+    #[serde(default)]
+    option: Option<String>,
+    #[serde(default)]
+    flags: Vec<String>,
+}
+
+/// One checklist a v2 spawn skips.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferArg {
+    addon: String,
+    id: String,
+}
+
+/// `launch` as a select: `option` names a registered launch addon and an
+/// option (≤ 128 bytes); flags are labelled flags of some addon.
+pub(crate) fn select_of(addons: &Addons, a: &LaunchArg) -> Result<LaunchSelect, String> {
+    let bad = |why: &str| Err(format!("bad request: launch: {why}"));
+    let pick = match (a.pick.as_str(), &a.addon, &a.option) {
+        ("default", None, None) => Pick::Default,
+        ("direct", None, None) => Pick::Direct,
+        ("option", Some(addon), Some(option)) => {
+            if addons.get(addon).is_none_or(|e| e.launch().is_none()) {
+                return bad("no such addon");
+            }
+            if option.is_empty() || option.len() > OFF_BYTES {
+                return bad("option: 1..=128 bytes");
+            }
+            let (addon, option) = (addon.clone(), option.clone());
+            Pick::Option { addon, option }
+        }
+        ("default" | "direct" | "option", _, _) => {
+            return bad("addon and option go with \"option\" only")
+        }
+        _ => return bad("pick: default, direct or option"),
+    };
+    if a.flags.len() > FLAGS_MAX {
+        return bad("at most 16 flags");
+    }
+    let launches = addons.iter().filter_map(|e| e.launch());
+    let known: Vec<Value> = launches.flat_map(labelled_flags).collect();
+    let named = |f: &String| known.iter().any(|k| k["name"] == f.as_str());
+    if let Some(f) = a.flags.iter().find(|f| !named(f)) {
+        return bad(&format!("no flag {}", line(f, 64)));
+    }
+    let flags = a.flags.clone();
+    Ok(LaunchSelect { pick, flags })
+}
+
+/// A v2 `defer` as the launch's `(addon, checklist)` pairs.
+pub(crate) fn deferred_of(
+    addons: &Addons,
+    defer: &[DeferArg],
+) -> Result<Vec<(String, String)>, String> {
+    if defer.len() > DEFER_MAX {
+        return Err("bad request: defer: at most 16".to_owned());
+    }
+    defer
+        .iter()
+        .map(|d| {
+            let addon = addon_named(addons, &d.addon)?;
+            check_id("defer", &d.id)?;
+            Ok((addon.to_owned(), d.id.clone()))
+        })
+        .collect()
+}
+
+/// A checklist save's answer: `{"off": [ids]}` or `"defer"`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AnswerArg {
+    Off(OffArg),
+    Word(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OffArg {
+    off: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveArgs {
+    addon: String,
+    checklist: String,
+    revision: String,
+    answer: AnswerArg,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowArgs {
+    addon: String,
+    name: String,
+    action: String,
+    #[serde(default)]
+    on: Option<bool>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChecklistArgs {
@@ -206,6 +320,8 @@ pub(crate) async fn dispatch(state: &AppState, op: &str, args: Value) -> Result<
             parse::<NoArgs>(args)?;
             Ok(rows(state))
         }
+        "addons.checklist.save" => save(rt, parse(args)?).await,
+        "addons.row_action" => row_action(state, parse(args)?).await,
         _ => Err("unknown op".to_owned()),
     }
 }
@@ -345,6 +461,94 @@ async fn action(state: &AppState, a: ActionArgs) -> Result<Value, String> {
             Err(format!("{addon}: the action timed out"))
         }
     }
+}
+
+/// `addons.checklist.save` within 15 s: refused as `stale` when the
+/// checklist changed since the page read it; the ids it turns off must
+/// be its items'.
+async fn save(rt: &AddonRuntime, a: SaveArgs) -> Result<Value, String> {
+    let addon = addon_named(rt.addons(), &a.addon)?;
+    check_id("checklist", &a.checklist)?;
+    let entry = rt.addons().get(addon).cloned();
+    let entry = entry.ok_or_else(|| "bad request: addon: no such addon".to_owned())?;
+    let ui = entry.ui().ok_or_else(|| "no such checklist".to_owned())?;
+    let now = ui.checklist(&a.checklist, rt.ctx(addon).as_ref());
+    let now = addon::checklist(now.ok_or_else(|| "no such checklist".to_owned())?);
+    if now.revision != a.revision {
+        return Err("stale".to_owned());
+    }
+    let answer = match a.answer {
+        AnswerArg::Word(w) if w == "defer" => ChecklistAnswer::Defer,
+        AnswerArg::Word(_) => {
+            return Err(r#"bad request: answer: {"off": [ids]} or "defer""#.to_owned())
+        }
+        AnswerArg::Off(o) => {
+            if o.off.len() > OFF_MAX || o.off.iter().any(|i| i.len() > OFF_BYTES) {
+                return Err("bad request: answer: at most 256 ids of 128 bytes".to_owned());
+            }
+            if let Some(bad) = o
+                .off
+                .iter()
+                .find(|i| !now.items.iter().any(|x| &x.id == *i))
+            {
+                return Err(format!("bad request: answer: no item {}", line(bad, 64)));
+            }
+            let revision = a.revision;
+            ChecklistAnswer::Save {
+                revision,
+                off: o.off,
+            }
+        }
+    };
+    let saving = ui.save_checklist(a.checklist.clone(), answer, rt.ctx(addon));
+    match tokio::time::timeout(ACTION_WAIT, saving).await {
+        Ok(Ok(())) => {
+            tracing::info!(op = "addons.checklist.save", addon, checklist = %a.checklist, "web op");
+            Ok(json!({}))
+        }
+        Ok(Err(why)) => Err(line(&why, TEXT_BYTES)),
+        Err(_) => Err(format!("{addon}: the save timed out")),
+    }
+}
+
+/// `addons.row_action`: a toggle goes the core's way (`[extensions]`
+/// written, the addon told; the registry and `extensions_changed`), a
+/// refresh to the addon (15 s).
+async fn row_action(state: &AppState, a: RowArgs) -> Result<Value, String> {
+    let rt = &state.addons;
+    let addon = addon_named(rt.addons(), &a.addon)?;
+    check_id("name", &a.name)?;
+    let ours = {
+        let registry = state.ctx.ext.registry();
+        let registry = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let of = |e: &&crate::app::extensions::Extension| matches!(&e.source, Source::Addon { addon: x, .. } if *x == addon);
+        registry
+            .extensions
+            .iter()
+            .filter(of)
+            .any(|e| e.name == a.name)
+    };
+    if !ours {
+        return Err("bad request: name: no such row".to_owned());
+    }
+    match (a.action.as_str(), a.on) {
+        ("toggle", Some(on)) => {
+            let hub = &state.hub;
+            state.ctx.ext.toggle(rt, hub, &a.name, on).await?;
+        }
+        ("toggle", None) => return Err("bad request: on: a toggle needs it".to_owned()),
+        ("refresh", None) => {
+            if let Some(n) = rt.row_action(addon, a.name, RowAction::Refresh).await? {
+                let text = n.text;
+                state
+                    .hub
+                    .broadcast(super::plugins::notice_event(&text, "info"));
+            }
+        }
+        ("refresh", Some(_)) => return Err("bad request: on: a toggle's only".to_owned()),
+        _ => return Err("bad request: action: toggle or refresh".to_owned()),
+    }
+    Ok(json!({}))
 }
 
 /// `addons.rows`: the registry's addon rows, as it has them.

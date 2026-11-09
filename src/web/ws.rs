@@ -453,11 +453,7 @@ pub(crate) async fn dispatch(
             check_size(a.rows, a.cols)?;
             hub.resize(a.sid, a.rows, a.cols).await.map(|()| json!({}))
         }
-        "session.spawn" => {
-            let req: SpawnReq = parse(args)?;
-            let sid = spawn::spawn_claude(&state.ctx, req).await?;
-            Ok(json!({ "sid": sid }))
-        }
+        "session.spawn" => spawn::spawn_claude(&state.ctx, parse::<SpawnReq>(args)?).await,
         "session.shell" => {
             let a: ShellArgs = parse(args)?;
             let sid = spawn::spawn_shell(&state.ctx, a.host, a.cwd, a.name, a.rows, a.cols).await?;
