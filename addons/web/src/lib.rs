@@ -358,8 +358,11 @@ async fn serve(
         Some(r) => r.allowed.clone(),
         None => auth::Allowed::new(args.listen, &args.allow_hosts),
     };
-    let auth = auth::Auth::new(token, allowed, auth::csp(assets.importmap_sha256()))
+    let mut auth = auth::Auth::new(token, allowed, auth::csp(assets.importmap_sha256()))
         .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
+    if let Some(r) = &remote {
+        auth = auth.with_password(r.password.clone());
+    }
     let state = build_state(auth, assets, addons).await?;
     let (hub, ext, addon_rt) = (
         state.hub.clone(),

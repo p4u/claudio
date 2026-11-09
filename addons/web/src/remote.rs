@@ -179,6 +179,8 @@ pub(crate) fn banner(f: &BannerFacts<'_>) -> Banner {
 pub(crate) struct Remote {
     pub addr: SocketAddr,
     pub cert: crate::tls::cert::Cert,
+    /// The stored password hash, loaded before anything else.
+    pub password: crate::password::Stored,
     pub allowed: crate::auth::Allowed,
     pub banner: Banner,
 }
@@ -190,8 +192,7 @@ pub(crate) fn prepare(
     addr: SocketAddr,
     token: &str,
 ) -> Result<Remote, String> {
-    // Task 5 keeps the loaded hash (`Remote.password`).
-    crate::password::load(&crate::password::path())?;
+    let password = crate::password::load(&crate::password::path())?;
     let hostname = claudio_core::sys::hostname();
     let names = cert_names(&hostname, addr, &args.allow_hosts);
     let cert =
@@ -212,6 +213,7 @@ pub(crate) fn prepare(
     Ok(Remote {
         addr,
         cert,
+        password,
         allowed: crate::auth::Allowed::remote(addr, &allowed_names),
         banner,
     })

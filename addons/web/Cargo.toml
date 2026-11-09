@@ -36,4 +36,6 @@ sha2.workspace = true
 claudio-core = { workspace = true, features = ["test-support"] }
 # A test AddonCtx returns these (the addon API's http() and config()).
 reqwest.workspace = true
+# login.rs's paused-clock test (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true

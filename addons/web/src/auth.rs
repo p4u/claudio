@@ -25,7 +25,10 @@ use axum::response::{IntoResponse, Response};
 
 use claudio_core::paths;
 
+use tokio::sync::Semaphore;
+
 use crate::limit::Limiter;
+use crate::password;
 use crate::peer::{Peer, PeerKey};
 
 pub(crate) const COOKIE: &str = "claudio_web";
@@ -33,6 +36,15 @@ pub(crate) const TOKEN_BYTES: usize = 32;
 pub(crate) const SESSION_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const MAX_SESSIONS: usize = 64;
 pub(crate) const LOGIN_BODY_MAX: usize = 4096;
+/// Concurrent argon2 verifications (each 19 MiB).
+pub(crate) const HASH_PERMITS: usize = 4;
+
+/// `--remote`'s password check: the stored hash and the slots its
+/// verifications run under.
+pub(crate) struct PasswordLogin {
+    pub stored: password::Stored,
+    pub hashing: Arc<Semaphore>,
+}
 
 /// `<config>/web-token`.
 pub(crate) fn token_path() -> PathBuf {
@@ -314,6 +326,8 @@ pub(crate) struct Auth {
     urandom: Mutex<File>,
     /// [`test_remote_peer`]: a loopback address that counts as remote.
     test_remote_peer: Option<IpAddr>,
+    /// `--remote`: password logins (`login.rs`).
+    pub(crate) password: Option<PasswordLogin>,
 }
 
 /// `CLAUDIO_TEST_REMOTE_PEER=<ip>`, debug builds only: that loopback address
@@ -342,7 +356,17 @@ impl Auth {
             inner: Mutex::new(Inner::default()),
             urandom: Mutex::new(File::open("/dev/urandom")?),
             test_remote_peer: test_remote_peer(),
+            password: None,
         })
+    }
+
+    /// With `--remote`: password logins against `stored`.
+    pub(crate) fn with_password(mut self, stored: password::Stored) -> Auth {
+        self.password = Some(PasswordLogin {
+            stored,
+            hashing: Arc::new(Semaphore::new(HASH_PERMITS)),
+        });
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -384,6 +408,9 @@ impl Auth {
         let mut methods = Vec::new();
         if self.token_allowed(caller) {
             methods.push("token");
+        }
+        if self.password.is_some() {
+            methods.push("password");
         }
         methods
     }
@@ -835,6 +862,18 @@ mod tests {
             "without --remote the token is for all"
         );
         assert_eq!(plain.login_methods(&c), ["token"]);
+    }
+
+    #[test]
+    fn with_a_password_every_caller_may_use_it() {
+        const FIXTURE: &str = include_str!("../web/e2e/fixtures/web-password");
+        let a = Auth::new("ab".repeat(32), remote_allowed(), csp(None))
+            .unwrap()
+            .with_password(password::Stored::parse(FIXTURE).unwrap());
+        let local = a.caller(peer("127.0.0.1:1"), "127.0.0.1:7337");
+        assert_eq!(a.login_methods(&local), ["token", "password"]);
+        let remote = a.caller(peer("192.168.1.5:1"), "box:7337");
+        assert_eq!(a.login_methods(&remote), ["password"]);
     }
 
     #[test]

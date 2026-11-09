@@ -465,7 +465,123 @@ async fn web_remote_guard_holds_over_tls() {
         .await;
     assert_eq!(me.status, 401);
     let body: Value = serde_json::from_str(&me.body).unwrap();
-    assert_eq!(body["login"], json!([]), "no password login yet: none");
+    assert_eq!(body["login"], json!(["password"]));
+}
+
+// ── --remote: logins (AC5) ───────────────────────────────────────────────────
+
+fn login_methods(reply: &Reply) -> Value {
+    serde_json::from_str::<Value>(&reply.body).unwrap()["login"].clone()
+}
+
+/// A login from 127.0.0.1 that names `host` (and its `https://` Origin).
+async fn login_as(r: &RemoteWeb, host: &str, body: Value) -> u16 {
+    let origin = format!("https://{host}");
+    r.req_as(
+        "127.0.0.1",
+        host,
+        "POST",
+        "/api/login",
+        &[("Origin", &origin)],
+        &body.to_string(),
+    )
+    .await
+    .status
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_login_rules() {
+    let r = RemoteWeb::start(
+        ManagerHarness::new(),
+        &["--allow-host", "claudio.test"],
+        |_| {},
+    );
+    let port = r.web.port;
+    // Local: both methods.
+    let me = r.req("GET", "/api/me", &[], "").await;
+    assert_eq!(
+        (me.status, login_methods(&me)),
+        (401, json!(["token", "password"]))
+    );
+    let pw = r.login(&json!({"password": TEST_PASSWORD})).await;
+    assert_eq!(pw.status, 204, "{pw:?}");
+    assert!(pw.header("set-cookie").unwrap().contains("; Secure"));
+    assert_eq!(r.login(&json!({"token": r.web.token})).await.status, 204);
+    // Not local (a loopback peer that names this machine): the password only.
+    let host = format!("claudio.test:{port}");
+    let me = r
+        .req_as("127.0.0.1", &host, "GET", "/api/me", &[], "")
+        .await;
+    assert_eq!(login_methods(&me), json!(["password"]));
+    let token = json!({"token": r.web.token});
+    assert_eq!(login_as(&r, &host, token).await, 401);
+    let right = json!({"password": TEST_PASSWORD});
+    assert_eq!(login_as(&r, &host, right).await, 204);
+    let wrong = json!({"password": "not-the-password"});
+    assert_eq!(login_as(&r, &host, wrong).await, 401);
+    let both = json!({"password": TEST_PASSWORD, "token": r.web.token});
+    assert_eq!(login_as(&r, &host, both).await, 400);
+    let big = json!({"password": "x".repeat(5000)});
+    assert_eq!(login_as(&r, &host, big).await, 413);
+    // No password reached the log (stderr carries the loopback token URL
+    // by design, so the token is not checked here).
+    let log = fs::read_to_string(r.web.h().root.join("web.log")).unwrap();
+    for secret in [TEST_PASSWORD, "not-the-password"] {
+        assert!(!log.contains(secret), "{secret} in the log");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_peer_on_another_address_needs_the_password() {
+    // Linux routes all of 127/8 to lo; macOS only 127.0.0.1 unless aliased.
+    if std::net::TcpListener::bind("127.0.0.2:0").is_err() {
+        return;
+    }
+    let r = RemoteWeb::start(ManagerHarness::new(), &[], |cmd| {
+        cmd.env("CLAUDIO_TEST_REMOTE_PEER", "127.0.0.2");
+    });
+    let (host, origin) = (r.host(), r.origin());
+    let from_2 = |method: &'static str, path: &'static str, body: String| {
+        let (r, host, origin) = (&r, host.clone(), origin.clone());
+        async move {
+            r.req_as(
+                "127.0.0.2",
+                &host,
+                method,
+                path,
+                &[("Origin", &origin)],
+                &body,
+            )
+            .await
+        }
+    };
+    let me = from_2("GET", "/api/me", String::new()).await;
+    assert_eq!(login_methods(&me), json!(["password"]));
+    let token = json!({"token": r.web.token}).to_string();
+    assert_eq!(from_2("POST", "/api/login", token).await.status, 401);
+    let pw = json!({"password": TEST_PASSWORD}).to_string();
+    assert_eq!(from_2("POST", "/api/login", pw).await.status, 204);
+    assert_eq!(
+        r.login(&json!({"token": r.web.token})).await.status,
+        204,
+        "127.0.0.1 stays local"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_concurrent_wrong_passwords_hash_at_most_five() {
+    let r = RemoteWeb::start(ManagerHarness::new(), &[], |_| {});
+    let wrong = json!({"password": "wrong-password-xx"});
+    let replies = futures::future::join_all((0..20).map(|_| r.login(&wrong))).await;
+    let count = |s| replies.iter().filter(|r| r.status == s).count();
+    // A 401 is only ever answered after argon2 ran: exactly five hashed.
+    assert_eq!((count(401), count(429)), (5, 15));
+    let right = json!({"password": TEST_PASSWORD});
+    assert_eq!(
+        r.login(&right).await.status,
+        429,
+        "the peer's minute is spent"
+    );
 }
 
 // ── Frames ────────────────────────────────────────────────────────────────────

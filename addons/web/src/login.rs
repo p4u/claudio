@@ -1,10 +1,12 @@
-//! `POST /api/login`: a token (local requests, or any without `--remote`).
-//! Every attempt reserves its rate-limit slot before anything is compared
-//! (`limit.rs`); the guard already checked Host and Origin, so only
-//! same-origin attempts reach it.
+//! `POST /api/login`: a token (local requests, or any without `--remote`)
+//! or the password (`--remote`). Every attempt reserves its rate-limit slot
+//! before anything is compared or hashed (`limit.rs`); argon2 runs off the
+//! executor under `auth::HASH_PERMITS` slots. The guard already checked
+//! Host and Origin, so only same-origin attempts reach it. Nothing a body
+//! carries is ever logged.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -12,6 +14,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::auth::{self, Auth, Caller};
+
+/// How long a password login waits for a hashing slot before `503`.
+pub(crate) const HASH_WAIT: Duration = Duration::from_secs(2);
 
 /// Exactly one of the two. Unknown fields are ignored, as before.
 #[derive(Deserialize)]
@@ -31,7 +36,10 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
             token: Some(token),
             password: None,
         }) => token_login(&auth, &caller, &token, Instant::now()),
-        // No password login without --remote.
+        Ok(LoginBody {
+            token: None,
+            password: Some(pw),
+        }) => password_login(&auth, &caller, pw, Instant::now()).await,
         _ => Err(StatusCode::BAD_REQUEST),
     };
     if let Err(status) = status {
@@ -72,12 +80,68 @@ fn token_login(auth: &Auth, caller: &Caller, token: &str, now: Instant) -> Resul
     }
 }
 
+/// A password attempt: `400` without `--remote`; its slot (peer and global
+/// windows) before any hashing; a hashing slot within [`HASH_WAIT`] or
+/// `503` (the attempt is given back: it did not count); argon2 in
+/// `spawn_blocking`, the permit held until it is done.
+async fn password_login(
+    auth: &Auth,
+    caller: &Caller,
+    pw: String,
+    now: Instant,
+) -> Result<(), StatusCode> {
+    let Some(login) = auth.password.as_ref() else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let slot = auth
+        .limiter
+        .reserve(caller.key, true, now)
+        .map_err(|()| StatusCode::TOO_MANY_REQUESTS)?;
+    let permit =
+        match tokio::time::timeout(HASH_WAIT, Arc::clone(&login.hashing).acquire_owned()).await {
+            Ok(Ok(permit)) => permit,
+            _ => {
+                auth.limiter.release(slot);
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        };
+    let stored = login.stored.clone();
+    let ok = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        stored.verify(&pw)
+    })
+    .await
+    .unwrap_or(false);
+    if ok {
+        auth.limiter.release(slot);
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{csp, Allowed};
+    use crate::auth::{csp, Allowed, HASH_PERMITS};
+    use crate::limit::GLOBAL;
+    use crate::password;
     use crate::peer::PeerKey;
-    use std::time::Duration;
+
+    const FIXTURE: &str = include_str!("../web/e2e/fixtures/web-password");
+    const TEST_PASSWORD: &str = "claudio-e2e-password";
+
+    fn remote() -> Auth {
+        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
+        Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None))
+            .unwrap()
+            .with_password(password::Stored::parse(FIXTURE).unwrap())
+    }
+
+    const REMOTE: Caller = Caller {
+        local: false,
+        key: PeerKey::V4(1),
+    };
 
     fn plain() -> Auth {
         let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 7337));
@@ -134,6 +198,99 @@ mod tests {
             Err(StatusCode::TOO_MANY_REQUESTS)
         );
         assert_eq!(token_login(&a, &LOCAL, &right, t0), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_password_logs_in_and_a_wrong_one_counts() {
+        let a = remote();
+        let t0 = Instant::now();
+        let pw = |s: &str| s.to_owned();
+        assert_eq!(
+            password_login(&a, &REMOTE, pw(TEST_PASSWORD), t0).await,
+            Ok(())
+        );
+        for _ in 0..5 {
+            assert_eq!(
+                password_login(&a, &REMOTE, pw("not-the-password"), t0).await,
+                Err(StatusCode::UNAUTHORIZED)
+            );
+        }
+        for p in [TEST_PASSWORD, "not-the-password"] {
+            assert_eq!(
+                password_login(&a, &REMOTE, pw(p), t0).await,
+                Err(StatusCode::TOO_MANY_REQUESTS)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_remote_a_password_body_is_400() {
+        let a = plain();
+        let t0 = Instant::now();
+        let r = password_login(&a, &REMOTE, TEST_PASSWORD.to_owned(), t0).await;
+        assert_eq!(r, Err(StatusCode::BAD_REQUEST));
+        for _ in 0..5 {
+            assert_eq!(
+                token_login(&a, &LOCAL, "wrong", t0),
+                Err(StatusCode::UNAUTHORIZED),
+                "nothing was counted"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_hashing_slot_answers_503_and_does_not_count() {
+        let a = remote();
+        let hashing = Arc::clone(&a.password.as_ref().unwrap().hashing);
+        let held = hashing
+            .acquire_many_owned(HASH_PERMITS as u32)
+            .await
+            .unwrap();
+        let t0 = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(
+                password_login(&a, &REMOTE, "wrong-password".to_owned(), t0).await,
+                Err(StatusCode::SERVICE_UNAVAILABLE)
+            );
+        }
+        drop(held);
+        for _ in 0..5 {
+            assert_eq!(
+                password_login(&a, &REMOTE, "wrong-password".to_owned(), t0).await,
+                Err(StatusCode::UNAUTHORIZED)
+            );
+        }
+        assert_eq!(
+            password_login(&a, &REMOTE, "wrong-password".to_owned(), t0).await,
+            Err(StatusCode::TOO_MANY_REQUESTS),
+            "the 503s took nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_global_window_stops_passwords_but_not_local_tokens() {
+        let a = remote();
+        let t0 = Instant::now();
+        for i in 0..GLOBAL as u32 {
+            a.limiter.reserve(PeerKey::V4(i), true, t0).unwrap();
+        }
+        let other = Caller {
+            local: false,
+            key: PeerKey::V4(999),
+        };
+        // Every hashing slot held: a 429 (not a 503) shows the refusal came
+        // before any wait for one, let alone a hash.
+        let hashing = Arc::clone(&a.password.as_ref().unwrap().hashing);
+        let held = hashing
+            .acquire_many_owned(HASH_PERMITS as u32)
+            .await
+            .unwrap();
+        assert_eq!(
+            password_login(&a, &other, TEST_PASSWORD.to_owned(), t0).await,
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        drop(held);
+        assert_eq!(token_login(&a, &LOCAL, &"ab".repeat(32), t0), Ok(()));
     }
 
     #[test]
