@@ -21,12 +21,12 @@ use super::hub::{daemon_error, HubEvent, HubHandle};
 use crate::app::extensions::{Registry, Source};
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
+use crate::plugins::state::{
+    reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
+};
 use crate::proto::{retry_secs, Applied, Msg};
 use crate::proxy::api::ApiError;
 use crate::proxy::plugins::{Plugin, PluginList};
-use crate::tui::plugins::{
-    reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
-};
 
 /// How long a spawn waits for a host to answer its plugin manifests.
 const MANIFEST_WAIT: Duration = Duration::from_secs(20);

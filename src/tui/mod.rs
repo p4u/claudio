@@ -18,7 +18,6 @@ mod leader;
 mod notifications;
 mod plain;
 pub(crate) mod plugin_setup;
-pub(crate) mod plugins;
 mod plugins_glue;
 mod proxy_state;
 mod reader;
@@ -72,6 +71,7 @@ use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
 use crate::app::state::ClientState;
+use crate::plugins::state as plugin_state;
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
 use plain::PlainStart;
 
@@ -541,7 +541,7 @@ enum HostEvent {
     /// A profile's plugin list was fetched (and the cache updated), or not.
     Plugins {
         profile: String,
-        fetch: plugins::PluginsFetch,
+        fetch: plugin_state::PluginsFetch,
     },
     /// Plugin `name`'s manifest at hash `sha256` was fetched and parsed, or
     /// why not.
@@ -672,7 +672,7 @@ async fn event_loop(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The plugin lists: now, then every 15 minutes.
-    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugins::REFRESH_SECS));
+    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugin_state::REFRESH_SECS));
     plugins_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 60-second proxy stats refresh.
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
@@ -1145,7 +1145,7 @@ fn run_effect(
                         part.applied = ready.remove(&part.name);
                     }
                 }
-                let composed = plugins::compose(&parts);
+                let composed = plugin_state::compose(&parts);
                 for text in composed.notices.clone() {
                     let _ = notices.send(HostEvent::Notice(text)).await;
                 }
@@ -1163,7 +1163,7 @@ fn run_effect(
                     }
                     Ok(env) => match client {
                         Some(c) => {
-                            let msg = plugins::with_plugins(msg, composed).merge_env(env);
+                            let msg = plugin_state::with_plugins(msg, composed).merge_env(env);
                             let reply = c.request(msg);
                             let _ = tx.send((to, reply.await));
                         }
@@ -1235,10 +1235,10 @@ async fn wait_manifests(
 /// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list
 /// is saved, a 401/403 drops the profile's entry (its secrets), anything
 /// else leaves it. A failed write is a notice.
-async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugins::PluginsFetch {
+async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_state::PluginsFetch {
     use crate::proxy::api::ApiError;
     use crate::proxy::plugins as cache;
-    use plugins::PluginsFetch;
+    use plugin_state::PluginsFetch;
     let Some(p) = crate::proxy::resolve::find_profile(profile) else {
         return PluginsFetch::Unreachable;
     };

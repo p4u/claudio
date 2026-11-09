@@ -25,8 +25,8 @@ use super::app::{App, Effect, Mode};
 use super::confirm::Queued;
 use super::extensions_view::ExtensionsView;
 use super::interaction::Modal;
-use super::plugins::ManifestState;
 use crate::app::extensions::Source;
+use crate::plugins::state::ManifestState;
 
 /// Ticks (250 ms each) during which a first-sight screen ignores keys.
 const ARM_TICKS: u8 = 4;
@@ -367,10 +367,10 @@ impl App {
 mod tests {
     use super::*;
     use crate::config::PluginChoices;
+    use crate::plugins::state::PluginsFetch;
     use crate::proto::Msg;
     use crate::proxy::plugins::{sample, PluginList};
     use crate::tui::confirm::{Choice, ConfirmPrompt};
-    use crate::tui::plugins::PluginsFetch;
     use crate::tui::test_support::{alt, app_with, press};
 
     const TEAM: &str = r#"

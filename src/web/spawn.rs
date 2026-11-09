@@ -15,8 +15,8 @@ use super::hub::HubHandle;
 use super::plugins::{notice_event, Plugins};
 use super::proxy::ProxyCache;
 use super::state::SessionMeta;
+use crate::plugins::state::{compose, with_plugins, PluginPart};
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
-use crate::tui::plugins::{compose, with_plugins, PluginPart};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

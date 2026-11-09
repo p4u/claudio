@@ -15,10 +15,10 @@ use crate::term::screen::Screen;
 use super::app::{App, Effect, Mode, PendingManifest, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
-use super::plugins::{compose, with_plugins, PluginPart};
 use super::wizard::{self, Wizard};
 use crate::app::label::sanitize_label;
 use crate::app::state::{self, ClientState, KillTombstone, SavedSession};
+use crate::plugins::state::{compose, with_plugins, PluginPart};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 

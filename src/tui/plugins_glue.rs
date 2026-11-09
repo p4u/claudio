@@ -11,7 +11,7 @@ use crate::proto::{Applied, Msg};
 use crate::proxy::plugins::{Plugin, PluginList};
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};
-use super::plugins::{
+use crate::plugins::state::{
     reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, PluginsFetch, INSTALLING,
 };
 
@@ -498,8 +498,8 @@ fn ready_lines(host: &str, a: &Applied) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::state::{applied, compose, part, with_plugins};
     use crate::proxy::plugins::sample;
-    use crate::tui::plugins::{applied, compose, part, with_plugins};
     use crate::tui::test_support::app_with;
 
     fn list(profile: &str, plugins: Vec<Plugin>) -> PluginList {

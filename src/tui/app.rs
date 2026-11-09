@@ -134,7 +134,7 @@ pub enum Effect {
     /// Spawn (or respawn) a session with proxy config: the effect runner
     /// fetches the proxy config (with a 5 s timeout) unless it is cached,
     /// waits up to 20 s for `pending` (asking `host` for each), adds the
-    /// plugins' share ([`super::plugins::compose`]) and the proxy env, then
+    /// plugins' share ([`crate::plugins::state::compose`]) and the proxy env, then
     /// sends the request. This avoids silently using fallback model
     /// defaults when the proxy-config cache is cold, and starting a session
     /// without a plugin whose manifest a host has not answered for yet.
@@ -147,7 +147,7 @@ pub enum Effect {
         first_party: bool,
         to: ReplyTo,
         /// The profile's enabled plugins, in registry order.
-        plugins: Vec<super::plugins::PluginPart>,
+        plugins: Vec<crate::plugins::state::PluginPart>,
         /// The `Manifest` requests of the plugins `host` has not answered.
         pending: Vec<PendingManifest>,
     },
@@ -387,7 +387,7 @@ pub struct App {
     pub failed_extensions: Vec<String>,
     /// The proxy plugins: lists, saved choices, manifests, each host's
     /// answers.
-    pub plugins: super::plugins::Plugins,
+    pub plugins: crate::plugins::state::Plugins,
     /// `--plain`'s session while plugin setup holds it: what to start, its
     /// proxy profile, and until when (Unix seconds) manifests are awaited.
     pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
