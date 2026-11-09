@@ -126,7 +126,7 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 
 impl Listening {
     /// The shared state, for tests that drive it directly.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn daemon(&self) -> Arc<Daemon> {
         Arc::clone(&self.daemon)
     }

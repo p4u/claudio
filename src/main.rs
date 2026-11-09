@@ -3,24 +3,22 @@
 //! (`addons::all()`) and routes argv to the core's words or an addon's;
 //! anything unclaimed execs the real `claude` unchanged.
 
-mod addon;
+// The core library. The TUI and the addons, still modules of this package
+// until P4.3-P4.6, reach it through these names; P4.7 removes this line.
+// Allowed unused: a build without some addons uses fewer of them.
+#[allow(unused_imports)]
+use claudio_core::{
+    addon, app, claude, client, config, daemon, freshness, paths, proto, release, remote, term,
+    text, upgrade, version,
+};
+
 mod addons;
-mod app;
-mod claude;
-mod client;
-mod config;
-mod daemon;
-mod freshness;
-mod paths;
+
+// P4.3 slot: becomes `use claudio_tui::plain::args as plain;`
 mod plain;
-mod proto;
-mod release;
-mod remote;
-mod term;
-mod text;
+
+// P4.3 slot: becomes `use claudio_tui as tui;`
 mod tui;
-mod upgrade;
-mod version;
 
 use std::io::Write;
 use std::process::ExitCode;

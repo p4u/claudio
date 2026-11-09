@@ -14,7 +14,7 @@ use super::*;
 
 /// What `prepare` answers.
 #[derive(Debug, Clone)]
-pub(crate) enum Script {
+pub enum Script {
     /// This part.
     Ok(LaunchPart),
     /// `LaunchError::Failed(why)`.
@@ -26,7 +26,7 @@ pub(crate) enum Script {
 }
 
 /// The fake addon. Build with `TestAddon::new(name)` and the builder methods.
-pub(crate) struct TestAddon {
+pub struct TestAddon {
     name: &'static str,
     sections: &'static [&'static str],
     flags: &'static [FlagDecl],

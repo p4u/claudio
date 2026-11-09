@@ -1,0 +1,37 @@
+[package]
+name = "claudio-core"
+description = "claudio's generic core: the daemon and its protocol, the client, SSH, claude install and update, the addon API and the shared app layer"
+version.workspace = true
+edition.workspace = true
+publish = false
+autotests = false
+
+[features]
+# Fixtures other crates' tests use (TestAddon, the daemon harness, the fake
+# host, scratch socket dirs). Enabled only by dev-dependencies, never in a release.
+test-support = []
+# The SSH test harness's diag words (`__bootstrap`, …); never in a release.
+diag = []
+
+[dependencies]
+alacritty_terminal.workspace = true
+futures.workspace = true
+libc.workspace = true
+portable-pty.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+vte.workspace = true
+
+[dev-dependencies]
+# A fake release server in claude::update's and upgrade's tests (D7: tests only).
+axum.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

@@ -119,7 +119,7 @@ fn only_section_differs(before: &Table, edited: &str, section: &str, new: &Table
 /// `text` with table `section` changed from `old` (what `text` parses to)
 /// to `new`, one key at a time; `None` when a change is not one this editor
 /// makes, or the text does not hold a key where the edit expects it.
-pub(crate) fn edit_text(text: &str, section: &str, old: &Table, new: &Table) -> Option<String> {
+pub fn edit_text(text: &str, section: &str, old: &Table, new: &Table) -> Option<String> {
     let mut out = text.to_owned();
     let keys = old
         .keys()

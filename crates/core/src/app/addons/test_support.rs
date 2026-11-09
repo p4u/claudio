@@ -8,7 +8,7 @@ use crate::proto::{read_frame, write_frame, Envelope, Frame, HostInfo, Msg, Welc
 
 /// A `Client` whose daemon is `daemon`, a task answering after the
 /// handshake with `features`.
-pub(crate) async fn fake_host<F, Fut>(features: &[&str], daemon: F) -> Client
+pub async fn fake_host<F, Fut>(features: &[&str], daemon: F) -> Client
 where
     F: FnOnce(DuplexStream) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -39,7 +39,7 @@ where
 }
 
 /// The next request the fake daemon reads.
-pub(crate) async fn next_request(stream: &mut DuplexStream) -> Option<(u64, Msg)> {
+pub async fn next_request(stream: &mut DuplexStream) -> Option<(u64, Msg)> {
     match read_frame(stream).await {
         Ok(Some(Frame::Control(Envelope {
             req: Some(req),
@@ -50,7 +50,7 @@ pub(crate) async fn next_request(stream: &mut DuplexStream) -> Option<(u64, Msg)
 }
 
 /// Answer request `req` with `msg`.
-pub(crate) async fn reply(stream: &mut DuplexStream, req: u64, msg: Msg) {
+pub async fn reply(stream: &mut DuplexStream, req: u64, msg: Msg) {
     write_frame(stream, &Frame::Control(Envelope::request(req, msg)))
         .await
         .unwrap();

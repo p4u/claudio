@@ -30,8 +30,8 @@ mod login_path;
 mod server;
 mod session;
 mod stats;
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 mod update;
@@ -225,7 +225,7 @@ pub fn run(addons: Arc<crate::addon::Addons>) -> std::process::ExitCode {
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// State shared by every connection and session actor.
-pub(crate) struct Daemon {
+pub struct Daemon {
     config: Config,
     registry: Mutex<Registry>,
     /// Serializes journal disk writes; **never** held while `registry` is held.
@@ -237,7 +237,7 @@ pub(crate) struct Daemon {
     host: tokio::sync::Mutex<Option<HostInfo>>,
     /// Held while `claude update` or one `claude plugin …` runs: one at a
     /// time, so `~/.claude` has one writer.
-    pub(crate) updating: Arc<tokio::sync::Mutex<()>>,
+    pub updating: Arc<tokio::sync::Mutex<()>>,
     /// Which optional flags this claude knows (`--allow-dangerously-skip-
     /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
     /// `claude --help`). Probed on first use, and again after a claude

@@ -149,8 +149,8 @@ fn spawn_when_not_busy(cmd: &mut Command) -> io::Result<std::process::Child> {
 /// ran the script first would fail at random. One `--version` run (fake
 /// claudes answer it) shows the file is free: the descriptor is then gone for
 /// good.
-#[cfg(test)]
-pub(crate) fn write_executable(path: &Path, script: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn write_executable(path: &Path, script: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, script).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();

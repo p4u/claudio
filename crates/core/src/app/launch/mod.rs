@@ -248,7 +248,7 @@ pub async fn run_deferring(
 }
 
 /// [`run`] with another budget (tests).
-pub(crate) async fn run_within(
+pub async fn run_within(
     rt: &AddonRuntime,
     spec: LaunchSpec,
     client: Client,

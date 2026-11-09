@@ -3,12 +3,15 @@
 //! feature (`api`, `web`, `vocdoni`, all default); without any, the core alone.
 
 #[cfg(feature = "api")]
+// P4.4 slot: becomes `pub use claudio_api as api;`
 pub mod api;
 
 #[cfg(feature = "vocdoni")]
+// P4.6 slot: becomes `pub use claudio_vocdoni as vocdoni;`
 pub mod vocdoni;
 
 #[cfg(feature = "web")]
+// P4.5 slot: becomes `pub use claudio_web as web;`
 pub mod web;
 
 use std::sync::Arc;

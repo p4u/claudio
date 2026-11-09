@@ -10,17 +10,17 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
-pub(crate) use super::host::write_executable;
+pub use super::host::write_executable;
 use super::{server, Config, Daemon};
 use crate::addon::Addons;
 use crate::proto::{self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SpawnSpec, PROTO};
 
-pub(crate) const BANNER: &str = "FAKE-CLAUDE-BANNER";
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub const BANNER: &str = "FAKE-CLAUDE-BANNER";
+pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Make `dir` (and its parents) and keep it private: 0700 (C4). What a
 /// test's fakes write in it may hold env values.
-pub(crate) fn make_private(dir: &Path) {
+pub fn make_private(dir: &Path) {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -31,7 +31,7 @@ pub(crate) fn make_private(dir: &Path) {
 }
 
 /// A new private (0700) fixture dir `<temp>/<tag>-<uuid>`.
-pub(crate) fn private_temp_dir(tag: &str) -> PathBuf {
+pub fn private_temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{tag}-{}", Uuid::new_v4()));
     make_private(&dir);
     dir
@@ -46,7 +46,7 @@ pub(crate) fn private_temp_dir(tag: &str) -> PathBuf {
 /// test asserts on goes in `present`. The lines set `umask 077` (every
 /// file the fake writes after them is 0600) and write a temp file renamed
 /// into place, so a reader never sees half a record.
-pub(crate) fn record_env_sh(out: &str, values: &[&str], present: &[&str]) -> String {
+pub fn record_env_sh(out: &str, values: &[&str], present: &[&str]) -> String {
     let mut sh = String::from("umask 077\n{\necho '# env'\n");
     for (keys, value) in [(values, true), (present, false)] {
         for key in keys {
@@ -70,7 +70,7 @@ pub(crate) fn record_env_sh(out: &str, values: &[&str], present: &[&str]) -> Str
 
 /// A variant of the fake claude that exits 3 immediately on any real invocation.
 /// Used to trigger the commit-before-exit race deterministically.
-pub(crate) fn fake_claude_exits_immediately() -> &'static Path {
+pub fn fake_claude_exits_immediately() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let dir = private_temp_dir("claudio-fake-claude-ei");
@@ -87,7 +87,7 @@ pub(crate) fn fake_claude_exits_immediately() -> &'static Path {
 /// A variant of the fake claude that exits 1 immediately when given `--resume`
 /// (simulating a deleted conversation), and otherwise behaves like the normal
 /// fake claude (prints banner + echoes input).
-pub(crate) fn fake_claude_resume_fails() -> &'static Path {
+pub fn fake_claude_resume_fails() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let dir = private_temp_dir("claudio-fake-claude-rf");
@@ -115,7 +115,7 @@ pub(crate) fn fake_claude_resume_fails() -> &'static Path {
 /// a file still open for writing). It answers `--version`, saves its
 /// `--settings` JSON into its cwd (so tests can read the hook token), prints a
 /// banner and echoes input.
-pub(crate) fn fake_claude() -> &'static Path {
+pub fn fake_claude() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let dir = private_temp_dir("claudio-fake-claude");
@@ -134,14 +134,14 @@ pub(crate) fn fake_claude() -> &'static Path {
 }
 
 /// A daemon running in its own temp dir.
-pub(crate) struct TestDaemon {
-    pub(crate) dir: PathBuf,
-    pub(crate) config: Config,
-    pub(crate) daemon: Arc<Daemon>,
+pub struct TestDaemon {
+    pub dir: PathBuf,
+    pub config: Config,
+    pub daemon: Arc<Daemon>,
 }
 
 impl TestDaemon {
-    pub(crate) fn config(dir: &Path) -> Config {
+    pub fn config(dir: &Path) -> Config {
         Config {
             socket: dir.join("rt/d.sock"),
             lock: dir.join("rt/d.lock"),
@@ -157,23 +157,23 @@ impl TestDaemon {
         }
     }
 
-    pub(crate) fn new_dir() -> PathBuf {
+    pub fn new_dir() -> PathBuf {
         let dir = crate::paths::socket_test_dir("cl-d");
         make_private(&dir);
         std::fs::create_dir_all(dir.join("work")).unwrap();
         dir
     }
 
-    pub(crate) async fn start_in(dir: PathBuf) -> TestDaemon {
+    pub async fn start_in(dir: PathBuf) -> TestDaemon {
         let config = Self::config(&dir);
         Self::start_with_config(dir, config)
     }
 
-    pub(crate) fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
+    pub fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
         Self::start_with_addons(dir, config, Addons::empty())
     }
 
-    pub(crate) fn start_with_addons(dir: PathBuf, config: Config, addons: Addons) -> TestDaemon {
+    pub fn start_with_addons(dir: PathBuf, config: Config, addons: Addons) -> TestDaemon {
         let listening = server::start(config.clone(), Arc::new(addons))
             .unwrap()
             .expect("lock is free");
@@ -186,12 +186,12 @@ impl TestDaemon {
         }
     }
 
-    pub(crate) async fn start() -> TestDaemon {
+    pub async fn start() -> TestDaemon {
         Self::start_in(Self::new_dir()).await
     }
 
     /// A daemon whose claude is `claude` instead of the shared fake.
-    pub(crate) async fn start_with_claude(dir: PathBuf, claude: PathBuf) -> TestDaemon {
+    pub async fn start_with_claude(dir: PathBuf, claude: PathBuf) -> TestDaemon {
         let config = Config {
             claude,
             ..Self::config(&dir)
@@ -199,15 +199,15 @@ impl TestDaemon {
         Self::start_with_config(dir, config)
     }
 
-    pub(crate) fn work(&self) -> PathBuf {
+    pub fn work(&self) -> PathBuf {
         self.dir.join("work")
     }
 
-    pub(crate) async fn client(&self) -> Client {
+    pub async fn client(&self) -> Client {
         Client::connect(&self.config.socket).await
     }
 
-    pub(crate) fn spec(&self, id: SessionId) -> SpawnSpec {
+    pub fn spec(&self, id: SessionId) -> SpawnSpec {
         SpawnSpec {
             id,
             cwd: self.work().to_string_lossy().into_owned(),
@@ -224,14 +224,14 @@ impl TestDaemon {
     }
 
     /// The hook token the fake claude was started with.
-    pub(crate) async fn token(&self) -> String {
+    pub async fn token(&self) -> String {
         self.token_other_than("").await
     }
 
     /// The hook token of a process started after the one with `previous`:
     /// after a respawn, `settings.json` holds the old token until the new
     /// process rewrites it.
-    pub(crate) async fn token_other_than(&self, previous: &str) -> String {
+    pub async fn token_other_than(&self, previous: &str) -> String {
         let path = self.work().join("settings.json");
         within(async {
             loop {
@@ -251,7 +251,7 @@ impl TestDaemon {
         .await
     }
 
-    pub(crate) fn journal(&self) -> serde_json::Value {
+    pub fn journal(&self) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(&self.config.journal).unwrap()).unwrap()
     }
 }
@@ -262,27 +262,27 @@ impl Drop for TestDaemon {
     }
 }
 
-pub(crate) async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
+pub async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(READ_TIMEOUT, f)
         .await
         .expect("timed out")
 }
 
 /// A protocol client over a real socket.
-pub(crate) struct Client {
-    pub(crate) stream: UnixStream,
-    pub(crate) next_req: u64,
+pub struct Client {
+    pub stream: UnixStream,
+    pub next_req: u64,
 }
 
 impl Client {
-    pub(crate) async fn raw(socket: &Path) -> Client {
+    pub async fn raw(socket: &Path) -> Client {
         Client {
             stream: UnixStream::connect(socket).await.unwrap(),
             next_req: 0,
         }
     }
 
-    pub(crate) async fn connect(socket: &Path) -> Client {
+    pub async fn connect(socket: &Path) -> Client {
         let mut c = Self::raw(socket).await;
         match c.call(Msg::Hello(hello(PROTO))).await {
             Msg::Welcome(w) => assert_eq!(w.proto, PROTO),
@@ -291,24 +291,24 @@ impl Client {
         c
     }
 
-    pub(crate) async fn send(&mut self, frame: Frame) {
+    pub async fn send(&mut self, frame: Frame) {
         proto::write_frame(&mut self.stream, &frame).await.unwrap();
     }
 
-    pub(crate) async fn request(&mut self, msg: Msg) -> u64 {
+    pub async fn request(&mut self, msg: Msg) -> u64 {
         self.next_req += 1;
         self.send(Frame::Control(Envelope::request(self.next_req, msg)))
             .await;
         self.next_req
     }
 
-    pub(crate) async fn recv(&mut self) -> Option<Frame> {
+    pub async fn recv(&mut self) -> Option<Frame> {
         within(proto::read_frame(&mut self.stream)).await.unwrap()
     }
 
     /// Read until `pick` accepts a frame. On a timeout, the panic lists the
     /// last frames that did arrive, so a failure says what was seen instead.
-    pub(crate) async fn until<T>(&mut self, mut pick: impl FnMut(&Frame) -> Option<T>) -> T {
+    pub async fn until<T>(&mut self, mut pick: impl FnMut(&Frame) -> Option<T>) -> T {
         let mut seen: std::collections::VecDeque<String> = Default::default();
         let wait = async {
             loop {
@@ -338,7 +338,7 @@ impl Client {
     }
 
     /// Send a request and wait for its reply.
-    pub(crate) async fn call(&mut self, msg: Msg) -> Msg {
+    pub async fn call(&mut self, msg: Msg) -> Msg {
         let req = self.request(msg).await;
         self.until(|f| match f {
             Frame::Control(env) if env.req == Some(req) => Some(env.msg.clone()),
@@ -348,7 +348,7 @@ impl Client {
     }
 
     /// Wait for a session event matching `pick`.
-    pub(crate) async fn event<T>(
+    pub async fn event<T>(
         &mut self,
         id: SessionId,
         pick: impl Fn(&SessionEvent) -> Option<T>,
@@ -364,7 +364,7 @@ impl Client {
     }
 
     /// Accumulate `D` bytes for `id` until they contain `needle`.
-    pub(crate) async fn output_until(&mut self, id: SessionId, needle: &str) -> String {
+    pub async fn output_until(&mut self, id: SessionId, needle: &str) -> String {
         let mut seen = Vec::new();
         self.until(|f| {
             if let Frame::Data { session, bytes } = f {
@@ -380,7 +380,7 @@ impl Client {
     }
 
     /// Attach and return the snapshot (the `D` frame right after `Attached`).
-    pub(crate) async fn attach(&mut self, id: SessionId, rows: u16, cols: u16) -> String {
+    pub async fn attach(&mut self, id: SessionId, rows: u16, cols: u16) -> String {
         let req = self.request(Msg::Attach { id, rows, cols }).await;
         let attached = self
             .until(|f| match f {
@@ -400,20 +400,20 @@ impl Client {
 
     /// Attach, then wait until the screen (snapshot or later output) shows
     /// `needle`.
-    pub(crate) async fn attach_until(&mut self, id: SessionId, needle: &str) {
+    pub async fn attach_until(&mut self, id: SessionId, needle: &str) {
         if !self.attach(id, 24, 80).await.contains(needle) {
             self.output_until(id, needle).await;
         }
     }
 
-    pub(crate) async fn spawn(&mut self, spec: SpawnSpec) -> Option<u32> {
+    pub async fn spawn(&mut self, spec: SpawnSpec) -> Option<u32> {
         match self.call(Msg::Spawn(spec)).await {
             Msg::Spawned { pid, .. } => pid,
             other => panic!("spawn failed: {other:?}"),
         }
     }
 
-    pub(crate) async fn sessions(&mut self) -> Vec<crate::proto::SessionInfo> {
+    pub async fn sessions(&mut self) -> Vec<crate::proto::SessionInfo> {
         match self.call(Msg::ListSessions).await {
             Msg::Sessions { sessions } => sessions,
             other => panic!("expected sessions, got {other:?}"),
@@ -421,7 +421,7 @@ impl Client {
     }
 }
 
-pub(crate) fn hello(proto: u32) -> Hello {
+pub fn hello(proto: u32) -> Hello {
     Hello {
         claudio_version: "test".into(),
         proto,
@@ -429,7 +429,7 @@ pub(crate) fn hello(proto: u32) -> Hello {
     }
 }
 
-pub(crate) async fn send_hook(socket: &Path, token: &str, event: &str, payload: serde_json::Value) {
+pub async fn send_hook(socket: &Path, token: &str, event: &str, payload: serde_json::Value) {
     let mut c = Client::raw(socket).await;
     let hook = Msg::Hook {
         token: token.into(),

@@ -599,7 +599,10 @@ mod launch_tests {
     }
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/state-v0.8.0.json")
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/state-v0.8.0.json"
+        ))
     }
 
     fn sid(n: u128) -> SessionId {

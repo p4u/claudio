@@ -5,8 +5,8 @@ mod clean;
 mod daemon;
 mod launch;
 mod registry;
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod ui;
 
 pub use clean::*;

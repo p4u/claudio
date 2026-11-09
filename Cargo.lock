@@ -263,6 +263,11 @@ dependencies = [
  "alacritty_terminal",
  "axum",
  "base64",
+ "claudio-api",
+ "claudio-core",
+ "claudio-tui",
+ "claudio-vocdoni",
+ "claudio-web",
  "crossterm",
  "flate2",
  "futures",
@@ -287,6 +292,103 @@ dependencies = [
  "unicode-width",
  "uuid",
  "vte 0.13.1",
+]
+
+[[package]]
+name = "claudio-api"
+version = "0.8.0"
+dependencies = [
+ "axum",
+ "claudio-core",
+ "futures",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "claudio-core"
+version = "0.8.0"
+dependencies = [
+ "alacritty_terminal",
+ "axum",
+ "futures",
+ "libc",
+ "portable-pty",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+ "uuid",
+ "vte 0.13.1",
+]
+
+[[package]]
+name = "claudio-tui"
+version = "0.8.0"
+dependencies = [
+ "alacritty_terminal",
+ "claudio-core",
+ "crossterm",
+ "futures",
+ "pulldown-cmark",
+ "ratatui",
+ "serde_json",
+ "tokio",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "claudio-vocdoni"
+version = "0.8.0"
+dependencies = [
+ "axum",
+ "claudio-core",
+ "futures",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "claudio-web"
+version = "0.8.0"
+dependencies = [
+ "axum",
+ "base64",
+ "claudio-core",
+ "flate2",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

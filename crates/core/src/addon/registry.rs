@@ -126,7 +126,7 @@ impl Addons {
 
     /// No addons: a core-only claudio (the tests' registry until P4's
     /// feature-free build uses it).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn empty() -> Addons {
         Addons { list: Vec::new() }
     }
