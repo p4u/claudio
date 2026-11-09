@@ -16,7 +16,7 @@ use super::plugins::{deferred, notice_event, select_of};
 use super::state::SessionMeta;
 use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice};
 use crate::app::addons::AddonRuntime;
-use crate::app::launch::{self, LaunchSpec, Step};
+use crate::app::launch::{self, LaunchSpec, ReviewAnswer, Step};
 use crate::client::Client;
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
 
@@ -180,7 +180,18 @@ async fn launch(
         base,
         core_lenses: ctx.ext.session_extensions(),
     };
-    match launch::run_deferring(&ctx.runtime, spec, client, &deferred).await {
+    let mut step = launch::run_deferring(&ctx.runtime, spec, client.clone(), &deferred).await;
+    // Web protocol v1 has no checklists (v2 brings them, P3.14): a plugin
+    // still to review is left out of this launch, and said.
+    while let Step::Review {
+        checklist, parked, ..
+    } = step
+    {
+        let text = format!("plugin {checklist} left out: set it up first");
+        ctx.hub.broadcast(notice_event(&text, "warn"));
+        step = launch::resume(&ctx.runtime, parked, ReviewAnswer::Skip, client.clone()).await;
+    }
+    match step {
         Step::Sent {
             choice,
             notices,
@@ -191,8 +202,6 @@ async fn launch(
             }
             Ok((reply_id(reply)?, choice))
         }
-        // Checklists reach the page with web protocol v2 (P3.14); until
-        // then such a launch fails.
         Step::Review { addon, .. } => Err(format!("{addon}: review needed")),
         Step::Failed(why) => Err(why),
     }

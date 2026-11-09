@@ -56,6 +56,9 @@ pub enum Task {
     Notice(String),
     /// What the front-ends show changed.
     Changed,
+    /// Offer plugin `name`'s checklist (its first-sight setup) to the
+    /// front-ends (D8).
+    Offer(String),
 }
 
 /// The addon's client state.
@@ -80,6 +83,10 @@ pub struct State {
     pub used: BTreeSet<String>,
     /// Whether [`State::load`] ran: nothing is fetched before.
     pub loaded: bool,
+    /// The profiles whose list fetch ended in this run (listed or not).
+    pub listed: BTreeSet<String>,
+    /// The plugins whose first-sight setup was offered in this run.
+    pub offered: BTreeSet<String>,
     /// When every list was last fetched.
     pub refreshed: u64,
     /// Unix seconds, as the runner last set it.

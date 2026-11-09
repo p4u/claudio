@@ -186,6 +186,7 @@ impl Runner {
             match task {
                 Task::Notice(text) => ctx.notify(text),
                 Task::Changed => ctx.changed(),
+                Task::Offer(name) => ctx.offer_checklist(name),
                 task => ctx.spawn(Box::pin(Arc::clone(self).task(Arc::clone(ctx), task))),
             }
         }
@@ -237,6 +238,7 @@ impl Runner {
             }
             Task::Notice(text) => ctx.notify(text),
             Task::Changed => ctx.changed(),
+            Task::Offer(name) => ctx.offer_checklist(name),
         }
     }
 

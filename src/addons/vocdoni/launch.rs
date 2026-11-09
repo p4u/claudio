@@ -202,10 +202,12 @@ async fn prepare(
     };
     profile.first_party |= first_party(&choice.flags);
     let deadline = Instant::now() + MANIFEST_WAIT;
-    let (config, share) = tokio::join!(
+    let reviewed = review(&runner, &req, &name, ctx.as_ref(), deadline).await?;
+    let (config, mut share) = tokio::join!(
         runner.config(&name),
         plugin_share(&runner, &req, &name, &ctx, deadline)
     );
+    share.notices.splice(0..0, reviewed);
     let env = layer_env(&share.env, session_env(&profile, config.as_ref()));
     let mut env_remove = vec![API_KEY.to_owned()];
     if profile.first_party {
@@ -219,6 +221,48 @@ async fn prepare(
         instructions: share.instructions,
         notices: share.notices,
     })
+}
+
+/// A new session's review: `profile`'s enabled plugins without saved
+/// choices, but those skipped for this launch. Once the addon has its
+/// start and the profile's list, the first whose manifest is here needs
+/// its checklist reviewed (D8); one whose manifest failed, or is still not
+/// here at `deadline`, is left out with a notice. A respawn, a recovery and
+/// a host without the addon review nothing.
+async fn review(
+    runner: &Arc<Runner>,
+    req: &LaunchRequest,
+    profile: &str,
+    ctx: &dyn AddonCtx,
+    deadline: Instant,
+) -> Result<Vec<String>, LaunchError> {
+    let fresh = matches!(req.op, LaunchOp::New | LaunchOp::Resume);
+    if !fresh || !ctx.host_has(&req.host) {
+        return Ok(Vec::new());
+    }
+    runner.transition(|s| s.use_profiles([profile.to_owned()].into()));
+    wait_listed(runner, profile, deadline).await;
+    loop {
+        let open = runner.state().unreviewed(profile, &req.deferred);
+        if let Some((checklist, revision)) = open.due.into_iter().next() {
+            return Err(LaunchError::NeedsReview {
+                checklist,
+                revision,
+            });
+        }
+        if open.fetching.is_empty() || Instant::now() >= deadline {
+            let failed = open.failed.into_iter().map(|(name, why)| {
+                let why: String = crate::text::sanitize(&why).chars().take(300).collect();
+                format!("plugin {name} left out: manifest: {why}")
+            });
+            let late = open
+                .fetching
+                .into_iter()
+                .map(|name| format!("plugin {name} left out: its manifest is not here yet"));
+            return Ok(failed.chain(late).collect());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// The plugins' part of a launch.
@@ -286,8 +330,8 @@ async fn plugin_share(
 
 /// `profile`'s enabled plugins on `host` minus `skip`, and the asks they
 /// wait for: a plugin without saved choices is left out whole, its
-/// secrets too (until its review, P3.11). A launch's profile is one in use
-/// (its list is fetched).
+/// secrets too (its review was skipped, or failed). A launch's profile is
+/// one in use (its list is fetched).
 fn saved_parts(
     runner: &Arc<Runner>,
     host: &str,
@@ -314,6 +358,16 @@ fn fill(parts: &mut [PluginPart], ready: &mut HashMap<String, Applied>) {
 /// front-end's start), or `deadline`. An inactive addon reads none.
 async fn wait_loaded(runner: &Runner, deadline: Instant) {
     while runner.is_active() && !runner.state().loaded && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Until the addon has its start and `profile`'s first list fetch of the
+/// run ended, or `deadline`.
+async fn wait_listed(runner: &Runner, profile: &str, deadline: Instant) {
+    wait_loaded(runner, deadline).await;
+    let listed = || runner.state().listed.contains(profile);
+    while runner.is_active() && !listed() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

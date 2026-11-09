@@ -10,7 +10,7 @@ use super::*;
 use crate::addon::{Addon, Addons, LaunchSelect};
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
-use crate::addons::vocdoni::plugins::state::PluginsFetch;
+use crate::addons::vocdoni::plugins::state::{ManifestState, PluginsFetch};
 use crate::addons::vocdoni::proxy::env::{DEFAULT_OPUS, DEFAULT_SONNET};
 use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
 use crate::addons::vocdoni::test_support::{lock, TestCtx, TEAM};
@@ -382,15 +382,7 @@ async fn plugin_share_becomes_optional_args_secrets_and_instructions() {
     assert!(part.notices.is_empty(), "{:?}", part.notices);
     // The answer went to the addon's state as well.
     assert!(runner.state().apply_state("local", "kb").is_some());
-    // An unsaved plugin is left out whole, its secret too (the review
-    // comes later); so is one skipped for this launch.
-    let runner = self::runner(profiles_file());
-    kb_ready(&runner);
-    runner.state().plugins.choices.clear();
-    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
-    let req = request(LaunchOp::New, choice("work".into(), false));
-    let part = prepare(runner, req, ctx).await.unwrap();
-    assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_none());
+    // One skipped for this launch is left out whole, its secret too.
     let runner = self::runner(profiles_file());
     kb_ready(&runner);
     let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
@@ -398,6 +390,104 @@ async fn plugin_share_becomes_optional_args_secrets_and_instructions() {
     req.deferred = vec!["kb".into()];
     let part = prepare(runner, req, ctx).await.unwrap();
     assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_none());
+}
+
+/// `kb` as [`kb_ready`] has it, but never set up.
+fn kb_unsaved() -> Arc<Runner> {
+    let runner = runner(profiles_file());
+    kb_ready(&runner);
+    runner.state().plugins.choices.clear();
+    runner
+}
+
+#[tokio::test]
+async fn prepare_needs_review_for_an_unsaved_plugin() {
+    let runner = kb_unsaved();
+    let test = Arc::new(TestCtx::default());
+    let ctx: Arc<dyn AddonCtx> = test.clone();
+    let req = request(LaunchOp::New, choice("work".into(), false));
+    let out = prepare(Arc::clone(&runner), req.clone(), ctx.clone()).await;
+    assert_eq!(
+        out,
+        Err(LaunchError::NeedsReview {
+            checklist: "kb".into(),
+            revision: "a".repeat(64),
+        })
+    );
+    assert!(lock(&test.requests).is_empty(), "nothing asked before it");
+    // A resume reviews too; a respawn or a recovery never does.
+    let resume = LaunchRequest {
+        op: LaunchOp::Resume,
+        ..req.clone()
+    };
+    let out = prepare(Arc::clone(&runner), resume, ctx.clone()).await;
+    assert!(matches!(out, Err(LaunchError::NeedsReview { .. })));
+    for op in [LaunchOp::Respawn, LaunchOp::Recover] {
+        let again = LaunchRequest { op, ..req.clone() };
+        let part = prepare(Arc::clone(&runner), again, ctx.clone()).await;
+        assert!(part.is_ok(), "{op:?}");
+    }
+    // A host without the addon gets no plugins: nothing to review.
+    test.old.store(true, Ordering::SeqCst);
+    assert!(prepare(Arc::clone(&runner), req.clone(), ctx).await.is_ok());
+    // Its manifest failed: left out, said.
+    let runner = kb_unsaved();
+    let failed = ManifestState::Failed("bad hash".into());
+    runner.state().plugins.manifests.get_mut("kb").unwrap().1 = failed;
+    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+    let part = prepare(runner, req, ctx).await.unwrap();
+    assert_eq!(part.notices, ["plugin kb left out: manifest: bad hash"]);
+    assert!(env_get(&part.env, "KB_TOKEN").is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn prepare_waits_for_an_unsaved_plugins_manifest() {
+    let runner = kb_unsaved();
+    runner.activate();
+    let sha = "a".repeat(64);
+    runner.state().plugins.manifests.get_mut("kb").unwrap().1 = ManifestState::Fetching;
+    let later = Arc::clone(&runner);
+    let arrives = sha.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let m = Manifest::parse(&TEAM.replace("\"team\"", "\"kb\"")).unwrap();
+        later.state().on_manifest("kb", &arrives, Ok(m));
+    });
+    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+    let req = request(LaunchOp::New, choice("work".into(), false));
+    let out = prepare(Arc::clone(&runner), req.clone(), ctx.clone()).await;
+    assert!(matches!(out, Err(LaunchError::NeedsReview { revision, .. }) if revision == sha));
+    // Never here: left out once the wait is over, said.
+    runner.state().plugins.manifests.get_mut("kb").unwrap().1 = ManifestState::Fetching;
+    let started = Instant::now();
+    let part = prepare(runner, req, ctx).await.unwrap();
+    assert!(started.elapsed() >= MANIFEST_WAIT);
+    assert_eq!(
+        part.notices,
+        ["plugin kb left out: its manifest is not here yet"]
+    );
+}
+
+#[tokio::test]
+async fn deferred_skips_review_for_that_launch_only() {
+    let runner = kb_unsaved();
+    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+    let mut req = request(LaunchOp::New, choice("work".into(), false));
+    req.deferred = vec!["kb".into()];
+    let part = prepare(Arc::clone(&runner), req.clone(), ctx.clone())
+        .await
+        .unwrap();
+    assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_none());
+    assert!(part.notices.is_empty(), "{:?}", part.notices);
+    // The next launch, which skips nothing, asks again: even after the
+    // member put the first-sight offer off for the run.
+    runner.state().defer("kb");
+    req.deferred.clear();
+    let out = prepare(runner, req, ctx).await;
+    assert!(
+        matches!(out, Err(LaunchError::NeedsReview { .. })),
+        "{out:?}"
+    );
 }
 
 #[tokio::test]

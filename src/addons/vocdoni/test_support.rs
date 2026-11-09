@@ -360,6 +360,7 @@ pub(crate) struct TestCtx {
     pub(crate) config: Mutex<toml::Table>,
     pub(crate) notices: Mutex<Vec<String>>,
     pub(crate) changed: AtomicUsize,
+    pub(crate) offers: Mutex<Vec<String>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -424,5 +425,7 @@ impl AddonCtx for TestCtx {
     fn changed(&self) {
         self.changed.fetch_add(1, Ordering::SeqCst);
     }
-    fn offer_checklist(&self, _id: String) {}
+    fn offer_checklist(&self, id: String) {
+        lock(&self.offers).push(id);
+    }
 }

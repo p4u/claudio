@@ -10,10 +10,11 @@ pub mod runner;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod ui;
 
 use std::sync::Arc;
 
-use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps, Launch};
+use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps, Launch, Ui};
 
 /// The addon's name: its config sections' owner and its daemon ops' prefix.
 pub const NAME: &str = "vocdoni";
@@ -59,6 +60,10 @@ impl Addon for Vocdoni {
     }
 
     fn launch(&self) -> Option<&dyn Launch> {
+        Some(self)
+    }
+
+    fn ui(&self) -> Option<&dyn Ui> {
         Some(self)
     }
 

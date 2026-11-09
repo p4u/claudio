@@ -6,6 +6,17 @@ use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, PluginsFetch};
 use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
 
+/// A launch's plugins without saved choices ([`State::unreviewed`]).
+#[derive(Debug, Default, PartialEq)]
+pub struct Unreviewed {
+    /// Their manifest is here: `(name, hash)`, to review.
+    pub due: Vec<(String, String)>,
+    /// Their manifest is still being fetched.
+    pub fetching: Vec<String>,
+    /// Their manifest failed: `(name, why)`.
+    pub failed: Vec<(String, String)>,
+}
+
 /// One plugin of a list as the extensions screen lists it.
 pub struct Row<'a> {
     pub profile: &'a str,
@@ -83,6 +94,7 @@ impl State {
     /// and ask the connected hosts for them.
     pub fn on_list(&mut self, profile: &str, fetch: PluginsFetch) -> Vec<Task> {
         let mut tasks = Vec::new();
+        self.listed.insert(profile.to_owned());
         match fetch {
             PluginsFetch::Listed(list) => {
                 self.plugins
@@ -145,8 +157,36 @@ impl State {
         let mut tasks = Vec::new();
         self.on_manifest_ready(name, sha256, &mut tasks);
         self.request_all(&mut tasks);
+        self.offer_due(&mut tasks);
         tasks.push(Task::Changed);
         tasks
+    }
+
+    /// Offer each first-sight setup now due, once per run.
+    fn offer_due(&mut self, tasks: &mut Vec<Task>) {
+        for name in self.first_sight() {
+            if self.offered.insert(name.clone()) {
+                tasks.push(Task::Offer(name));
+            }
+        }
+    }
+
+    /// What a launch with `profile` must review first: its enabled plugins
+    /// without saved choices, but `skip`, by their manifest's state.
+    pub fn unreviewed(&self, profile: &str, skip: &[String]) -> Unreviewed {
+        let mut out = Unreviewed::default();
+        for p in self.enabled_plugins(profile) {
+            let name = p.name.clone();
+            if skip.contains(&name) || self.plugins.choices.contains_key(&name) {
+                continue;
+            }
+            match self.plugins.manifests.get(&name) {
+                Some((sha, ManifestState::Ready(_))) => out.due.push((name, sha.clone())),
+                Some((_, ManifestState::Failed(why))) => out.failed.push((name, why.clone())),
+                Some((_, ManifestState::Fetching)) | None => out.fetching.push(name),
+            }
+        }
+        out
     }
 
     /// Plugin `name`'s manifest is here: with choices saved and the plugin
@@ -227,6 +267,7 @@ impl State {
                 self.on_manifest_ready(name, &sha, &mut tasks);
             }
             self.request_all(&mut tasks);
+            self.offer_due(&mut tasks);
         }
         tasks.push(Task::Changed);
         tasks
