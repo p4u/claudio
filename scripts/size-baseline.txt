@@ -1,13 +1,30 @@
 # Over-budget items (ACCEPTANCE.md A8, D2). Only shrinks; see scripts/check_rules.py.
-# P4: grouped by destination crate so the parallel moves edit disjoint blocks; P4.7 re-sorts.
-
-# -- claudio-core
+file addons/vocdoni/src/daemon/mod.rs 862
+file addons/vocdoni/src/plugins/manifest.rs 828
+file addons/web/src/hub.rs 2065
 file crates/core/src/claude/projects.rs 927
 file crates/core/src/client.rs 857
 file crates/core/src/daemon/git.rs 978
 file crates/core/src/daemon/server.rs 900
 file crates/core/src/daemon/session.rs 1036
 file crates/core/src/proto.rs 929
+file crates/tui/src/interaction.rs 1024
+file crates/tui/src/lib.rs 814
+file crates/tui/src/ui/mod.rs 881
+file crates/tui/src/wizard.rs 1147
+fn addons/api/src/api/agentic.rs::tool_preamble 85
+fn addons/api/src/api/pool.rs::resolve_turn 98
+fn addons/api/src/api/routes/chat.rs::completions 91
+fn addons/api/src/cli.rs::parse#2 138
+fn addons/api/src/print/driver.rs::start 184
+fn addons/api/src/print/driver.rs::turn 82
+fn addons/vocdoni/src/plugins/manifest.rs::check 130
+fn addons/vocdoni/src/plugins/manifest.rs::check#2 99
+fn addons/web/src/hub.rs::connected 119
+fn addons/web/src/hub.rs::handle 181
+fn addons/web/src/session_events.rs::apply_event 125
+fn addons/web/src/ws.rs::dispatch 234
+fn addons/web/src/ws.rs::tab 103
 fn crates/core/src/client.rs::handshake_flagged 91
 fn crates/core/src/daemon/login_path.rs::capture 91
 fn crates/core/src/daemon/mod.rs::spawn_reserved 98
@@ -19,19 +36,12 @@ fn crates/core/src/remote/bootstrap.rs::upload_release 91
 fn crates/core/src/remote/diag.rs::remote_session_cmd 101
 fn crates/core/src/term/screen.rs::snapshot 149
 fn crates/core/src/upgrade.rs::run_upgrade 103
-unwrap crates/core/src/daemon/host.rs 4
-
-# -- claudio-tui (src/tui and src/plain.rs until P4.3)
-file crates/tui/src/interaction.rs 1024
-file crates/tui/src/lib.rs 838
-file crates/tui/src/ui/mod.rs 881
-file crates/tui/src/wizard.rs 1147
 fn crates/tui/src/interaction.rs::modal_key 113
 fn crates/tui/src/interaction.rs::on_event 91
 fn crates/tui/src/interaction.rs::on_reply 111
 fn crates/tui/src/keys.rs::encode_key 127
 fn crates/tui/src/lib.rs::event_loop 229
-fn crates/tui/src/lib.rs::main 93
+fn crates/tui/src/lib.rs::main 91
 fn crates/tui/src/lib.rs::run_effect 123
 fn crates/tui/src/ui/extensions.rs::draw_extensions 85
 fn crates/tui/src/ui/mod.rs::draw_wizard 188
@@ -39,32 +49,9 @@ fn crates/tui/src/wizard.rs::on_key 110
 fn crates/tui/src/wizard.rs::on_key#2 155
 fn crates/tui/src/wizard.rs::refilter 85
 fn crates/tui/src/wizard.rs::refilter#2 85
-unwrap crates/tui/src/keymap.rs 2
-
-# -- claudio-api (src/addons/api until P4.4)
-fn addons/api/src/api/agentic.rs::tool_preamble 85
-fn addons/api/src/api/pool.rs::resolve_turn 98
-fn addons/api/src/api/routes/chat.rs::completions 91
-fn addons/api/src/cli.rs::parse#2 138
-fn addons/api/src/print/driver.rs::start 184
-fn addons/api/src/print/driver.rs::turn 82
 unwrap addons/api/src/api/pool.rs 9
 unwrap addons/api/src/print/hooks.rs 3
-
-# -- claudio-web (src/addons/web until P4.5)
-file addons/web/src/hub.rs 2229
-fn addons/web/src/hub.rs::connected 119
-fn addons/web/src/hub.rs::handle 194
-fn addons/web/src/session_events.rs::apply_event 125
-fn addons/web/src/ws.rs::dispatch 251
-fn addons/web/src/ws.rs::tab 103
-unwrap addons/web/build.rs 1
-
-# -- claudio-vocdoni (src/addons/vocdoni until P4.6)
-file addons/vocdoni/src/daemon/mod.rs 862
-file addons/vocdoni/src/plugins/manifest.rs 828
-fn addons/vocdoni/src/plugins/manifest.rs::check 130
-fn addons/vocdoni/src/plugins/manifest.rs::check#2 99
 unwrap addons/vocdoni/src/cmd.rs 2
-
-# -- claudio (root)
+unwrap addons/web/build.rs 1
+unwrap crates/core/src/daemon/host.rs 4
+unwrap crates/tui/src/keymap.rs 2
