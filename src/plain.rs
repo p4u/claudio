@@ -6,14 +6,18 @@
 //! parses the command line; the rest is in `tui/`.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use crate::addon::Addons;
 use crate::proxy::resolve::split_launch_flags;
 use crate::proxy::ProxyChoice;
 use crate::tui;
 
-pub fn run(args: &[String]) -> ExitCode {
+pub fn run(args: &[String], addons: Arc<Addons>) -> ExitCode {
     match split_args(args) {
-        Ok((choice, first_party, user_args)) => tui::run_plain(choice, first_party, user_args),
+        Ok((choice, first_party, user_args)) => {
+            tui::run_plain(addons, choice, first_party, user_args)
+        }
         Err(msg) => {
             eprintln!("claudio: {msg}");
             ExitCode::from(2)

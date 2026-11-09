@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 use super::hub::HubHandle;
 use super::plugins::{extensions_changed, notice_event, Plugins};
+use crate::app::addons::AddonRuntime;
 use crate::app::extensions::host::ExtensionHost;
 use crate::app::extensions::protocol::SessionContext;
 use crate::app::extensions::{manifest, ActionResult, Extension, Registry, Source};
@@ -215,7 +216,12 @@ impl Extensions {
     /// Every 5 s: config.toml's mtime (spawn_blocking); on a change, `config::load`
     /// (spawn_blocking) and apply [extensions], [plugins.*], [claude] and the proxy
     /// profiles; then `extensions_changed` (and `profiles` if they changed).
-    pub(crate) fn watch_config(self: &Arc<Self>, plugins: Plugins, hub: HubHandle) {
+    pub(crate) fn watch_config(
+        self: &Arc<Self>,
+        plugins: Plugins,
+        hub: HubHandle,
+        addons: AddonRuntime,
+    ) {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(CONFIG_POLL);
@@ -223,13 +229,15 @@ impl Extensions {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                this.reread(&plugins, &hub).await;
+                if this.reread(&plugins, &hub).await {
+                    addons.config_changed();
+                }
             }
         });
     }
 
-    /// Re-read config.toml if it changed since the last look.
-    async fn reread(&self, plugins: &Plugins, hub: &HubHandle) {
+    /// Re-read config.toml if it changed since the last look; whether it did.
+    async fn reread(&self, plugins: &Plugins, hub: &HubHandle) -> bool {
         let _edit = self.edit.lock().await;
         let path = self.config_path.clone();
         let now = tokio::task::spawn_blocking(move || stamp(&path))
@@ -238,7 +246,7 @@ impl Extensions {
         {
             let mut last = lock(&self.last);
             if *last == now {
-                return;
+                return false;
             }
             *last = now;
         }
@@ -251,7 +259,7 @@ impl Extensions {
         })
         .await
         else {
-            return;
+            return false;
         };
         tracing::debug!("web: config.toml re-read");
         let before = lock(&self.registry).clone();
@@ -290,6 +298,7 @@ impl Extensions {
         if *lock(&self.registry) != before {
             hub.broadcast(extensions_changed());
         }
+        true
     }
 
     /// ExtensionHost::shutdown

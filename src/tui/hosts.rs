@@ -16,43 +16,45 @@ use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
 
 /// A host's daemon connected (bootstrap + connect): start its reader and
-/// recover its sessions; a stale attempt is ignored.
+/// recover its sessions. Whether it was taken (a stale attempt is not).
 pub(super) fn on_connected(
     app: &mut App,
     conns: &mut Connections,
     ev_tx: &mpsc::Sender<HostEvent>,
-    host: String,
+    host: &str,
     client: Client,
     sessions: Vec<SessionInfo>,
     generation: u64,
-) {
+) -> bool {
     // A newer attempt is already in flight.
-    if generation < conns.current_generation(&host) {
-        return;
+    if generation < conns.current_generation(host) {
+        return false;
     }
     let home = client.welcome().host.home.clone();
     let remote_claude = client_claude(&client);
-    conns.reset_delay(&host);
+    conns.reset_delay(host);
     // Start the reader tagged with the current generation.
-    let cur_gen = conns.current_generation(&host);
+    let cur_gen = conns.current_generation(host);
     if let Some(rx) = client.take_incoming() {
-        spawn_reader(host.clone(), cur_gen, rx, ev_tx.clone());
+        spawn_reader(host.to_owned(), cur_gen, rx, ev_tx.clone());
     }
-    conns.connected(&host, client);
+    conns.connected(host, client);
     // Record this host in the MRU so it appears first next time.
-    crate::remote::hosts::touch(&host);
+    crate::remote::hosts::touch(host);
     app.on_ssh_hosts(crate::remote::hosts::candidates());
-    app.on_host_connected(&host, &home);
-    app.on_plugin_host(&host);
+    app.on_host_connected(host, &home);
+    app.on_plugin_host(host);
     // Recover this host's sessions only.
-    app.recover_host(&host, &sessions);
-    app.subscribe_host_stats(&host);
-    app.check_remote_claude(&host, remote_claude.as_deref());
+    app.recover_host(host, &sessions);
+    app.subscribe_host_stats(host);
+    app.check_remote_claude(host, remote_claude.as_deref());
     app.redraw = true;
+    true
 }
 
 /// The local daemon answered again after a lost connection: start its
-/// reader and recover its sessions; a stale attempt is ignored.
+/// reader and recover its sessions. Whether it was taken (a stale attempt
+/// is not).
 pub(super) fn on_local_reconnected(
     app: &mut App,
     conns: &mut Connections,
@@ -60,10 +62,10 @@ pub(super) fn on_local_reconnected(
     client: Client,
     sessions: Vec<SessionInfo>,
     generation: u64,
-) {
+) -> bool {
     // A newer attempt is already in flight.
     if generation < conns.current_generation("local") {
-        return;
+        return false;
     }
     conns.reset_delay("local");
     let home = client.welcome().host.home.clone();
@@ -76,6 +78,7 @@ pub(super) fn on_local_reconnected(
     app.on_plugin_host("local");
     app.check_local_install();
     app.on_reconnected_local(&sessions, home);
+    true
 }
 
 /// Ask every host whose daemon is outdated whether it is idle now, so it

@@ -4,6 +4,7 @@
 //! connections (local + remote) and runs the event loop. State and update
 //! logic live in [`app`], rendering in [`ui`].
 
+mod addon_runner;
 pub mod app;
 mod builtins;
 mod claude_update;
@@ -51,6 +52,7 @@ mod wizard;
 use std::io::{self, Stdout};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -71,6 +73,7 @@ use crate::client::{Client, Incoming};
 use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
+use crate::addon::Addons;
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
@@ -141,8 +144,8 @@ enum Start {
 }
 
 /// Run the manager until the user quits.
-pub fn run() -> ExitCode {
-    run_with_proxy(crate::proxy::ProxyChoice::Default, false)
+pub fn run(addons: Arc<Addons>) -> ExitCode {
+    run_with_proxy(addons, crate::proxy::ProxyChoice::Default, false)
 }
 
 /// Like [`run`] but applies a startup proxy override to every new session.
@@ -152,29 +155,36 @@ pub fn run() -> ExitCode {
 /// - `Default` → wizard pre-selects the config.toml default, if any.
 ///
 /// `first_party` (--first-party) makes every session of this run first-party.
-pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice, first_party: bool) -> ExitCode {
-    run_launch(Entry::Manager {
+pub fn run_with_proxy(
+    addons: Arc<Addons>,
+    proxy_override: crate::proxy::ProxyChoice,
+    first_party: bool,
+) -> ExitCode {
+    let entry = Entry::Manager {
         proxy: proxy_override,
         first_party,
-    })
+    };
+    run_launch(entry, addons)
 }
 
 /// `claudio --plain`: run claude alone, full screen, with the proxy `proxy`
 /// picks, and exit with its status. The manager's help, proxy stats, history
 /// and reset keys work; the rest of the keyboard is claude's.
 pub fn run_plain(
+    addons: Arc<Addons>,
     proxy: crate::proxy::ProxyChoice,
     first_party: bool,
     args: Vec<String>,
 ) -> ExitCode {
-    run_launch(Entry::Plain {
+    let entry = Entry::Plain {
         proxy,
         first_party,
         args,
-    })
+    };
+    run_launch(entry, addons)
 }
 
-fn run_launch(entry: Entry) -> ExitCode {
+fn run_launch(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -185,12 +195,12 @@ fn run_launch(entry: Entry) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = rt.block_on(main(entry));
+    let code = rt.block_on(main(entry, addons));
     rt.shutdown_background();
     code
 }
 
-async fn main(entry: Entry) -> ExitCode {
+async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let config = crate::config::load();
     let mut key_notices = Vec::new();
@@ -277,20 +287,22 @@ async fn main(entry: Entry) -> ExitCode {
         config.extensions.clone(),
         config.plugins.clone(),
     );
+    let runner = addon_runner::start(addons);
     app.on_plugin_host("local");
+    runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
     let start = match plain {
         Some(start) => Start::Plain(start),
         None => Start::Manager { saved, live },
     };
-    let mut conns = Connections::with_local(local_client.clone());
+    let mut conns = Connections::with_local(local_client);
     // A panic must still reach the cleanup below, so catch it and re-raise.
     let result = std::panic::AssertUnwindSafe(event_loop(
         &mut terminal,
         &mut conns,
         app,
         start,
-        local_client,
+        runner,
         config.update.check,
         key_notices,
     ))
@@ -558,7 +570,7 @@ async fn event_loop(
     conns: &mut Connections,
     mut app: App,
     start: Start,
-    local_client: Client,
+    runner: addon_runner::Runner,
     update_check_enabled: bool,
     key_notices: Vec<String>,
 ) -> io::Result<plain::Exit> {
@@ -590,12 +602,11 @@ async fn event_loop(
     let (ev_tx, mut ev_rx) = mpsc::channel::<HostEvent>(1024);
 
     // Start the local incoming reader, tagged with the current local generation.
-    if let Some(rx) = local_client.take_incoming() {
+    if let Some(rx) = conns.client("local").and_then(Client::take_incoming) {
         let gen = conns.current_generation("local");
         spawn_reader("local".to_owned(), gen, rx, ev_tx.clone());
     }
-    // `conns` owns the connection from here: dropping it there closes it.
-    drop(local_client);
+    let addon_runner::Runner { runtime, mut rx } = runner;
 
     // Start background connections to the saved tabs' remote hosts.
     for host in remote_hosts {
@@ -663,7 +674,9 @@ async fn event_loop(
         for effect in app.take_effects() {
             run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host);
         }
+        addon_runner::sync(&runtime, &app);
         if app.quit {
+            runtime.shutdown();
             ext_host.shutdown().await;
             return Ok(std::mem::take(&mut app.exit));
         }
@@ -697,7 +710,7 @@ async fn event_loop(
                         // Reconnect with backoff.
                         Incoming::Disconnected => {
                             conns.disconnect(&host);
-                            app.on_incoming_from(&host, Incoming::Disconnected);
+                            addon_runner::on_incoming(&mut app, &runtime, &host, Incoming::Disconnected);
                             let (delay, gen) = conns.next_attempt(&host);
                             if host == "local" {
                                 spawn_reconnect_local(delay, gen, ev_tx.clone());
@@ -712,7 +725,9 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
-                    on_connected(&mut app, conns, &ev_tx, host, client, sessions, generation);
+                    if on_connected(&mut app, conns, &ev_tx, &host, client, sessions, generation) {
+                        addon_runner::host_up(&runtime, &host, conns);
+                    }
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
                     // A newer attempt is already in flight.
@@ -728,7 +743,9 @@ async fn event_loop(
                     spawn_connect_after(host, gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
-                    on_local_reconnected(&mut app, conns, &ev_tx, client, sessions, generation);
+                    if on_local_reconnected(&mut app, conns, &ev_tx, client, sessions, generation) {
+                        addon_runner::host_up(&runtime, "local", conns);
+                    }
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
                     if generation < conns.current_generation("local") {
@@ -744,7 +761,7 @@ async fn event_loop(
                     // Dropping the client closes the connection; the newer
                     // generation silences its reader.
                     conns.disconnect(&host);
-                    app.on_incoming_from(&host, Incoming::Disconnected);
+                    addon_runner::on_incoming(&mut app, &runtime, &host, Incoming::Disconnected);
                     let gen = conns.next_generation(&host);
                     if host == "local" {
                         spawn_reconnect_local(Duration::ZERO, gen, ev_tx.clone());
@@ -786,7 +803,8 @@ async fn event_loop(
                 Some(HostEvent::Notice(text)) => app.notify(text),
                 None => return Ok(Default::default()),
             },
-            Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
+            Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
+            Some(out) = rx.recv() => addon_runner::on_out(&mut app, out),
             _ = tick.tick() => app.on_tick(),
             _ = proxy_tick.tick() => {
                 // Refresh proxy stats for the active session's profile (they
@@ -910,13 +928,7 @@ fn run_effect(
                 Err(e) => app.notify(format!("could not save: {e}")),
             }
         }
-        Effect::SaveExtension { name, on } => {
-            let state = if on { "on" } else { "off" };
-            match crate::config::save_extension(&paths::config_file(), &name, on) {
-                Ok(()) => app.notify(format!("extension {name} {state} (saved)")),
-                Err(e) => app.notify(format!("could not save: {e}")),
-            }
-        }
+        Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.
             let tx = ev_tx.clone();

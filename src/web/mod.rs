@@ -2,6 +2,7 @@
 //! of the claudio daemons (local socket, remote ssh bridge), like the TUI.
 //! See docs/specs/2026-11-08-web-ui-design.md and docs/web-protocol.md.
 
+mod addon_feed;
 pub(crate) mod assets;
 pub(crate) mod auth;
 mod dto;
@@ -67,6 +68,8 @@ pub(crate) struct AppState {
     pub tabs: Arc<AtomicUsize>,
     /// Spawns, proxy, plugins and extensions.
     pub ctx: Arc<spawn::SpawnCtx>,
+    /// The addon runtime, fed by the hub (`addon_feed`).
+    pub addons: crate::app::addons::AddonRuntime,
 }
 
 impl FromRef<AppState> for Arc<auth::Auth> {
@@ -164,7 +167,7 @@ pub(crate) fn listen_addr(addr: &str) -> Result<SocketAddr, String> {
 }
 
 /// `claudio web …` (`args` are the words after `web`).
-pub fn run(args: &[String]) -> ExitCode {
+pub fn run(args: &[String], addons: Arc<crate::addon::Addons>) -> ExitCode {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
@@ -213,7 +216,7 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(serve(args, token, url)) {
+    match runtime.block_on(serve(args, token, url, addons)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("claudio web: {e}");
@@ -222,7 +225,12 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> {
+async fn serve(
+    args: WebArgs,
+    token: String,
+    url: String,
+    addons: Arc<crate::addon::Addons>,
+) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
@@ -233,8 +241,12 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         auth::csp(assets.importmap_sha256()),
     )
     .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
-    let state = build_state(auth, assets).await?;
-    let (hub, ext) = (state.hub.clone(), Arc::clone(&state.ctx.ext));
+    let state = build_state(auth, assets, addons).await?;
+    let (hub, ext, addon_rt) = (
+        state.hub.clone(),
+        Arc::clone(&state.ctx.ext),
+        state.addons.clone(),
+    );
     if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
         eprintln!("claudio web: local build {}", version());
     }
@@ -258,6 +270,7 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         shutdown().await;
         hub.shutdown().await;
         ext.shutdown().await;
+        addon_rt.shutdown();
     };
     axum::serve(listener, router(state))
         .with_graceful_shutdown(stop)
@@ -267,12 +280,22 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
 
 /// The server's state: the hub (from config.toml, both state files and the
 /// proxy profiles, read off the executor), the extensions, the plugins and
-/// the spawn context.
-async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<AppState, String> {
+/// the spawn context, and the addon runtime they feed.
+async fn build_state(
+    auth: auth::Auth,
+    assets: Arc<assets::Assets>,
+    addons: Arc<crate::addon::Addons>,
+) -> Result<AppState, String> {
+    // The web's own config poll (`ext`) tells the runtime until P3.13 (F20).
+    let opts = crate::app::addons::RuntimeOptions {
+        config_path: crate::paths::config_file(),
+        watch_config: false,
+    };
+    let (runtime, rt_rx) = crate::app::addons::AddonRuntime::start(addons, opts);
     // Files, before the hub starts: off the executor.
     let state_path = state::path();
     let (hub_cfg, cached_plugins) = {
-        let state_path = state_path.clone();
+        let (state_path, runtime) = (state_path.clone(), runtime.clone());
         tokio::task::spawn_blocking(move || {
             let cfg = hub::HubConfig {
                 config: crate::config::load(),
@@ -280,6 +303,7 @@ async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<Ap
                 web: state::load(&state_path),
                 profiles: crate::proxy::resolve::load_proxy_profiles(),
                 state_path,
+                runtime,
             };
             (cfg, crate::proxy::plugins::load_all())
         })
@@ -288,6 +312,7 @@ async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<Ap
     };
     let config = hub_cfg.config.clone();
     let hub = hub::start(hub_cfg);
+    addon_feed::follow(hub.clone(), runtime.clone(), rt_rx);
     let ext = ext::Extensions::load(&config, &hub).await;
     let plugins = plugins::Plugins::start(
         hub.clone(),
@@ -296,7 +321,7 @@ async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<Ap
         config.extensions.clone(),
         config.plugins.clone(),
     );
-    ext.watch_config(plugins.clone(), hub.clone());
+    ext.watch_config(plugins.clone(), hub.clone(), runtime.clone());
     let ctx = Arc::new(spawn::SpawnCtx {
         hub: hub.clone(),
         proxy: proxy::ProxyCache::new(),
@@ -310,6 +335,7 @@ async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<Ap
         search_slots: Arc::default(),
         tabs: Arc::default(),
         ctx,
+        addons: runtime,
     })
 }
 

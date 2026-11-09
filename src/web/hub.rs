@@ -23,6 +23,7 @@ use axum::body::Bytes;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use super::addon_feed;
 use super::dto;
 use super::events::{claude_event, ev, host_stats};
 use super::input::{self, Decision};
@@ -523,6 +524,8 @@ pub(crate) struct HubConfig {
     pub profiles: (Vec<String>, Option<String>),
     /// web-state.json as read at start (in `spawn_blocking`, by `serve`).
     pub web: WebState,
+    /// Fed with the sessions after every change (`addon_feed`).
+    pub runtime: crate::app::addons::AddonRuntime,
 }
 
 /// A session as a request handler needs it.
@@ -714,6 +717,7 @@ pub(crate) fn start(cfg: HubConfig) -> HubHandle {
         events: events.clone(),
         writer,
         local_claude: None,
+        runtime: cfg.runtime,
     };
     // `local`, then the remembered hosts and the TUI's remote ones.
     let mut hosts = vec!["local".to_owned()];
@@ -967,6 +971,7 @@ struct Hub {
     writer: mpsc::UnboundedSender<WriteJob>,
     /// The local claude's `--version` line, from the local Welcome.
     local_claude: Option<String>,
+    runtime: crate::app::addons::AddonRuntime,
 }
 
 async fn run(mut hub: Hub, mut rx: mpsc::Receiver<Cmd>) {
@@ -981,7 +986,14 @@ async fn run(mut hub: Hub, mut rx: mpsc::Receiver<Cmd>) {
                     hub.shutdown(reply);
                     break;
                 }
-                Some(cmd) => hub.handle(cmd),
+                Some(cmd) => {
+                    let data = matches!(&cmd, Cmd::Input { .. } | Cmd::Incoming { inc: Incoming::Data { .. }, .. });
+                    hub.handle(cmd);
+                    if !data {
+                        let views = hub.sessions.values().map(|v| (v, !v.subs.is_empty()));
+                        hub.runtime.sessions_reset(addon_feed::snaps(views));
+                    }
+                }
                 None => break,
             },
             _ = tick.tick() => hub.on_tick(),
@@ -2462,8 +2474,14 @@ mod tests {
         assert!(apply_event(&mut v, SessionEvent::Removed, true, 7).removed);
     }
 
-    #[test]
-    fn ephemeral_sessions_are_never_listed() {
+    #[tokio::test]
+    async fn ephemeral_sessions_are_never_listed() {
+        let opts = crate::app::addons::RuntimeOptions {
+            config_path: "/nonexistent/claudio/config.toml".into(),
+            watch_config: false,
+        };
+        let addons = Arc::new(crate::addon::Addons::empty());
+        let (runtime, _out) = crate::app::addons::AddonRuntime::start(addons, opts);
         let (tx, _rx) = mpsc::channel(8);
         let (events, _) = broadcast::channel(8);
         let (writer, _jobs) = mpsc::unbounded_channel();
@@ -2487,6 +2505,7 @@ mod tests {
             events,
             writer,
             local_claude: None,
+            runtime,
         };
         hub.hosts.insert("local".into(), HostState::new("local"));
         let mut eph = info(SessionState::Working);

@@ -44,7 +44,7 @@ use print::emit::Outcome;
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
-    let addons = registry(); // later P3 tasks hand it to each entry point
+    let addons = registry();
 
     // Remote probe: `claudio __probe` prints one JSON line describing this
     // binary (version, proto, os, arch, sha256 of the exe). Must run before
@@ -181,24 +181,24 @@ fn main() -> std::process::ExitCode {
 
     // `claudio web [...]` — the session manager in a browser (src/web/).
     if argv.get(1).map(String::as_str) == Some("web") {
-        return web::run(&argv[2..]);
+        return web::run(&argv[2..], addons);
     }
 
     // `claudio --plain [--proxy <name>|--no-proxy] [claude args…]` — plain
     // claude with the manager's proxy environment, no daemon or TUI.
     if argv.get(1).map(String::as_str) == Some("--plain") {
-        return plain::run(&argv[2..]);
+        return plain::run(&argv[2..], addons);
     }
 
     // `claudio [--proxy <name>|--no-proxy] [--first-party]` — open the session
     // manager with a proxy override and/or first-party mode for every new session.
     if argv.len() == 1 {
-        return tui::run();
+        return tui::run(addons);
     }
     if matches!(argv[1].as_str(), "--proxy" | "--no-proxy" | "--first-party") {
         return match proxy::resolve::split_launch_flags(&argv[1..]) {
             Ok(flags) if flags.rest.is_empty() => {
-                tui::run_with_proxy(flags.choice, flags.first_party)
+                tui::run_with_proxy(addons, flags.choice, flags.first_party)
             }
             Ok(_) => {
                 eprintln!(
