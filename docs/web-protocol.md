@@ -276,7 +276,7 @@ known host answers `"no such host"`; a known but disconnected one `"not connecte
 
 **Review (decided here).** A `review` reply means addon `addon` wants checklist `id` (at
 `revision`) reviewed before this launch. The server keeps nothing of it. The page shows
-`addons.checklist {addon, id}` and then: *Save* → `addons.checklist.save` and the same
+`addons.checklist {addon, checklist: id}` and then: *Save* → `addons.checklist.save` and the same
 `session.spawn` again; *Skip* → the same `session.spawn` with `{addon, id}` added to `defer`
 (the addon leaves that checklist's part out of this launch only); *Cancel* → nothing is sent.
 
@@ -334,8 +334,9 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 
 ### Addons **(version 2)**
 
-`addon` must name a registered addon (else `"bad request: addon: no such addon"`); `id`, `name`
-and `panel` match `[a-z0-9-]{1,64}`; `sid`, where given, must name a session the server knows
+`addon` must name a registered addon (else `"bad request: addon: no such addon"`); `panel`,
+`action`, `checklist` and `name` match `[a-z0-9-]{1,64}` (a panel or checklist id is passed as
+`panel` or `checklist`: an arg named `id` would be the request's, §3.2); `sid`, where given, must name a session the server knows
 (`"no such session"`). A session-bound request carries only `sid`: the server finds the
 session's launch and conversation in its own state and hands the addon those, never anything
 the page sends (an extra arg answers `"bad request: …"`).
@@ -343,10 +344,10 @@ the page sends (an extra arg answers `"bad request: …"`).
 | Op | Args | → | Notes |
 |---|---|---|---|
 | `addons.list` | — | `{"addons":[AddonDecl]}` | registry order; addons with neither panels, launch options nor launch flags are left out |
-| `addons.panel` | `addon`, `id`, `page?` (≥ 0), `window?` (one of the panel's `windows`), `sid?` | Panel | 10 s; past it, or when the addon fails, an error page (one `text` block saying why) |
+| `addons.panel` | `addon`, `panel` (its id), `page?` (≥ 0), `window?` (one of the panel's `windows`), `sid?` | Panel | 10 s; past it, or when the addon fails, an error page (one `text` block saying why) |
 | `addons.action` | `addon`, `panel`, `action`, `sid?` | Notice | 15 s, then `"<addon>: the action timed out"`; the addon's refusal is the error |
-| `addons.checklist` | `addon`, `id` | Checklist | `"no such checklist"` when the addon has none (yet) |
-| `addons.checklist.save` | `addon`, `id`, `revision`, `answer`: `{"off":[item id]}` (≤ 256 ids of ≤ 128 bytes, each one of the checklist's) \| `"defer"` | `{}` | `"stale"` when the checklist's revision is no longer `revision` (the page reads it again); `"defer"` puts it off for this server run. 15 s |
+| `addons.checklist` | `addon`, `checklist` (its id) | Checklist | `"no such checklist"` when the addon has none (yet) |
+| `addons.checklist.save` | `addon`, `checklist`, `revision`, `answer`: `{"off":[item id]}` (≤ 256 ids of ≤ 128 bytes, each one of the checklist's) \| `"defer"` | `{}` | `"stale"` when the checklist's revision is no longer `revision` (the page reads it again); `"defer"` puts it off for this server run. 15 s |
 | `addons.rows` | — | `{"rows":[ExtensionRow]}` | registry order; `on`/`refused` as the registry has them (a name a core extension holds is refused) |
 | `addons.row_action` | `addon`, `name`, `action`: `"toggle"` \| `"refresh"`, `on?` (bool; `toggle` only, required) | `{}` | `toggle` writes `[extensions] <name> = on` in config.toml, then tells the addon (a refused row answers `"refused: <why>"`); `refresh` has the addon refetch its rows' data. 15 s; then `extensions_changed` |
 
