@@ -108,6 +108,51 @@ render in the web UI only`.
 
 Expected size: about −9k lines.
 
+### P2: untangle (spec §Untangling; exit: `grep -rn 'crate::tui' src/web` is empty)
+Model: standard   Files: src/** (moves and import updates), tests only where imports move
+Goal: every helper lives where it belongs, the module cycles are gone, and the code both
+front-ends share sits in a UI-free `app` layer, so `src/web` imports nothing from `src/tui`.
+No behaviour change; each step is its own commit (moves via `git mv` where a file moves whole,
+then a separate commit for any edit). Every commit: `cargo build --locked` and
+`cargo test --locked --bin claudio` pass; at the end `make check`, manager, web, screenshots,
+node and Playwright suites pass and `python3 scripts/check_rules.py --write-baseline` renames
+baseline entries for moved files (same counts; totals must not grow).
+
+Steps (in this order):
+1. `src/text.rs`: `sanitize` (from `claude::latex`), `parse_rfc3339` (from `proxy::api`),
+   `fmt_tokens` (from `proxy::cmd`). Callers import `crate::text`. `claude::latex` keeps its
+   extraction functions. Breaks `proto → claude`, and `tui::fmt → proxy`.
+2. `src/release.rs`: `SemVer` and `http_client` (from `upgrade`), `RELEASES_REPO`,
+   `release_arch`, `release_os` (from `remote::bootstrap`). `upgrade`, `remote`, `freshness`,
+   `claude::update` import `crate::release`.
+3. `paths` stops importing `proto`: `PROTO` moves to `src/version.rs` (`pub const PROTO`), and
+   `proto` re-exports it (`pub use crate::version::PROTO;`) so its users don't change.
+4. `proto → proxy`: `Msg::merge_env` uses a private env-merge function in `proto` (the body of
+   `proxy::env::merge`, which then calls the proto one or is deleted if unused).
+5. `plugins ↔ proxy`: `name_ok` and `key_ok` move from `proxy::plugins` to
+   `plugins::manifest` (the parser of the names they check); `proxy`, `config` and
+   `daemon::manifest` import them from there.
+6. `freshness ↔ client`: `freshness::ensure_current` takes the connected `Client` (the caller
+   connects) instead of calling `client::connect`; `freshness` no longer names `client`.
+7. `src/app/` (the shared layer, no ratatui/crossterm/axum): `git mv` `tui/state.rs` →
+   `app/state.rs`, `tui/connections.rs` → `app/connections.rs`, `tui/snippets.rs` →
+   `app/snippets.rs`, `tui/extensions/` → `app/extensions/`, then edit: `sanitize_label` from
+   `tui/sessions.rs` → `app/label.rs`; `stats_view::Window` → `proxy/stats.rs` (it is proxy
+   stats data); `plugin_setup::choices_for` → `plugins/choices.rs`; `proxy::login::
+   {browser_wanted, open_browser}` → `app/browser.rs`. `tui/test_support.rs` helpers used by
+   the moved files move with them (`app/test_support.rs`, `#[cfg(test)]`).
+8. `tui/plugins.rs` (the pure plugin state machine and `compose`) → `plugins/state.rs`, beside
+   the manifest parser; the TUI's `impl App` glue that lives in it stays in
+   `tui/plugins_glue.rs` (or `tui/plugins.rs` keeps only the glue). Web imports
+   `crate::plugins::state`.
+9. Snippets once (A5): the TUI runner (`tui/mod.rs` `LoadSnippets`/`SaveSnippet`) and
+   `web/ext.rs` call the same `app::snippets` functions; no duplicated directory or naming
+   logic remains.
+
+Interfaces this phase provides to P3: `crate::text`, `crate::release`, `crate::version`,
+`crate::app::{state, connections, snippets, extensions, label, browser}`,
+`crate::plugins::{manifest, state, choices}`.
+
 ## Merge and release
 1. Each phase: all suites green (`make check`, manager, web, screenshots, node, Playwright),
    then `git merge --no-ff refactor/core-addons` into local `main` after the phase's review.
