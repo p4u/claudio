@@ -610,3 +610,50 @@ async fn the_cache_keeps_at_most_32_manifests() {
     );
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// compat(v0.10): an old client's `manifest` op (the raw JSON of the
+/// releases before addons) is refused as unsupported, which that client
+/// reports as "daemon too old" and starts its session without plugins
+/// (AC8, old client → new daemon).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manifest_op_from_an_old_client_is_refused_as_unsupported() {
+    use tokio::io::AsyncWriteExt;
+    let h = PluginHost::start().await;
+    let mut c = h.d.client().await;
+    let json = format!(
+        r#"{{"req":77,"op":"manifest","name":"team","url":"https://127.0.0.1:9/never.toml","sha256":"{}","secrets":[],"disabled":[]}}"#,
+        sha256_hex(TEAM.as_bytes())
+    );
+    let mut frame = ((json.len() + 1) as u32).to_be_bytes().to_vec();
+    frame.push(b'J');
+    frame.extend_from_slice(json.as_bytes());
+    c.stream.write_all(&frame).await.unwrap();
+    let reply = c
+        .until(|f| match f {
+            crate::proto::Frame::Control(env) if env.req == Some(77) => Some(env.msg.clone()),
+            _ => None,
+        })
+        .await;
+    match reply {
+        Msg::Error { message } => assert!(message.starts_with("unsupported op"), "{message}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(h.log().is_empty(), "nothing was installed");
+}
+
+/// A daemon with the Vocdoni addon lists `addon:vocdoni` in its features.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn welcome_lists_addon_vocdoni() {
+    let h = PluginHost::start().await;
+    let mut c = crate::daemon::test_support::Client::raw(&h.d.config.socket).await;
+    let hello = crate::daemon::test_support::hello(crate::proto::PROTO);
+    let Msg::Welcome(welcome) = c.call(Msg::Hello(hello)).await else {
+        panic!("no welcome");
+    };
+    assert!(
+        welcome.features.iter().any(|f| f == "addon:vocdoni"),
+        "{:?}",
+        welcome.features
+    );
+    assert!(super::serves_apply(&welcome.features));
+}

@@ -677,6 +677,64 @@ KB_REGION = "eu"
         assert_eq!(details[1], "manifest: hash mismatch");
     }
 
+    /// `kb` listed, its manifest here and its choices saved; no host yet.
+    fn app_with_kb_unasked() -> App {
+        let mut app = app_with(&[]);
+        app.modal = None;
+        app.plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
+        app.on_plugins(
+            "work",
+            PluginsFetch::Listed(list("work", vec![sample("kb")])),
+        );
+        app.on_manifest("kb", &sha(), Ok(manifest_of("kb")));
+        app.take_effects();
+        app
+    }
+
+    /// A daemon whose Welcome lacks `addon:vocdoni` (older than addons) is
+    /// never asked: every plugin is `TooOld` there at once and a spawn does
+    /// not wait for it. Once a newer daemon connects there, it is asked.
+    #[test]
+    fn a_host_without_addon_vocdoni_is_too_old_and_never_asked() {
+        let mut app = app_with_kb_unasked();
+        app.on_daemon_host("local", &["lens".to_owned()]);
+        assert!(manifest_requests(&mut app).is_empty(), "never asked");
+        assert_eq!(app.apply_state("local", "kb"), Some(&ApplyState::TooOld));
+        let (parts, pending) = app.plugin_parts("local", "work");
+        assert!(pending.is_empty(), "a spawn does not wait for it");
+        assert_eq!(parts[0].applied, None);
+        assert_eq!(
+            parts[0].secrets,
+            [("KB_TOKEN".to_owned(), "s3cret".to_owned())]
+        );
+        let features = ["lens".to_owned(), "addon:vocdoni".to_owned()];
+        app.on_daemon_host("local", &features);
+        assert_eq!(asked(&mut app), [pair("local", "kb")]);
+    }
+
+    /// C1: the apply request on the wire names the plugin's secrets, never
+    /// their values.
+    #[test]
+    fn apply_bodies_carry_secret_names_never_values() {
+        let mut app = app_with_kb_unasked();
+        app.on_daemon_host("local", &["addon:vocdoni".to_owned()]);
+        let msgs: Vec<Msg> = app
+            .take_effects()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Request { msg, .. } => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(msgs.len(), 1);
+        let frame = serde_json::to_string(&crate::proto::Envelope::request(1, msgs[0].clone()));
+        let frame = frame.unwrap();
+        assert!(frame.contains(r#""secrets":["KB_TOKEN"]"#), "{frame}");
+        assert!(!frame.contains("s3cret"), "a secret value on the wire");
+    }
+
     /// An app with `local` connected and profile `work` serving `kb`, set
     /// up, whose manifest is here and which `local` answered with `answer`
     /// (`None`: not yet).
