@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
+use crate::proto::merge_env_pairs;
 use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
-use crate::proxy::env::merge;
 use crate::proxy::plugins::{Plugin, PluginList};
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};
@@ -218,7 +218,7 @@ pub fn compose(parts: &[PluginPart]) -> Composed {
         .iter()
         .flat_map(|p| p.secrets.iter().cloned())
         .collect();
-    c.env = merge(&manifest_env, merge(&secrets, Vec::new()));
+    c.env = merge_env_pairs(&manifest_env, merge_env_pairs(&secrets, Vec::new()));
     c.instructions = instructions.join("\n\n");
     c
 }
