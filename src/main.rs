@@ -188,28 +188,11 @@ fn main() -> std::process::ExitCode {
         return plain::run(&argv[2..], addons);
     }
 
-    // `claudio [--proxy <name>|--no-proxy] [--first-party]` — open the session
-    // manager with a proxy override and/or first-party mode for every new session.
-    if argv.len() == 1 {
-        return tui::run(addons, Default::default());
-    }
-    if matches!(argv[1].as_str(), "--proxy" | "--no-proxy" | "--first-party") {
-        return match addons::vocdoni::proxy::resolve::split_launch_flags(&argv[1..]) {
-            Ok(flags) if flags.rest.is_empty() => {
-                tui::run(addons, flags.choice.launch_select(flags.first_party))
-            }
-            Ok(_) => {
-                eprintln!(
-                    "claudio: --proxy, --no-proxy and --first-party open the session manager \
-                     and take no claude arguments; use `claudio --plain …` for one claude"
-                );
-                std::process::ExitCode::FAILURE
-            }
-            Err(msg) => {
-                eprintln!("claudio: {msg}");
-                std::process::ExitCode::FAILURE
-            }
-        };
+    // `claudio [<launch flags>]` (`--proxy NAME`, `--no-proxy`,
+    // `--first-party`: the addons') — the session manager, new sessions
+    // routed as the flags ask.
+    if argv.len() == 1 || addons.launch_flags().iter().any(|(_, d)| d.name == argv[1]) {
+        return manager_cmd(&argv[1..], addons);
     }
 
     let args = &argv[1..];
@@ -351,6 +334,31 @@ fn print_help_with_appendix(args: &[String]) -> std::process::ExitCode {
 }
 
 // ── `claudio sessions` ────────────────────────────────────────────────────────
+
+/// `claudio [<launch flags>]`: the session manager. The flags take no
+/// claude arguments after them.
+fn manager_cmd(args: &[String], addons: std::sync::Arc<addon::Addons>) -> std::process::ExitCode {
+    match app::launch::split_flags(&addons, args) {
+        Ok((select, [])) => tui::run(addons, select),
+        Ok(_) => {
+            let names: Vec<&str> = addons.launch_flags().iter().map(|(_, d)| d.name).collect();
+            let names = match names.split_last() {
+                Some((last, [])) => last.to_string(),
+                Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+                None => String::new(),
+            };
+            eprintln!(
+                "claudio: {names} open the session manager and take no claude arguments; \
+                 use `claudio --plain …` for one claude"
+            );
+            std::process::ExitCode::FAILURE
+        }
+        Err(msg) => {
+            eprintln!("claudio: {msg}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
 fn sessions_cmd() -> std::process::ExitCode {
     let rt = tokio::runtime::Builder::new_current_thread()

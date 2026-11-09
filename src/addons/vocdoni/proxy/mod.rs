@@ -11,5 +11,3 @@ pub mod plugins;
 pub mod profile;
 pub mod resolve;
 pub mod stats;
-
-pub use resolve::ProxyChoice;
