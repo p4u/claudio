@@ -115,7 +115,8 @@ async fn an_outdated_idle_daemon_is_replaced_and_its_sessions_come_back() {
         ..old.config.clone()
     };
     let start = || async move {
-        let listening = server::start(config)?.expect("the old daemon released the lock");
+        let addons = Arc::new(crate::addon::Addons::empty());
+        let listening = server::start(config, addons)?.expect("the old daemon released the lock");
         tokio::spawn(listening.serve());
         Ok(())
     };

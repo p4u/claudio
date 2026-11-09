@@ -1316,6 +1316,7 @@ mod tests {
             latex: false,
             build: None,
             path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -1516,6 +1517,7 @@ mod tests {
             latex: false,
             build: None,
             path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
         };
         for given in [ALLOW, "--dangerously-skip-permissions"] {
             let spec = SpawnSpec {
@@ -1555,6 +1557,7 @@ mod tests {
             latex: false,
             build: None,
             path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -1606,6 +1609,7 @@ mod tests {
             latex: false,
             build: None,
             path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
         };
         let agents = r#"{"reviewer":{"description":"d","prompt":"p"}}"#;
         let mcp = r#"{"mcpServers":{"kb":{"type":"http","url":"https://e.org"}}}"#;

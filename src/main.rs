@@ -44,7 +44,7 @@ use print::emit::Outcome;
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
-    let _addons = registry(); // no consumer yet; later P3 tasks hand it to each entry point
+    let addons = registry(); // later P3 tasks hand it to each entry point
 
     // Remote probe: `claudio __probe` prints one JSON line describing this
     // binary (version, proto, os, arch, sha256 of the exe). Must run before
@@ -155,7 +155,7 @@ fn main() -> std::process::ExitCode {
 
     // Session daemon: `claudio --daemon` owns the PTYs of the manager sessions.
     if argv.get(1).map(String::as_str) == Some("--daemon") {
-        return daemon::run();
+        return daemon::run(addons);
     }
 
     // `claudio upgrade [--check]` — self-upgrade from the public releases repo.

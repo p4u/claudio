@@ -246,6 +246,17 @@ pub enum Msg {
         #[serde(default)]
         disabled: Vec<String>,
     },
+    /// Run addon `addon`'s daemon op `op` (docs/daemon-protocol.md). Sent
+    /// only to a daemon whose `Welcome.features` lists `addon:<addon>`; an
+    /// older one answers `Error "unsupported op…"`. `op` is `name` on the
+    /// wire (`op` is this enum's tag). Answered by `AddonReply` or `Error`.
+    AddonOp {
+        addon: String,
+        #[serde(rename = "name")]
+        op: String,
+        #[serde(default)]
+        body: serde_json::Value,
+    },
 
     // ── daemon → client replies ──────────────────────────────────────────
     Sessions {
@@ -314,6 +325,10 @@ pub enum Msg {
     },
     /// Reply to `Manifest`.
     Applied(Applied),
+    /// The reply to `AddonOp`.
+    AddonReply {
+        body: serde_json::Value,
+    },
     Ok,
     Error {
         message: String,
@@ -369,6 +384,36 @@ pub struct Welcome {
     /// Old daemons omit it: they have none of them.
     #[serde(default)]
     pub features: Vec<String>,
+}
+
+/// The most an `AddonOp` or `AddonReply` body may take, JSON-encoded.
+pub const ADDON_BODY_MAX: usize = 512 * 1024;
+
+/// Whether `body` fits [`ADDON_BODY_MAX`] encoded (checked by both peers).
+pub fn addon_body_ok(body: &serde_json::Value) -> Result<(), String> {
+    if addon_body_len(body) > ADDON_BODY_MAX {
+        return Err("body over 512 KiB".into());
+    }
+    Ok(())
+}
+
+/// `body`'s JSON-encoded length, counted without building the text.
+pub fn addon_body_len(body: &serde_json::Value) -> usize {
+    struct Count(usize);
+    impl io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    match serde_json::to_writer(&mut count, body) {
+        Ok(()) => count.0,
+        Err(_) => usize::MAX,
+    }
 }
 
 /// The features a daemon of this build reports in [`Welcome::features`]:
@@ -1921,5 +1966,47 @@ mod tests {
             serde_json::from_str::<OldEvent>(&json),
             Ok(OldEvent::Unknown)
         ));
+    }
+
+    #[test]
+    fn addon_op_json_shape() {
+        use serde_json::json;
+        let msg = Msg::AddonOp {
+            addon: "echo".into(),
+            op: "sleep".into(),
+            body: json!({"secs": 2}),
+        };
+        let wire = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            wire,
+            json!({"op": "addon_op", "addon": "echo", "name": "sleep", "body": {"secs": 2}})
+        );
+        assert_eq!(serde_json::from_value::<Msg>(wire).unwrap(), msg);
+        // A missing body is null.
+        let bare: Msg =
+            serde_json::from_value(json!({"op": "addon_op", "addon": "a", "name": "x"})).unwrap();
+        assert_eq!(
+            bare,
+            Msg::AddonOp {
+                addon: "a".into(),
+                op: "x".into(),
+                body: serde_json::Value::Null
+            }
+        );
+        let reply = Msg::AddonReply { body: json!([1]) };
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            json!({"op": "addon_reply", "body": [1]})
+        );
+        // The cap counts the encoded body: a string's quotes too.
+        assert_eq!(addon_body_len(&json!({"a": 1})), 7);
+        let at_cap = json!("x".repeat(ADDON_BODY_MAX - 2));
+        assert_eq!(addon_body_len(&at_cap), ADDON_BODY_MAX);
+        assert_eq!(addon_body_ok(&at_cap), Ok(()));
+        let over = json!("x".repeat(ADDON_BODY_MAX - 1));
+        assert_eq!(addon_body_ok(&over), Err("body over 512 KiB".into()));
+        // A body at the cap still fits one frame.
+        let framed = Frame::Control(Envelope::request(1, Msg::AddonReply { body: at_cap }));
+        assert!(framed.encode().len() <= MAX_FRAME);
     }
 }

@@ -10,6 +10,7 @@ use tokio::net::UnixStream;
 use uuid::Uuid;
 
 use super::{server, Config, Daemon};
+use crate::addon::Addons;
 use crate::proto::{
     self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SessionState, SpawnSpec, PROTO,
 };
@@ -104,6 +105,7 @@ impl TestDaemon {
             latex: false,
             build: None,
             path: None,
+            addon_timeout: std::time::Duration::from_secs(150),
         }
     }
 
@@ -119,7 +121,11 @@ impl TestDaemon {
     }
 
     fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
-        let listening = server::start(config.clone())
+        Self::start_with_addons(dir, config, Addons::empty())
+    }
+
+    fn start_with_addons(dir: PathBuf, config: Config, addons: Addons) -> TestDaemon {
+        let listening = server::start(config.clone(), Arc::new(addons))
             .unwrap()
             .expect("lock is free");
         let daemon = listening.daemon();
@@ -406,7 +412,9 @@ async fn handshake_reports_host_and_rejects_wrong_proto() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_daemon_backs_off() {
     let d = TestDaemon::start().await;
-    assert!(server::start(d.config.clone()).unwrap().is_none());
+    assert!(server::start(d.config.clone(), Arc::new(Addons::empty()))
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -930,6 +938,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         latex: false,
         build: None,
         path: None,
+        addon_timeout: std::time::Duration::from_secs(150),
     };
     // Pre-populate a journal entry with a claude_session_id so the spawn
     // request carries --resume.
@@ -948,7 +957,9 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     });
     crate::paths::write_atomic(journal_path, journal_entry.to_string().as_bytes()).unwrap();
 
-    let listening = server::start(config).unwrap().expect("lock is free");
+    let listening = server::start(config, Arc::new(Addons::empty()))
+        .unwrap()
+        .expect("lock is free");
     tokio::spawn(listening.serve());
     let socket = dir.join("rt/d.sock");
     // Wait for daemon to start.
@@ -1046,9 +1057,12 @@ async fn immediate_exit_leaves_session_dormant() {
         latex: false,
         build: None,
         path: None,
+        addon_timeout: std::time::Duration::from_secs(150),
     };
 
-    let listening = server::start(config).unwrap().expect("lock is free");
+    let listening = server::start(config, Arc::new(Addons::empty()))
+        .unwrap()
+        .expect("lock is free");
     tokio::spawn(listening.serve());
     let socket = dir.join("rt/d.sock");
     within(async {
@@ -1389,6 +1403,7 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
         (proto::SessionKind::Shell, 1700000000)
     );
 }
+mod addon_ops;
 mod freshness;
 mod git;
 mod login_path;
@@ -2324,6 +2339,8 @@ struct PluginHost {
     cache: PathBuf,
     claude: PathBuf,
     ctl: PathBuf,
+    /// A daemon-side addon beside the plugins: counts `on_claude_installed`.
+    echo: Arc<crate::addon::test_support::TestAddon>,
 }
 
 impl PluginHost {
@@ -2358,13 +2375,16 @@ impl PluginHost {
             path: Some(path.into()),
             ..TestDaemon::config(&dir)
         };
-        let d = TestDaemon::start_with_config(dir, config);
+        let echo = Arc::new(crate::addon::test_support::TestAddon::new("echo").with_daemon());
+        let addons = Addons::new(vec![Arc::clone(&echo) as Arc<dyn crate::addon::Addon>]);
+        let d = TestDaemon::start_with_addons(dir, config, addons.unwrap());
         d.daemon.manifests.set_dirs(cache.clone(), claude.clone());
         PluginHost {
             d,
             cache,
             claude,
             ctl,
+            echo,
         }
     }
 
@@ -2822,6 +2842,7 @@ async fn installing_claude_forgets_the_plugin_failures() {
     assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
     assert_retrying(&a.skipped[1], "plugin:b@market", why, 15);
     assert!(h.log().is_empty(), "{:?}", h.log());
+    assert_eq!(h.echo.installs(), 0);
 
     match c.call(Msg::UpdateClaude { install: true }).await {
         Msg::ClaudeUpdated { version, ok, tail } => {
@@ -2832,6 +2853,8 @@ async fn installing_claude_forgets_the_plugin_failures() {
         other => panic!("expected ClaudeUpdated, got {other:?}"),
     }
     assert_eq!(h.log(), ["curl -fsSL https://claude.ai/install.sh"]);
+    // Every daemon-side addon hears it (claude_install_calls_on_claude_installed).
+    assert_eq!(h.echo.installs(), 1);
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.skipped[0].1, "installing");
     h.idle().await;

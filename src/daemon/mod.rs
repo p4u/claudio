@@ -17,6 +17,7 @@
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
 
+mod addon_ops;
 pub mod ctl;
 mod git;
 mod git_status;
@@ -88,6 +89,8 @@ pub struct Config {
     /// user's login-shell `PATH` merged with the inherited one
     /// ([`login_path`]). `None` keeps the daemon's own `PATH`.
     pub path: Option<OsString>,
+    /// How long one addon op may run ([`addon_ops::TIMEOUT`]).
+    pub addon_timeout: Duration,
 }
 
 impl Config {
@@ -114,6 +117,7 @@ impl Config {
                 .inspect_err(|e| tracing::warn!(error = %e, "cannot identify this binary"))
                 .ok(),
             path,
+            addon_timeout: addon_ops::TIMEOUT,
         })
     }
 
@@ -162,7 +166,7 @@ pub fn resolve_claude_path(name: &OsStr, path: Option<&OsStr>, home: &Path) -> P
 
 /// Run the daemon until it is killed. Exits 0 straight away if another daemon
 /// already holds the lock.
-pub fn run() -> std::process::ExitCode {
+pub fn run(addons: Arc<crate::addon::Addons>) -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -185,7 +189,7 @@ pub fn run() -> std::process::ExitCode {
         }
     };
     let (code, lock) = runtime.block_on(async move {
-        match server::start(config) {
+        match server::start(config, addons) {
             Ok(Some(listening)) => {
                 // Zips a pre-manifest build cached: nothing uses them now.
                 manifest::remove_stale_zips(&crate::paths::cache_dir().join("plugins"));
@@ -229,7 +233,7 @@ pub(crate) struct Daemon {
     host: tokio::sync::Mutex<Option<HostInfo>>,
     /// Held while `claude update` or one `claude plugin …` runs: one at a
     /// time, so `~/.claude` has one writer.
-    updating: tokio::sync::Mutex<()>,
+    updating: Arc<tokio::sync::Mutex<()>>,
     /// Which optional flags this claude knows (`--allow-dangerously-skip-
     /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
     /// `claude --help`). Probed on first use, and again after a claude
@@ -244,6 +248,9 @@ pub(crate) struct Daemon {
     /// `Manifest`: where manifests go, one download per name at a time,
     /// and what the plugin installs did.
     pub(crate) manifests: manifest::Manifests,
+    /// The addons this binary runs, and each daemon-side one's op slots.
+    addons: Arc<crate::addon::Addons>,
+    addon_slots: HashMap<&'static str, Arc<tokio::sync::Semaphore>>,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -258,7 +265,7 @@ struct Registry {
 }
 
 impl Daemon {
-    fn new(config: Config) -> Daemon {
+    fn new(config: Config, addons: Arc<crate::addon::Addons>) -> Daemon {
         let journal = Journal::load(&config.journal);
         tracing::info!(
             sessions = journal.entries().len(),
@@ -280,12 +287,14 @@ impl Daemon {
             journal_write: Mutex::new(()),
             events,
             host: tokio::sync::Mutex::new(None),
-            updating: tokio::sync::Mutex::new(()),
+            updating: Arc::default(),
             claude_flags: Mutex::new(None),
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
             search: server::SearchSlot::new(),
             manifests: manifest::Manifests::new(),
+            addon_slots: addon_ops::slots(&addons),
+            addons,
         }
     }
 
@@ -870,6 +879,7 @@ mod claude_path_tests {
             latex: false,
             build: None,
             path,
+            addon_timeout: std::time::Duration::from_secs(150),
         }
     }
 

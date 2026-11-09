@@ -27,13 +27,13 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use super::session::{ClientId, Cmd};
-use super::{git, host, manifest, update, Config, Daemon};
+use super::{addon_ops, git, host, manifest, update, Config, Daemon};
 use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
 use crate::proto::{
-    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome,
-    DAEMON_FEATURES, MAX_FRAME, PROTO,
+    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
+    PROTO,
 };
 
 /// Deadline for a connection's first frame.
@@ -67,7 +67,7 @@ pub struct Listening {
 /// Take the startup lock, bind the socket (mode 0600) and load the journal.
 /// `Ok(None)` means another daemon holds the lock. Must run inside a tokio
 /// runtime.
-pub fn start(config: Config) -> io::Result<Option<Listening>> {
+pub fn start(config: Config, addons: Arc<crate::addon::Addons>) -> io::Result<Option<Listening>> {
     for dir in [config.socket.parent(), config.lock.parent()]
         .into_iter()
         .flatten()
@@ -95,7 +95,7 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     let listener = bind(&socket_path)?;
     tracing::info!(socket = %config.socket.display(), "daemon listening");
 
-    let daemon = Arc::new(Daemon::new(config));
+    let daemon = Arc::new(Daemon::new(config, addons));
     // Warm the host probe (`claude --version`) so the first Welcome is quick,
     // and the `claude --help` flag check so the first spawn is.
     let warm = Arc::clone(&daemon);
@@ -281,7 +281,7 @@ async fn client_loop(
         host: client.daemon.host().await,
         build: build.map(|b| b.build.clone()),
         build_time: build.and_then(|b| b.mtime),
-        features: DAEMON_FEATURES.iter().map(|f| f.to_string()).collect(),
+        features: addon_ops::features(&client.daemon),
     };
     // Queued directly (no event flush): Welcome is always the first frame.
     let welcome = Envelope {
@@ -563,6 +563,11 @@ impl Client {
                 self.reply_later(req, async move {
                     manifest::handle(&daemon, name, url, sha256, secrets, disabled).await
                 });
+                return;
+            }
+            Msg::AddonOp { addon, op, body } => {
+                let daemon = Arc::clone(&self.daemon);
+                self.reply_later(req, addon_ops::run(daemon, addon, op, body));
                 return;
             }
             other => Msg::Error {
