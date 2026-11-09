@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use super::daemon::{Applied, OP_APPLY};
-use super::plugins::state::{compose, layer_env, PluginPart};
+use super::plugins::state::{layer_env, plugins_part, PluginPart};
 use super::profiles::{missing, Profiles};
 use super::proxy::env::session_env;
 use super::runner::{applied, Runner};
@@ -322,7 +322,7 @@ async fn plugin_share(
         }
         fill(&mut parts, &mut ready);
     }
-    let composed = compose(&parts);
+    let composed = plugins_part(&parts);
     notices.extend(composed.notices);
     let args = composed
         .args

@@ -1,7 +1,7 @@
 //! Proxy plugins on the client: each profile's list (from the proxy or its
 //! cache in `plugins.json`), each plugin's manifest (fetched here, kept in
 //! memory), what each connected host answered for it (`Applied`), and what
-//! a spawn gets from them ([`compose`]).
+//! a spawn gets from them ([`plugins_part`]).
 //!
 //! Pure, like `app.rs`: fetching a list or a manifest, writing the cache
 //! and asking a host for a manifest are `Effect`s that `tui/mod.rs`
@@ -120,7 +120,7 @@ pub struct PluginPart {
     pub secrets: Vec<(String, String)>,
 }
 
-/// The plugins' share of a spawn ([`compose`]).
+/// The plugins' share of a spawn ([`plugins_part`]).
 #[derive(Clone, Default, PartialEq)]
 pub struct Composed {
     /// `--agents <json>` then `--mcp-config <json>`, per plugin.
@@ -172,7 +172,7 @@ pub const REASK_EVERY: u64 = 30;
 /// secrets, a later layer replacing an earlier one's key and the first
 /// plugin winning within a layer. The instructions are joined by a blank
 /// line, cut at the last whole one that fits 8 KiB.
-pub fn compose(parts: &[PluginPart]) -> Composed {
+pub fn plugins_part(parts: &[PluginPart]) -> Composed {
     let mut c = Composed::default();
     let mut manifest_env: Vec<(String, String)> = Vec::new();
     let mut instructions: Vec<&str> = Vec::new();
@@ -284,13 +284,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compose_orders_flags_layers_env_and_joins_instructions() {
+    fn plugins_part_orders_flags_layers_env_and_joins_instructions() {
         let parts = [
             part("one", true, &[("ONE_TOKEN", "1"), ("KB_REGION", "secret")]),
             part("two", false, &[("TWO_TOKEN", "2"), ("ONE_TOKEN", "x")]),
             part("three", true, &[]),
         ];
-        let c = compose(&parts);
+        let c = plugins_part(&parts);
         assert_eq!(
             c.args,
             [
@@ -320,7 +320,7 @@ mod tests {
         let mut bare = part("bare", true, &[]);
         let a = bare.applied.as_mut().unwrap();
         (a.agents, a.mcp_config) = (None, None);
-        assert!(compose(&[bare]).args.is_empty());
+        assert!(plugins_part(&[bare]).args.is_empty());
     }
 
     #[test]
@@ -350,16 +350,16 @@ mod tests {
     #[test]
     fn debug_output_never_shows_env_or_secret_values() {
         let parts = [part("one", true, &[("ONE_TOKEN", "hunter2-secret")])];
-        let c = compose(&parts);
+        let c = plugins_part(&parts);
         let shown = format!("{parts:?} {c:?}");
         assert!(!shown.contains("hunter2-secret"), "{shown}");
         assert!(shown.contains("ONE_TOKEN"), "{shown}");
     }
 
     #[test]
-    fn compose_takes_eight_plugins_and_cuts_instructions_at_8_kib() {
+    fn plugins_part_takes_eight_plugins_and_cuts_instructions_at_8_kib() {
         let parts: Vec<PluginPart> = (0..10).map(|i| part(&format!("p{i}"), true, &[])).collect();
-        let c = compose(&parts);
+        let c = plugins_part(&parts);
         assert_eq!(c.args.len(), 8 * 4);
         assert_eq!(
             c.notices,
@@ -375,11 +375,11 @@ mod tests {
         };
         let fits = MAX_PLUGIN_INSTRUCTIONS - 5000 - 2;
         let parts = [big("a", 5000), big("b", fits), big("c", 10)];
-        let c = compose(&parts);
+        let c = plugins_part(&parts);
         assert_eq!(c.instructions.len(), MAX_PLUGIN_INSTRUCTIONS);
         assert_eq!(c.notices, ["plugin instructions over 8 KiB: c left out"]);
         let parts = [big("a", 5000), big("b", 4000), big("c", 10)];
-        let c = compose(&parts);
+        let c = plugins_part(&parts);
         assert_eq!(c.instructions.len(), 5000);
         assert_eq!(c.notices, ["plugin instructions over 8 KiB: b, c left out"]);
     }

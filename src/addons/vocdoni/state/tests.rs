@@ -9,7 +9,7 @@ use crate::addon::AddonError;
 use crate::addons::vocdoni::daemon::applied::apply_msg;
 use crate::addons::vocdoni::daemon::Applied;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
-use crate::addons::vocdoni::plugins::state::{applied, compose, ApplyState, PluginsFetch};
+use crate::addons::vocdoni::plugins::state::{applied, plugins_part, ApplyState, PluginsFetch};
 use crate::addons::vocdoni::proxy::plugins::{sample, Plugin};
 
 fn list(profile: &str, plugins: Vec<Plugin>) -> PluginList {
@@ -363,7 +363,7 @@ fn spawn_with(s: &State, profile: Option<&str>) -> Spawned {
     let (parts, pending) = profile
         .map(|p| s.plugin_parts("local", p, &[]))
         .unwrap_or_default();
-    let c = compose(&parts);
+    let c = plugins_part(&parts);
     let args = std::iter::once("-c".to_owned()).chain(c.args).collect();
     let waits = pending.into_iter().map(|(name, _)| name).collect();
     (args, c.env, c.instructions, waits)
@@ -456,7 +456,7 @@ fn a_reset_sends_the_current_plugin_env_and_instructions_and_no_args() {
     // The composer drops a respawn's args (app::launch); the share's env
     // and instructions are the plugins' now.
     let (parts, pending) = s.plugin_parts("local", "work", &[]);
-    let c = compose(&parts);
+    let c = plugins_part(&parts);
     assert_eq!(c.env.len(), 2);
     assert_eq!(c.instructions, "Use kb.");
     assert!(pending.is_empty());
