@@ -513,20 +513,21 @@ async fn a_slow_git_request_does_not_stall_terminal_data() {
     })
     .await;
 
-    // Release git: a writer lets the blocked open finish; then drop the FIFO
-    // so the commands that follow find nothing to wait for.
-    let release = fifo.clone();
-    within(tokio::task::spawn_blocking(move || {
-        drop(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&release)
-                .unwrap(),
-        );
-        std::fs::remove_file(&release).unwrap();
-    }))
-    .await
-    .unwrap();
+    // Release git: move the FIFO aside first, so a git that reaches the include
+    // late finds nothing there (closing the writer and removing the FIFO as
+    // two steps leaves a window where a git opens it after the writer is gone
+    // and waits for the 10 s deadline, which a loaded runner hits). Then hold
+    // it open read-write, which never blocks, for a moment to free the opens
+    // already stuck; they read an empty config once it closes.
+    let aside = d.dir.join("blocker-released");
+    std::fs::rename(&fifo, &aside).unwrap();
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&aside)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(writer);
     let reply = c
         .until(|f| match f {
             Frame::Control(Envelope { req: Some(r), msg }) if *r == git_req => Some(msg.clone()),

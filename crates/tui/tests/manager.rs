@@ -1062,6 +1062,12 @@ fn test_soak_connection_stays_alive() {
 // ── Additional status bar and tab tests ──────────────────────────────────────
 
 /// Status bar shows cpu sparkline and mem usage for a running local session.
+///
+/// Linux only: `crates/core/src/daemon/stats.rs` samples CPU and memory from
+/// /proc and returns zeros elsewhere (macOS has no sampler yet), so there is
+/// nothing for the status bar to show on other platforms. Drop the gate when
+/// stats.rs gains a macOS sampler.
+#[cfg(target_os = "linux")]
 #[test]
 fn test_status_bar_machine_stats() {
     let harness = ManagerHarness::new();
@@ -1725,12 +1731,7 @@ fn test_reader_shows_the_answers_with_formulas_as_source() {
     let mut tui = h.start_tui();
     wizard_pick_dir(&mut tui, &h.dirs[0]);
 
-    tui.send_keys(ALT_U);
-    tui.wait_for(
-        "answer 2/2 · Explain the quadratic formula",
-        Region::Pane,
-        DAEMON_WAIT,
-    );
+    open_reader_once_answers_exist(&mut tui, "answer 2/2 · Explain the quadratic formula");
     tui.wait_for(
         "The roots of <latex>ax^2 + bx + c = 0</latex> are",
         Region::Pane,
@@ -1797,6 +1798,34 @@ while IFS= read -r line; do printf 'GOT %s\n' "$line"; done
     .unwrap();
 }
 
+/// Open the reader (Alt+u) and wait for `header`. The reader asks the daemon
+/// for the transcript once, when it opens, and the fake claude writes it (and
+/// the SessionStart hook that tells the daemon its session id) a moment after
+/// the tab appears; on a slow runner Alt+u can land first and get the final
+/// "No answers yet". That answer is not wrong, only early, so close the reader
+/// and ask again until the answers are there, within three DAEMON_WAITs.
+fn open_reader_once_answers_exist(tui: &mut TuiProcess, header: &str) {
+    let deadline = Instant::now() + DAEMON_WAIT * 3;
+    loop {
+        tui.send_keys(ALT_U);
+        tui.wait_until(
+            |s| s.contains("answer ", Region::Pane) || s.contains("No answers yet", Region::Pane),
+            WAIT,
+        );
+        if tui.screen_text(Region::Pane).contains(header) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reader never showed {header:?}:\n{}",
+            tui.screen_text(Region::Pane)
+        );
+        tui.send_keys(ESC);
+        tui.wait_until(|s| !s.contains("No answers yet", Region::Pane), WAIT);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 fn user_record(text: &str, cwd: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
         "type": "user",
@@ -1830,8 +1859,7 @@ fn test_reader_shows_a_mermaid_diagram_as_its_source() {
     let mut tui = h.start_tui();
     wizard_pick_dir(&mut tui, &h.dirs[0]);
 
-    tui.send_keys(ALT_U);
-    tui.wait_for("answer 1/1 · Draw it", Region::Pane, DAEMON_WAIT);
+    open_reader_once_answers_exist(&mut tui, "answer 1/1 · Draw it");
     tui.wait_for("  flowchart LR", Region::Pane, WAIT);
     let pane = tui.screen_text(Region::Pane);
     assert!(pane.contains("    alpha --> beta"), "{pane}");
