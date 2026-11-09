@@ -61,10 +61,10 @@ fn src/addons/web/ws.rs::tab 103
 unwrap addons/web/build.rs 1
 
 # -- claudio-vocdoni (src/addons/vocdoni until P4.6)
-file src/addons/vocdoni/daemon/mod.rs 862
-file src/addons/vocdoni/plugins/manifest.rs 828
-fn src/addons/vocdoni/plugins/manifest.rs::check 130
-fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
-unwrap src/addons/vocdoni/cmd.rs 2
+file addons/vocdoni/src/daemon/mod.rs 862
+file addons/vocdoni/src/plugins/manifest.rs 828
+fn addons/vocdoni/src/plugins/manifest.rs::check 130
+fn addons/vocdoni/src/plugins/manifest.rs::check#2 99
+unwrap addons/vocdoni/src/cmd.rs 2
 
 # -- claudio (root)
