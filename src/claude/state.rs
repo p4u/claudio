@@ -120,7 +120,12 @@ impl Tracker {
                     })
                     .unwrap_or_default();
                 let detail = (!labels.is_empty()).then(|| labels.join(" \u{b7} "));
-                (SessionState::NeedsInput, "ask_user_question", message, detail)
+                (
+                    SessionState::NeedsInput,
+                    "ask_user_question",
+                    message,
+                    detail,
+                )
             }
             Some("ExitPlanMode") => (
                 SessionState::NeedsApproval,
@@ -142,7 +147,9 @@ impl Tracker {
             kind: kind.into(),
             message: one_line(message, MAX_MESSAGE),
             tool: tool.map(|t| one_line(t, MAX_TOOL)),
-            detail: detail.map(|d| one_line(&d, MAX_DETAIL)).filter(|d| !d.is_empty()),
+            detail: detail
+                .map(|d| one_line(&d, MAX_DETAIL))
+                .filter(|d| !d.is_empty()),
         };
         self.attention = Some(attention.clone());
         events.push(SessionEvent::Attention { attention });
@@ -261,7 +268,13 @@ fn one_line(text: &str, max: usize) -> String {
     let text = &text[..char_floor(text, max.saturating_mul(4))];
     let flat: String = text
         .chars()
-        .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let mut out = sanitize(&flat);
     out.truncate(char_floor(&out, max));
@@ -290,7 +303,6 @@ mod tests {
     }
 
     // ── permission → working → stop flow ─────────────────────────────────────
-
 
     // ── /clear changes the session id ────────────────────────────────────────
 
@@ -431,7 +443,10 @@ mod tests {
         assert_eq!(evs.len(), 2);
         assert_eq!(evs[0], state_event(SessionState::NeedsApproval));
         let a = attention(&evs).expect("an attention");
-        assert_eq!((a.seq, a.kind.as_str(), a.message.as_str()), (1, "permission_prompt", "Allow bash?"));
+        assert_eq!(
+            (a.seq, a.kind.as_str(), a.message.as_str()),
+            (1, "permission_prompt", "Allow bash?")
+        );
         let evs = t.apply("PreToolUse", &json!({"tool_name": "Bash"}));
         assert_eq!(evs, vec![state_event(SessionState::Working)]);
         assert_eq!(t.attention, None);
@@ -444,7 +459,10 @@ mod tests {
     fn worker_permission_prompt_needs_approval() {
         let mut t = Tracker::new();
         t.apply("UserPromptSubmit", &json!({}));
-        let evs = t.apply("Notification", &json!({"notification_type": "worker_permission_prompt"}));
+        let evs = t.apply(
+            "Notification",
+            &json!({"notification_type": "worker_permission_prompt"}),
+        );
         assert_eq!(evs[0], state_event(SessionState::NeedsApproval));
         assert_eq!(attention(&evs).unwrap().kind, "worker_permission_prompt");
     }
@@ -452,10 +470,16 @@ mod tests {
     #[test]
     fn elicitation_url_dialog_needs_approval() {
         let mut t = Tracker::new();
-        let evs = t.apply("Notification", &json!({"notification_type": "elicitation_url_dialog"}));
+        let evs = t.apply(
+            "Notification",
+            &json!({"notification_type": "elicitation_url_dialog"}),
+        );
         assert_eq!(evs[0], state_event(SessionState::NeedsApproval));
         let a = attention(&evs).unwrap();
-        assert_eq!((a.kind.as_str(), a.tool.as_deref()), ("elicitation_url_dialog", None));
+        assert_eq!(
+            (a.kind.as_str(), a.tool.as_deref()),
+            ("elicitation_url_dialog", None)
+        );
     }
 
     /// AC5: the tool call before the prompt names what is asked.
@@ -482,7 +506,9 @@ mod tests {
             evs,
             vec![
                 state_event(SessionState::NeedsApproval),
-                SessionEvent::Attention { attention: expected.clone() },
+                SessionEvent::Attention {
+                    attention: expected.clone()
+                },
             ]
         );
         assert_eq!(t.attention, Some(expected));
@@ -492,11 +518,17 @@ mod tests {
     #[test]
     fn idle_prompt_after_session_start_emits_an_attention_without_a_state() {
         let mut t = Tracker::new();
-        let evs = t.apply("SessionStart", &json!({"session_id": "c1", "source": "startup"}));
+        let evs = t.apply(
+            "SessionStart",
+            &json!({"session_id": "c1", "source": "startup"}),
+        );
         assert_eq!(evs.len(), 3, "{evs:?}");
         assert!(evs.contains(&state_event(SessionState::NeedsInput)));
         let start = attention(&evs).unwrap();
-        assert_eq!((start.seq, start.kind.as_str(), start.tool.as_deref()), (1, SESSION_START, None));
+        assert_eq!(
+            (start.seq, start.kind.as_str(), start.tool.as_deref()),
+            (1, SESSION_START, None)
+        );
         let evs = t.apply(
             "Notification",
             &json!({"notification_type": "idle_prompt", "message": "Claude is waiting for your input"}),
@@ -519,33 +551,84 @@ mod tests {
     #[test]
     fn permission_then_elicitation_emits_two_attentions_with_rising_seq() {
         let mut t = Tracker::new();
-        t.apply("PreToolUse", &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
-        let first = t.apply("Notification", &json!({"notification_type": "permission_prompt", "message": "a"}));
-        let second = t.apply("Notification", &json!({"notification_type": "elicitation_dialog", "message": "pick one"}));
+        t.apply(
+            "PreToolUse",
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        );
+        let first = t.apply(
+            "Notification",
+            &json!({"notification_type": "permission_prompt", "message": "a"}),
+        );
+        let second = t.apply(
+            "Notification",
+            &json!({"notification_type": "elicitation_dialog", "message": "pick one"}),
+        );
         assert_eq!(attention(&first).unwrap().seq, 1);
-        assert_eq!(second.len(), 1, "no State: the session still needs approval");
+        assert_eq!(
+            second.len(),
+            1,
+            "no State: the session still needs approval"
+        );
         let a = attention(&second).unwrap();
-        assert_eq!((a.seq, a.kind.as_str(), a.message.as_str()), (2, "elicitation_dialog", "pick one"));
+        assert_eq!(
+            (a.seq, a.kind.as_str(), a.message.as_str()),
+            (2, "elicitation_dialog", "pick one")
+        );
         assert_eq!(t.attention.as_ref().map(|a| a.seq), Some(2));
     }
 
     #[test]
     fn tool_summaries_pick_the_useful_field() {
         let cases = [
-            (json!({"tool_name": "Edit", "tool_input": {"file_path": "/w/src/a.rs", "old_string": "x"}}), "Edit", "/w/src/a.rs"),
-            (json!({"tool_name": "Write", "tool_input": {"file_path": "/w/b.md", "content": "y"}}), "Write", "/w/b.md"),
-            (json!({"tool_name": "Read", "tool_input": {"file_path": "/w/c"}}), "Read", "/w/c"),
-            (json!({"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "p"}}), "WebFetch", "https://example.org"),
-            (json!({"tool_name": "Grep", "tool_input": {"pattern": "fn main"}}), "Grep", "fn main"),
-            (json!({"tool_name": "Glob", "tool_input": {"pattern": "**/*.rs"}}), "Glob", "**/*.rs"),
-            (json!({"tool_name": "mcp__kb__search", "tool_input": {"q": "x"}}), "mcp__kb__search", r#"{"q":"x"}"#),
+            (
+                json!({"tool_name": "Edit", "tool_input": {"file_path": "/w/src/a.rs", "old_string": "x"}}),
+                "Edit",
+                "/w/src/a.rs",
+            ),
+            (
+                json!({"tool_name": "Write", "tool_input": {"file_path": "/w/b.md", "content": "y"}}),
+                "Write",
+                "/w/b.md",
+            ),
+            (
+                json!({"tool_name": "Read", "tool_input": {"file_path": "/w/c"}}),
+                "Read",
+                "/w/c",
+            ),
+            (
+                json!({"tool_name": "WebFetch", "tool_input": {"url": "https://example.org", "prompt": "p"}}),
+                "WebFetch",
+                "https://example.org",
+            ),
+            (
+                json!({"tool_name": "Grep", "tool_input": {"pattern": "fn main"}}),
+                "Grep",
+                "fn main",
+            ),
+            (
+                json!({"tool_name": "Glob", "tool_input": {"pattern": "**/*.rs"}}),
+                "Glob",
+                "**/*.rs",
+            ),
+            (
+                json!({"tool_name": "mcp__kb__search", "tool_input": {"q": "x"}}),
+                "mcp__kb__search",
+                r#"{"q":"x"}"#,
+            ),
         ];
         for (pre, tool, detail) in cases {
             let mut t = Tracker::new();
             t.apply("PreToolUse", &pre);
-            let evs = t.apply("Notification", &json!({"notification_type": "permission_prompt"}));
+            let evs = t.apply(
+                "Notification",
+                &json!({"notification_type": "permission_prompt"}),
+            );
             let a = attention(&evs).unwrap();
-            assert_eq!((a.tool.as_deref(), a.detail.as_deref()), (Some(tool), Some(detail)), "{pre}");
+            assert_eq!(
+                (a.tool.as_deref(), a.detail.as_deref()),
+                (Some(tool), Some(detail)),
+                "{pre}"
+            );
         }
     }
 
@@ -564,17 +647,30 @@ mod tests {
         let a = attention(&evs).unwrap();
         let detail = a.detail.as_deref().unwrap();
         for text in [a.message.as_str(), detail] {
-            assert!(!text.chars().any(|c| c.is_control() || c == '\u{202e}'), "{text:?}");
+            assert!(
+                !text.chars().any(|c| c.is_control() || c == '\u{202e}'),
+                "{text:?}"
+            );
         }
-        assert!(a.message.len() <= MAX_MESSAGE && a.message.starts_with("line1 line2é"), "{}", a.message);
-        assert!(detail.len() <= MAX_DETAIL && detail.starts_with("echo [31mred é"), "{detail}");
+        assert!(
+            a.message.len() <= MAX_MESSAGE && a.message.starts_with("line1 line2é"),
+            "{}",
+            a.message
+        );
+        assert!(
+            detail.len() <= MAX_DETAIL && detail.starts_with("echo [31mred é"),
+            "{detail}"
+        );
     }
 
     #[test]
     fn turn_events_clear_the_attention() {
         for event in ["PreToolUse", "UserPromptSubmit", "Stop", "StopFailure"] {
             let mut t = Tracker::new();
-            t.apply("Notification", &json!({"notification_type": "permission_prompt"}));
+            t.apply(
+                "Notification",
+                &json!({"notification_type": "permission_prompt"}),
+            );
             assert!(t.attention.is_some());
             t.apply(event, &json!({"tool_name": "Bash"}));
             assert_eq!(t.attention, None, "{event}");
@@ -585,7 +681,10 @@ mod tests {
     fn unknown_notifications_leave_the_attention_and_seq_alone() {
         let mut t = Tracker::new();
         t.apply("Notification", &json!({"notification_type": "idle_prompt"}));
-        let evs = t.apply("Notification", &json!({"notification_type": "push_notification", "message": "foo"}));
+        let evs = t.apply(
+            "Notification",
+            &json!({"notification_type": "push_notification", "message": "foo"}),
+        );
         assert!(evs.is_empty());
         assert_eq!(t.attention.as_ref().map(|a| a.seq), Some(1));
         let evs = t.apply("Notification", &json!({"notification_type": "idle_prompt"}));
@@ -620,12 +719,18 @@ mod tests {
     fn plan_approval_needs_approval() {
         let mut t = Tracker::new();
         t.apply("UserPromptSubmit", &json!({}));
-        let evs = t.apply("PreToolUse", &json!({"tool_name": "ExitPlanMode", "tool_input": {"plan": "do x"}}));
+        let evs = t.apply(
+            "PreToolUse",
+            &json!({"tool_name": "ExitPlanMode", "tool_input": {"plan": "do x"}}),
+        );
         assert_eq!(evs[0], state_event(SessionState::NeedsApproval));
         let a = attention(&evs).unwrap();
         assert_eq!(a.kind, "plan_approval");
         assert_eq!(a.message, "Claude asks to approve its plan");
-        assert_eq!((a.tool.as_deref(), a.detail.as_deref()), (Some("ExitPlanMode"), None));
+        assert_eq!(
+            (a.tool.as_deref(), a.detail.as_deref()),
+            (Some("ExitPlanMode"), None)
+        );
         let evs = t.apply("PostToolUse", &json!({"tool_name": "ExitPlanMode"}));
         assert_eq!(evs, vec![state_event(SessionState::Working)]);
         assert_eq!(t.attention, None);
@@ -634,28 +739,51 @@ mod tests {
     #[test]
     fn ask_user_question_falls_back_on_malformed_input() {
         let cases = [
-            (json!({"tool_name": "AskUserQuestion"}), "Claude asks a question", None),
-            (json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}), "Claude asks a question", None),
-            (json!({"tool_name": "AskUserQuestion", "tool_input": {"question": "flat?"}}), "flat?", None),
+            (
+                json!({"tool_name": "AskUserQuestion"}),
+                "Claude asks a question",
+                None,
+            ),
+            (
+                json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": []}}),
+                "Claude asks a question",
+                None,
+            ),
+            (
+                json!({"tool_name": "AskUserQuestion", "tool_input": {"question": "flat?"}}),
+                "flat?",
+                None,
+            ),
             (
                 json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": 5, "options": [{"label": 1}, "x", {"label": "ok"}]}]}}),
                 "Claude asks a question",
                 Some("ok"),
             ),
-            (json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": "bad"}}), "Claude asks a question", None),
+            (
+                json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": "bad"}}),
+                "Claude asks a question",
+                None,
+            ),
         ];
         for (pre, message, detail) in cases {
             let mut t = Tracker::new();
             let evs = t.apply("PreToolUse", &pre);
             let a = attention(&evs).unwrap_or_else(|| panic!("{pre}"));
-            assert_eq!((a.message.as_str(), a.detail.as_deref()), (message, detail), "{pre}");
+            assert_eq!(
+                (a.message.as_str(), a.detail.as_deref()),
+                (message, detail),
+                "{pre}"
+            );
         }
     }
 
     #[test]
     fn ordinary_pre_tool_use_is_unchanged() {
         let mut t = Tracker::new();
-        let evs = t.apply("PreToolUse", &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
+        let evs = t.apply(
+            "PreToolUse",
+            &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        );
         assert_eq!(evs, vec![state_event(SessionState::Working)]);
         assert_eq!(t.attention, None);
     }

@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, os::unix::fs::PermissionsExt, thread};
@@ -218,10 +218,10 @@ impl ScreenModel {
         const CHAR_W: f64 = 7.8;
         const LINE_H: f64 = 19.0;
         const TITLE_H: f64 = 44.0; // title-bar height (traffic lights)
-        const PAD_L: f64 = 8.0;    // left padding inside window
-        const PAD_R: f64 = 8.0;    // right padding inside window
-        const PAD_B: f64 = 8.0;    // bottom padding inside window
-        const SHADOW: f64 = 8.0;   // drop-shadow offset (right+down)
+        const PAD_L: f64 = 8.0; // left padding inside window
+        const PAD_R: f64 = 8.0; // right padding inside window
+        const PAD_B: f64 = 8.0; // bottom padding inside window
+        const SHADOW: f64 = 8.0; // drop-shadow offset (right+down)
 
         const DEFAULT_BG: &str = "#1e1e2e";
         const DEFAULT_FG: &str = "#cdd6f4";
@@ -278,7 +278,11 @@ impl ScreenModel {
                     if svg_color(b2, DEFAULT_FG, DEFAULT_BG, false, false) != bg_hex {
                         break;
                     }
-                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) {
+                        2
+                    } else {
+                        1
+                    };
                 }
 
                 if bg_hex != DEFAULT_BG {
@@ -294,7 +298,9 @@ impl ScreenModel {
 
             // ── Text runs ─────────────────────────────────────────────────
             let ty = TITLE_H + row as f64 * LINE_H + LINE_H * 0.78;
-            text_rows.push_str(&format!("<text y=\"{ty:.1}\" class=\"t\" xml:space=\"preserve\">"));
+            text_rows.push_str(&format!(
+                "<text y=\"{ty:.1}\" class=\"t\" xml:space=\"preserve\">"
+            ));
 
             col = 0;
             while col < cols {
@@ -311,8 +317,13 @@ impl ScreenModel {
                 if flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let fg_hex =
-                    svg_color(fg, DEFAULT_FG, DEFAULT_BG, flags.contains(Flags::BOLD), flags.contains(Flags::DIM));
+                let fg_hex = svg_color(
+                    fg,
+                    DEFAULT_FG,
+                    DEFAULT_BG,
+                    flags.contains(Flags::BOLD),
+                    flags.contains(Flags::DIM),
+                );
                 let bold = flags.contains(Flags::BOLD);
                 let italic = flags.contains(Flags::ITALIC);
 
@@ -343,15 +354,24 @@ impl ScreenModel {
                     {
                         break;
                     }
-                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                    run_end += if c2.flags.contains(Flags::WIDE_CHAR) {
+                        2
+                    } else {
+                        1
+                    };
                 }
 
                 // Collect text, escaping XML specials.
                 let mut run_text = String::new();
                 for c in run_start..run_end {
-                    if c >= cols { break; }
+                    if c >= cols {
+                        break;
+                    }
                     let ch = grid[line][Column(c)].c;
-                    if grid[line][Column(c)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    if grid[line][Column(c)]
+                        .flags
+                        .contains(Flags::WIDE_CHAR_SPACER)
+                    {
                         continue;
                     }
                     let ch = if ch == '\0' { ' ' } else { ch };
@@ -367,8 +387,12 @@ impl ScreenModel {
                 if !run_text.trim().is_empty() {
                     let x = PAD_L + run_start as f64 * CHAR_W;
                     let mut style = format!("fill:{fg_hex}");
-                    if bold { style.push_str(";font-weight:bold"); }
-                    if italic { style.push_str(";font-style:italic"); }
+                    if bold {
+                        style.push_str(";font-weight:bold");
+                    }
+                    if italic {
+                        style.push_str(";font-style:italic");
+                    }
                     text_rows.push_str(&format!(
                         "<tspan x=\"{x:.1}\" style=\"{style}\">{run_text}</tspan>"
                     ));
@@ -890,7 +914,10 @@ exec cat
 
     /// The sessions in the daemon's journal.
     pub fn journal_sessions(&self) -> Vec<serde_json::Value> {
-        let path = self.config_home.join("claudio").join("daemon-sessions-v1.json");
+        let path = self
+            .config_home
+            .join("claudio")
+            .join("daemon-sessions-v1.json");
         fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -924,7 +951,7 @@ impl Drop for ManagerHarness {
 ///
 /// Waits for the wizard to close (the fake claude banner to appear in the pane)
 /// before returning, so callers don't need a sleep.
-pub fn wizard_pick_dir(tui: &mut TuiProcess, dir: &PathBuf) {
+pub fn wizard_pick_dir(tui: &mut TuiProcess, dir: &Path) {
     let path = dir.to_str().expect("non-UTF-8 dir");
     // Host step: confirm "local" (pre-selected).
     tui.send_keys(ENTER);
@@ -978,7 +1005,12 @@ pub fn run_git(dir: &std::path::Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .current_dir(dir)
         .args(["-c", "user.name=Tess", "-c", "user.email=tess@example.org"])
-        .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
@@ -1044,36 +1076,40 @@ fn svg_color(
     use ansi::NamedColor as NC;
     let (r, g, b) = match color {
         ansi::Color::Named(nc) => match nc {
-            NC::Black        => (0x45, 0x47, 0x5a),
-            NC::Red          => (0xf3, 0x8b, 0xa8),
-            NC::Green        => (0xa6, 0xe3, 0xa1),
-            NC::Yellow       => (0xf9, 0xe2, 0xaf),
-            NC::Blue         => (0x89, 0xb4, 0xfa),
-            NC::Magenta      => (0xcb, 0xa6, 0xf7),
-            NC::Cyan         => (0x89, 0xdc, 0xeb),
-            NC::White        => (0xba, 0xc2, 0xde),
-            NC::BrightBlack  => (0x58, 0x5b, 0x70),
-            NC::BrightRed    => (0xf3, 0x8b, 0xa8),
-            NC::BrightGreen  => (0xa6, 0xe3, 0xa1),
+            NC::Black => (0x45, 0x47, 0x5a),
+            NC::Red => (0xf3, 0x8b, 0xa8),
+            NC::Green => (0xa6, 0xe3, 0xa1),
+            NC::Yellow => (0xf9, 0xe2, 0xaf),
+            NC::Blue => (0x89, 0xb4, 0xfa),
+            NC::Magenta => (0xcb, 0xa6, 0xf7),
+            NC::Cyan => (0x89, 0xdc, 0xeb),
+            NC::White => (0xba, 0xc2, 0xde),
+            NC::BrightBlack => (0x58, 0x5b, 0x70),
+            NC::BrightRed => (0xf3, 0x8b, 0xa8),
+            NC::BrightGreen => (0xa6, 0xe3, 0xa1),
             NC::BrightYellow => (0xf9, 0xe2, 0xaf),
-            NC::BrightBlue   => (0x89, 0xb4, 0xfa),
+            NC::BrightBlue => (0x89, 0xb4, 0xfa),
             NC::BrightMagenta => (0xcb, 0xa6, 0xf7),
-            NC::BrightCyan   => (0x94, 0xe2, 0xd5),
-            NC::BrightWhite  => (0xa6, 0xad, 0xc8),
+            NC::BrightCyan => (0x94, 0xe2, 0xd5),
+            NC::BrightWhite => (0xa6, 0xad, 0xc8),
             NC::Foreground | NC::BrightForeground => {
-                if bold { (0xff, 0xff, 0xff) } else { hex_to_rgb(default_fg) }
+                if bold {
+                    (0xff, 0xff, 0xff)
+                } else {
+                    hex_to_rgb(default_fg)
+                }
             }
-            NC::Background   => hex_to_rgb(default_bg),
-            NC::Cursor       => hex_to_rgb(default_fg),
+            NC::Background => hex_to_rgb(default_bg),
+            NC::Cursor => hex_to_rgb(default_fg),
             // Dim variants — map to normal colour (dim applied below).
-            NC::DimBlack     => (0x45, 0x47, 0x5a),
-            NC::DimRed       => (0xf3, 0x8b, 0xa8),
-            NC::DimGreen     => (0xa6, 0xe3, 0xa1),
-            NC::DimYellow    => (0xf9, 0xe2, 0xaf),
-            NC::DimBlue      => (0x89, 0xb4, 0xfa),
-            NC::DimMagenta   => (0xcb, 0xa6, 0xf7),
-            NC::DimCyan      => (0x89, 0xdc, 0xeb),
-            NC::DimWhite     => (0xba, 0xc2, 0xde),
+            NC::DimBlack => (0x45, 0x47, 0x5a),
+            NC::DimRed => (0xf3, 0x8b, 0xa8),
+            NC::DimGreen => (0xa6, 0xe3, 0xa1),
+            NC::DimYellow => (0xf9, 0xe2, 0xaf),
+            NC::DimBlue => (0x89, 0xb4, 0xfa),
+            NC::DimMagenta => (0xcb, 0xa6, 0xf7),
+            NC::DimCyan => (0x89, 0xdc, 0xeb),
+            NC::DimWhite => (0xba, 0xc2, 0xde),
             NC::DimForeground => hex_to_rgb(default_fg),
         },
         ansi::Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
@@ -1093,16 +1129,16 @@ fn svg_color(
 /// Convert an xterm-256 colour index to `(r, g, b)`.
 fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
     match idx {
-        0  => (0x45, 0x47, 0x5a),
-        1  => (0xf3, 0x8b, 0xa8),
-        2  => (0xa6, 0xe3, 0xa1),
-        3  => (0xf9, 0xe2, 0xaf),
-        4  => (0x89, 0xb4, 0xfa),
-        5  => (0xcb, 0xa6, 0xf7),
-        6  => (0x89, 0xdc, 0xeb),
-        7  => (0xba, 0xc2, 0xde),
-        8  => (0x58, 0x5b, 0x70),
-        9  => (0xf3, 0x8b, 0xa8),
+        0 => (0x45, 0x47, 0x5a),
+        1 => (0xf3, 0x8b, 0xa8),
+        2 => (0xa6, 0xe3, 0xa1),
+        3 => (0xf9, 0xe2, 0xaf),
+        4 => (0x89, 0xb4, 0xfa),
+        5 => (0xcb, 0xa6, 0xf7),
+        6 => (0x89, 0xdc, 0xeb),
+        7 => (0xba, 0xc2, 0xde),
+        8 => (0x58, 0x5b, 0x70),
+        9 => (0xf3, 0x8b, 0xa8),
         10 => (0xa6, 0xe3, 0xa1),
         11 => (0xf9, 0xe2, 0xaf),
         12 => (0x89, 0xb4, 0xfa),
@@ -1114,7 +1150,13 @@ fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
             let ri = n / 36;
             let gi = (n % 36) / 6;
             let bi = n % 6;
-            let c = |x: u8| -> u8 { if x == 0 { 0 } else { 55u8.saturating_add(x.saturating_mul(40)) } };
+            let c = |x: u8| -> u8 {
+                if x == 0 {
+                    0
+                } else {
+                    55u8.saturating_add(x.saturating_mul(40))
+                }
+            };
             (c(ri), c(gi), c(bi))
         }
         n => {

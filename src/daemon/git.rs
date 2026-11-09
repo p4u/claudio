@@ -1110,7 +1110,7 @@ mod tests {
     fn numstat_drops_a_record_cut_by_the_size_cap() {
         let files = parse_numstat(b"1\t1\ta\0\0\t0\t");
         assert_eq!(files.len(), 1);
-        let files = parse_numstat(b"1\t1\ta\02\t2\t\0old\0");
+        let files = parse_numstat(b"1\t1\ta\x002\t2\t\0old\0");
         assert_eq!(files.len(), 1, "rename missing its new name is dropped");
     }
 
@@ -1182,7 +1182,9 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.rs\0\
         let parsed = parse_worktree(data);
         assert_eq!(parsed.branch.as_deref(), Some("main"));
         assert!(!parsed.truncated);
-        let got: Vec<(&[u8], Option<&[u8]>, u8, u8)> = parsed
+        // Path, original path, index and worktree status.
+        type NumstatRow<'a> = (&'a [u8], Option<&'a [u8]>, u8, u8);
+        let got: Vec<NumstatRow> = parsed
             .entries
             .iter()
             .map(|e| {

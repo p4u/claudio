@@ -27,9 +27,9 @@ mod manifest;
 mod server;
 mod session;
 mod stats;
-mod update;
 #[cfg(test)]
 mod tests;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -157,126 +157,6 @@ pub fn resolve_claude_path(name: &OsStr, path: Option<&OsStr>, home: &Path) -> P
         .map(|dir| dir.join(name))
         .find(|p| p.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
-}
-
-#[cfg(test)]
-mod claude_path_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("claudio-resolve-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// An executable `claude` in `dir`.
-    fn install(dir: &Path) -> PathBuf {
-        std::fs::create_dir_all(dir).unwrap();
-        let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
-    }
-
-    fn join(dirs: &[&Path]) -> OsString {
-        std::env::join_paths(dirs).unwrap()
-    }
-
-    const ABSENT: &str = "claude-not-installed-anywhere";
-
-    #[test]
-    fn the_login_path_comes_first() {
-        let root = scratch();
-        let home = root.join("home");
-        let mine = install(&home.join(".npm-packages/bin"));
-        let stale = install(&root.join("usr/local/bin"));
-        let (mine_dir, stale_dir) = (mine.parent().unwrap(), stale.parent().unwrap());
-        let path = join(&[mine_dir, stale_dir]);
-        assert_eq!(
-            resolve_claude_path(OsStr::new("claude"), Some(&path), &home),
-            mine
-        );
-        // Whichever comes first in the PATH wins.
-        let path = join(&[stale_dir, mine_dir]);
-        assert_eq!(
-            resolve_claude_path(OsStr::new("claude"), Some(&path), &home),
-            stale
-        );
-    }
-
-    #[test]
-    fn well_known_locations_when_the_path_lacks_claude() {
-        let root = scratch();
-        let home = root.join("home");
-        let empty = root.join("empty");
-        std::fs::create_dir_all(&empty).unwrap();
-        let npm = install(&home.join(".npm-packages/bin"));
-        assert_eq!(
-            resolve_claude_path(OsStr::new("claude"), Some(&join(&[&empty])), &home),
-            npm
-        );
-        // The native installer's location ranks above npm's.
-        let native = install(&home.join(".local/bin"));
-        assert_eq!(
-            resolve_claude_path(OsStr::new("claude"), None, &home),
-            native
-        );
-    }
-
-    #[test]
-    fn missing_everywhere_is_the_bare_name() {
-        let root = scratch();
-        let got = resolve_claude_path(OsStr::new(ABSENT), Some(&join(&[&root])), &root);
-        assert_eq!(got, PathBuf::from(ABSENT));
-    }
-
-    #[test]
-    fn relative_path_entries_are_skipped() {
-        let root = scratch();
-        let path = OsString::from(".:bin");
-        let got = resolve_claude_path(OsStr::new(ABSENT), Some(&path), &root);
-        assert_eq!(got, PathBuf::from(ABSENT));
-    }
-
-    fn config(claude: PathBuf, path: Option<OsString>) -> Config {
-        Config {
-            socket: "/run/d.sock".into(),
-            lock: "/run/d.lock".into(),
-            journal: "/j.json".into(),
-            claude,
-            claudio: "/bin/claudio".into(),
-            skip_permissions: false,
-            latex: false,
-            build: None,
-            path,
-        }
-    }
-
-    #[test]
-    fn claudio_claude_path_wins() {
-        let root = scratch();
-        let mine = install(&root.join("login"));
-        let pinned = install(&root.join("pinned"));
-        let path = Some(join(&[mine.parent().unwrap()]));
-        let setting = claude_setting(Some(pinned.clone().into()));
-        assert_eq!(config(setting, path.clone()).claude_bin(), pinned);
-        // Unset or empty: the bare name, looked up in the login PATH.
-        assert_eq!(claude_setting(None), PathBuf::from("claude"));
-        assert_eq!(claude_setting(Some("".into())), PathBuf::from("claude"));
-        assert_eq!(config(claude_setting(None), path).claude_bin(), mine);
-    }
-
-    #[test]
-    fn claude_bin_sees_a_claude_installed_later() {
-        let root = scratch();
-        let dir = root.join("login");
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg = config(PathBuf::from(ABSENT), Some(join(&[&dir])));
-        assert_eq!(cfg.claude_bin(), PathBuf::from(ABSENT));
-        std::fs::write(dir.join(ABSENT), "").unwrap();
-        assert_eq!(cfg.claude_bin(), dir.join(ABSENT));
-    }
 }
 
 /// Run the daemon until it is killed. Exits 0 straight away if another daemon
@@ -514,7 +394,8 @@ impl Daemon {
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
         if let Some(ext) = &spec.extensions {
-            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+            ext.validate()
+                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
         }
         // Phase 1: idempotency check and reservation (fast, no I/O).
         let kind = {
@@ -554,7 +435,11 @@ impl Daemon {
                 entry.and_then(|e| e.extensions.clone())
             };
             let requested = spec.extensions.take();
-            spec.extensions = Some(effective_extensions(requested, journaled, self.config.latex));
+            spec.extensions = Some(effective_extensions(
+                requested,
+                journaled,
+                self.config.latex,
+            ));
         }
 
         // Phase 2: PTY open + process spawn + thread creation (blocking,
@@ -664,7 +549,7 @@ impl Daemon {
         let (live, saved_entry, was_known, journal_snapshot) = {
             let mut reg = self.registry();
             // If the spawn is in-flight, defer the kill.
-            if reg.in_flight.contains(&id) && reg.live.get(&id).is_none() {
+            if reg.in_flight.contains(&id) && !reg.live.contains_key(&id) {
                 tracing::info!(%id, "kill deferred: spawn still in-flight");
                 reg.to_kill.insert(id);
                 // Announce Removed optimistically; the deferred kill will
@@ -746,7 +631,9 @@ impl Daemon {
 
     /// Every journaled session; live ones report their pid, state and title.
     async fn sessions(&self) -> Vec<SessionInfo> {
-        let rows: Vec<(Entry, Option<(tokio::sync::mpsc::Sender<Cmd>, Option<u32>)>)> = {
+        // A journal entry and, when live, its command channel and pid.
+        type Row = (Entry, Option<(tokio::sync::mpsc::Sender<Cmd>, Option<u32>)>);
+        let rows: Vec<Row> = {
             let reg = self.registry();
             reg.journal
                 .entries()
@@ -886,7 +773,8 @@ impl Daemon {
     /// `to_kill` and wins, so a killed session is never brought back.
     async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
         if let Some(ext) = &req.extensions {
-            ext.validate().map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
+            ext.validate()
+                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
         }
         let id = req.id;
         let (entry, old) = {
@@ -955,7 +843,12 @@ impl Daemon {
             (Ok(_), None) => {}
             (Err(_), _) => {
                 // The old process is gone: the tab is dormant until the next try.
-                self.broadcast(id, SessionEvent::State { state: SessionState::Exited });
+                self.broadcast(
+                    id,
+                    SessionEvent::State {
+                        state: SessionState::Exited,
+                    },
+                );
                 self.broadcast(id, SessionEvent::Exited { code: None });
             }
         }
@@ -1039,14 +932,16 @@ fn effective_extensions(
     journaled: Option<SessionExtensions>,
     latex: bool,
 ) -> SessionExtensions {
-    let mut ext = requested.or(journaled).unwrap_or_else(|| SessionExtensions {
-        lenses: vec![LensSpec {
-            name: "latex".to_owned(),
-            kind: LensKind::Tag,
-            instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
-        }],
-        ..Default::default()
-    });
+    let mut ext = requested
+        .or(journaled)
+        .unwrap_or_else(|| SessionExtensions {
+            lenses: vec![LensSpec {
+                name: "latex".to_owned(),
+                kind: LensKind::Tag,
+                instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
+            }],
+            ..Default::default()
+        });
     ext.lenses
         .retain(|l| l.kind != LensKind::Unknown && (latex || l.name != "latex"));
     ext
@@ -1093,5 +988,125 @@ fn dormant_info(entry: &Entry) -> SessionInfo {
         kind: entry.kind,
         ephemeral: entry.ephemeral,
         attention: None,
+    }
+}
+
+#[cfg(test)]
+mod claude_path_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("claudio-resolve-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An executable `claude` in `dir`.
+    fn install(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    fn join(dirs: &[&Path]) -> OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    const ABSENT: &str = "claude-not-installed-anywhere";
+
+    #[test]
+    fn the_login_path_comes_first() {
+        let root = scratch();
+        let home = root.join("home");
+        let mine = install(&home.join(".npm-packages/bin"));
+        let stale = install(&root.join("usr/local/bin"));
+        let (mine_dir, stale_dir) = (mine.parent().unwrap(), stale.parent().unwrap());
+        let path = join(&[mine_dir, stale_dir]);
+        assert_eq!(
+            resolve_claude_path(OsStr::new("claude"), Some(&path), &home),
+            mine
+        );
+        // Whichever comes first in the PATH wins.
+        let path = join(&[stale_dir, mine_dir]);
+        assert_eq!(
+            resolve_claude_path(OsStr::new("claude"), Some(&path), &home),
+            stale
+        );
+    }
+
+    #[test]
+    fn well_known_locations_when_the_path_lacks_claude() {
+        let root = scratch();
+        let home = root.join("home");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let npm = install(&home.join(".npm-packages/bin"));
+        assert_eq!(
+            resolve_claude_path(OsStr::new("claude"), Some(&join(&[&empty])), &home),
+            npm
+        );
+        // The native installer's location ranks above npm's.
+        let native = install(&home.join(".local/bin"));
+        assert_eq!(
+            resolve_claude_path(OsStr::new("claude"), None, &home),
+            native
+        );
+    }
+
+    #[test]
+    fn missing_everywhere_is_the_bare_name() {
+        let root = scratch();
+        let got = resolve_claude_path(OsStr::new(ABSENT), Some(&join(&[&root])), &root);
+        assert_eq!(got, PathBuf::from(ABSENT));
+    }
+
+    #[test]
+    fn relative_path_entries_are_skipped() {
+        let root = scratch();
+        let path = OsString::from(".:bin");
+        let got = resolve_claude_path(OsStr::new(ABSENT), Some(&path), &root);
+        assert_eq!(got, PathBuf::from(ABSENT));
+    }
+
+    fn config(claude: PathBuf, path: Option<OsString>) -> Config {
+        Config {
+            socket: "/run/d.sock".into(),
+            lock: "/run/d.lock".into(),
+            journal: "/j.json".into(),
+            claude,
+            claudio: "/bin/claudio".into(),
+            skip_permissions: false,
+            latex: false,
+            build: None,
+            path,
+        }
+    }
+
+    #[test]
+    fn claudio_claude_path_wins() {
+        let root = scratch();
+        let mine = install(&root.join("login"));
+        let pinned = install(&root.join("pinned"));
+        let path = Some(join(&[mine.parent().unwrap()]));
+        let setting = claude_setting(Some(pinned.clone().into()));
+        assert_eq!(config(setting, path.clone()).claude_bin(), pinned);
+        // Unset or empty: the bare name, looked up in the login PATH.
+        assert_eq!(claude_setting(None), PathBuf::from("claude"));
+        assert_eq!(claude_setting(Some("".into())), PathBuf::from("claude"));
+        assert_eq!(config(claude_setting(None), path).claude_bin(), mine);
+    }
+
+    #[test]
+    fn claude_bin_sees_a_claude_installed_later() {
+        let root = scratch();
+        let dir = root.join("login");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = config(PathBuf::from(ABSENT), Some(join(&[&dir])));
+        assert_eq!(cfg.claude_bin(), PathBuf::from(ABSENT));
+        std::fs::write(dir.join(ABSENT), "").unwrap();
+        assert_eq!(cfg.claude_bin(), dir.join(ABSENT));
     }
 }

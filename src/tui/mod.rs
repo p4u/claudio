@@ -306,7 +306,11 @@ async fn main(launch: Launch) -> ExitCode {
     }
     let local_features = local_client.welcome().features.clone();
     let mut app = App::new(AppConfig {
-        mode: if plain.is_some() { Mode::Plain } else { Mode::Manager },
+        mode: if plain.is_some() {
+            Mode::Plain
+        } else {
+            Mode::Manager
+        },
         size,
         home: local_client.welcome().host.home.clone(),
         keymap,
@@ -411,7 +415,12 @@ async fn retry_outdated(
 
 /// The `claude --version` its daemon reported at connect, if claude is there.
 fn client_claude(client: &Client) -> Option<String> {
-    client.welcome().host.claude.as_ref().map(|c| c.version.clone())
+    client
+        .welcome()
+        .host
+        .claude
+        .as_ref()
+        .map(|c| c.version.clone())
 }
 
 async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
@@ -561,7 +570,10 @@ enum HostEvent {
         host: String,
         id: crate::proto::SessionId,
         seq: u64,
-        items: Vec<(crate::proto::LensItem, Option<extensions::protocol::Rendering>)>,
+        items: Vec<(
+            crate::proto::LensItem,
+            Option<extensions::protocol::Rendering>,
+        )>,
     },
     /// The extension host rendered the external items of reader view `gen`.
     ReaderExternalRendered {
@@ -636,7 +648,11 @@ enum RenderJob {
 /// What the `latex-render` thread made of a job.
 enum Rendered {
     Latex(LatexJob, Vec<latex::Formula>),
-    Answers(AnswersJob, Vec<reader::RenderedAnswer>, Vec<reader::External>),
+    Answers(
+        AnswersJob,
+        Vec<reader::RenderedAnswer>,
+        Vec<reader::External>,
+    ),
 }
 
 /// Start the `latex-render` thread: it renders each job (its formulas from
@@ -1035,7 +1051,11 @@ async fn event_loop(
     let notices = ev_tx.clone();
     tokio::spawn(async move {
         while let Some(text) = notice_rx.recv().await {
-            if notices.send(HostEvent::ExtensionNotice(text)).await.is_err() {
+            if notices
+                .send(HostEvent::ExtensionNotice(text))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -1344,10 +1364,20 @@ fn run_effect(
         }
         Effect::LoadSshHosts => app.on_ssh_hosts(crate::remote::hosts::candidates()),
         Effect::CopyToClipboard(text) => copy_to_clipboard(&text),
-        Effect::RenderLatex { host, id, seq, srcs } => {
+        Effect::RenderLatex {
+            host,
+            id,
+            seq,
+            srcs,
+        } => {
             // Without a worker (it could not start) formulas stay raw.
             if let Some(jobs) = latex_jobs {
-                let _ = jobs.send(RenderJob::Latex(LatexJob { host, id, seq, srcs }));
+                let _ = jobs.send(RenderJob::Latex(LatexJob {
+                    host,
+                    id,
+                    seq,
+                    srcs,
+                }));
             }
         }
         Effect::RenderExternal {
@@ -1540,10 +1570,7 @@ fn run_effect(
             tokio::spawn(async move {
                 let result = switch_subscription(&profile_name, &claude_session_id).await;
                 let _ = tx
-                    .send(HostEvent::SubscriptionSwitch {
-                        session,
-                        result,
-                    })
+                    .send(HostEvent::SubscriptionSwitch { session, result })
                     .await;
             });
         }
@@ -1603,29 +1630,25 @@ fn run_effect(
                 );
                 match env {
                     Err(e) => {
-                        let _ = tx.send((
-                            to,
-                            Err(io::Error::other(format!("proxy env error: {e}"))),
-                        ));
+                        let _ =
+                            tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
                     }
-                    Ok(env) => {
-                        match client {
-                            Some(c) => {
-                                let msg = plugins::with_plugins(msg, composed).merge_env(env);
-                                let reply = c.request(msg);
-                                let _ = tx.send((to, reply.await));
-                            }
-                            None => {
-                                let _ = tx.send((
-                                    to,
-                                    Err(io::Error::new(
-                                        io::ErrorKind::NotConnected,
-                                        format!("{host}: not connected"),
-                                    )),
-                                ));
-                            }
+                    Ok(env) => match client {
+                        Some(c) => {
+                            let msg = plugins::with_plugins(msg, composed).merge_env(env);
+                            let reply = c.request(msg);
+                            let _ = tx.send((to, reply.await));
                         }
-                    }
+                        None => {
+                            let _ = tx.send((
+                                to,
+                                Err(io::Error::new(
+                                    io::ErrorKind::NotConnected,
+                                    format!("{host}: not connected"),
+                                )),
+                            ));
+                        }
+                    },
                 }
             });
         }
@@ -1997,10 +2020,17 @@ mod tests {
         let started = Instant::now();
         let (formula, cache) = render_formula("E = mc^2", &running);
         assert!(started.elapsed() < RENDER_BUDGET, "not even started");
-        assert_eq!((formula.inline, cache), (None, false), "busy: raw, not cached");
+        assert_eq!(
+            (formula.inline, cache),
+            (None, false),
+            "busy: raw, not cached"
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         while running.load(Ordering::SeqCst) > 0 {
-            assert!(Instant::now() < deadline, "the abandoned renders never ended");
+            assert!(
+                Instant::now() < deadline,
+                "the abandoned renders never ended"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         let (formula, cache) = render_formula("E = mc^2", &running);
@@ -2027,7 +2057,8 @@ mod tests {
         };
         let deep = "\\frac ".repeat(300);
         jobs.send(job(1, vec!["E = mc^2".into()])).unwrap();
-        jobs.send(job(2, vec!["E = mc^2".into(), deep.clone()])).unwrap();
+        jobs.send(job(2, vec!["E = mc^2".into(), deep.clone()]))
+            .unwrap();
         let wait = Duration::from_secs(10);
         let (seq, first) = rx.recv_timeout(wait).unwrap();
         assert_eq!(seq, 1);
@@ -2139,7 +2170,11 @@ mod tests {
         cache.formula("0", &running); // used again: "1" is now the oldest
         cache.formula("new", &running);
         assert_eq!(cache.entries.len(), CACHE_SIZE);
-        let has = |src: &str| cache.entries.contains_key(&("latex".to_owned(), src.to_owned()));
+        let has = |src: &str| {
+            cache
+                .entries
+                .contains_key(&("latex".to_owned(), src.to_owned()))
+        };
         assert!(has("0") && has("new"));
         assert!(!has("1"));
     }
@@ -2217,7 +2252,10 @@ mod tests {
         let rows = drawn.0.block.expect("drawn").rows;
         assert!(rows.iter().any(|r| r.contains("alpha")), "{rows:?}");
         assert!(rows.iter().any(|r| r.contains("beta")), "{rows:?}");
-        for src in ["classDiagram\n  A <|-- B".to_owned(), "flowchart LR\n".repeat(300)] {
+        for src in [
+            "classDiagram\n  A <|-- B".to_owned(),
+            "flowchart LR\n".repeat(300),
+        ] {
             let (raw, keep) = render_lens("mermaid", &src, &running);
             assert_eq!(raw, latex::Formula::raw(&src));
             assert!(keep);

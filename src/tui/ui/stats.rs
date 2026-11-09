@@ -1200,7 +1200,9 @@ mod tests {
 
     /// Type `c` into the popup.
     fn goto(app: &mut App, c: char) {
-        app.on_terminal(crate::tui::test_support::press(crossterm::event::KeyCode::Char(c)));
+        app.on_terminal(crate::tui::test_support::press(
+            crossterm::event::KeyCode::Char(c),
+        ));
     }
 
     #[test]
@@ -1296,7 +1298,10 @@ mod tests {
         assert!(bottom > 0);
         goto(&mut app, 'j');
         assert_eq!(scroll(&app), bottom, "the end of the page");
-        assert!(render(&app).contains("↑ "), "the footer says there is more above");
+        assert!(
+            render(&app).contains("↑ "),
+            "the footer says there is more above"
+        );
         goto(&mut app, 'k');
         assert_eq!(scroll(&app), bottom - 1);
         goto(&mut app, '1'); // Overview fits: scroll resets.

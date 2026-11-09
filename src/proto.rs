@@ -33,6 +33,8 @@ const TAG_DATA: u8 = b'D';
 pub type SessionId = Uuid;
 
 /// One protocol frame.
+// large_enum_variant: `Envelope` is the common case on the control path; boxing it would touch every `Frame::Control` site.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Control(Envelope),
@@ -565,7 +567,10 @@ impl SessionExtensions {
             }
             let len = crate::claude::latex::sanitize(&lens.instruction).len();
             if len > MAX_INSTRUCTION {
-                return Err(format!("lens {} instruction over {MAX_INSTRUCTION} bytes", lens.name));
+                return Err(format!(
+                    "lens {} instruction over {MAX_INSTRUCTION} bytes",
+                    lens.name
+                ));
             }
             total += len;
         }
@@ -910,7 +915,9 @@ pub enum SessionEvent {
     /// the payload's `kind` would collide with this enum's tag. Old clients
     /// map it to `Unknown`. A client drops its attention on any `State` that
     /// leaves `needs_approval`/`needs_input`.
-    Attention { attention: Attention },
+    Attention {
+        attention: Attention,
+    },
     /// Catch-all for event kinds this client doesn't recognise yet.
     /// Keeps older clients alive when the daemon sends a newer event kind.
     #[serde(other)]
@@ -1071,7 +1078,7 @@ pub struct Answer {
 /// the cap is on the encoded size, not on the text's.
 pub fn answers_reply(id: SessionId, answers: Vec<Answer>) -> Msg {
     let mut msg = Msg::AnswersReply { id, answers };
-    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > ANSWERS_REPLY_MAX) {
+    while serde_json::to_vec(&msg).is_ok_and(|json| json.len() > ANSWERS_REPLY_MAX) {
         match &mut msg {
             Msg::AnswersReply { answers, .. } if !answers.is_empty() => {
                 answers.remove(0);
@@ -1117,7 +1124,7 @@ pub fn search_reply(
         total,
         truncated,
     };
-    while serde_json::to_vec(&msg).map_or(false, |json| json.len() > SEARCH_REPLY_MAX) {
+    while serde_json::to_vec(&msg).is_ok_and(|json| json.len() > SEARCH_REPLY_MAX) {
         match &mut msg {
             Msg::SearchReply {
                 hits, truncated, ..
@@ -1582,7 +1589,11 @@ mod tests {
         let spec = format!(r#"{{"id":"{id}","cwd":"/w","rows":24,"cols":80}}"#);
         assert!(!serde_json::from_str::<SpawnSpec>(&spec).unwrap().ephemeral);
         let info = format!(r#"{{"id":"{id}","cwd":"/w","state":"idle","created_at":1}}"#);
-        assert!(!serde_json::from_str::<SessionInfo>(&info).unwrap().ephemeral);
+        assert!(
+            !serde_json::from_str::<SessionInfo>(&info)
+                .unwrap()
+                .ephemeral
+        );
     }
 
     #[test]
@@ -1697,7 +1708,10 @@ mod tests {
         }
         let json = serde_json::to_string(&SessionEvent::ClaudeSessionCleared).unwrap();
         assert_eq!(json, r#"{"kind":"claude_session_cleared"}"#);
-        assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
+        assert_eq!(
+            serde_json::from_str::<Older>(&json).unwrap(),
+            Older::Unknown
+        );
         let back: SessionEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SessionEvent::ClaudeSessionCleared);
     }
@@ -1767,7 +1781,6 @@ mod tests {
             }
         );
     }
-
 
     #[test]
     fn an_answers_reply_always_fits_a_frame() {
@@ -1889,7 +1902,10 @@ mod tests {
             #[serde(other)]
             Unknown,
         }
-        assert_eq!(serde_json::from_str::<Older>(&json).unwrap(), Older::Unknown);
+        assert_eq!(
+            serde_json::from_str::<Older>(&json).unwrap(),
+            Older::Unknown
+        );
     }
 
     #[test]
@@ -1934,7 +1950,10 @@ mod tests {
             turns: Some(14),
         };
         let json = serde_json::to_string(&new).unwrap();
-        assert!(!json.contains("model"), "absent fields are not sent: {json}");
+        assert!(
+            !json.contains("model"),
+            "absent fields are not sent: {json}"
+        );
         assert_eq!(
             serde_json::from_str::<Older>(&json).unwrap(),
             Older::Meta {
@@ -1978,9 +1997,17 @@ mod tests {
     fn extensions_are_optional_on_the_wire_and_unknown_kinds_survive() {
         // An old client's Spawn and Respawn: no extensions.
         let spawn = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/","rows":1,"cols":1}"#;
-        assert_eq!(serde_json::from_str::<SpawnSpec>(spawn).unwrap().extensions, None);
+        assert_eq!(
+            serde_json::from_str::<SpawnSpec>(spawn).unwrap().extensions,
+            None
+        );
         let respawn = r#"{"id":"00000000-0000-0000-0000-000000000000","rows":1,"cols":1}"#;
-        assert_eq!(serde_json::from_str::<RespawnSpec>(respawn).unwrap().extensions, None);
+        assert_eq!(
+            serde_json::from_str::<RespawnSpec>(respawn)
+                .unwrap()
+                .extensions,
+            None
+        );
         // A newer client's lens kind still parses (the daemon drops it).
         let ext = r#"{"lenses":[{"name":"x","kind":"widget","instruction":"i"},{"name":"keys","kind":"tag"}]}"#;
         let ext: SessionExtensions = serde_json::from_str(ext).unwrap();
@@ -2058,20 +2085,28 @@ mod tests {
             tool: Some("Bash".into()),
             detail: Some("ls".into()),
         };
-        let ev = SessionEvent::Attention { attention: attention.clone() };
+        let ev = SessionEvent::Attention {
+            attention: attention.clone(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(
-            json.starts_with(r#"{"kind":"attention","attention":{"seq":3,"kind":"permission_prompt""#),
+            json.starts_with(
+                r#"{"kind":"attention","attention":{"seq":3,"kind":"permission_prompt""#
+            ),
             "{json}"
         );
-        assert_eq!(serde_json::from_str::<OldEvent>(&json).unwrap(), OldEvent::Unknown);
+        assert_eq!(
+            serde_json::from_str::<OldEvent>(&json).unwrap(),
+            OldEvent::Unknown
+        );
         assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), ev);
         let old = r#"{"id":"00000000-0000-0000-0000-000000000000","cwd":"/w",
             "state":"needs_approval","created_at":1}"#;
         let mut info: SessionInfo = serde_json::from_str(old).unwrap();
         assert_eq!(info.attention, None);
         info.attention = Some(attention);
-        let back: SessionInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        let back: SessionInfo =
+            serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back, info);
         assert!(DAEMON_FEATURES.contains(&"attention"));
     }
@@ -2097,7 +2132,9 @@ mod tests {
         assert_eq!(ok(vec![lens("a", &at_cap)]), Ok(()));
         assert!(ok(vec![lens("a", &"i".repeat(2049))]).is_err());
         // 8192 in total.
-        let full: Vec<LensSpec> = (0..4).map(|i| lens(&format!("l{i}"), &"i".repeat(2048))).collect();
+        let full: Vec<LensSpec> = (0..4)
+            .map(|i| lens(&format!("l{i}"), &"i".repeat(2048)))
+            .collect();
         assert_eq!(ok(full.clone()), Ok(()));
         let mut over = full;
         over.push(lens("one", "i"));
@@ -2149,7 +2186,11 @@ mod tests {
     #[test]
     fn extension_context_and_debug_never_show_instructions() {
         let ext = SessionExtensions {
-            lenses: vec![lens("latex", " Math.\u{1b} "), lens("abc", ""), lens("keys", "Keys.")],
+            lenses: vec![
+                lens("latex", " Math.\u{1b} "),
+                lens("abc", ""),
+                lens("keys", "Keys."),
+            ],
             instructions: "\nTeam rules.\u{202e}\n".into(),
         };
         assert_eq!(ext.context(), "Math.\n\nKeys.\n\nTeam rules.");
@@ -2165,7 +2206,10 @@ mod tests {
             extensions: Some(ext.clone()),
         };
         let shown = format!("{spec:?}");
-        assert!(shown.contains("\"latex\"") && !shown.contains("Math"), "{shown}");
+        assert!(
+            shown.contains("\"latex\"") && !shown.contains("Math"),
+            "{shown}"
+        );
         assert!(!shown.contains("Team rules"), "{shown}");
         let respawn = RespawnSpec {
             id: Uuid::nil(),
@@ -2206,6 +2250,9 @@ mod tests {
             #[serde(other)]
             Unknown,
         }
-        assert!(matches!(serde_json::from_str::<OldEvent>(&json), Ok(OldEvent::Unknown)));
+        assert!(matches!(
+            serde_json::from_str::<OldEvent>(&json),
+            Ok(OldEvent::Unknown)
+        ));
     }
 }

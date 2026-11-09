@@ -53,9 +53,7 @@ fn fake_claude_args() -> &'static Path {
              echo \"ARGS[$*]\"\n\
              exec cat\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, &script);
         bin
     })
 }

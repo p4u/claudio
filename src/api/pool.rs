@@ -244,7 +244,14 @@ impl SessionPool {
             }
         } else {
             tracing::info!("NEW (no prefix match) — starting fresh session");
-            self.start_fresh(env, model, messages, system, full_body, req_hash, corr)
+            self.start_fresh(
+                env,
+                model,
+                messages.len(),
+                &build_full_prompt(system, full_body),
+                req_hash,
+                corr,
+            )
         }
     }
 
@@ -252,9 +259,8 @@ impl SessionPool {
         &self,
         env: &WrapperEnv,
         model: &str,
-        messages: &[Message],
-        system: &str,
-        full_body: &str,
+        served_len: usize,
+        prompt: &str,
         req_hash: u64,
         corr: &str,
     ) -> AppResult<RawResult> {
@@ -267,25 +273,23 @@ impl SessionPool {
         let mut session = PtySession::start(env, &forward, &csid, None)
             .map_err(|e| AppError::Internal(format!("failed to start claude session: {e}")))?;
 
-        let prompt = build_full_prompt(system, full_body);
-
         if crate::msglog::enabled() {
             crate::msglog::record(
                 crate::msglog::Dir::ClaudioToClaude,
                 corr,
                 &format!("NEW · session {} · model {model}", short(&csid)),
-                &prompt,
+                prompt,
             );
         }
 
-        let res = session.turn(&prompt);
+        let res = session.turn(prompt);
 
         match res {
             Ok((summary, failure)) => {
                 let handle = Handle {
                     csid: csid.clone(),
                     prefix_hash: req_hash,
-                    served_len: messages.len(),
+                    served_len,
                     turns: 1,
                     last_used: Instant::now(),
                     slot: Arc::new(Mutex::new(Slot {
@@ -302,7 +306,7 @@ impl SessionPool {
                     session = short(&csid),
                     pool = n,
                     live,
-                    served = messages.len(),
+                    served = served_len,
                     "NEW session registered"
                 );
                 shape(summary, failure)

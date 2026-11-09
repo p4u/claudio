@@ -204,9 +204,10 @@ pub fn spawn(
             pixel_height: 0,
         })
         .map_err(|e| io::Error::other(format!("could not open a pty: {e}")))?;
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
-        io::Error::other(format!("could not start {}: {e}", program.display()))
-    })?;
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| io::Error::other(format!("could not start {}: {e}", program.display())))?;
     drop(pair.slave);
 
     let pid = child.process_id();
@@ -254,8 +255,12 @@ pub fn spawn(
         spawned_with_resume,
         spawn_time,
         kind,
-        meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind)
-            .with_tags(spec.extensions.as_ref().map(|e| e.tags()).unwrap_or_default()),
+        meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind).with_tags(
+            spec.extensions
+                .as_ref()
+                .map(|e| e.tags())
+                .unwrap_or_default(),
+        ),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
     Ok((Handle { tx, token, pid }, committed_tx))
@@ -279,7 +284,11 @@ pub(super) fn context_path(socket: &Path, id: SessionId) -> PathBuf {
 /// session starts without context.
 fn write_context(socket: &Path, spec: &SpawnSpec) -> Option<PathBuf> {
     let path = context_path(socket, spec.id);
-    let context = spec.extensions.as_ref().map(|e| e.context()).unwrap_or_default();
+    let context = spec
+        .extensions
+        .as_ref()
+        .map(|e| e.context())
+        .unwrap_or_default();
     if context.is_empty() {
         let _ = std::fs::remove_file(&path);
         return None;
@@ -666,7 +675,12 @@ impl MetaRefresher {
             return;
         }
         self.started_at = Some(std::time::Instant::now());
-        let (id, daemon, cwd, kind) = (self.id, Arc::clone(&self.daemon), self.cwd.clone(), self.kind);
+        let (id, daemon, cwd, kind) = (
+            self.id,
+            Arc::clone(&self.daemon),
+            self.cwd.clone(),
+            self.kind,
+        );
         let (cursor, busy) = (Arc::clone(&self.cursor), Arc::clone(&self.busy));
         let latex = Arc::clone(&self.latex);
         let (lens, tags) = (Arc::clone(&self.lens), self.tags.clone());
@@ -771,7 +785,12 @@ fn meta_event(
         None => read_git_branch(cwd),
     };
     let (model, context_tokens, output_tokens, turns) = match transcript {
-        Some(t) => (t.model, t.context_tokens, Some(t.output_tokens), Some(t.turns)),
+        Some(t) => (
+            t.model,
+            t.context_tokens,
+            Some(t.output_tokens),
+            Some(t.turns),
+        ),
         None => (None, None, None, None),
     };
     SessionEvent::Meta {
@@ -834,11 +853,10 @@ impl Actor {
                     // forever if another process holds the PTY slave open.
                     let drain_deadline =
                         tokio::time::Instant::now() + EXIT_DRAIN_TIMEOUT;
-                    loop {
-                        match tokio::time::timeout_at(drain_deadline, output.recv()).await {
-                            Ok(Some(bytes)) => self.on_output(&bytes),
-                            Ok(None) | Err(_) => break,
-                        }
+                    while let Ok(Some(bytes)) =
+                        tokio::time::timeout_at(drain_deadline, output.recv()).await
+                    {
+                        self.on_output(&bytes);
                     }
                     // §Race fix: wait for Daemon::spawn Phase 3 to commit the
                     // handle to registry.live before running on_exit. Without
@@ -1235,7 +1253,10 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(argv, ["/bin/zsh", "-l"], "no --settings, no hooks");
-        assert_eq!(cmd.get_cwd().map(|c| c.as_os_str()), Some(OsStr::new("/tmp")));
+        assert_eq!(
+            cmd.get_cwd().map(|c| c.as_os_str()),
+            Some(OsStr::new("/tmp"))
+        );
         assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
     }
@@ -1423,7 +1444,11 @@ mod tests {
     #[test]
     fn lens_items_are_sent_when_they_change_with_their_own_growing_seq() {
         let mut sent = None;
-        assert_eq!(lens_items_event(&mut sent, &items(&[])), None, "nothing yet");
+        assert_eq!(
+            lens_items_event(&mut sent, &items(&[])),
+            None,
+            "nothing yet"
+        );
         let one = items(&[("keys", "a")]);
         assert_eq!(lens_items_event(&mut sent, &one), lens(1, &[("keys", "a")]));
         assert_eq!(lens_items_event(&mut sent, &one), None, "unchanged");
@@ -1454,7 +1479,10 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Frame::Control(_))), "attached");
         assert!(matches!(rx.try_recv(), Ok(Frame::Data { .. })), "snapshot");
         let event = |e: Option<SessionEvent>| {
-            Frame::Control(Envelope::event(Msg::Event { id, event: e.unwrap() }))
+            Frame::Control(Envelope::event(Msg::Event {
+                id,
+                event: e.unwrap(),
+            }))
         };
         assert_eq!(rx.try_recv().unwrap(), event(latex(1, &["x"])));
         assert_eq!(rx.try_recv().unwrap(), event(lens(1, &[("keys", "k")])));

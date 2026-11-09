@@ -151,10 +151,7 @@ pub fn delete(dir: &Path, name: &str) -> io::Result<()> {
     let path = dir.join(format!("{name}.md"));
     match path.symlink_metadata() {
         Ok(m) if m.is_file() => fs::remove_file(&path),
-        _ => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "no such snippet",
-        )),
+        _ => Err(io::Error::new(io::ErrorKind::NotFound, "no such snippet")),
     }
 }
 

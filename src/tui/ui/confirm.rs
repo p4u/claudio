@@ -6,8 +6,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::{centered, popup};
-use crate::tui::fmt::str_width;
 use crate::tui::confirm::{Choice, ConfirmPrompt};
+use crate::tui::fmt::str_width;
 
 /// Widest the popup gets, border included.
 const MAX_WIDTH: u16 = 76;
@@ -102,6 +102,9 @@ mod tests {
     #[test]
     fn long_text_wraps_inside_a_narrow_terminal() {
         let screen = render(&prompt(true), 40);
-        assert!(screen.contains("[y] update"), "keys stay visible:\n{screen}");
+        assert!(
+            screen.contains("[y] update"),
+            "keys stay visible:\n{screen}"
+        );
     }
 }

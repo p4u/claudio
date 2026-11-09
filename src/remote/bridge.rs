@@ -197,7 +197,7 @@ async fn ensure_daemon_detached(socket: &Path) -> io::Result<()> {
 ///
 /// Waits for the launcher to exit and returns `Err` if it fails (so the
 /// caller can fall back to `spawn_setsid`).
-fn try_systemd_run(exe: &PathBuf, log: std::fs::File) -> io::Result<()> {
+fn try_systemd_run(exe: &Path, log: std::fs::File) -> io::Result<()> {
     // Only try if systemd-run is on PATH and XDG_RUNTIME_DIR is set.
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         return Err(io::Error::new(

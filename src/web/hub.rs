@@ -972,6 +972,9 @@ impl HubHandle {
     }
 }
 
+/// A session's meta and optional first prompt (with its pane size), kept until `Created`.
+type PendingSpawn = (SessionMeta, Option<(PendingPrompt, (u16, u16))>);
+
 /// The actor's state.
 struct Hub {
     claude: crate::config::ClaudeSection,
@@ -984,7 +987,7 @@ struct Hub {
     conns: Connections,
     sessions: HashMap<SessionId, SessionView>,
     /// What `spawned()` said of a session whose `Created` has not come yet.
-    pending_spawns: HashMap<SessionId, (SessionMeta, Option<(PendingPrompt, (u16, u16))>)>,
+    pending_spawns: HashMap<SessionId, PendingSpawn>,
     tabs: BTreeMap<TabId, TabTx>,
     next_tab: TabId,
     connect_waiters: HashMap<String, Vec<Reply<Result<Value, String>>>>,
@@ -1147,7 +1150,7 @@ impl Hub {
                     .take(4096)
                     .collect();
                 self.web.order = sids.clone();
-                self.to_tabs_but(tab, &ev("order", json!({ "sids": sids })));
+                self.send_tabs_but(tab, &ev("order", json!({ "sids": sids })));
                 self.save(Some(Box::new(move |r| {
                     let _ = reply.send(r);
                 })));
@@ -1161,12 +1164,12 @@ impl Hub {
                     return;
                 }
                 self.web.layout = layout.clone();
-                self.to_tabs_but(tab, &ev("layout", json!({ "layout": layout })));
+                self.send_tabs_but(tab, &ev("layout", json!({ "layout": layout })));
                 self.save(Some(Box::new(move |r| {
                     let _ = reply.send(r);
                 })));
             }
-            Cmd::Broadcast(v) => self.to_tabs(&v),
+            Cmd::Broadcast(v) => self.send_tabs(&v),
             Cmd::ClaudeUpdate {
                 host,
                 install,
@@ -1195,7 +1198,7 @@ impl Hub {
                     "profiles",
                     json!({"names": self.profiles.0, "default": self.profiles.1}),
                 );
-                self.to_tabs(&v);
+                self.send_tabs(&v);
                 let _ = reply.send(());
             }
             Cmd::SetClaude { claude } => self.claude = claude,
@@ -1302,7 +1305,7 @@ impl Hub {
         }
     }
 
-    fn to_tabs(&mut self, v: &Value) {
+    fn send_tabs(&mut self, v: &Value) {
         let text = v.to_string();
         let cut: Vec<TabId> = self
             .tabs
@@ -1313,7 +1316,7 @@ impl Hub {
         self.drop_tabs(cut);
     }
 
-    fn to_tabs_but(&mut self, but: TabId, v: &Value) {
+    fn send_tabs_but(&mut self, but: TabId, v: &Value) {
         let text = v.to_string();
         let cut: Vec<TabId> = self
             .tabs
@@ -1326,7 +1329,7 @@ impl Hub {
     }
 
     /// `out` to every tab subscribed to `sid`.
-    fn to_subs(&mut self, sid: SessionId, out: Out) {
+    fn send_subs(&mut self, sid: SessionId, out: Out) {
         let Some(view) = self.sessions.get(&sid) else {
             return;
         };
@@ -1407,14 +1410,14 @@ impl Hub {
     fn send_host(&mut self, host: &str) {
         if let Some(h) = self.hosts.get(host) {
             let v = ev("host", json!({ "host": dto::host(h) }));
-            self.to_tabs(&v);
+            self.send_tabs(&v);
         }
     }
 
     fn send_session(&mut self, sid: SessionId) {
         if let Some(view) = self.sessions.get(&sid) {
             let v = ev("session", json!({ "session": dto::session(view) }));
-            self.to_tabs(&v);
+            self.send_tabs(&v);
         }
     }
 
@@ -1423,7 +1426,7 @@ impl Hub {
             "notice",
             json!({"text": clean(text, 1000), "level": level, "host": host, "sid": sid}),
         );
-        self.to_tabs(&v);
+        self.send_tabs(&v);
     }
 
     // ── sessions ─────────────────────────────────────────────────────────
@@ -1660,7 +1663,7 @@ impl Hub {
         }
         if let Some((seq, items)) = applied.lens {
             for v in lens_events(sid, seq, &items) {
-                self.to_tabs(&v);
+                self.send_tabs(&v);
             }
         }
         if let Some(text) = applied.notice {
@@ -1685,7 +1688,7 @@ impl Hub {
             if self.web.sessions.remove(&sid).is_some() {
                 self.dirty = true;
             }
-            self.to_tabs(&ev("session_removed", json!({ "sid": sid })));
+            self.send_tabs(&ev("session_removed", json!({ "sid": sid })));
         }
     }
 
@@ -1760,9 +1763,9 @@ impl Hub {
         for sid in ids {
             self.sessions.remove(&sid);
             self.web.sessions.remove(&sid);
-            self.to_tabs(&ev("session_removed", json!({ "sid": sid })));
+            self.send_tabs(&ev("session_removed", json!({ "sid": sid })));
         }
-        self.to_tabs(&ev("host_removed", json!({ "name": host })));
+        self.send_tabs(&ev("host_removed", json!({ "name": host })));
         self.web.hosts.retain(|h| *h != host);
         let _ = self.events.send(HubEvent::HostDown { host });
         self.save(Some(Box::new(move |r| {
@@ -1807,7 +1810,10 @@ impl Hub {
             .map(|s| (s.id, s))
             .collect();
         // Sessions that ended while no web was running had no view to remove.
-        if self.web.forget_unlisted(host, |sid| listed.contains_key(sid)) {
+        if self
+            .web
+            .forget_unlisted(host, |sid| listed.contains_key(sid))
+        {
             self.dirty = true;
         }
         let gone: Vec<SessionId> = self
@@ -1904,7 +1910,7 @@ impl Hub {
             // A first `hosts.connect` that failed: not a host of this server.
             self.hosts.remove(host);
             self.conns.next_generation(host);
-            self.to_tabs(&ev("host_removed", json!({ "name": host })));
+            self.send_tabs(&ev("host_removed", json!({ "name": host })));
             return;
         }
         self.send_host(host);
@@ -1969,7 +1975,7 @@ impl Hub {
                 frame.push(KIND_OUTPUT);
                 frame.extend_from_slice(id.as_bytes());
                 frame.extend_from_slice(&bytes);
-                self.to_subs(id, Out::Binary(Bytes::from(frame)));
+                self.send_subs(id, Out::Binary(Bytes::from(frame)));
             }
             Incoming::Attached { id, rows, cols } => {
                 let Some(view) = self.sessions.get_mut(&id).filter(|v| v.host == host) else {
@@ -1977,7 +1983,7 @@ impl Hub {
                 };
                 on_attached(view, rows, cols);
                 let v = ev("attached", json!({"sid": id, "rows": rows, "cols": cols}));
-                self.to_subs(id, Out::Text(v.to_string()));
+                self.send_subs(id, Out::Text(v.to_string()));
             }
             Incoming::Event { id, event } => self.on_event(host, id, event),
             Incoming::HostStats {
@@ -1989,7 +1995,7 @@ impl Hub {
                 if let Some(h) = self.hosts.get_mut(host) {
                     h.stats = Some((cpu_pct, mem_used, mem_total));
                 }
-                self.to_tabs(&host_stats(host, (cpu_pct, mem_used, mem_total)));
+                self.send_tabs(&host_stats(host, (cpu_pct, mem_used, mem_total)));
             }
             Incoming::Disconnected => {
                 self.lost(host);
@@ -2071,7 +2077,7 @@ impl Hub {
                 };
                 let offer = claude_event(host, phase, have.as_deref(), want.as_deref(), None, None);
                 h.claude_offer = Some(offer.clone());
-                self.to_tabs(&offer);
+                self.send_tabs(&offer);
             }
         }
     }
@@ -2092,7 +2098,7 @@ impl Hub {
         let phase = if install { "installing" } else { "updating" };
         let v = claude_event(host, phase, None, None, None, None);
         h.claude_offer = Some(v.clone());
-        self.to_tabs(&v);
+        self.send_tabs(&v);
         tracing::info!(op = "claude.update", host, install, "web op");
         let request = client.request(Msg::UpdateClaude { install });
         let (host, tx) = (host.to_owned(), self.tx.clone());
@@ -2150,7 +2156,7 @@ impl Hub {
             Ok(_) => claude_event(host, "failed", None, None, None, Some("unexpected reply")),
             Err(e) => claude_event(host, "failed", None, None, None, Some(&tail(&e))),
         };
-        self.to_tabs(&v);
+        self.send_tabs(&v);
     }
 
     // ── web-state.json ───────────────────────────────────────────────────

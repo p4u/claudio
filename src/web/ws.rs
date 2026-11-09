@@ -622,7 +622,7 @@ pub(crate) async fn dispatch(
                 .map_err(daemon_error)?
             {
                 Msg::ClaudeSessions { cwd, mut sessions } => {
-                    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+                    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
                     Ok(json!({"cwd": cwd, "sessions": to_json(sessions)?}))
                 }
                 _ => Err(UNEXPECTED.to_owned()),
@@ -900,7 +900,7 @@ async fn search(state: &AppState, query: String) -> Value {
             Err(error) => failed.push(json!({"host": host, "error": error})),
         }
     }
-    hits.sort_by(|a, b| b.1.modified.cmp(&a.1.modified));
+    hits.sort_by_key(|h| std::cmp::Reverse(h.1.modified));
     let hits: Vec<Value> = hits
         .into_iter()
         .map(|(host, h)| {

@@ -65,7 +65,15 @@ impl App {
     /// Start the plain UI's session now, with `proxy`.
     pub(super) fn start_plain_now(&mut self, start: PlainStart, proxy: Option<String>) {
         let PlainStart { id, args, cwd } = start;
-        let started = self.start(id, "local".to_owned(), cwd, SessionKind::Claude, args, proxy, 0);
+        let started = self.start(
+            id,
+            "local".to_owned(),
+            cwd,
+            SessionKind::Claude,
+            args,
+            proxy,
+            0,
+        );
         if let Err(e) = started {
             self.plain_failed(format!("cannot start claude: {e}"));
         }
@@ -284,7 +292,13 @@ mod tests {
         app.take_effects();
         app.sessions[0].mirror.feed(b"FIRST ROW\r\n");
         app.sessions[0].mirror.feed(b"\x1b[30;1HLAST ROW");
-        event(&mut app, id, SessionEvent::State { state: SessionState::Idle });
+        event(
+            &mut app,
+            id,
+            SessionEvent::State {
+                state: SessionState::Idle,
+            },
+        );
         let rows = screen(&app);
         assert_eq!(rows.len(), 30);
         assert_eq!(rows[0], "FIRST ROW", "the pane starts at the top");
@@ -319,7 +333,9 @@ mod tests {
         app.take_effects();
         app.on_terminal(alt('h'));
         let text = screen(&app).join("\n");
-        for key in ["Alt+h", "Alt+s", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+i"] {
+        for key in [
+            "Alt+h", "Alt+s", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+i",
+        ] {
             assert!(text.contains(key), "{key} missing:\n{text}");
         }
         for gone in ["Alt+n", "Alt+x", "Alt+q", "Alt+g", "Alt+c", "Alt+Shift"] {
@@ -340,11 +356,21 @@ mod tests {
         let (mut app, id) = plain_app(&[]);
         app.take_effects();
         // Another client's session is none of our business.
-        event(&mut app, Uuid::new_v4(), SessionEvent::Exited { code: Some(9) });
+        event(
+            &mut app,
+            Uuid::new_v4(),
+            SessionEvent::Exited { code: Some(9) },
+        );
         assert!(!app.quit);
         event(&mut app, id, SessionEvent::Exited { code: Some(3) });
         assert!(app.quit);
-        assert_eq!(app.exit, Exit { code: 3, message: None });
+        assert_eq!(
+            app.exit,
+            Exit {
+                code: 3,
+                message: None
+            }
+        );
         // The daemon then closes a cleanly ended session: still quitting.
         event(&mut app, id, SessionEvent::Removed);
         assert_eq!(app.exit.code, 3);
@@ -368,11 +394,18 @@ mod tests {
         app.take_effects();
         app.on_reply(
             ReplyTo::Spawned(id),
-            Err(std::io::Error::other("working directory /work does not exist")),
+            Err(std::io::Error::other(
+                "working directory /work does not exist",
+            )),
         );
         assert!(app.quit);
         assert_eq!(app.exit.code, 1);
-        assert!(app.exit.message.as_deref().unwrap().contains("does not exist"));
+        assert!(app
+            .exit
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("does not exist"));
     }
 
     #[test]
@@ -381,9 +414,28 @@ mod tests {
         let mut effects = app.take_effects();
         // Everything that saves in the manager: activation, daemon events,
         // a restart, a rename from elsewhere.
-        app.on_incoming_from("local", Incoming::Attached { id, rows: 30, cols: 100 });
-        event(&mut app, id, SessionEvent::ClaudeSession { claude_session_id: "c1".into() });
-        event(&mut app, id, SessionEvent::Renamed { name: Some("n".into()) });
+        app.on_incoming_from(
+            "local",
+            Incoming::Attached {
+                id,
+                rows: 30,
+                cols: 100,
+            },
+        );
+        event(
+            &mut app,
+            id,
+            SessionEvent::ClaudeSession {
+                claude_session_id: "c1".into(),
+            },
+        );
+        event(
+            &mut app,
+            id,
+            SessionEvent::Renamed {
+                name: Some("n".into()),
+            },
+        );
         app.on_reply(ReplyTo::Respawned(id), Ok(Msg::Pong));
         effects.extend(app.take_effects());
         assert!(
@@ -397,7 +449,13 @@ mod tests {
         let (mut app, _) = plain_app(&[]);
         app.take_effects();
         let other = test_support::info(Some(1), None);
-        event(&mut app, other.id, SessionEvent::Created { info: other.clone() });
+        event(
+            &mut app,
+            other.id,
+            SessionEvent::Created {
+                info: other.clone(),
+            },
+        );
         assert_eq!(app.sessions.len(), 1);
         // A reconnect re-attaches ours and leaves the others alone.
         let ours = app.sessions[0].id;
@@ -408,9 +466,9 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         assert!(!app.quit);
         let reqs: Vec<_> = app.take_effects();
-        assert!(reqs
-            .iter()
-            .any(|e| matches!(e, Effect::Request { msg: Msg::Attach { id, .. }, .. } if *id == ours)));
+        assert!(reqs.iter().any(
+            |e| matches!(e, Effect::Request { msg: Msg::Attach { id, .. }, .. } if *id == ours)
+        ));
     }
 
     #[test]
@@ -424,9 +482,21 @@ mod tests {
 
     #[test]
     fn exit_status_becomes_the_process_code() {
-        let ok = Exit { code: 7, message: None };
-        assert_eq!(format!("{:?}", ok.exit_code()), format!("{:?}", ExitCode::from(7)));
-        let odd = Exit { code: -1, message: None };
-        assert_eq!(format!("{:?}", odd.exit_code()), format!("{:?}", ExitCode::from(1)));
+        let ok = Exit {
+            code: 7,
+            message: None,
+        };
+        assert_eq!(
+            format!("{:?}", ok.exit_code()),
+            format!("{:?}", ExitCode::from(7))
+        );
+        let odd = Exit {
+            code: -1,
+            message: None,
+        };
+        assert_eq!(
+            format!("{:?}", odd.exit_code()),
+            format!("{:?}", ExitCode::from(1))
+        );
     }
 }

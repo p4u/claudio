@@ -44,11 +44,19 @@ impl SemVer {
             .next()
             .and_then(|p| p.parse().ok())
             .unwrap_or(0);
-        Some(SemVer { major, minor, patch })
+        Some(SemVer {
+            major,
+            minor,
+            patch,
+        })
     }
 
     fn zero() -> Self {
-        SemVer { major: 0, minor: 0, patch: 0 }
+        SemVer {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        }
     }
 }
 
@@ -268,10 +276,7 @@ pub fn upgrade_cmd(check_only: bool) -> std::process::ExitCode {
 }
 
 /// Injectable base-URL variant used by tests.
-pub async fn run_upgrade(
-    check_only: bool,
-    api_base: &str,
-) -> std::process::ExitCode {
+pub async fn run_upgrade(check_only: bool, api_base: &str) -> std::process::ExitCode {
     // 1. Fetch latest tag.
     let tag = match latest_tag_from(api_base).await {
         Ok(t) => t,
@@ -285,14 +290,14 @@ pub async fn run_upgrade(
     let latest = SemVer::parse(&tag).unwrap_or_else(SemVer::zero);
 
     if latest <= current {
-        println!(
-            "claudio is up to date (v{})",
-            env!("CARGO_PKG_VERSION")
-        );
+        println!("claudio is up to date (v{})", env!("CARGO_PKG_VERSION"));
         return std::process::ExitCode::SUCCESS;
     }
 
-    println!("New version available: {tag} (current: v{})", env!("CARGO_PKG_VERSION"));
+    println!(
+        "New version available: {tag} (current: v{})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     if check_only {
         println!("Run `claudio upgrade` to install.");
@@ -407,9 +412,9 @@ fn derive_download_base(api_base: &str, tag: &str) -> String {
 /// Write `binary_bytes` to a temp file next to `exe_path`, then atomically
 /// rename it over `exe_path`.  Sets mode 0755.
 fn install_binary(exe_path: &std::path::Path, binary_bytes: &[u8]) -> io::Result<()> {
-    let dir = exe_path.parent().ok_or_else(|| {
-        io::Error::other("cannot determine install directory from current_exe()")
-    })?;
+    let dir = exe_path
+        .parent()
+        .ok_or_else(|| io::Error::other("cannot determine install directory from current_exe()"))?;
 
     // Check we can write to the install directory.
     let meta = std::fs::metadata(dir)?;
@@ -421,7 +426,10 @@ fn install_binary(exe_path: &std::path::Path, binary_bytes: &[u8]) -> io::Result
     }
 
     // Write to a unique temp file.
-    let tmp = dir.join(format!(".claudio-upgrade-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let tmp = dir.join(format!(
+        ".claudio-upgrade-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -453,17 +461,29 @@ mod tests {
     fn semver_parse() {
         assert_eq!(
             SemVer::parse("1.2.3"),
-            Some(SemVer { major: 1, minor: 2, patch: 3 })
+            Some(SemVer {
+                major: 1,
+                minor: 2,
+                patch: 3
+            })
         );
         assert_eq!(
             SemVer::parse("v0.2.0"),
-            Some(SemVer { major: 0, minor: 2, patch: 0 })
+            Some(SemVer {
+                major: 0,
+                minor: 2,
+                patch: 0
+            })
         );
         assert_eq!(SemVer::parse("bad"), None);
         // Trailing pre-release suffix on patch.
         assert_eq!(
             SemVer::parse("1.2.3-alpha"),
-            Some(SemVer { major: 1, minor: 2, patch: 3 })
+            Some(SemVer {
+                major: 1,
+                minor: 2,
+                patch: 3
+            })
         );
     }
 
@@ -506,11 +526,7 @@ mod tests {
         // We can't know the exact name in CI, but it must not error on the
         // current platform (linux or macos, x86_64 or aarch64).
         let name = current_asset_name();
-        assert!(
-            name.is_ok(),
-            "current_asset_name failed: {:?}",
-            name.err()
-        );
+        assert!(name.is_ok(), "current_asset_name failed: {:?}", name.err());
         let name = name.unwrap();
         assert!(name.starts_with("claudio-"), "unexpected name: {name}");
     }
@@ -531,10 +547,7 @@ mod tests {
     fn derive_download_base_mock() {
         let api = "http://127.0.0.1:12345/releases/latest";
         let base = derive_download_base(api, "v0.3.0");
-        assert_eq!(
-            base,
-            "http://127.0.0.1:12345/releases/download/v0.3.0"
-        );
+        assert_eq!(base, "http://127.0.0.1:12345/releases/download/v0.3.0");
     }
 
     // ── install_binary (replace-by-rename) ───────────────────────────────────
@@ -542,8 +555,10 @@ mod tests {
     #[test]
     fn install_binary_replaces_file() {
         // Create a fake "exe" in a temp dir.
-        let tmp = std::env::temp_dir()
-            .join(format!("claudio-upgrade-test-{}", uuid::Uuid::new_v4().simple()));
+        let tmp = std::env::temp_dir().join(format!(
+            "claudio-upgrade-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         let exe = tmp.join("claudio-fake");
         std::fs::write(&exe, b"old content").unwrap();
@@ -589,9 +604,7 @@ mod tests {
         let addr = tcp.local_addr().unwrap();
 
         // Build axum router.
-        let tag_route = get(|| async {
-            r#"{"tag_name":"v0.3.0","name":"v0.3.0"}"#
-        });
+        let tag_route = get(|| async { r#"{"tag_name":"v0.3.0","name":"v0.3.0"}"# });
         let bin_route = get(move || {
             let b = fake_binary_b.clone();
             async move { b }
@@ -614,8 +627,10 @@ mod tests {
         });
 
         // Prepare a temp "exe" to be replaced.
-        let tmp = std::env::temp_dir()
-            .join(format!("claudio-mock-upgrade-{}", uuid::Uuid::new_v4().simple()));
+        let tmp = std::env::temp_dir().join(format!(
+            "claudio-mock-upgrade-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         let fake_exe = tmp.join("claudio-linux-x86_64");
         std::fs::write(&fake_exe, b"old").unwrap();

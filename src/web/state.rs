@@ -150,7 +150,10 @@ mod tests {
             "{s:?}"
         );
         assert!(s.sessions.contains_key(&kept) && s.sessions.contains_key(&other));
-        assert!(!s.forget_unlisted("local", |sid| *sid == kept), "nothing left to drop");
+        assert!(
+            !s.forget_unlisted("local", |sid| *sid == kept),
+            "nothing left to drop"
+        );
     }
 
     #[test]

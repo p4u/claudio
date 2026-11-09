@@ -71,7 +71,7 @@ pub struct RemoteInfo {
 /// and returns [`RemoteInfo`]. Errors are returned as a human-readable string
 /// for display in the TUI.
 pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
-    validate_host(host).map_err(|e| e)?;
+    validate_host(host)?;
 
     let local = Probe::current().map_err(|e| format!("cannot read local binary: {e}"))?;
 
@@ -406,7 +406,9 @@ async fn upload_bytes(
     let hash_out = ssh_run(host, &verify_cmd).await.map_err(|e| {
         let h = host.to_owned();
         let cmd = format!("rm -f {tmp_quoted} 2>/dev/null; true");
-        tokio::spawn(async move { let _ = ssh_run(&h, &cmd).await; });
+        tokio::spawn(async move {
+            let _ = ssh_run(&h, &cmd).await;
+        });
         format!("remote hash check failed: {e}")
     })?;
     let remote_hash = hash_out
@@ -442,7 +444,9 @@ fi"#
     ssh_run(host, &install_cmd).await.map_err(|e| {
         let h = host.to_owned();
         let cmd = format!("rm -f {tmp_quoted} 2>/dev/null; true");
-        tokio::spawn(async move { let _ = ssh_run(&h, &cmd).await; });
+        tokio::spawn(async move {
+            let _ = ssh_run(&h, &cmd).await;
+        });
         format!("install failed on {host}: {e}")
     })?;
 

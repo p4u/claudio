@@ -13,12 +13,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **claudio never invokes `claude -p`.** Every path goes through the interactive TUI. Don't install the binary *as* `claude`, because it has to find the real one on `PATH` (or `$CLAUDIO_CLAUDE_PATH`).
 
+## Acceptance rules
+
+`ACCEPTANCE.md` is the bar every change meets before it merges (architecture: a generic core
+plus addons, compatibility, security, quality, tests, docs). Check a diff against it and cite
+the rule in reviews; `make check` runs the mechanical rules. The core/addons refactor that
+introduces this shape is `docs/specs/2026-11-09-core-addons-design.md`.
+
 ## Commands
 
 ```bash
 make                 # release build → target/release/claudio
 make static          # static musl binary → dist/claudio (ARCH=aarch64 for cross)
 make dev             # install this checkout to ~/.local/bin for testing, no release (make dev-undo reverts)
+make check           # acceptance checks (ACCEPTANCE.md): fmt, clippy -D warnings, rules, core-only build, unit tests
 make test-unit       # unit tests only: cargo test --locked --bin claudio (no claude needed)
 make test-manager    # manager integration tests (fake claude, no API key required)
 make test            # unit + E2E (E2E needs an authenticated `claude` on PATH, ~5 min)

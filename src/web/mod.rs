@@ -31,7 +31,11 @@ pub(crate) const DEFAULT_PORT: u16 = 7337;
 /// This build's version as the page shows it: the release version, plus the
 /// label of a local build (`make dev`: `0.8.0+dev.20f0b49`).
 pub(crate) fn version() -> String {
-    format!("{}{}", env!("CARGO_PKG_VERSION"), env!("CLAUDIO_BUILD_LABEL"))
+    format!(
+        "{}{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CLAUDIO_BUILD_LABEL")
+    )
 }
 
 const USAGE: &str = "usage: claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... \

@@ -346,7 +346,9 @@ impl TranscriptCursor {
                     push_latex(&mut self.latex, msg.get("content"));
                     push_lens(&mut self.lens, &self.tags, msg.get("content"));
                 }
-                let Some(usage) = msg.get("usage") else { return };
+                let Some(usage) = msg.get("usage") else {
+                    return;
+                };
                 let count = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                 if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
                     // What claude asked for keeps the `[1m]` the context
@@ -366,10 +368,11 @@ impl TranscriptCursor {
                 }
                 self.last_message_id = message_id;
             }
-            Some("user") => {
-                if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true) && is_real_prompt(&v) {
-                    totals.turns = totals.turns.saturating_add(1);
-                }
+            Some("user")
+                if v.get("isMeta").and_then(|m| m.as_bool()) != Some(true)
+                    && is_real_prompt(&v) =>
+            {
+                totals.turns = totals.turns.saturating_add(1);
             }
             _ => {}
         }
@@ -672,10 +675,10 @@ pub fn recent_answers(bytes: &[u8]) -> Vec<Answer> {
                     push_texts(texts, content);
                 }
             }
-            Some("system") => {
-                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") {
-                    finish(&mut answers, current.take());
-                }
+            Some("system")
+                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") =>
+            {
+                finish(&mut answers, current.take());
             }
             _ => {}
         }
@@ -858,7 +861,7 @@ pub fn recent_project_dirs(limit: usize) -> Vec<(PathBuf, u64)> {
         }
     }
 
-    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
     dirs.truncate(limit);
     dirs.into_iter().map(|(mtime, p)| (p, mtime)).collect()
 }
@@ -1085,7 +1088,10 @@ mod tests {
         std::fs::write(dir.join("conv-1.jsonl"), format!("{record}\n")).unwrap();
 
         let via_link = list_sessions_in(&root, &base.join("home/repo"));
-        assert_eq!(via_link.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["conv-1"]);
+        assert_eq!(
+            via_link.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["conv-1"]
+        );
         assert_eq!(list_sessions_in(&root, &real).len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1106,7 +1112,8 @@ mod tests {
 
         // A path that does not exist cannot be resolved: it is encoded as given.
         let missing = base.join("home/missing");
-        assert!(transcript_path(&missing, "sid").ends_with(format!("{}/sid.jsonl", encode_cwd(&missing))));
+        assert!(transcript_path(&missing, "sid")
+            .ends_with(format!("{}/sid.jsonl", encode_cwd(&missing))));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1142,7 +1149,14 @@ mod tests {
         TranscriptCursor::new(Path::new("/nonexistent"), "sid")
     }
 
-    fn assistant(id: &str, model: &str, input: u64, cache_create: u64, cache_read: u64, out: u64) -> String {
+    fn assistant(
+        id: &str,
+        model: &str,
+        input: u64,
+        cache_create: u64,
+        cache_read: u64,
+        out: u64,
+    ) -> String {
         format!(
             r#"{{"type":"assistant","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{input},"cache_creation_input_tokens":{cache_create},"cache_read_input_tokens":{cache_read},"output_tokens":{out}}}}}}}"#
         ) + "\n"
@@ -1166,8 +1180,11 @@ mod tests {
     #[test]
     fn cursor_prefers_the_requested_model() {
         let mut c = cursor();
-        let record = assistant("m1", "claude-opus-5-5", 1, 0, 0, 1)
-            .replacen('{', r#"{"requestedModel":"claude-opus-5-5[1m]","#, 1);
+        let record = assistant("m1", "claude-opus-5-5", 1, 0, 0, 1).replacen(
+            '{',
+            r#"{"requestedModel":"claude-opus-5-5[1m]","#,
+            1,
+        );
         c.feed(record.as_bytes());
         assert_eq!(c.totals().model.as_deref(), Some("claude-opus-5-5[1m]"));
     }
@@ -1181,7 +1198,8 @@ mod tests {
         // One response, two content blocks: same message id and usage.
         jsonl += &assistant("m1", "claude-x", 10, 0, 0, 40);
         jsonl += &assistant("m1", "claude-x", 10, 0, 0, 40);
-        jsonl += r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t"}]}}"#;
+        jsonl +=
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t"}]}}"#;
         jsonl += "\n";
         jsonl += &assistant("m2", "claude-x", 20, 0, 0, 8);
         jsonl += r#"{"type":"user","isMeta":true,"message":{"content":"<system-reminder>x</system-reminder>"}}"#;
@@ -1202,7 +1220,10 @@ mod tests {
         let line = assistant("m1", "claude-x", 1, 0, 0, 7);
         let (a, b) = line.as_bytes().split_at(30);
         c.feed(a);
-        assert!(!c.has_assistant(), "an unterminated line is not a record yet");
+        assert!(
+            !c.has_assistant(),
+            "an unterminated line is not a record yet"
+        );
         c.feed(b);
         assert_eq!(c.totals().output_tokens, 7);
         // Garbage lines are skipped, not fatal.
@@ -1223,8 +1244,12 @@ mod tests {
         assert!(!c.advance(), "nothing new");
         {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-            f.write_all(assistant("m2", "claude-x", 9, 0, 0, 4).as_bytes()).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(assistant("m2", "claude-x", 9, 0, 0, 4).as_bytes())
+                .unwrap();
         }
         assert!(c.advance());
         assert_eq!(c.totals().output_tokens, 7);
@@ -1254,8 +1279,11 @@ mod tests {
         );
         jsonl += &said(r#""a string <latex>b^2</latex>""#);
         // A subagent's record and the user's own text are not the answer.
-        jsonl += &said(r#"[{"type":"text","text":"<latex>side</latex>"}]"#)
-            .replacen('{', r#"{"isSidechain":true,"#, 1);
+        jsonl += &said(r#"[{"type":"text","text":"<latex>side</latex>"}]"#).replacen(
+            '{',
+            r#"{"isSidechain":true,"#,
+            1,
+        );
         jsonl += r#"{"type":"user","message":{"content":"<latex>user</latex>"}}"#;
         jsonl += "\n";
         // A record without usage is still read for formulas.
@@ -1306,8 +1334,7 @@ mod tests {
     fn recent_project_dirs_skips_nonexistent_cwd() {
         use std::io::Write;
         // Build a fake projects root.
-        let tmp = std::env::temp_dir()
-            .join(format!("claudio-rpd-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("claudio-rpd-test-{}", uuid::Uuid::new_v4()));
         let projects = tmp.join("projects");
         // A "deleted" project: the transcript's cwd points at a dir that doesn't exist.
         let deleted_cwd = tmp.join("deleted-session-dir");
@@ -1328,11 +1355,7 @@ mod tests {
         )
         .unwrap();
         // Also write a line with a user message so the transcript isn't skipped.
-        writeln!(
-            f,
-            r#"{{"type":"user","message":{{"content":"hello"}}}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"type":"user","message":{{"content":"hello"}}}}"#).unwrap();
         drop(f);
 
         // A "live" project whose cwd actually exists.
@@ -1353,11 +1376,7 @@ mod tests {
             live_cwd.display()
         )
         .unwrap();
-        writeln!(
-            f,
-            r#"{{"type":"user","message":{{"content":"hello"}}}}"#
-        )
-        .unwrap();
+        writeln!(f, r#"{{"type":"user","message":{{"content":"hello"}}}}"#).unwrap();
         drop(f);
 
         // Override CLAUDE_CONFIG_DIR to point at our fake root.
@@ -1373,11 +1392,15 @@ mod tests {
             .map(|(p, _)| p.to_string_lossy().to_string())
             .collect();
         assert!(
-            !paths.iter().any(|p| p == &deleted_cwd.to_string_lossy().to_string()),
+            !paths
+                .iter()
+                .any(|p| p == &deleted_cwd.to_string_lossy().to_string()),
             "deleted cwd must not appear in results; got: {paths:?}"
         );
         assert!(
-            paths.iter().any(|p| p == &live_cwd.to_string_lossy().to_string()),
+            paths
+                .iter()
+                .any(|p| p == &live_cwd.to_string_lossy().to_string()),
             "live cwd must appear in results; got: {paths:?}"
         );
     }
@@ -1649,8 +1672,11 @@ mod tests {
         jsonl += &said(
             r#"[{"type":"thinking","thinking":"<keys>t</keys>"},{"type":"text","text":"press <keys>Ctrl+C</keys> for <latex>a^2</latex>, not <kbd>x</kbd>"}]"#,
         );
-        jsonl += &said(r#"[{"type":"text","text":"<keys>side</keys>"}]"#)
-            .replacen('{', r#"{"isSidechain":true,"#, 1);
+        jsonl += &said(r#"[{"type":"text","text":"<keys>side</keys>"}]"#).replacen(
+            '{',
+            r#"{"isSidechain":true,"#,
+            1,
+        );
         jsonl += &said(r#""then <keys>Esc</keys>""#);
         c.feed(jsonl.as_bytes());
         let items: Vec<(&str, &str)> = c
@@ -1658,7 +1684,10 @@ mod tests {
             .iter()
             .map(|i| (i.tag.as_str(), i.text.as_str()))
             .collect();
-        assert_eq!(items, [("keys", "Ctrl+C"), ("latex", "a^2"), ("keys", "Esc")]);
+        assert_eq!(
+            items,
+            [("keys", "Ctrl+C"), ("latex", "a^2"), ("keys", "Esc")]
+        );
         // The latex list is kept as before.
         assert_eq!(c.latex().iter().collect::<Vec<_>>(), ["a^2"]);
         // Without tags, no items.

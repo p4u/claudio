@@ -743,11 +743,11 @@ fn detect_terminal_size_realistic() {
     if nums.len() >= 2 {
         let (rows, cols) = (nums[0], nums[1]);
         assert!(
-            rows >= 35 && rows <= 65,
+            (35..=65).contains(&rows),
             "PTY rows={rows} outside realistic range [35, 65]: {stdout:?}"
         );
         assert!(
-            cols >= 150 && cols <= 290,
+            (150..=290).contains(&cols),
             "PTY cols={cols} outside realistic range [150, 290]: {stdout:?}"
         );
     }

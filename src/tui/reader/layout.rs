@@ -677,7 +677,7 @@ mod tests {
         );
         let text = "Roots:\n\n<latex>q</latex>\n\ndone";
         assert_eq!(
-            shown(text, &[quad.clone()], 40),
+            shown(text, std::slice::from_ref(&quad), 40),
             [
                 "Roots:",
                 "",
@@ -749,7 +749,7 @@ mod tests {
         );
         let text = "| name | value |\n|---|---|\n| one | 1 |\n| frac | <latex>x</latex> |";
         assert_eq!(
-            shown(text, &[e.clone()], 40),
+            shown(text, std::slice::from_ref(&e), 40),
             [
                 "name │ value",
                 "─────┼──────",

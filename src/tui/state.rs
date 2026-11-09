@@ -203,10 +203,13 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
         .claude_session_id
         .clone()
         .or_else(|| saved.and_then(|s| s.claude_session_id.clone()));
-    let respawn = info.pid.is_none().then(|| match (info.kind, &claude_session_id) {
-        (SessionKind::Claude, Some(csid)) => vec!["--resume".to_owned(), csid.clone()],
-        _ => Vec::new(),
-    });
+    let respawn = info
+        .pid
+        .is_none()
+        .then(|| match (info.kind, &claude_session_id) {
+            (SessionKind::Claude, Some(csid)) => vec!["--resume".to_owned(), csid.clone()],
+            _ => Vec::new(),
+        });
     Recovered {
         saved: SavedSession {
             id: info.id,
@@ -283,7 +286,10 @@ mod tests {
 
     fn mk_recent(host: &str, dirs: &[&str]) -> HashMap<String, Vec<String>> {
         let mut m = HashMap::new();
-        m.insert(host.to_owned(), dirs.iter().map(|s| s.to_string()).collect());
+        m.insert(
+            host.to_owned(),
+            dirs.iter().map(|s| s.to_string()).collect(),
+        );
         m
     }
 
@@ -323,7 +329,11 @@ mod tests {
         // Old state.json stores recent_dirs as a flat array.
         let json = r#"{"recent_dirs":["/srv","/tmp"]}"#;
         let state: ClientState = serde_json::from_str(json).unwrap();
-        let local_dirs = state.recent_dirs.get("local").map(Vec::as_slice).unwrap_or(&[]);
+        let local_dirs = state
+            .recent_dirs
+            .get("local")
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         assert_eq!(local_dirs, &["/srv", "/tmp"][..]);
     }
 

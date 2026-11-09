@@ -312,6 +312,8 @@ async fn client_loop(
 }
 
 /// What the socket reader hands the client loop.
+// large_enum_variant: `Frame` is moved once per message through a channel; boxing `Msg` would touch every protocol call site.
+#[allow(clippy::large_enum_variant)]
 enum Inbound {
     Frame(Frame),
     /// A well-framed control message we could not decode (e.g. an op from a
@@ -615,6 +617,8 @@ impl Client {
     /// Dropped without running if the client disconnects first. Past
     /// [`GIT_PENDING`] requests the reply is an immediate busy error, so a
     /// stuck git cannot make a client pile up tasks without bound.
+    // result_large_err: the `Err` is the reply itself, sent at once; it is never on a hot path.
+    #[allow(clippy::result_large_err)]
     fn spawn_git(&self, req: Option<u64>, request: Msg) -> Result<(), Msg> {
         let pending = Arc::clone(&self.git_pending)
             .try_acquire_owned()
@@ -639,6 +643,8 @@ impl Client {
     /// Run a search off the client loop and queue its reply when done. One
     /// search runs per daemon: while one does, another is refused at once
     /// with "search busy". A bad query is refused before anything runs.
+    // result_large_err: the `Err` is the reply itself, sent at once; it is never on a hot path.
+    #[allow(clippy::result_large_err)]
     fn spawn_search(&self, req: Option<u64>, query: String, limit: u32) -> Result<(), Msg> {
         if let Err(BadQuery(why)) = search::terms(&query) {
             return Err(Msg::Error {

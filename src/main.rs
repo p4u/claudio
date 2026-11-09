@@ -19,8 +19,8 @@ mod daemon;
 mod freshness;
 mod msglog;
 mod paths;
-mod plugins;
 mod plain;
+mod plugins;
 mod print;
 mod proto;
 mod proxy;
@@ -354,10 +354,7 @@ fn sessions_cmd() -> std::process::ExitCode {
                         println!("no sessions");
                         return;
                     }
-                    println!(
-                        "{:<10} {:<14} {:<20} {}",
-                        "ID", "STATE", "NAME/TITLE", "CWD"
-                    );
+                    println!("{:<10} {:<14} {:<20} CWD", "ID", "STATE", "NAME/TITLE");
                     for s in &sessions {
                         let id_prefix: String = s.id.to_string().chars().take(8).collect();
                         let state = format!("{:?}", s.state).to_ascii_lowercase();

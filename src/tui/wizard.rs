@@ -107,11 +107,7 @@ impl HostStep {
     }
 
     /// Like `new` but also populates the LOCAL section with recent dirs.
-    pub fn with_local_dirs(
-        active_host: &str,
-        extra: &[String],
-        local_dirs: &[String],
-    ) -> HostStep {
+    pub fn with_local_dirs(active_host: &str, extra: &[String], local_dirs: &[String]) -> HostStep {
         let candidates: Vec<String> = extra
             .iter()
             .filter(|h| h.as_str() != "local")
@@ -190,7 +186,7 @@ impl HostStep {
                     HostSection::Remote => {
                         if self.selected > 0 {
                             self.selected -= 1;
-                        } else if !self.local_items.is_empty() || true {
+                        } else {
                             // Cross edge: go to bottom of LOCAL section.
                             self.focus = HostSection::Local;
                             self.local_selected = self.local_len().saturating_sub(1);
@@ -297,7 +293,7 @@ impl HostStep {
             .iter()
             .filter_map(|h| Some((fuzzy_score(&input, h)?, h.clone())))
             .collect();
-        scored_remote.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_remote.sort_by_key(|s| std::cmp::Reverse(s.0));
         self.items = scored_remote.iter().map(|(_, h)| h.clone()).collect();
 
         // ── Filter local dirs (scored, best first). ────────────────────────────
@@ -306,7 +302,7 @@ impl HostStep {
             .iter()
             .filter_map(|d| Some((fuzzy_score(&input, d)?, d.clone())))
             .collect();
-        scored_local.sort_by(|a, b| b.0.cmp(&a.0));
+        scored_local.sort_by_key(|s| std::cmp::Reverse(s.0));
         self.local_items = scored_local.iter().map(|(_, d)| d.clone()).collect();
 
         // ── Score the "Explore local dirs…" pseudo-entry. ─────────────────────
@@ -331,8 +327,7 @@ impl HostStep {
                 self.focus = HostSection::Remote;
                 self.selected = 0;
                 // Clamp local too.
-                self.local_selected =
-                    self.local_selected.min(self.local_len().saturating_sub(1));
+                self.local_selected = self.local_selected.min(self.local_len().saturating_sub(1));
                 return;
             }
         }
@@ -397,8 +392,7 @@ impl ResumeStep {
         self.sessions
             .iter()
             .filter(|s| {
-                s.id.to_lowercase().contains(&f)
-                    || resume_label(s, 0).to_lowercase().contains(&f)
+                s.id.to_lowercase().contains(&f) || resume_label(s, 0).to_lowercase().contains(&f)
             })
             .collect()
     }
@@ -516,7 +510,6 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
 }
 
 impl Wizard {
-
     /// A wizard on `active_host`. `recent` fills the first screen's LOCAL
     /// section and marks those seeds `recently_used` in `meta`.
     pub fn new(
@@ -714,7 +707,7 @@ impl Wizard {
                 proxy: self.selected_proxy().map(str::to_owned),
             };
         }
-        sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         self.resume = Some(ResumeStep {
             cwd: cwd.to_owned(),
             sessions,
@@ -1093,17 +1086,25 @@ impl Wizard {
                 // is a tie-breaker.
                 let frecency = self.meta.get(s.as_str()).map_or(0i64, |m| {
                     let mut bonus = 0i64;
-                    if m.hidden { bonus -= 100_000; }
-                    if m.claude_at.is_some() { bonus += 200; }
-                    if m.recently_used { bonus += 100; }
-                    if m.git.is_some() { bonus += 50; }
+                    if m.hidden {
+                        bonus -= 100_000;
+                    }
+                    if m.claude_at.is_some() {
+                        bonus += 200;
+                    }
+                    if m.recently_used {
+                        bonus += 100;
+                    }
+                    if m.git.is_some() {
+                        bonus += 50;
+                    }
                     bonus
                 });
                 Some((fuzzy + frecency, s))
             })
             .collect();
         // Stable: equal scores keep seed (recency) order.
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         for (_, s) in scored {
             if !items.contains(s) {
                 items.push(s.clone());
@@ -1399,7 +1400,8 @@ mod tests {
     #[test]
     fn proxy_toggle_available_in_directory_step() {
         let mut w = Wizard::new(
-            strings(&["/w"]), &[],
+            strings(&["/w"]),
+            &[],
             "/h".into(),
             "local",
             &[],
@@ -1419,7 +1421,8 @@ mod tests {
     #[test]
     fn host_paste_sets_host_input() {
         let mut w = Wizard::new(
-            vec![], &[],
+            vec![],
+            &[],
             "/h".into(),
             "local",
             &["server.example.com".to_owned()],
@@ -1437,7 +1440,8 @@ mod tests {
     fn host_filtering_uses_fuzzy_scorer() {
         // Fuzzy: "srv" matches "my-server" (subsequence).
         let mut w = Wizard::new(
-            vec![], &[],
+            vec![],
+            &[],
             "/h".into(),
             "local",
             &["my-server".to_owned(), "production".to_owned()],
@@ -1481,7 +1485,10 @@ mod tests {
         let seeds = strings(&["/regular", "/claude-active", "/git-only"]);
         let mut w = wizard_local(seeds, "/h");
         // /claude-active has a recent claude session.
-        w.meta.entry("/claude-active".to_owned()).or_default().claude_at = Some(1_000_000);
+        w.meta
+            .entry("/claude-active".to_owned())
+            .or_default()
+            .claude_at = Some(1_000_000);
         // /git-only has a git repo.
         w.meta.entry("/git-only".to_owned()).or_default().git = Some("main".to_owned());
         w.input.clear();
@@ -1506,15 +1513,13 @@ mod tests {
     fn recently_used_badge_set_from_recent_dirs() {
         let seeds = strings(&["/a", "/b", "/c"]);
         let recent = strings(&["/b"]);
-        let w = Wizard::new(
-            seeds, &recent, "/h".into(), "local", &[], &[], None,
-        );
+        let w = Wizard::new(seeds, &recent, "/h".into(), "local", &[], &[], None);
         assert!(
-            w.meta.get("/b").map_or(false, |m| m.recently_used),
+            w.meta.get("/b").is_some_and(|m| m.recently_used),
             "/b should be marked recently_used"
         );
         assert!(
-            !w.meta.get("/a").map_or(false, |m| m.recently_used),
+            !w.meta.get("/a").is_some_and(|m| m.recently_used),
             "/a should not be recently_used"
         );
     }
@@ -1549,7 +1554,10 @@ mod tests {
         hs.refilter();
         assert_eq!(hs.focus, HostSection::Remote, "should switch to Remote");
         assert_eq!(hs.selected, 0, "top of REMOTE section");
-        assert!(hs.items.iter().any(|h| h == "devbox"), "devbox should be visible");
+        assert!(
+            hs.items.iter().any(|h| h == "devbox"),
+            "devbox should be visible"
+        );
         assert!(!hs.connect_raw);
     }
 
@@ -1559,7 +1567,10 @@ mod tests {
         let mut hs = make_host_step(&["prod"], &[]);
         hs.input = "newhost".to_owned();
         hs.refilter();
-        assert!(hs.connect_raw, "connect_raw should be set for unknown host-like query");
+        assert!(
+            hs.connect_raw,
+            "connect_raw should be set for unknown host-like query"
+        );
         assert_eq!(hs.focus, HostSection::Remote);
         assert_eq!(hs.remote_len(), 1, "only the connect_raw row");
         // Enter should use the raw input.
@@ -1627,7 +1638,15 @@ mod tests {
 
     #[test]
     fn late_local_dirs_fill_the_first_screen_until_the_user_types() {
-        let mut w = Wizard::new(vec![], &[], "/h".into(), "local", &["box".into()], &[], None);
+        let mut w = Wizard::new(
+            vec![],
+            &[],
+            "/h".into(),
+            "local",
+            &["box".into()],
+            &[],
+            None,
+        );
         w.set_local_dirs(&strings(&["/h/a", "/h/b"]));
         let step = w.host_step.as_ref().unwrap();
         assert_eq!(step.local_items, strings(&["/h/a", "/h/b"]));
@@ -1635,7 +1654,12 @@ mod tests {
 
         w.on_key(&press(KeyCode::Char('a')));
         w.set_local_dirs(&strings(&["/h/c"]));
-        assert!(!w.host_step.as_ref().unwrap().local_dirs.contains(&"/h/c".to_owned()));
+        assert!(!w
+            .host_step
+            .as_ref()
+            .unwrap()
+            .local_dirs
+            .contains(&"/h/c".to_owned()));
     }
 
     // ── Hidden directories ────────────────────────────────────────────────────
@@ -1668,7 +1692,10 @@ mod tests {
         assert_eq!(names(&w), vec!["repos"]);
 
         // Seeds with a hidden final component are hidden too.
-        let w = wizard_local(strings(&["/w/app", "/w/.cache", "/home/u/.dotproj"]), "/home/u");
+        let w = wizard_local(
+            strings(&["/w/app", "/w/.cache", "/home/u/.dotproj"]),
+            "/home/u",
+        );
         assert_eq!(w.items, strings(&["/w/app"]));
     }
 
@@ -1730,7 +1757,15 @@ mod tests {
     /// A wizard past the host step, browsing `/home/u` (`~/`) with `entries`
     /// listed. Returns the `ListDir` outcome that opening the browser produced.
     fn browser(entries: &[&str]) -> (Wizard, Outcome) {
-        let mut w = Wizard::new(strings(&["/srv/app"]), &[], "/home/u".into(), "local", &[], &[], None);
+        let mut w = Wizard::new(
+            strings(&["/srv/app"]),
+            &[],
+            "/home/u".into(),
+            "local",
+            &[],
+            &[],
+            None,
+        );
         w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
         let opened = w.browse_home();
         let entries: Vec<DirEntry> = entries.iter().map(|n| DirEntry::simple(*n, true)).collect();
@@ -1745,14 +1780,25 @@ mod tests {
         assert_eq!(w.input, "~/");
         assert!(w.browsing());
         assert_eq!(w.items, strings(&["/home/u/docs", "/home/u/repos"]));
-        assert!(w.here_selected(), "`start here` is preselected on a trailing slash");
+        assert!(
+            w.here_selected(),
+            "`start here` is preselected on a trailing slash"
+        );
         assert_eq!(w.here_dir().as_deref(), Some("/home/u"));
         assert_eq!(w.display("/home/u"), "~");
     }
 
     #[test]
     fn browser_uses_the_remote_hosts_home() {
-        let mut w = Wizard::new(vec![], &[], "/home/u".into(), "local", &["box".into()], &[], None);
+        let mut w = Wizard::new(
+            vec![],
+            &[],
+            "/home/u".into(),
+            "local",
+            &["box".into()],
+            &[],
+            None,
+        );
         w.on_host_connected("box", "/home/remote", vec![]);
         assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
         w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)]);
@@ -1821,7 +1867,10 @@ mod tests {
             Outcome::ListDir("/home/u/repos".into())
         );
         assert_eq!(w.input, "~/repos/");
-        assert!(w.here_selected(), "`start here` is selected after descending");
+        assert!(
+            w.here_selected(),
+            "`start here` is selected after descending"
+        );
         w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)]);
         w.on_key(&press(KeyCode::Down));
         assert_eq!(
@@ -1844,7 +1893,10 @@ mod tests {
             Outcome::ListDir("/home".into())
         );
         assert_eq!(w.input, "/home/");
-        assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::ListDir("/".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Left)),
+            Outcome::ListDir("/".into())
+        );
         assert_eq!(w.input, "/");
         assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::None, "stays at /");
         assert_eq!(w.input, "/");
@@ -1856,7 +1908,10 @@ mod tests {
         let (mut w, _) = browser(&["repos"]);
         type_str(&mut w, "repos/");
         assert_eq!(w.input, "~/repos/");
-        assert_eq!(w.on_key(&press(KeyCode::Left)), Outcome::ListDir("/home/u".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Left)),
+            Outcome::ListDir("/home/u".into())
+        );
         assert_eq!(w.input, "~/");
     }
 
@@ -1890,7 +1945,15 @@ mod tests {
 
     #[test]
     fn arrows_cycle_the_proxy_only_without_input() {
-        let mut w = Wizard::new(vec![], &[], "/h".into(), "local", &[], &["p".to_owned()], None);
+        let mut w = Wizard::new(
+            vec![],
+            &[],
+            "/h".into(),
+            "local",
+            &[],
+            &["p".to_owned()],
+            None,
+        );
         w.on_host_connected("local", "/h", vec![]);
         // Empty input: proxy cycling.
         w.on_key(&press(KeyCode::Right));
@@ -1911,7 +1974,10 @@ mod tests {
         type_str(&mut w, "app");
         assert_eq!(w.items, strings(&["/srv/app"]));
         assert_eq!(w.selected, 0, "no `start here` row");
-        assert_eq!(w.on_key(&press(KeyCode::Enter)), Outcome::ChooseDir("/srv/app".into()));
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/srv/app".into())
+        );
     }
 
     #[test]

@@ -136,7 +136,7 @@ fn importmap_sha256(html: &[u8]) -> Option<String> {
     let end = start + text[start..].find("</script>")?;
     Some(
         base64::engine::general_purpose::STANDARD
-            .encode(Sha256::digest(text[start..end].as_bytes())),
+            .encode(Sha256::digest(&text.as_bytes()[start..end])),
     )
 }
 

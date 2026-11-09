@@ -23,8 +23,7 @@ use crate::proxy::api::SessionCredential;
 
 use super::super::app::{App, HostStatsSample};
 use super::super::fmt::{
-    abbreviate_home, fmt_age, fmt_tokens, fmt_window, short_model, spans_width, str_width,
-    truncate,
+    abbreviate_home, fmt_age, fmt_tokens, fmt_window, short_model, spans_width, str_width, truncate,
 };
 use super::super::sessions::SessionView;
 
@@ -156,10 +155,7 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
 
 /// The credential the proxy reports for the session: `work-max (max)` and a
 /// short-lived switch notice. Empty when the proxy sent nothing to name.
-pub(super) fn credential_segments(
-    cred: &SessionCredential,
-    now: u64,
-) -> Vec<Vec<Span<'static>>> {
+pub(super) fn credential_segments(cred: &SessionCredential, now: u64) -> Vec<Vec<Span<'static>>> {
     let mut segments = Vec::new();
     if let Some(name) = cred.name() {
         let mut spans = vec![bold_colored(truncate(name, 24), TEXT)];
@@ -435,7 +431,10 @@ fn conversation_segment(turns: Option<u32>, output_tokens: Option<u64>) -> Optio
         if !spans.is_empty() {
             spans.push(dim(SEPARATOR));
         }
-        spans.push(bold_colored(fmt_tokens(n.min(i64::MAX as u64) as i64), TEXT));
+        spans.push(bold_colored(
+            fmt_tokens(n.min(i64::MAX as u64) as i64),
+            TEXT,
+        ));
         spans.push(dim(" out"));
     }
     (!spans.is_empty()).then_some(Segment {
@@ -628,11 +627,17 @@ mod tests {
     fn credential_without_utilization_or_plan_is_just_the_label() {
         let mut c = cred(None, None);
         c.credential.plan.clear();
-        assert_eq!(plain(&join_segments(credential_segments(&c, 0))), "work-max");
+        assert_eq!(
+            plain(&join_segments(credential_segments(&c, 0))),
+            "work-max"
+        );
         // The id stands in for a missing label; nothing to name shows nothing.
         c.credential.label.clear();
         c.credential.id = "cred_ab12".into();
-        assert_eq!(plain(&join_segments(credential_segments(&c, 0))), "cred_ab12");
+        assert_eq!(
+            plain(&join_segments(credential_segments(&c, 0))),
+            "cred_ab12"
+        );
         c.credential.id.clear();
         assert!(credential_segments(&c, 0).is_empty());
     }
@@ -641,12 +646,20 @@ mod tests {
     fn switch_notice_lasts_ten_minutes() {
         let at = "2026-10-09T10:07:02Z";
         let t0 = crate::proxy::api::parse_rfc3339(at).unwrap();
-        let line = |now| plain(&join_segments(credential_segments(&cred(None, Some(at)), now)));
+        let line = |now| {
+            plain(&join_segments(credential_segments(
+                &cred(None, Some(at)),
+                now,
+            )))
+        };
         assert_eq!(line(t0 + 180), "work-max (max) · ⇆ switched 3m ago");
         assert_eq!(line(t0 + 599), "work-max (max) · ⇆ switched 9m ago");
         assert_eq!(line(t0 + 600), "work-max (max)");
         let spans = join_segments(credential_segments(&cred(None, Some(at)), t0 + 5));
-        let sw = spans.iter().find(|s| s.content.contains("switched")).unwrap();
+        let sw = spans
+            .iter()
+            .find(|s| s.content.contains("switched"))
+            .unwrap();
         assert_eq!(sw.style.fg, Some(YELLOW));
         assert!(sw.style.add_modifier.contains(Modifier::DIM));
     }
@@ -678,7 +691,13 @@ mod tests {
             }),
             output_tokens: Some(48_200),
             turns: Some(14),
-            ..SessionView::new(uuid::Uuid::new_v4(), "local", "/srv", SessionKind::Claude, (10, 40))
+            ..SessionView::new(
+                uuid::Uuid::new_v4(),
+                "local",
+                "/srv",
+                SessionKind::Claude,
+                (10, 40),
+            )
         });
         app.active = Some(0);
         for (cpu, mem) in [(10.0, 20u64), (30.0, 25), (23.0, 26)] {
@@ -718,8 +737,7 @@ mod tests {
             },
         );
         assert!(line(&app).ends_with("⇄ proxy:work"));
-        app.session_creds.get_mut(&app.sessions[0].id).unwrap().cred =
-            Some(cred(Some(37.5), None));
+        app.session_creds.get_mut(&app.sessions[0].id).unwrap().cred = Some(cred(Some(37.5), None));
         assert!(
             line(&app).ends_with("⇄ proxy:work · work-max (max)"),
             "{}",
@@ -838,7 +856,11 @@ mod tests {
         let pct = find(&seg.spans, "62%");
         assert_eq!(pct.style.fg, Some(YELLOW));
         assert!(pct.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(seg.spans[2].style.fg, Some(YELLOW), "gauge shares the color");
+        assert_eq!(
+            seg.spans[2].style.fg,
+            Some(YELLOW),
+            "gauge shares the color"
+        );
         assert_eq!(find(&seg.spans, " 620k/1M").style.fg, Some(DIM));
 
         let seg = context_segment(Some(40_000), Some("claude-haiku-4-5")).unwrap();
@@ -892,16 +914,25 @@ mod tests {
     #[test]
     fn git_segment_variants() {
         // Clean and in sync with the upstream: a check mark.
-        assert_eq!(segment_text(&git_segment(Some(&git(0, 0)), None).unwrap()), "⎇ main ✓");
+        assert_eq!(
+            segment_text(&git_segment(Some(&git(0, 0)), None).unwrap()),
+            "⎇ main ✓"
+        );
         // Clean, ahead only.
-        assert_eq!(segment_text(&git_segment(Some(&git(3, 0)), None).unwrap()), "⎇ main ↑3");
+        assert_eq!(
+            segment_text(&git_segment(Some(&git(3, 0)), None).unwrap()),
+            "⎇ main ↑3"
+        );
         // No upstream: no delta, no check mark.
         let local = GitStatus {
             upstream: false,
             ahead: 5,
             ..git(0, 0)
         };
-        assert_eq!(segment_text(&git_segment(Some(&local), None).unwrap()), "⎇ main");
+        assert_eq!(
+            segment_text(&git_segment(Some(&local), None).unwrap()),
+            "⎇ main"
+        );
         // Detached: the short commit id, dim.
         let detached = GitStatus {
             head: "9f8e7d6".into(),
@@ -913,7 +944,10 @@ mod tests {
         assert_eq!(segment_text(&seg), "⎇ @9f8e7d6 …1");
         assert_eq!(find(&seg.spans, "@9f8e7d6").style.fg, Some(DIM));
         // Only a branch name (old daemon): just that. Nothing: nothing.
-        assert_eq!(segment_text(&git_segment(None, Some("dev")).unwrap()), "⎇ dev");
+        assert_eq!(
+            segment_text(&git_segment(None, Some("dev")).unwrap()),
+            "⎇ dev"
+        );
         assert!(git_segment(None, Some("")).is_none());
         assert!(git_segment(None, None).is_none());
         // A long branch name is cut.
@@ -943,14 +977,21 @@ mod tests {
         let seven = seven_day_segment(&c).unwrap();
         assert_eq!(segment_text(&five), "5h █▉░░░ 37%");
         assert_eq!(segment_text(&seven), "7d 91%");
-        assert_eq!((five.priority, seven.priority), (PRIO_FIVE_HOUR, PRIO_SEVEN_DAY));
+        assert_eq!(
+            (five.priority, seven.priority),
+            (PRIO_FIVE_HOUR, PRIO_SEVEN_DAY)
+        );
         assert_eq!(find(&five.spans, "37%").style.fg, Some(GREEN));
         assert_eq!(find(&seven.spans, "91%").style.fg, Some(RED));
         for (value, color) in [(72.0, YELLOW), (91.0, RED)] {
             let c = cred(Some(value), None);
             assert!(seven_day_segment(&c).is_none(), "no 7d figure");
             let five = five_hour_segment(&c).unwrap();
-            let pct = five.spans.iter().find(|s| s.content.ends_with('%')).unwrap();
+            let pct = five
+                .spans
+                .iter()
+                .find(|s| s.content.ends_with('%'))
+                .unwrap();
             assert_eq!(pct.style.fg, Some(color), "{value}");
         }
         assert!(five_hour_segment(&cred(None, None)).is_none());
@@ -961,7 +1002,10 @@ mod tests {
         let seg = conversation_segment(Some(14), Some(48_200)).unwrap();
         assert_eq!(segment_text(&seg), "14 turns · 48k out");
         assert_eq!(seg.priority, PRIO_CONVERSATION);
-        assert!(find(&seg.spans, "14").style.add_modifier.contains(Modifier::BOLD));
+        assert!(find(&seg.spans, "14")
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
         assert_eq!(
             segment_text(&conversation_segment(Some(1), None).unwrap()),
             "1 turn"
@@ -1012,7 +1056,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(render(&app, 200).contains("62% 620k/1M"), "{}", render(&app, 200));
+        assert!(
+            render(&app, 200).contains("62% 620k/1M"),
+            "{}",
+            render(&app, 200)
+        );
     }
 
     #[test]
@@ -1022,7 +1070,10 @@ mod tests {
         // 160: everything fits.
         let line = at(160);
         assert_eq!(str_width(&line), 160);
-        assert!(line.contains("7d 12%") && line.contains("14 turns"), "{line:?}");
+        assert!(
+            line.contains("7d 12%") && line.contains("14 turns"),
+            "{line:?}"
+        );
         // 120: the 7-day window and the conversation totals go; 5h stays.
         let line = at(120);
         assert_eq!(str_width(&line), 120);
@@ -1036,7 +1087,10 @@ mod tests {
         // 80: mem goes before git; ctx and cpu stay.
         let line = at(80);
         assert_eq!(str_width(&line), 80);
-        assert!(line.contains("cpu") && line.contains("ctx") && line.contains("⎇"), "{line:?}");
+        assert!(
+            line.contains("cpu") && line.contains("ctx") && line.contains("⎇"),
+            "{line:?}"
+        );
         assert!(!line.contains("mem"), "{line:?}");
         // 60: cpu and ctx only.
         let line = at(60);
@@ -1058,7 +1112,10 @@ mod tests {
         let line = render(&app, 200);
         assert!(line.contains("cpu") && line.contains("mem") && line.contains("⎇ main ↑2 ↓1 ✚3"));
         for claude_only in ["ctx", "5h", "7d", "turns", "out"] {
-            assert!(!line.contains(claude_only), "{claude_only} on a terminal: {line:?}");
+            assert!(
+                !line.contains(claude_only),
+                "{claude_only} on a terminal: {line:?}"
+            );
         }
         // A claude tab without a transcript or credential yet: host and git.
         let mut app = demo_app();
@@ -1130,7 +1187,7 @@ mod tests {
 
     #[test]
     fn hint_stays_visible_when_narrow() {
-        let left = vec![text(&"x".repeat(100))];
+        let left = vec![text("x".repeat(100))];
         for width in [60, 30, 17] {
             let line = plain(&layout_line(
                 left.clone(),
@@ -1150,7 +1207,15 @@ mod tests {
     #[test]
     fn print_renderings() {
         let mut app = demo_app();
-        for (cpu, mem) in [(18.0, 26u64), (41.0, 27), (35.0, 27), (22.0, 26), (27.0, 26), (19.0, 26), (23.0, 26)] {
+        for (cpu, mem) in [
+            (18.0, 26u64),
+            (41.0, 27),
+            (35.0, 27),
+            (22.0, 26),
+            (27.0, 26),
+            (19.0, 26),
+            (23.0, 26),
+        ] {
             app.on_host_stats("local".into(), cpu, mem << 30, 46 << 30);
         }
         let shell = {

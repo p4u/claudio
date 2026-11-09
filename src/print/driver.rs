@@ -206,7 +206,7 @@ impl PtySession {
             .map_err(|e| DriverError::Internal(e.to_string()))?
             .to_string_lossy()
             .into_owned();
-        let relay_arg = relay.as_ref().zip(listener.port()).map(|(r, p)| (r, p));
+        let relay_arg = relay.as_ref().zip(listener.port());
         let (settings, settings_warns) =
             hooks::build_settings_merged(&exe, relay_arg, user_settings);
         for w in &settings_warns {

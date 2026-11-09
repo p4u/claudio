@@ -491,8 +491,16 @@ impl Screen {
         let mut out = String::new();
         for r in start.0 as usize..=last_row {
             let line = Line(r as i32 - grid.display_offset() as i32);
-            let from = if r == start.0 as usize { start.1 as usize } else { 0 };
-            let to = if r == end.0 as usize { (end.1 as usize).min(n_cols - 1) } else { n_cols - 1 };
+            let from = if r == start.0 as usize {
+                start.1 as usize
+            } else {
+                0
+            };
+            let to = if r == end.0 as usize {
+                (end.1 as usize).min(n_cols - 1)
+            } else {
+                n_cols - 1
+            };
             let mut row = String::new();
             for c in from..=to {
                 let cell = &grid[line][Column(c)];
@@ -507,7 +515,9 @@ impl Screen {
                     row.extend(zwc);
                 }
             }
-            let wraps = grid[line][Column(n_cols - 1)].flags.contains(Flags::WRAPLINE);
+            let wraps = grid[line][Column(n_cols - 1)]
+                .flags
+                .contains(Flags::WRAPLINE);
             if r < last_row && wraps {
                 out.push_str(&row);
             } else {
@@ -757,13 +767,21 @@ mod tests {
     fn text_spans_rows_and_trims_trailing_blanks() {
         let mut s = Screen::new(4, 20);
         s.feed(b"first line   \r\nsecond\r\n\r\nfourth row");
-        assert_eq!(s.text((0, 6), (1, 2)), "line\nsec", "the rest of row 0, then row 1's start");
+        assert_eq!(
+            s.text((0, 6), (1, 2)),
+            "line\nsec",
+            "the rest of row 0, then row 1's start"
+        );
         assert_eq!(s.text((0, 0), (3, 19)), "first line\nsecond\n\nfourth row");
         assert_eq!(s.text((1, 0), (1, 19)), "second");
         assert_eq!(s.text((0, 2), (0, 2)), "r");
         assert_eq!(s.text((1, 10), (1, 15)), "", "only blanks");
         assert_eq!(s.text((2, 0), (1, 0)), "", "start after end");
-        assert_eq!(s.text((3, 0), (9, 50)), "fourth row", "clamped to the screen");
+        assert_eq!(
+            s.text((3, 0), (9, 50)),
+            "fourth row",
+            "clamped to the screen"
+        );
         assert_eq!(s.text((1, 0), (2, 19)), "second", "no trailing blank rows");
     }
 
@@ -774,7 +792,11 @@ mod tests {
         // 'e' with a combining acute accent.
         s.feed("Ａ🦀xe\u{301}".as_bytes());
         assert_eq!(s.text((0, 0), (0, 19)), "Ａ🦀xe\u{301}");
-        assert_eq!(s.text((0, 1), (0, 2)), "🦀", "from a spacer to the next wide char");
+        assert_eq!(
+            s.text((0, 1), (0, 2)),
+            "🦀",
+            "from a spacer to the next wide char"
+        );
         let row = s.row_chars(0);
         assert_eq!(&row[..6], &['Ａ', 'Ａ', '🦀', '🦀', 'x', 'e']);
         assert_eq!(row.len(), 20);

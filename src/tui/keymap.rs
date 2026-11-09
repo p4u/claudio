@@ -381,15 +381,17 @@ impl Keymap {
                 b.mods = mods;
             }
         }
-        Keymap { bindings, goto_tabs }
+        Keymap {
+            bindings,
+            goto_tabs,
+        }
     }
 
     /// The global action bound to `key`, if any. Releases never trigger actions.
     pub fn lookup(&self, key: &KeyEvent) -> Option<Action> {
-        self.lookup_scope(key, Scope::Global)
-            .or_else(|| {
-                goto_session(key).filter(|_| self.goto_tabs && key.kind != KeyEventKind::Release)
-            })
+        self.lookup_scope(key, Scope::Global).or_else(|| {
+            goto_session(key).filter(|_| self.goto_tabs && key.kind != KeyEventKind::Release)
+        })
     }
 
     /// The wizard-scoped action bound to `key`, if any.
@@ -539,9 +541,10 @@ pub fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
 /// (legacy encoding) or `Char('q')` with `ALT | SHIFT` (kitty protocol).
 fn canonical_key(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
     match code {
-        KeyCode::Char(c) if mods.contains(KeyModifiers::SHIFT) && c.is_ascii_alphabetic() => {
-            (KeyCode::Char(c.to_ascii_uppercase()), mods - KeyModifiers::SHIFT)
-        }
+        KeyCode::Char(c) if mods.contains(KeyModifiers::SHIFT) && c.is_ascii_alphabetic() => (
+            KeyCode::Char(c.to_ascii_uppercase()),
+            mods - KeyModifiers::SHIFT,
+        ),
         _ => (code, mods),
     }
 }
@@ -971,7 +974,11 @@ mod tests {
         }
         for d in '0'..='9' {
             let mods = KeyModifiers::ALT | KeyModifiers::SHIFT;
-            assert_eq!(km.lookup(&key(KeyCode::Char(d), mods)), None, "Alt+Shift+{d}");
+            assert_eq!(
+                km.lookup(&key(KeyCode::Char(d), mods)),
+                None,
+                "Alt+Shift+{d}"
+            );
         }
         // The wizard key is not part of it either.
         assert_eq!(km.lookup_wizard(&alt('.')), None);
@@ -983,7 +990,16 @@ mod tests {
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
-            ["Alt+h", "Alt+s", "Alt+s → n", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+i"]
+            [
+                "Alt+h",
+                "Alt+s",
+                "Alt+s → n",
+                "Alt+l",
+                "Alt+e",
+                "Alt+u",
+                "Alt+z",
+                "Alt+i"
+            ]
         );
     }
 
@@ -991,7 +1007,10 @@ mod tests {
     fn help_lists_the_subscription_switch_after_the_stats_key() {
         let entries = Keymap::default().help_entries();
         let at = entries.iter().position(|(k, _)| k == "Alt+s").unwrap();
-        assert_eq!(entries[at + 1], ("Alt+s → n".to_owned(), SWITCH_SUBSCRIPTION_HELP));
+        assert_eq!(
+            entries[at + 1],
+            ("Alt+s → n".to_owned(), SWITCH_SUBSCRIPTION_HELP)
+        );
         // A remapped stats key moves the row along with it.
         let overrides = [("proxy_stats".to_owned(), "alt+p".to_owned())].into();
         let km = Keymap::build(&overrides, &mut Vec::new());

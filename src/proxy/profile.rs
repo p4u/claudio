@@ -273,7 +273,7 @@ pub fn name_from_url(url: &str) -> String {
     if is_localhost(host) {
         return "localhost".to_owned();
     }
-    host.splitn(2, '.').next().unwrap_or(host).to_owned()
+    host.split('.').next().unwrap_or(host).to_owned()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -365,8 +365,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
-        let mut sec = ProxySection::default();
-        sec.default = Some("work".into());
+        let mut sec = ProxySection {
+            default: Some("work".into()),
+            ..Default::default()
+        };
         sec.profiles.insert(
             "work".into(),
             Profile {

@@ -19,12 +19,12 @@ use crate::term::screen::{MouseMode, Screen};
 
 use super::app::{App, Effect, Mode, ReplyTo};
 use super::confirm::ConfirmPrompt;
+use super::extensions::protocol::Rendering;
 use super::extensions_view::ExtensionsView;
 use super::git_view::GitView;
 use super::keymap::Action;
-use super::leader::{Input, Picker};
-use super::extensions::protocol::Rendering;
 use super::latex::{Formula, Rendered};
+use super::leader::{Input, Picker};
 use super::reader::{External, ReaderView, RenderedAnswer};
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
@@ -224,7 +224,10 @@ impl App {
 
     fn open_overview(&mut self) {
         let selected = self.active.unwrap_or(0);
-        self.modal = Some(Modal::Overview { selected, filter: String::new() });
+        self.modal = Some(Modal::Overview {
+            selected,
+            filter: String::new(),
+        });
         self.redraw = true;
     }
 
@@ -320,11 +323,7 @@ impl App {
                         let host = self.sessions[i].host.clone();
                         self.sessions[i].name = name.clone();
                         // Persist to daemon journal so the name survives reconnects.
-                        self.request(
-                            &host,
-                            Msg::Rename { id, name },
-                            ReplyTo::Ack("rename"),
-                        );
+                        self.request(&host, Msg::Rename { id, name }, ReplyTo::Ack("rename"));
                         self.save();
                     }
                 }
@@ -361,7 +360,9 @@ impl App {
                     KeyCode::Down => {
                         // Max is the filtered session count.
                         let f = filter.clone();
-                        let matches = self.sessions.iter()
+                        let matches = self
+                            .sessions
+                            .iter()
                             .filter(|v| overview_matches(v, &f))
                             .count();
                         if *selected + 1 < matches {
@@ -372,7 +373,10 @@ impl App {
                         let f = filter.clone();
                         let sel = *selected;
                         // Find the actual index in all sessions.
-                        let real_idx = self.sessions.iter().enumerate()
+                        let real_idx = self
+                            .sessions
+                            .iter()
+                            .enumerate()
                             .filter(|(_, v)| overview_matches(v, &f))
                             .nth(sel)
                             .map(|(i, _)| i);
@@ -438,7 +442,9 @@ impl App {
             self.redraw = true;
             return;
         }
-        let Some(Modal::Git(view)) = &mut self.modal else { return };
+        let Some(Modal::Git(view)) = &mut self.modal else {
+            return;
+        };
         // Pane rows start below the tab bar; the status bar is not the pane.
         let above = self.mode.rows_above() as usize;
         let Some(row) = (m.row as usize).checked_sub(above).filter(|&r| r < rows) else {
@@ -558,7 +564,9 @@ impl App {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let Some(line) = self.dragged_row(at.row) else { return false };
+                let Some(line) = self.dragged_row(at.row) else {
+                    return false;
+                };
                 if let Some(sel) = &mut self.selection {
                     sel.extend(sel.unit().span(at, &line));
                 }
@@ -589,7 +597,9 @@ impl App {
     /// until the next click, key, paste, tab switch or resize.
     fn finish_selection(&mut self) {
         self.redraw = true;
-        let Some(sel) = &mut self.selection else { return };
+        let Some(sel) = &mut self.selection else {
+            return;
+        };
         sel.finish();
         let (start, end) = sel.bounds();
         let text = (!sel.is_empty())
@@ -973,7 +983,14 @@ impl App {
                 let formula = match rendering {
                     Some((inline, block)) => {
                         let text = None;
-                        Formula::new(&item.text, Rendered { inline, block, text })
+                        Formula::new(
+                            &item.text,
+                            Rendered {
+                                inline,
+                                block,
+                                text,
+                            },
+                        )
                     }
                     None => Formula::raw(&item.text),
                 };
@@ -1169,7 +1186,12 @@ mod tests {
 
     /// A mouse event at screen `col`, `row` (row 0 is the tab bar).
     fn mouse(kind: MouseEventKind, col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE })
+        Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     const DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
@@ -1331,7 +1353,9 @@ mod tests {
         drag(&mut app, (0, 1), (4, 1));
         app.take_effects();
         let titles = ui::tab_titles(&app.sessions, app.active, app.width, app.now);
-        let col = (0..app.width).find(|&c| ui::tab_at(&titles, c) == Some(1)).unwrap();
+        let col = (0..app.width)
+            .find(|&c| ui::tab_at(&titles, c) == Some(1))
+            .unwrap();
         app.on_terminal(mouse(DOWN, col, 0));
         assert_eq!(app.active, Some(1));
         assert!(app.selection.is_none());
@@ -1388,7 +1412,13 @@ mod tests {
         let new_conversation = SessionEvent::ClaudeSession {
             claude_session_id: "c2".into(),
         };
-        app.on_incoming_from(&host, Incoming::Event { id, event: new_conversation });
+        app.on_incoming_from(
+            &host,
+            Incoming::Event {
+                id,
+                event: new_conversation,
+            },
+        );
         let v = &app.sessions[0];
         assert_eq!(v.latex_seq, 0);
         assert!(v.latex.is_empty() && v.latex_srcs.is_empty());
@@ -1417,9 +1447,20 @@ mod tests {
         app.take_effects();
         // The daemon was restarted: the client re-attaches and the new
         // daemon replays its list under seq 1.
-        app.on_incoming_from(&host, Incoming::Attached { id, rows: 24, cols: 80 });
+        app.on_incoming_from(
+            &host,
+            Incoming::Attached {
+                id,
+                rows: 24,
+                cols: 80,
+            },
+        );
         assert_eq!(app.sessions[0].latex_seq, 0);
-        assert_eq!(app.sessions[0].latex, [Formula::raw("old")], "kept until the replay");
+        assert_eq!(
+            app.sessions[0].latex,
+            [Formula::raw("old")],
+            "kept until the replay"
+        );
         app.on_incoming_from(&host, latex(1, &["new"]));
         assert_eq!(app.sessions[0].latex_seq, 1);
         assert_eq!(app.sessions[0].latex_srcs, ["new"]);
@@ -1471,8 +1512,14 @@ mod tests {
         assert!(renders(&mut app).is_empty());
         let items = vec![item("keys", "k"), item("latex", "b"), item("latex", "c")];
         app.on_incoming_from(&host, lens(2, items));
-        assert_eq!(renders(&mut app), [(2, vec!["b".to_owned(), "c".to_owned()])]);
-        assert_eq!(app.sessions[0].lens_items, [item("latex", "b"), item("latex", "c")]);
+        assert_eq!(
+            renders(&mut app),
+            [(2, vec!["b".to_owned(), "c".to_owned()])]
+        );
+        assert_eq!(
+            app.sessions[0].lens_items,
+            [item("latex", "b"), item("latex", "c")]
+        );
         // An older list is ignored, as for latex.
         app.on_incoming_from(&host, lens(1, vec![item("latex", "old")]));
         assert!(renders(&mut app).is_empty());
@@ -1705,7 +1752,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
         terminal.draw(|f| ui::draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
-        let reversed = |x: u16| buf[(x, 1)].modifier.contains(ratatui::style::Modifier::REVERSED);
+        let reversed = |x: u16| {
+            buf[(x, 1)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
         assert!((6..=10).all(reversed), "world is highlighted");
         assert!(!reversed(5) && !reversed(11) && !reversed(0));
     }
