@@ -49,12 +49,7 @@ pub(crate) struct TabSlot(Arc<AtomicUsize>);
 
 impl TabSlot {
     fn take(count: &Arc<AtomicUsize>) -> Option<TabSlot> {
-        count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_TABS).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| TabSlot(Arc::clone(count)))
+        crate::atomic::increment_below(count, MAX_TABS).then(|| TabSlot(Arc::clone(count)))
     }
 }
 

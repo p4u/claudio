@@ -126,11 +126,7 @@ impl TabTx {
 
     /// The writer took `n` bytes off the queue.
     pub(crate) fn sent(&self, n: usize) {
-        let _ = self
-            .queued
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |q| {
-                Some(q.saturating_sub(n))
-            });
+        crate::atomic::saturating_sub(&self.queued, n);
     }
 }
 

@@ -6,6 +6,7 @@ mod addon;
 mod addon_feed;
 mod addons;
 pub(crate) mod assets;
+mod atomic;
 pub(crate) mod auth;
 mod dto;
 mod events;

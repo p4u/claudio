@@ -330,10 +330,12 @@ async fn plugin_share(
     notices.extend(composed.notices);
     let args = composed
         .args
-        .chunks_exact(2)
-        .map(|pair| LaunchArg::Optional {
-            flag: pair[0].clone(),
-            value: pair[1].clone(),
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[flag, value]| LaunchArg::Optional {
+            flag: flag.clone(),
+            value: value.clone(),
         })
         .collect();
     Share {

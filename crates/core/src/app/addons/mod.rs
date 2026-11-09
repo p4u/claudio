@@ -336,7 +336,7 @@ impl Inner {
     fn stop(&self) {
         let mut tasks = self.tasks();
         tasks.stopped = true;
-        for (_, set) in tasks.addons.iter_mut() {
+        for set in tasks.addons.values_mut() {
             set.abort_all();
         }
         tasks.internal.abort_all();
