@@ -14,11 +14,8 @@ use claudio_core::{
 
 mod addons;
 
-// P4.3 slot: becomes `use claudio_tui::plain::args as plain;`
-mod plain;
-
-// P4.3 slot: becomes `use claudio_tui as tui;`
-mod tui;
+use claudio_tui as tui;
+use claudio_tui::plain::args as plain;
 
 use std::io::Write;
 use std::process::ExitCode;
