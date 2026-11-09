@@ -26,6 +26,7 @@ mod proto;
 mod proxy;
 mod remote;
 mod term;
+mod text;
 mod tui;
 mod upgrade;
 mod web;

@@ -268,7 +268,7 @@ impl Registry {
         let mut dropped = Vec::new();
         let mut total = 0;
         for lens in self.enabled().flat_map(|e| e.lenses.iter()) {
-            let size = crate::claude::latex::sanitize(&lens.instruction).len();
+            let size = crate::text::sanitize(&lens.instruction).len();
             if lenses.len() == MAX_LENSES || total + size > MAX_INSTRUCTIONS {
                 dropped.push(lens.name.clone());
                 continue;

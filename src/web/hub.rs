@@ -1028,10 +1028,7 @@ fn now_secs() -> u64 {
 
 /// `text` sanitized and cut at `max` characters.
 fn clean(text: &str, max: usize) -> String {
-    crate::claude::latex::sanitize(text)
-        .chars()
-        .take(max)
-        .collect()
+    crate::text::sanitize(text).chars().take(max).collect()
 }
 
 /// A daemon error for the browser: sanitized, ≤ 300 characters, and the
@@ -1047,7 +1044,7 @@ pub(crate) fn daemon_error(e: impl std::fmt::Display) -> String {
 
 /// The last `TAIL_MAX` bytes of `text`, sanitized, on a char boundary.
 fn tail(text: &str) -> String {
-    let text = crate::claude::latex::sanitize(text);
+    let text = crate::text::sanitize(text);
     let mut at = text.len().saturating_sub(TAIL_MAX);
     while !text.is_char_boundary(at) {
         at += 1;

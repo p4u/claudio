@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr;
 
 use super::{ActionResult, ListItem};
-use crate::claude::latex::sanitize;
+use crate::text::sanitize;
 
 /// The protocol version in `CLAUDIO_EXTENSION_PROTOCOL`.
 pub const VERSION: u32 = 1;

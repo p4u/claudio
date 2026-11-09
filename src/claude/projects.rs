@@ -7,8 +7,9 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::claude::latex::{extract_latex, lens_tags, sanitize, MAX_FORMULAS};
+use crate::claude::latex::{extract_latex, lens_tags, MAX_FORMULAS};
 use crate::proto::{Answer, ClaudeSession, LensItem};
+use crate::text::sanitize;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

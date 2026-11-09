@@ -168,7 +168,7 @@ impl SessionCredential {
     /// Seconds since the proxy moved the conversation to this credential,
     /// while that is recent enough (see [`SWITCH_NOTICE_SECS`]) to mention.
     pub fn recent_switch_age(&self, now: u64) -> Option<u64> {
-        let at = parse_rfc3339(self.switched_at.as_deref()?)?;
+        let at = crate::text::parse_rfc3339(self.switched_at.as_deref()?)?;
         Some(now.saturating_sub(at)).filter(|age| *age < SWITCH_NOTICE_SECS)
     }
 }
@@ -189,46 +189,6 @@ pub struct CredentialUtilization {
     pub five_hour_pct: Option<f64>,
     pub seven_day_pct: Option<f64>,
     pub captured_at: Option<String>,
-}
-
-/// Parse an RFC 3339 timestamp (`2026-10-09T10:07:02Z`, with optional
-/// fractional seconds and `±HH:MM` offset) to unix seconds.
-pub fn parse_rfc3339(ts: &str) -> Option<u64> {
-    let (date, rest) = ts.split_once(['T', 't', ' '])?;
-    let mut d = date.split('-');
-    let year: i64 = d.next()?.parse().ok()?;
-    let month: i64 = d.next()?.parse().ok()?;
-    let day: i64 = d.next()?.parse().ok()?;
-    if d.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let (clock, offset) = match rest.find(['Z', 'z', '+', '-']) {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "Z"),
-    };
-    let mut c = clock.split(':');
-    let hour: i64 = c.next()?.parse().ok()?;
-    let min: i64 = c.next()?.parse().ok()?;
-    let sec: i64 = c.next().unwrap_or("0").split('.').next()?.parse().ok()?;
-    if hour > 23 || min > 59 || sec > 60 {
-        return None;
-    }
-    let offset_secs: i64 = if offset.eq_ignore_ascii_case("z") {
-        0
-    } else {
-        let sign = if offset.starts_with('-') { -1 } else { 1 };
-        let (oh, om) = offset[1..].split_once(':')?;
-        sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60)
-    };
-    // Days since 1970-01-01 (Howard Hinnant's days-from-civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let secs = days * 86_400 + hour * 3600 + min * 60 + sec - offset_secs;
-    u64::try_from(secs).ok()
 }
 
 /// Overall pool status derived from individual providers.
@@ -883,27 +843,5 @@ mod tests {
             err.to_string(),
             "this session uses account-scoped resources and must keep its credential"
         );
-    }
-
-    #[test]
-    fn rfc3339_parses_to_unix_seconds() {
-        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_rfc3339("2026-10-09T10:07:02Z"), Some(1_791_540_422));
-        assert_eq!(
-            parse_rfc3339("2026-10-09T10:07:02.123456Z"),
-            Some(1_791_540_422)
-        );
-        // +02:00 is two hours ahead of UTC.
-        assert_eq!(
-            parse_rfc3339("2026-10-09T12:07:02+02:00"),
-            Some(1_791_540_422)
-        );
-        assert_eq!(
-            parse_rfc3339("2026-10-09T05:37:02-04:30"),
-            Some(1_791_540_422)
-        );
-        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
-        assert_eq!(parse_rfc3339("soon"), None);
-        assert_eq!(parse_rfc3339("2026-13-09T10:07:02Z"), None);
     }
 }

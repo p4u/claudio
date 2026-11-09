@@ -10,6 +10,7 @@ use super::api;
 use super::login::{self, Granted};
 use super::plugins;
 use super::profile::{self, Profile};
+use crate::text::fmt_tokens;
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
@@ -562,18 +563,6 @@ async fn print_live_status(p: &Profile) {
             }
         }
         Err(e) => eprintln!("  Pool health unavailable: {e}"),
-    }
-}
-
-/// Format a token count for display (e.g. `1.2M`, `340k`, `42`).
-/// Made `pub` so other modules (e.g. the TUI) can reuse this formatter.
-pub fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }
 

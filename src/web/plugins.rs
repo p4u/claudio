@@ -64,10 +64,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// `text` sanitized and cut at `max` characters.
 fn clean(text: &str, max: usize) -> String {
-    crate::claude::latex::sanitize(text)
-        .chars()
-        .take(max)
-        .collect()
+    crate::text::sanitize(text).chars().take(max).collect()
 }
 
 /// A `notice` event (docs/web-protocol.md §6) for every tab.

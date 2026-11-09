@@ -12,8 +12,8 @@ use super::extensions::protocol::SessionContext;
 use super::extensions::{ActionResult, ListItem, Source, MANAGE_KEY, READER_KEY};
 use super::interaction::Modal;
 use super::reader::ReaderView;
-use crate::claude::latex::sanitize;
 use crate::proto::{Answer, SessionId, SessionKind};
+use crate::text::sanitize;
 
 /// The longest input an action gets, in bytes.
 pub const INPUT_MAX: usize = 512;

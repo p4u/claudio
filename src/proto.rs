@@ -565,7 +565,7 @@ impl SessionExtensions {
             if self.lenses[..i].iter().any(|l| l.name == lens.name) {
                 return Err(format!("lens {} given twice", lens.name));
             }
-            let len = crate::claude::latex::sanitize(&lens.instruction).len();
+            let len = crate::text::sanitize(&lens.instruction).len();
             if len > MAX_INSTRUCTION {
                 return Err(format!(
                     "lens {} instruction over {MAX_INSTRUCTION} bytes",
@@ -577,7 +577,7 @@ impl SessionExtensions {
         if total > MAX_INSTRUCTIONS {
             return Err(format!("instructions over {MAX_INSTRUCTIONS} bytes"));
         }
-        if crate::claude::latex::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
+        if crate::text::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
             return Err(format!(
                 "plugin instructions over {MAX_PLUGIN_INSTRUCTIONS} bytes"
             ));
@@ -602,7 +602,7 @@ impl SessionExtensions {
             .iter()
             .map(|l| l.instruction.as_str())
             .chain([self.instructions.as_str()])
-            .map(|i| crate::claude::latex::sanitize(i).trim().to_owned())
+            .map(|i| crate::text::sanitize(i).trim().to_owned())
             .filter(|i| !i.is_empty())
             .collect();
         parts.join("\n\n")

@@ -70,7 +70,7 @@ impl Extensions {
             &mut notices,
         );
         for notice in &notices {
-            tracing::warn!("web: {}", crate::claude::latex::sanitize(notice));
+            tracing::warn!("web: {}", crate::text::sanitize(notice));
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let host = ExtensionHost::new(&registry, tx);
@@ -124,7 +124,7 @@ impl Extensions {
                 refused: Some(why), ..
             } = &ext.source
             {
-                return Err(format!("refused: {}", crate::claude::latex::sanitize(why)));
+                return Err(format!("refused: {}", crate::text::sanitize(why)));
             }
             let source = ext.source.clone();
             registry.set_enabled(name, on);
@@ -321,7 +321,7 @@ fn extension_dto(e: &Extension) -> Value {
         .iter()
         .map(|a| json!({"id": a.id, "title": a.title, "input": a.input}))
         .collect();
-    let s = crate::claude::latex::sanitize;
+    let s = crate::text::sanitize;
     json!({
         "name": s(&e.name),
         "description": s(&e.description),

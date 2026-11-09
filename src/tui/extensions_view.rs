@@ -17,8 +17,8 @@ use super::app::{App, Effect, Mode};
 use super::extensions::{ActionDecl, Extension, Source};
 use super::interaction::Modal;
 use super::keymap::Action;
-use crate::claude::latex::sanitize;
 use crate::proto::LensKind;
+use crate::text::sanitize;
 
 /// The screen's title.
 pub const TITLE: &str = "Extensions (Space toggle · Enter plugin setup · r refresh · Esc close)";

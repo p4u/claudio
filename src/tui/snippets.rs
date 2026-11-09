@@ -8,8 +8,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::claude::latex::sanitize;
 use crate::paths;
+use crate::text::sanitize;
 
 /// The largest snippet file read.
 pub const MAX_BYTES: u64 = 64 * 1024;

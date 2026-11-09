@@ -37,12 +37,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use super::Daemon;
-use crate::claude::latex::sanitize;
 use crate::claude::SESSION_MARKERS;
 use crate::paths;
 use crate::plugins::manifest::{self, Manifest, Marketplace, PluginRef};
 use crate::proto::{retrying, Applied, Msg};
 use crate::proxy::plugins::{key_ok, name_ok, sha256_ok, test_http_ok};
+use crate::text::sanitize;
 
 /// A manifest's size cap.
 const MAX_BYTES: u64 = manifest::MAX_BYTES as u64;

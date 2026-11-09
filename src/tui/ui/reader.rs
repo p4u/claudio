@@ -9,7 +9,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::claude::latex::{is_unsafe, sanitize};
+use crate::text::{is_unsafe, sanitize};
 use crate::tui::reader::layout::{safe, Line};
 use crate::tui::reader::ReaderView;
 

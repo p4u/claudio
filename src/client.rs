@@ -217,7 +217,7 @@ fn lock_tail(m: &Mutex<SshTail>) -> MutexGuard<'_, SshTail> {
 /// One ssh stderr line as a failed connect reports it: sanitized, trimmed,
 /// at most [`SSH_TAIL_CHARS`] characters; `None` when nothing is left.
 fn ssh_tail_line(line: &str) -> Option<String> {
-    let clean = crate::claude::latex::sanitize(line);
+    let clean = crate::text::sanitize(line);
     let clean: String = clean.trim().chars().take(SSH_TAIL_CHARS).collect();
     (!clean.is_empty()).then_some(clean)
 }
