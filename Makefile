@@ -10,6 +10,8 @@
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
 #   make check      → the acceptance checks of ACCEPTANCE.md (fmt, clippy, rules, core-only build, unit tests)
+#   make features   → one cell of the feature matrix (FEATURES="api,web"; "" is the core alone)
+#   make matrix     → the whole feature matrix: core only, each addon alone, all of them
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
 #   make test-web   → browser app: node unit tests + Playwright e2e (debug build, fake claude/proxy)
 #   make e2e        → E2E suite only (alias for the integration subset of make test)
@@ -27,7 +29,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker check test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
+.PHONY: all build static static-docker check features matrix test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
 
 all: build
 
@@ -103,6 +105,21 @@ check:
 	python3 scripts/check_rules.py
 	$(CHECK_CARGO) build --locked --no-default-features
 	$(CHECK_CARGO) test --locked --workspace --lib --bins
+
+## One cell of the feature matrix (ACCEPTANCE E5). FEATURES="" is the core alone (A4),
+## which also runs the TUI's manager suite against that binary.
+## cargo accepts --features "" (no feature).
+FEATURES ?=
+features:
+	$(CHECK_CARGO) clippy --locked -p claudio --no-default-features --features "$(FEATURES)" --all-targets -- -D warnings
+	$(CHECK_CARGO) build --locked -p claudio --no-default-features --features "$(FEATURES)"
+	$(CHECK_CARGO) test --locked -p claudio --no-default-features --features "$(FEATURES)" --bins
+	$(if $(FEATURES),,$(CHECK_CARGO) test --locked -p claudio --no-default-features --test manager -- --test-threads=1)
+
+## The whole matrix: core only, each addon alone, all of them.
+matrix:
+	@for f in "" api web vocdoni api,web,vocdoni; do \
+		$(MAKE) --no-print-directory features FEATURES="$$f" || exit 1; done
 
 ## Run representative cases against the real, locally-authenticated claude.
 evidence: build
