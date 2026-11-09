@@ -5,7 +5,11 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# The workspace: the binary's wiring (src), the core and the TUI (crates), and
+# the addons (addons/web embeds its page, addons/web/web, through build.rs).
 COPY src ./src
+COPY crates ./crates
+COPY addons ./addons
 RUN cargo build --release --locked
 
 # ─── runtime stage ─────────────────────────────────────────────────────────
