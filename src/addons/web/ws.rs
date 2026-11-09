@@ -782,7 +782,7 @@ mod tests {
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(
-            binary_frame(&[crate::web::hub::KIND_OUTPUT; HEADER]),
+            binary_frame(&[crate::addons::web::hub::KIND_OUTPUT; HEADER]),
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(

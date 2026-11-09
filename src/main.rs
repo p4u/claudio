@@ -28,11 +28,11 @@ mod text;
 mod tui;
 mod upgrade;
 mod version;
-mod web;
 
 use std::io::{IsTerminal, Read, Write};
 
 use addons::api::{api, cli, msglog, print};
+use addons::web;
 use cli::{OutputFormat, WrapperEnv};
 use print::emit::Outcome;
 
@@ -173,7 +173,7 @@ fn main() -> std::process::ExitCode {
         return sessions_cmd();
     }
 
-    // `claudio web [...]` — the session manager in a browser (src/web/).
+    // `claudio web [...]` — the session manager in a browser (src/addons/web/).
     if argv.get(1).map(String::as_str) == Some("web") {
         return web::run(&argv[2..], addons);
     }

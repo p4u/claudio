@@ -1,6 +1,6 @@
 //! Embeds the browser app (`web/`) into the binary: every file gzipped
 //! (level 9, mtime 0, so builds are reproducible) and listed in
-//! `$OUT_DIR/web_assets.rs`, which `src/web/assets.rs` includes. Dev-only
+//! `$OUT_DIR/web_assets.rs`, which `src/addons/web/assets.rs` includes. Dev-only
 //! directories (tests, e2e, dev, node_modules), dotfiles and npm files are
 //! left out. Without `web/index.html` a stub page is embedded.
 //!
@@ -128,7 +128,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
 }
 
 /// The CSP hash of `index.html`'s `<script type="importmap">` text.
-/// Keep in step with `src/web/assets.rs`'s copy.
+/// Keep in step with `src/addons/web/assets.rs`'s copy.
 fn importmap_sha256(html: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(html).ok()?;
     let open = "<script type=\"importmap\">";
@@ -140,7 +140,7 @@ fn importmap_sha256(html: &[u8]) -> Option<String> {
     )
 }
 
-/// Keep in step with `src/web/assets.rs`'s copy.
+/// Keep in step with `src/addons/web/assets.rs`'s copy.
 fn mime(rel: &str) -> &'static str {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let ext = match name.rsplit_once('.') {

@@ -11,7 +11,7 @@ file src/tui/interaction.rs 1024
 file src/tui/mod.rs 838
 file src/tui/ui/mod.rs 881
 file src/tui/wizard.rs 1147
-file src/web/hub.rs 2229
+file src/addons/web/hub.rs 2229
 fn src/addons/vocdoni/plugins/manifest.rs::check 130
 fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
 fn src/addons/vocdoni/proxy/cmd.rs::cmd_login 169
@@ -46,11 +46,11 @@ fn src/tui/wizard.rs::on_key#2 155
 fn src/tui/wizard.rs::refilter 85
 fn src/tui/wizard.rs::refilter#2 85
 fn src/upgrade.rs::run_upgrade 103
-fn src/web/session_events.rs::apply_event 125
-fn src/web/hub.rs::connected 119
-fn src/web/hub.rs::handle 194
-fn src/web/ws.rs::dispatch 251
-fn src/web/ws.rs::tab 103
+fn src/addons/web/session_events.rs::apply_event 125
+fn src/addons/web/hub.rs::connected 119
+fn src/addons/web/hub.rs::handle 194
+fn src/addons/web/ws.rs::dispatch 251
+fn src/addons/web/ws.rs::tab 103
 unwrap src/addons/vocdoni/proxy/cmd.rs 2
 unwrap src/addons/api/api/pool.rs 9
 unwrap src/daemon/host.rs 4

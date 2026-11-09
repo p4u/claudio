@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod vocdoni;
+pub mod web;
 
 use std::sync::Arc;
 
