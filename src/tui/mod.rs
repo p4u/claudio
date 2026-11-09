@@ -73,10 +73,7 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::{Addons, LaunchSelect};
-use crate::app::connections::Connections;
-use crate::app::extensions;
-use crate::app::snippets;
-use crate::app::state::ClientState;
+use crate::app::{connections::Connections, extensions, snippets, state::ClientState};
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
 use plain::PlainStart;
 
