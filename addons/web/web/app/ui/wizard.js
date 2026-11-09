@@ -174,15 +174,19 @@ function LaunchFields({ w, set }) {
 export function Wizard() {
   const args = wizardArgs.value;
   const m = model.value;
-  const [w, setW] = useState(() => initialWizard({
+  const [entries, setW] = useState(() => initialWizard({
     hosts: Object.values(m.hosts).filter((h) => h.connected).map((h) => h.name),
-    decls: addonDecls.value, recent: [], focusedHost: args.host ?? (focused.value ? m.sessions[focused.value]?.host : 'local'),
+    recent: [], focusedHost: args.host ?? (focused.value ? m.sessions[focused.value]?.host : 'local'),
     kind: args.kind ?? 'claude', cwd: args.cwd ?? '', resume: args.resume ?? null,
   }));
+  // The addons' declarations as they are now, never a copy taken at open: the page can draw
+  // (and this wizard open) before its connection's snapshot brings them, and addons.changed
+  // replaces them while it is open.
+  const w = { ...entries, decls: addonDecls.value };
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const set = (patch) => setW((cur) => ({ ...cur, ...patch }));
-  useEffect(() => { loadAddonDecls().then((decls) => set({ decls })); }, []);
+  useEffect(() => { loadAddonDecls(); }, []);
   const shell = w.kind === 'shell';
   const ready = abs(w.cwd) && !busy;
 
