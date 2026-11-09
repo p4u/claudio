@@ -93,14 +93,20 @@ async fn optional_is_journaled_and_applied_on_respawn() {
 }
 
 /// A fake claude that fails at once on `--resume` (a deleted conversation)
-/// and otherwise saves its env to `run.env` and its args to `run.argv` in
-/// its cwd, then behaves like the normal fake.
+/// and otherwise records, in its cwd, the env vars these tests assert on to
+/// `run.env` (the test-set token's value, the others as present or absent;
+/// never the whole env, [`record_env_sh`]) and its args to `run.argv`, then
+/// behaves like the normal fake.
 fn fake_claude_recording() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-rr-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-rr");
         let bin = dir.join("claude");
+        let record = record_env_sh(
+            "run.env",
+            &["ANTHROPIC_AUTH_TOKEN"],
+            &["ANTHROPIC_API_KEY", "HOME", "CLAUDECODE", SENTINEL_KEY],
+        );
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
@@ -108,7 +114,7 @@ fn fake_claude_recording() -> &'static Path {
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--resume\" ]; then exit 1; fi\n\
              done\n\
-             env > run.env\n\
+             {record}\
              printf '%s\\n' \"$@\" > run.argv\n\
              echo {BANNER}\n\
              exec cat\n"
@@ -134,6 +140,75 @@ async fn recorded(d: &TestDaemon) -> (String, String) {
         std::fs::read_to_string(d.work().join("run.env")).unwrap(),
         argv,
     )
+}
+
+/// A var the recording fake reports as present only: a stand-in for a
+/// developer's secret that a session's process inherits.
+const SENTINEL_KEY: &str = "CL_TEST_SENTINEL_SECRET";
+
+/// Every regular file under `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = vec![];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files
+}
+
+/// The recording fake never writes a value it was not asked for (C1,
+/// E3): a sentinel secret in the session process's env (sent as spawn
+/// env, so this test leaves the test process's env alone; the daemon's
+/// sessions see it exactly as they see an inherited var) is recorded as
+/// present and its value lands in no fixture file. The fixture dirs are
+/// 0700 and the record 0600. The manager suite's
+/// `test_env_recording_fakes_keep_inherited_secrets_out_of_fixtures` does
+/// the same with a var inherited from the test process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn env_recording_fakes_keep_unnamed_values_out_of_fixtures() {
+    use std::os::unix::fs::PermissionsExt;
+    let sentinel = format!("sentinel-secret-{}", Uuid::new_v4().simple());
+    let claude = fake_claude_recording().to_path_buf();
+    let d = TestDaemon::start_with_claude(TestDaemon::new_dir(), claude.clone()).await;
+    let mut c = d.client().await;
+    let spec = SpawnSpec {
+        env: vec![
+            ("ANTHROPIC_AUTH_TOKEN".into(), "test-token".into()),
+            (SENTINEL_KEY.into(), sentinel.clone()),
+        ],
+        ..d.spec(Uuid::new_v4())
+    };
+    c.spawn(spec).await;
+    let (env, _) = recorded(&d).await;
+    assert!(env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=test-token"));
+    assert!(
+        env.lines().any(|l| l == format!("{SENTINEL_KEY}=<set>")),
+        "the session's process never saw the sentinel"
+    );
+    let fake_dir = claude.parent().unwrap();
+    for file in files_under(&d.dir).iter().chain(&files_under(fake_dir)) {
+        let text = String::from_utf8_lossy(&std::fs::read(file).unwrap_or_default()).into_owned();
+        assert!(
+            !text.contains(&sentinel),
+            "the sentinel's value landed in {file:?}"
+        );
+    }
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&d.dir), 0o700, "the daemon's fixture dir is private");
+    assert_eq!(mode(fake_dir), 0o700, "the fake's dir is private");
+    assert_eq!(
+        mode(&d.work().join("run.env")),
+        0o600,
+        "the record is private"
+    );
+    assert_eq!(mode(&d.work().join("run.argv")), 0o600);
 }
 
 /// The fresh retry after a failed `--resume` starts with the env and

@@ -18,13 +18,62 @@ use crate::proto::{
 const BANNER: &str = "FAKE-CLAUDE-BANNER";
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Make `dir` (and its parents) and keep it private: 0700 (C4). What a
+/// test's fakes write in it may hold env values.
+fn make_private(dir: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A new private (0700) fixture dir `<temp>/<tag>-<uuid>`.
+fn private_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{tag}-{}", Uuid::new_v4()));
+    make_private(&dir);
+    dir
+}
+
+/// Shell lines for a fake claude that record the named env vars into
+/// `out`, never the whole env (C1, E3): a `# env` header line, then
+/// `KEY=value` for each of `values` that is set and `KEY=<set>` for each
+/// of `present` that is set. A value is recorded only for a key whose
+/// value the test sets itself (the daemon's sessions inherit this
+/// process's env, a developer's credentials included); any other key a
+/// test asserts on goes in `present`. The lines set `umask 077` (every
+/// file the fake writes after them is 0600) and write a temp file renamed
+/// into place, so a reader never sees half a record.
+fn record_env_sh(out: &str, values: &[&str], present: &[&str]) -> String {
+    let mut sh = String::from("umask 077\n{\necho '# env'\n");
+    for (keys, value) in [(values, true), (present, false)] {
+        for key in keys {
+            assert!(
+                super::command::env_remove_ok(&[key.to_string()]).is_ok(),
+                "not an env var name: {key}"
+            );
+            let line = if value {
+                format!("printf '%s=%s\\n' {key} \"${key}\"")
+            } else {
+                format!("echo '{key}=<set>'")
+            };
+            sh.push_str(&format!("if [ -n \"${{{key}+x}}\" ]; then {line}; fi\n"));
+        }
+    }
+    sh.push_str(&format!(
+        "}} > \"{out}.tmp\" && mv \"{out}.tmp\" \"{out}\"\n"
+    ));
+    sh
+}
+
 /// A variant of the fake claude that exits 3 immediately on any real invocation.
 /// Used to trigger the commit-before-exit race deterministically.
 fn fake_claude_exits_immediately() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ei-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-ei");
         let bin = dir.join("claude");
         let script = "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
@@ -41,8 +90,7 @@ fn fake_claude_exits_immediately() -> &'static Path {
 fn fake_claude_resume_fails() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-rf-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-rf");
         let bin = dir.join("claude");
         // Exit 1 immediately if --resume is in the arguments, otherwise behave
         // like the normal fake claude.
@@ -70,8 +118,7 @@ fn fake_claude_resume_fails() -> &'static Path {
 fn fake_claude() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\
@@ -112,6 +159,7 @@ impl TestDaemon {
 
     fn new_dir() -> PathBuf {
         let dir = crate::paths::socket_test_dir("cl-d");
+        make_private(&dir);
         std::fs::create_dir_all(dir.join("work")).unwrap();
         dir
     }
@@ -1425,8 +1473,7 @@ mod spawn_env;
 fn fake_claude_logging_argv() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-av-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-av");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\
@@ -1702,8 +1749,7 @@ async fn respawn_restarts_a_shell() {
 fn fake_claude_slow_to_stop() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ss-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-ss");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\
@@ -2259,8 +2305,7 @@ REGION = "eu"
 fn fake_plugin_claude() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-plugins-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-plugins");
         let bin = dir.join("claude");
         let script = r#"#!/bin/sh
 ctl="${PATH%%:*}"
@@ -2316,8 +2361,7 @@ const LATE_CLAUDE: &str = "claude-late";
 fn fake_installer_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-installer-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-installer");
         for tool in ["sh", "bash", "cat", "cp", "mkdir", "sleep"] {
             let real = ["/usr/bin", "/bin"]
                 .iter()

@@ -52,8 +52,7 @@ fn daemon_running(build: Probe, claude: &Path) -> TestDaemon {
 fn fake_claude_args() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-args-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-args");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\

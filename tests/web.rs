@@ -1440,17 +1440,25 @@ fn fake_proxy() -> String {
     addr
 }
 
-/// A fake claude that dumps its env to `env_file` (never to the terminal),
-/// lists `--agents`/`--mcp-config` in `--help`, then prints the banner and
-/// echoes lines.
+/// A fake claude that records the env vars these tests assert on to
+/// `env_file` (never the whole env, never to the terminal;
+/// [`common::record_env_sh`]), lists `--agents`/`--mcp-config` in `--help`,
+/// then prints the banner and echoes lines.
 fn write_env_fake_claude(h: &ManagerHarness, env_file: &std::path::Path) {
-    let env_path = env_file.display();
+    let record = common::record_env_sh(
+        &env_file.display().to_string(),
+        &[
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "VOCDONI_TEST_TOKEN",
+        ],
+        &["CLAUDECODE"],
+    );
     let script = format!(
         r#"#!/bin/sh
 [ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
 if [ "$1" = "--help" ]; then printf '  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n'; exit 0; fi
-env > "{env_path}.tmp" && mv "{env_path}.tmp" "{env_path}"
-printf '%s' "$2" > .fake-settings.json
+{record}printf '%s' "$2" > .fake-settings.json
 echo "FAKE_CLAUDE_BANNER pid=$$"
 while IFS= read -r line; do printf 'line:%s\n' "$line"; done
 "#

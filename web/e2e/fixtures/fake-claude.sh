@@ -14,9 +14,19 @@ case "$1" in
     exit 0 ;;
 esac
 name=$(pwd -P | tr / _)
+# Everything the fake writes is private (0600 files, 0700 dirs).
+umask 077
 mkdir -p "$FAKE_DIR/settings" "$FAKE_DIR/input" "$FAKE_DIR/env"
-if [ "$FAKE_DUMP_ENV" = 1 ]; then
-  env > "$FAKE_DIR/env/$name.txt.tmp" && mv "$FAKE_DIR/env/$name.txt.tmp" "$FAKE_DIR/env/$name.txt"
+# Record only the env vars named in FAKE_ENV_KEYS (KEY=value when set), never
+# the whole env: the server inherits the developer's env.
+if [ -n "$FAKE_ENV_KEYS" ]; then
+  {
+    echo '# env'
+    for k in $FAKE_ENV_KEYS; do
+      case "$k" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+      if eval "[ -n \"\${$k+x}\" ]"; then eval "printf '%s=%s\\n' \"\$k\" \"\$$k\""; fi
+    done
+  } > "$FAKE_DIR/env/$name.txt.tmp" && mv "$FAKE_DIR/env/$name.txt.tmp" "$FAKE_DIR/env/$name.txt"
 fi
 printf '%s' "$2" > "$FAKE_DIR/settings/$name.json"
 echo "FAKE_CLAUDE_BANNER nonce=$$"

@@ -25,10 +25,11 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, encode_cwd, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard,
-    ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q,
-    ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, BINARY, CTRL_U, DAEMON_WAIT,
-    DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
+    current_nonce, encode_cwd, extract_nonce, record_env_sh, run_git, wizard_pick_dir,
+    ClaudeProjectGuard, ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L,
+    ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, BINARY,
+    CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW,
+    WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -1016,15 +1017,35 @@ fn test_proxy_env_injection() {
     let proxy_url = format!("{token}@127.0.0.1:{port}");
     let expected_base_url = format!("http://127.0.0.1:{port}");
 
-    // ── 4. Isolated env with an env-dumping fake claude ───────────────────────
+    // ── 4. Isolated env with an env-recording fake claude ─────────────────────
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("claude-env.txt");
-    // Overwrite fake claude: dump env (but not on --version), then banner+cat.
-    harness.write_env_dumping_fake_claude(&env_file);
+    // Overwrite fake claude: record the asserted env vars (but not on
+    // --version), then banner+cat. Values only for what the test sets.
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_USE_GATEWAY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        ],
+        &[
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_API_KEY",
+        ],
+    );
 
     // ── 5. Start claudio TUI with CLAUDIO_PROXY_URL ────────────────────────────
     let mut tui = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+        // Never inherit the developer's own gateway settings.
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
     });
 
     // ── 6. Wizard: pick a fresh dir ───────────────────────────────────────────
@@ -1142,6 +1163,8 @@ fn test_proxy_env_injection() {
     // Restart claudio with the proxy URL; daemon should respawn the dormant session.
     let mut tui2 = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
     });
 
     // Wait for env.txt to be re-written by the respawned session.
@@ -1928,7 +1951,15 @@ fn test_plain_keeps_proxy_stats_and_reset() {
 fn test_plain_injects_proxy_env() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ],
+        &["ANTHROPIC_API_KEY", "CLAUDECODE"],
+    );
 
     let tui = harness.start_plain_with(&["-c", "hello"], |cmd| {
         cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
@@ -1968,7 +1999,11 @@ fn test_plain_injects_proxy_env() {
 fn test_plain_no_proxy_keeps_api_key() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_API_KEY"],
+        &["ANTHROPIC_AUTH_TOKEN", "CLAUDECODE"],
+    );
 
     let tui = harness.start_plain_with(&["--no-proxy"], |cmd| {
         cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
@@ -1980,6 +2015,60 @@ fn test_plain_no_proxy_keeps_api_key() {
     drop(tui);
 }
 
+/// The env-recording fakes never write the inherited environment into a
+/// fixture (C1, E3): a sentinel secret in this test process's env reaches
+/// claude's process (inherited through the UI and the daemon: the record
+/// says it is set) and its value lands in no file under the harness root,
+/// which is 0700, with the record 0600. The suite runs single-threaded, so
+/// setting the process env is safe.
+#[test]
+fn test_env_recording_fakes_keep_inherited_secrets_out_of_fixtures() {
+    use std::os::unix::fs::PermissionsExt;
+    const SENTINEL_KEY: &str = "CL_TEST_SENTINEL_SECRET";
+    let sentinel = format!("sentinel-secret-{}", std::process::id());
+    std::env::set_var(SENTINEL_KEY, &sentinel);
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("plain.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_API_KEY"],
+        &[SENTINEL_KEY, "CLAUDECODE"],
+    );
+    let tui = harness.start_plain_with(&[], |_| {});
+    std::env::remove_var(SENTINEL_KEY);
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    drop(tui);
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(
+        env.lines().any(|l| l == format!("{SENTINEL_KEY}=<set>")),
+        "claude's process never inherited the sentinel: {env}"
+    );
+
+    let mut files = vec![];
+    let mut stack = vec![harness.root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    assert!(files.contains(&env_file), "{files:?}");
+    for file in &files {
+        let bytes = fs::read(file).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(&sentinel),
+            "the inherited sentinel's value landed in {file:?}"
+        );
+    }
+    let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&harness.root), 0o700, "the fixture root is private");
+    assert_eq!(mode(&env_file), 0o600, "the record is private");
+}
+
 /// An old client's spawn (no `env_remove`) gets the compatibility scrub
 /// from a new daemon: the proxy token in its env replaces the inherited
 /// `ANTHROPIC_API_KEY`, and the session markers go (docs/daemon-protocol.md,
@@ -1988,7 +2077,11 @@ fn test_plain_no_proxy_keeps_api_key() {
 fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("old-client.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_AUTH_TOKEN"],
+        &["ANTHROPIC_API_KEY", "CLAUDECODE"],
+    );
     // The daemon inherits the TUI's env: the harness's API key and a marker.
     let tui = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDECODE", "1");
@@ -2036,7 +2129,17 @@ fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
 fn test_plain_first_party_flag() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "CLAUDE_CODE_USE_GATEWAY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "DISABLE_AUTOUPDATER",
+            "ANTHROPIC_BASE_URL",
+            "ENABLE_TOOL_SEARCH",
+        ],
+        &[],
+    );
     let proxy = "sekret@127.0.0.1:1";
 
     let tui = harness.start_plain_with(&[], |cmd| {
@@ -3060,11 +3163,12 @@ fn fake_plugin_proxy() -> String {
 /// `plugin …` runs are logged to `<dumps>/plugin.log` and act on
 /// `$CLAUDE_CONFIG_DIR` as Claude Code would (the marketplace is added, the
 /// plugin installed beside `have@market`). Every other launch is recorded
-/// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`) before the
-/// usual banner and `cat`.
+/// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`: the plugin
+/// secret's key only, [`record_env_sh`]) before the usual banner and `cat`.
 fn write_plugin_claude(h: &ManagerHarness, dumps: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(dumps.join("launches")).unwrap();
+    let record = record_env_sh("$d/env", &[PLUGIN_KEY], &[]);
     let dumps = dumps.display();
     let script = format!(
         r#"#!/bin/sh
@@ -3084,8 +3188,7 @@ if [ "$1" = "plugin" ]; then
 fi
 d="{dumps}/launches/$(ls "{dumps}/launches" | wc -l | tr -d ' ')"
 mkdir -p "$d"
-printf '%s\n' "$@" > "$d/argv"
-env > "$d/env"
+{record}printf '%s\n' "$@" > "$d/argv"
 echo "FAKE_CLAUDE_BANNER pid=$$"
 exec cat
 "#

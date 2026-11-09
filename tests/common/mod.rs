@@ -690,6 +690,9 @@ impl ManagerHarness {
         let fake_claude = root.join("fake-claude");
         let dirs = [root.join("sa"), root.join("sb")];
 
+        // The root is private (0700, C4): what the fakes record under it
+        // may hold env values.
+        private_dir(&root);
         for p in [&runtime_dir, &config_home, &home, &dirs[0], &dirs[1]] {
             fs::create_dir_all(p).expect("create test dir");
         }
@@ -728,25 +731,31 @@ exec cat
             .expect("chmod fake claude");
     }
 
-    /// Write an env-dumping fake claude (for proxy tests).
+    /// Write an env-recording fake claude (for proxy tests).
     ///
-    /// Dumps env to `env_file`, then follows the same nonce+cat protocol.
-    /// Still returns a clean `--version` (no env dump).
-    pub fn write_env_dumping_fake_claude(&self, env_file: &std::path::Path) {
-        let env_path = env_file.display().to_string();
+    /// Records the named env vars to `env_file` ([`record_env_sh`]: `values`
+    /// with their value, `present` as present or absent, never the whole
+    /// env), then follows the same nonce+cat protocol. Still returns a clean
+    /// `--version` (nothing recorded).
+    pub fn write_env_recording_fake_claude(
+        &self,
+        env_file: &std::path::Path,
+        values: &[&str],
+        present: &[&str],
+    ) {
+        let record = record_env_sh(&env_file.display().to_string(), values, present);
         let script = format!(
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
     echo "claude 0.0.0-fake"
     exit 0
 fi
-env > "{env_path}"
-NONCE="${{$}}__${{RANDOM}}${{RANDOM}}"
+{record}NONCE="${{$}}__${{RANDOM}}${{RANDOM}}"
 echo "FAKE_CLAUDE_BANNER pid=$$ nonce=$NONCE args=$*"
 exec cat
 "#
         );
-        fs::write(&self.fake_claude, &script).expect("write env-dumping fake claude");
+        fs::write(&self.fake_claude, &script).expect("write env-recording fake claude");
         fs::set_permissions(&self.fake_claude, fs::Permissions::from_mode(0o755))
             .expect("chmod fake claude");
     }
@@ -1231,6 +1240,49 @@ fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
 
 /// Create a short temp path `/tmp/cl-<8hex>` to stay well under the macOS
 /// Unix-socket path length limit (104 chars).
+/// Shell lines for a fake claude that record the named env vars into
+/// `out`, never the whole env (C1, E3): a `# env` header line, then
+/// `KEY=value` for each of `values` that is set and `KEY=<set>` for each of
+/// `present` that is set. A value is recorded only for a key whose value
+/// the test sets itself, so a developer's own credentials never land in a
+/// fixture; any other key a test asserts on goes in `present`. The lines
+/// set `umask 077` (every file the fake writes after them is 0600) and
+/// write a temp file renamed into place, so a reader never sees half a
+/// record.
+pub fn record_env_sh(out: &str, values: &[&str], present: &[&str]) -> String {
+    let mut sh = String::from("umask 077\n{\necho '# env'\n");
+    for (keys, value) in [(values, true), (present, false)] {
+        for key in keys {
+            assert!(
+                key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+                    && key.chars().next().is_some_and(|c| !c.is_ascii_digit()),
+                "not an env var name: {key}"
+            );
+            let line = if value {
+                format!("printf '%s=%s\\n' {key} \"${key}\"")
+            } else {
+                format!("echo '{key}=<set>'")
+            };
+            sh.push_str(&format!("if [ -n \"${{{key}+x}}\" ]; then {line}; fi\n"));
+        }
+    }
+    sh.push_str(&format!(
+        "}} > \"{out}.tmp\" && mv \"{out}.tmp\" \"{out}\"\n"
+    ));
+    sh
+}
+
+/// Create `dir` (and its parents) and make it private: 0700 (C4).
+pub fn private_dir(dir: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .expect("create private test dir");
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("chmod test dir");
+}
+
 fn short_tmp_root() -> PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
