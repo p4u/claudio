@@ -7,14 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::DuplexStream;
 
+use super::test_support::{fake_host, next_request, reply};
 use super::*;
 use crate::addon::test_support::TestAddon;
 use crate::addon::{Addon, AddonError, Level};
-use crate::proto::{
-    read_frame, write_frame, Envelope, Frame, HostInfo, Msg, SessionKind, Welcome, PROTO,
-};
+use crate::proto::{Msg, SessionKind};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -76,55 +74,6 @@ fn snap(sid: u128, conversation: Option<&str>) -> SessionSnap {
         launch: None,
         focused: false,
     }
-}
-
-/// A `Client` whose daemon is `daemon`, a task answering after the
-/// handshake with `features`.
-async fn fake_host<F, Fut>(features: &[&str], daemon: F) -> Client
-where
-    F: FnOnce(DuplexStream) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    let (ours, mut theirs) = tokio::io::duplex(2 << 20);
-    let welcome = Msg::Welcome(Welcome {
-        claudio_version: "test".into(),
-        proto: PROTO,
-        host: HostInfo {
-            hostname: "h".into(),
-            os: "linux".into(),
-            arch: "x86_64".into(),
-            home: "/home/u".into(),
-            claude: None,
-        },
-        build: None,
-        build_time: None,
-        features: features.iter().map(|f| f.to_string()).collect(),
-    });
-    tokio::spawn(async move {
-        let _hello = read_frame(&mut theirs).await;
-        write_frame(&mut theirs, &Frame::Control(Envelope::event(welcome)))
-            .await
-            .unwrap();
-        daemon(theirs).await;
-    });
-    Client::handshake(ours).await.unwrap()
-}
-
-/// The next request the fake daemon reads.
-async fn next_request(stream: &mut DuplexStream) -> Option<(u64, Msg)> {
-    match read_frame(stream).await {
-        Ok(Some(Frame::Control(Envelope {
-            req: Some(req),
-            msg,
-        }))) => Some((req, msg)),
-        _ => None,
-    }
-}
-
-async fn reply(stream: &mut DuplexStream, req: u64, msg: Msg) {
-    write_frame(stream, &Frame::Control(Envelope::request(req, msg)))
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

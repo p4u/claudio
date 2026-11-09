@@ -271,6 +271,27 @@ impl Launch for TestAddon {
     fn flags(&self) -> &'static [FlagDecl] {
         self.flags
     }
+    /// A flag with a value picks the option it names (an empty one is a
+    /// usage error), a `--no-…` switch picks direct, any other switch is
+    /// one of the select's flags.
+    fn select(&self, given: &[FlagArg]) -> Result<LaunchSelect, String> {
+        self.record(format!("select {}", given.len()));
+        let mut select = LaunchSelect::default();
+        for flag in given {
+            match &flag.value {
+                Some(v) if v.is_empty() => return Err(format!("{} needs a value", flag.name)),
+                Some(v) => {
+                    select.pick = Pick::Option {
+                        addon: self.name.to_owned(),
+                        option: v.clone(),
+                    }
+                }
+                None if flag.name.starts_with("--no-") => select.pick = Pick::Direct,
+                None => select.flags.push(flag.name.clone()),
+            }
+        }
+        Ok(select)
+    }
     fn resolve(&self, select: &LaunchSelect, ctx: &dyn AddonCtx) -> Result<Routing, String> {
         let _ = ctx;
         self.record(format!("resolve {:?}", select.pick));
