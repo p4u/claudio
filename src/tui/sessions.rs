@@ -557,26 +557,31 @@ impl App {
     }
 
     /// The route the wizard preselects: the active session's, else the
-    /// run's (flags), else the addons' default option; the run's switches.
+    /// run's (flags, else the addons' default, which the route row and the
+    /// composer resolve; never direct unless asked), with the run's switches.
     pub(super) fn preselected(&self) -> LaunchSelect {
-        let flags = self.launch_default.flags.clone();
-        if let Some(choice) = self.active_view().and_then(|v| v.launch.as_ref()) {
-            return LaunchSelect {
-                flags,
-                ..LaunchSelect::of(Some(choice))
-            };
-        }
-        let pick = match &self.launch_default.pick {
-            Pick::Default => match self.launch_options.iter().find(|(_, o)| o.default) {
-                Some((addon, o)) => Pick::Option {
-                    addon: addon.to_string(),
-                    option: o.id.clone(),
-                },
-                None => Pick::Direct,
-            },
-            pick => pick.clone(),
+        let pick = match self.active_view().and_then(|v| v.launch.as_ref()) {
+            Some(choice) => LaunchSelect::of(Some(choice)).pick,
+            None => self.launch_default.pick.clone(),
         };
+        let flags = self.launch_default.flags.clone();
         LaunchSelect { pick, flags }
+    }
+
+    /// The wizard's Enter: refused while its route is an option the
+    /// options lack (the wizard stays open to pick another), else spawned.
+    pub(super) fn wizard_spawn(
+        &mut self,
+        host: String,
+        cwd: String,
+        resume: Option<String>,
+        select: LaunchSelect,
+    ) {
+        if let Some(why) = self.wizard_mut().and_then(|w| w.route.unavailable()) {
+            return self.notify(why);
+        }
+        self.modal = None;
+        self.spawn(host, cwd, resume, select);
     }
 
     pub(super) fn open_wizard(&mut self) {

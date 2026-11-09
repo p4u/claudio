@@ -560,3 +560,81 @@ async fn respawn_waits_for_no_manifest() {
         assert_eq!(env_get(&part.env, "KB_TOKEN"), Some("s3cret"));
     }
 }
+
+/// A config.toml of `text` in its own private directory (removed by the caller).
+fn config_file(text: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("claudio-launch-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// A launch of `select` through the composer, the profiles read from
+/// `profiles`, to a fake daemon: where it got to, and every `Spawn` sent.
+async fn compose_launch(
+    profiles: PathBuf,
+    select: LaunchSelect,
+    frontend: crate::addon::Frontend,
+) -> (Step, Vec<Msg>) {
+    let vocdoni = Vocdoni::with_runner(runner(profiles));
+    let addons = Arc::new(Addons::new(vec![Arc::new(vocdoni) as Arc<dyn Addon>]).unwrap());
+    let opts = RuntimeOptions {
+        config_path: "/nonexistent/claudio/config.toml".into(),
+        watch_config: false,
+    };
+    let (rt, _rx) = AddonRuntime::start(addons, opts);
+    let sent: Arc<Mutex<Vec<Msg>>> = Arc::default();
+    let seen = Arc::clone(&sent);
+    let client = fake_host(&["addon:vocdoni"], move |mut s| async move {
+        while let Some((req, msg)) = next_request(&mut s).await {
+            if let Msg::Spawn(spec) = &msg {
+                let id = spec.id;
+                seen.lock().unwrap().push(msg);
+                reply(&mut s, req, Msg::Spawned { id, pid: None }).await;
+            }
+        }
+    })
+    .await;
+    rt.host_up("local", client.clone());
+    let sid = SessionId::from_u128(11);
+    let spec = LaunchSpec {
+        op: LaunchOp::New,
+        sid,
+        host: "local".into(),
+        cwd: "/w".into(),
+        select,
+        frontend,
+        base: Msg::Spawn(SpawnSpec {
+            id: sid,
+            cwd: "/w".into(),
+            ..Default::default()
+        }),
+        core_lenses: SessionExtensions::default(),
+    };
+    let step = run_within(&rt, spec, client, Duration::from_secs(25)).await;
+    rt.shutdown();
+    let sent = sent.lock().unwrap().clone();
+    (step, sent)
+}
+
+/// R18: a configured default the profiles lack (what the wizard keeps as
+/// `Pick::Default`) fails the launch; nothing is sent, never direct.
+#[tokio::test]
+async fn a_default_the_profiles_lack_fails_the_launch() {
+    let path = config_file(
+        "[proxy]\ndefault = \"gone\"\n[proxy.profiles.work]\nurl = \"http://127.0.0.1:1\"\ntoken = \"t\"\n",
+    );
+    let (step, sent) = compose_launch(
+        path.clone(),
+        LaunchSelect::default(),
+        crate::addon::Frontend::Tui,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let Step::Failed(why) = step else {
+        panic!("not failed: {step:?}")
+    };
+    assert!(why.contains("'gone' not found"), "{why}");
+    assert!(sent.is_empty(), "{sent:?}");
+}

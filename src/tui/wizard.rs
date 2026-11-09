@@ -1150,7 +1150,8 @@ mod tests {
     use super::*;
     use crate::addon::Pick;
 
-    /// No launch options: the wizard offers no route row.
+    /// No launch options: the wizard offers no route row, and launches
+    /// the default for the composer to resolve (R18: never direct).
     const NO_LAUNCH: (&[(&str, LaunchOption)], &LaunchSelect) = (
         &[],
         &LaunchSelect {
@@ -1321,7 +1322,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: None,
-                select: LaunchSelect::of(None)
+                select: LaunchSelect::default()
             },
             "first row is `+ New session`"
         );
@@ -1332,7 +1333,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: Some("old".into()),
-                select: LaunchSelect::of(None)
+                select: LaunchSelect::default()
             }
         );
         // Esc goes back to the directory step.
@@ -1350,7 +1351,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: None,
-                select: LaunchSelect::of(None)
+                select: LaunchSelect::default()
             }
         );
     }

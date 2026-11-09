@@ -688,10 +688,7 @@ impl App {
                 cwd,
                 resume,
                 select,
-            } => {
-                self.modal = None;
-                self.spawn(wizard_host, cwd, resume, select);
-            }
+            } => self.wizard_spawn(wizard_host, cwd, resume, select),
         }
         self.redraw = true;
     }
