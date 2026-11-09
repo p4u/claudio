@@ -220,22 +220,8 @@ fn main() -> std::process::ExitCode {
         return print_help_with_appendix(args);
     }
 
-    // Optional message-flow logging (CLI⇄claudio⇄claude). Flag or env enables it;
-    // a file path also enables the raw JSONL sink. Init before any turn runs.
-    {
-        let pretty = parsed.log_messages
-            || std::env::var("CLAUDIO_LOG_MESSAGES")
-                .map(|v| v == "1" || v == "true")
-                .unwrap_or(false);
-        let file = parsed.log_messages_file.clone().or_else(|| {
-            std::env::var("CLAUDIO_LOG_MESSAGES_FILE")
-                .ok()
-                .filter(|s| !s.is_empty())
-        });
-        if pretty || file.is_some() {
-            msglog::init(pretty, file.as_deref());
-        }
-    }
+    // Init message-flow logging before any turn runs.
+    init_message_log(&parsed);
 
     // §API — `--api` starts the OpenAI-compatible server, served by the same
     // PTY backend that powers `-p`. It takes precedence over print mode.
@@ -309,6 +295,23 @@ fn main() -> std::process::ExitCode {
             }
             std::process::ExitCode::from(2)
         }
+    }
+}
+
+/// Optional message-flow logging (CLI⇄claudio⇄claude). Flag or env enables it;
+/// a file path also enables the raw JSONL sink.
+fn init_message_log(parsed: &cli::Parsed) {
+    let pretty = parsed.log_messages
+        || std::env::var("CLAUDIO_LOG_MESSAGES")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+    let file = parsed.log_messages_file.clone().or_else(|| {
+        std::env::var("CLAUDIO_LOG_MESSAGES_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
+    if pretty || file.is_some() {
+        msglog::init(pretty, file.as_deref());
     }
 }
 
