@@ -42,14 +42,14 @@ fn crates/tui/src/wizard.rs::refilter#2 85
 unwrap crates/tui/src/keymap.rs 2
 
 # -- claudio-api (src/addons/api until P4.4)
-fn src/addons/api/api/agentic.rs::tool_preamble 85
-fn src/addons/api/api/pool.rs::resolve_turn 98
-fn src/addons/api/api/routes/chat.rs::completions 91
-fn src/addons/api/cli.rs::parse#2 138
-fn src/addons/api/print/driver.rs::start 184
-fn src/addons/api/print/driver.rs::turn 82
-unwrap src/addons/api/api/pool.rs 9
-unwrap src/addons/api/print/hooks.rs 3
+fn addons/api/src/api/agentic.rs::tool_preamble 85
+fn addons/api/src/api/pool.rs::resolve_turn 98
+fn addons/api/src/api/routes/chat.rs::completions 91
+fn addons/api/src/cli.rs::parse#2 138
+fn addons/api/src/print/driver.rs::start 184
+fn addons/api/src/print/driver.rs::turn 82
+unwrap addons/api/src/api/pool.rs 9
+unwrap addons/api/src/print/hooks.rs 3
 
 # -- claudio-web (src/addons/web until P4.5)
 file src/addons/web/hub.rs 2229

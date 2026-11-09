@@ -474,7 +474,7 @@ fn extract_fenced<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::api::api::types::{Content, FunctionDef};
+    use crate::api::types::{Content, FunctionDef};
 
     fn tool(name: &str, desc: &str) -> Tool {
         Tool {

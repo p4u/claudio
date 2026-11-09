@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::addons::api::cli::{Parsed, WrapperEnv};
-use crate::addons::api::print::hooks::{self, HookEvent, Listener};
-use crate::addons::api::print::session::{self, Summary};
-use crate::term::probe::ProbeResponder;
-use crate::term::strip_escapes;
+use crate::cli::{Parsed, WrapperEnv};
+use crate::print::hooks::{self, HookEvent, Listener};
+use crate::print::session::{self, Summary};
+use claudio_core::term::probe::ProbeResponder;
+use claudio_core::term::strip_escapes;
 
 #[derive(Debug)]
 pub enum DriverError {
@@ -122,11 +122,11 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
         parsed.user_settings.as_deref(),
     )?;
 
-    let corr = if crate::addons::api::msglog::enabled() {
-        let c = crate::addons::api::msglog::new_corr();
+    let corr = if crate::msglog::enabled() {
+        let c = crate::msglog::new_corr();
         let sid: String = session_id.chars().take(8).collect();
-        crate::addons::api::msglog::record(
-            crate::addons::api::msglog::Dir::ClaudioToClaude,
+        crate::msglog::record(
+            crate::msglog::Dir::ClaudioToClaude,
             &c,
             &format!("-p turn · session {sid}"),
             prompt,
@@ -138,9 +138,9 @@ pub fn run(parsed: &Parsed, env: &WrapperEnv, prompt: &str) -> Result<RunResult,
 
     let (summary, failure) = sess.turn(prompt)?;
 
-    if crate::addons::api::msglog::enabled() {
-        crate::addons::api::msglog::record(
-            crate::addons::api::msglog::Dir::ClaudeToClaudio,
+    if crate::msglog::enabled() {
+        crate::msglog::record(
+            crate::msglog::Dir::ClaudeToClaudio,
             &corr,
             &format!(
                 "reply · turns={} · error={}",

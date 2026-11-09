@@ -22,7 +22,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-use crate::addons::api::cli::HookTransport;
+use crate::cli::HookTransport;
 
 // Kept for the file-transport relay path (env var is still needed there
 // because the hook command writes to a dir, not connects to a port).
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn tcp_listener_has_no_child_env() {
         // With the Relay approach, child_env() returns empty for TCP.
-        use crate::addons::api::cli::HookTransport;
+        use crate::cli::HookTransport;
         let listener = Listener::start(HookTransport::Tcp).unwrap();
         assert!(
             listener.child_env().is_empty(),
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn tcp_listener_roundtrip() {
-        use crate::addons::api::cli::HookTransport;
+        use crate::cli::HookTransport;
         use std::net::TcpStream;
 
         let listener = Listener::start(HookTransport::Tcp).unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn tcp_listener_poll_timeout_returns_none() {
-        use crate::addons::api::cli::HookTransport;
+        use crate::cli::HookTransport;
         let listener = Listener::start(HookTransport::Tcp).unwrap();
         assert!(listener
             .poll(std::time::Duration::from_millis(50))
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn file_listener_roundtrip() {
-        use crate::addons::api::cli::HookTransport;
+        use crate::cli::HookTransport;
 
         let listener = Listener::start(HookTransport::File).unwrap();
         let env = listener.child_env();
