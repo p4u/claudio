@@ -3340,7 +3340,8 @@ make matrix
 cargo test --test web --test web_manager --test vocdoni_web -- --test-threads=1
 make test-web
 make static && ldd dist/claudio      # "not a dynamic executable" / static-pie
-cargo tree -e normal --target all | grep -c aws-lc    # 0
+! cargo tree -e normal --target all | grep -q aws-lc          # exits 0: no aws-lc (R9)
+! strings dist/claudio | grep -q CLAUDIO_TEST_REMOTE_PEER      # exits 0: the debug-only test hook is not in the release binary (R8)
 git log --format='%H %s%n%b' 558a54d..HEAD | grep -ci 'co-authored\|claude\|generated'   # 0
 ```
 
