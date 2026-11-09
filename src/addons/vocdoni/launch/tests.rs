@@ -382,14 +382,22 @@ async fn plugin_share_becomes_optional_args_secrets_and_instructions() {
     assert!(part.notices.is_empty(), "{:?}", part.notices);
     // The answer went to the addon's state as well.
     assert!(runner.state().apply_state("local", "kb").is_some());
-    // An unsaved plugin is left out (the review comes later).
+    // An unsaved plugin is left out whole, its secret too (the review
+    // comes later); so is one skipped for this launch.
     let runner = self::runner(profiles_file());
     kb_ready(&runner);
     runner.state().plugins.choices.clear();
     let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
     let req = request(LaunchOp::New, choice("work".into(), false));
     let part = prepare(runner, req, ctx).await.unwrap();
-    assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_some());
+    assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_none());
+    let runner = self::runner(profiles_file());
+    kb_ready(&runner);
+    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+    let mut req = request(LaunchOp::New, choice("work".into(), false));
+    req.deferred = vec!["kb".into()];
+    let part = prepare(runner, req, ctx).await.unwrap();
+    assert!(part.args.is_empty() && env_get(&part.env, "KB_TOKEN").is_none());
 }
 
 #[tokio::test]

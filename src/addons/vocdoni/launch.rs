@@ -246,7 +246,7 @@ async fn plugin_share(
         wait_loaded(runner, deadline).await;
     }
     let host = req.host.as_str();
-    let (mut parts, pending) = runner.state().plugin_parts(host, profile, &req.deferred);
+    let (mut parts, pending) = saved_parts(runner, host, profile, &req.deferred);
     if !ctx.host_has(host) {
         let notices = (!parts.is_empty())
             .then(|| format!("daemon on {host} is older: plugins after `claudio daemon restart`"))
@@ -282,6 +282,23 @@ async fn plugin_share(
         instructions: composed.instructions,
         notices,
     }
+}
+
+/// `profile`'s enabled plugins on `host` minus `skip`, and the asks they
+/// wait for: a plugin without saved choices is left out whole, its
+/// secrets too (until its review, P3.11). A launch's profile is one in use
+/// (its list is fetched).
+fn saved_parts(
+    runner: &Arc<Runner>,
+    host: &str,
+    profile: &str,
+    skip: &[String],
+) -> (Vec<PluginPart>, Vec<(String, super::daemon::ApplyRequest)>) {
+    runner.transition(|s| s.use_profiles([profile.to_owned()].into()));
+    let state = runner.state();
+    let (mut parts, pending) = state.plugin_parts(host, profile, skip);
+    parts.retain(|p| state.plugins.choices.contains_key(&p.name));
+    (parts, pending)
 }
 
 /// The answers that came in, into the parts that lacked one.
