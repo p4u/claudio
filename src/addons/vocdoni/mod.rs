@@ -24,6 +24,10 @@ use crate::addon::{Addon, AddonCtx, AddonEvent, Addons, Commands, DaemonOps, Lau
 /// The addon's name: its config sections' owner and its daemon ops' prefix.
 pub const NAME: &str = "vocdoni";
 
+/// The proxy `claudio vocdoni login` signs in to without a URL and without
+/// a default profile.
+pub const DEFAULT_URL: &str = "https://claude.vocdoni.net";
+
 /// The Vocdoni addon.
 pub struct Vocdoni {
     daemon: daemon::VocdoniDaemon,
@@ -92,5 +96,9 @@ impl Commands for Vocdoni {
             return Some(code);
         }
         cmd::dispatch(argv.get(1..).unwrap_or_default())
+    }
+
+    fn help(&self) -> &'static str {
+        cmd::APPENDIX
     }
 }

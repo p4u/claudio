@@ -14,7 +14,6 @@ file src/tui/wizard.rs 1147
 file src/addons/web/hub.rs 2229
 fn src/addons/vocdoni/plugins/manifest.rs::check 130
 fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
-fn src/addons/vocdoni/cmd.rs::cmd_login 169
 fn src/addons/api/api/agentic.rs::tool_preamble 85
 fn src/addons/api/api/pool.rs::resolve_turn 98
 fn src/addons/api/api/routes/chat.rs::completions 91

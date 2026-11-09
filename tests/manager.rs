@@ -3336,6 +3336,9 @@ fn fake_plugin_proxy() -> String {
             let line = String::from_utf8_lossy(&head);
             let (status, reply) = if line.starts_with("GET /v1/claudio/plugins ") {
                 ("200 OK", list.as_str())
+            } else if line.starts_with("GET /v1/claudio ") {
+                // `claudio vocdoni login`'s check of the token.
+                ("200 OK", "{}")
             } else if line.starts_with(&format!("GET /{PLUGIN}.toml ")) {
                 ("200 OK", PLUGIN_MANIFEST)
             } else {
@@ -3359,9 +3362,14 @@ fn fake_plugin_proxy() -> String {
 /// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`: the plugin
 /// secret's key only, [`record_env_sh`]) before the usual banner and `cat`.
 fn write_plugin_claude(h: &ManagerHarness, dumps: &std::path::Path) {
+    write_plugin_claude_noting(h, dumps, &[]);
+}
+
+/// [`write_plugin_claude`], also noting whether each of `present` is set.
+fn write_plugin_claude_noting(h: &ManagerHarness, dumps: &std::path::Path, present: &[&str]) {
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(dumps.join("launches")).unwrap();
-    let record = record_env_sh("$d/env", &[PLUGIN_KEY], &[]);
+    let record = record_env_sh("$d/env", &[PLUGIN_KEY], present);
     let dumps = dumps.display();
     let script = format!(
         r#"#!/bin/sh
@@ -3439,6 +3447,95 @@ fn context_files(h: &ManagerHarness) -> String {
 /// the instructions in its context, and the plugin is installed through
 /// the CLI; the extensions screen shows each item's outcome; turned off,
 /// the next session has none of it.
+/// AC7: `claudio vocdoni login --token` (the URL given, the token on
+/// stdin) saves the default profile and caches its plugins; a new session
+/// then gets the proxy env (the token), the plugin args and the
+/// instructions in its context file.
+#[test]
+fn test_vocdoni_login_token_then_a_session_gets_the_proxy_and_plugins() {
+    use std::io::Write;
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude_noting(&h, &dumps, &["ANTHROPIC_AUTH_TOKEN"]);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(claude_config.join("plugins")).unwrap();
+    let cache = h.root.join("xdg-cache");
+    let proxy = fake_plugin_proxy();
+    let url = format!("http://{proxy}");
+    let mut login = std::process::Command::new(BINARY)
+        .args(["vocdoni", "login", &url, "--name", "work", "--token"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("XDG_RUNTIME_DIR", &h.runtime_dir)
+        .env("XDG_CONFIG_HOME", &h.config_home)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("HOME", &h.home)
+        .env("CLAUDIO_CLAUDE_PATH", &h.fake_claude)
+        .env("CLAUDIO_TEST_LOOPBACK_HTTP", "1")
+        .env("CLAUDIO_NO_BROWSER", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run claudio vocdoni login");
+    login
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"member-token\n")
+        .unwrap();
+    let out = login.wait_with_output().unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("Profile \"work\" saved as default."),
+        "{stdout}"
+    );
+    assert!(stdout.contains(PLUGIN), "its plugins are listed: {stdout}");
+    assert!(!stdout.contains("member-token") && !stderr.contains("member-token"));
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains("default = \"work\""), "{config}");
+
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("XDG_CACHE_HOME", &cache);
+        cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    // Past the arming, keep everything.
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ENTER);
+    tui.wait_for(
+        &format!("plugin {PLUGIN} set up (saved)"),
+        Region::StatusBar,
+        WAIT,
+    );
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(
+        env.contains("ANTHROPIC_AUTH_TOKEN=<set>"),
+        "the proxy env: {env}"
+    );
+    assert!(env.contains(&format!("{PLUGIN_KEY}=s3cret")), "{env}");
+    assert!(flag_value(&argv, "--agents").is_some(), "{argv:?}");
+    let mcp = flag_value(&argv, "--mcp-config").expect("--mcp-config");
+    assert!(mcp.contains("Bearer ${VOCDONI_TEST_TOKEN}"), "{mcp}");
+    assert!(!argv.iter().any(|a| a.contains("member-token")), "{argv:?}");
+    let context = context_files(&h);
+    assert!(
+        context.contains("Manifest instructions for the test."),
+        "{context}"
+    );
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
 #[test]
 fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     let h = ManagerHarness::new();

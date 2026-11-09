@@ -1,7 +1,7 @@
-//! CLI subcommands: `claudio proxy login/status/logout/use`.
-//!
-//! These commands run synchronously (blocking tokio runtime) before the rest
-//! of the TUI starts. They are dispatched in `main.rs` before `cli::parse`.
+//! The addon's CLI: `claudio vocdoni login|status|use|logout`, and
+//! `claudio proxy …` as an alias with the same subcommands. They run
+//! synchronously (a blocking tokio runtime), dispatched by the addon
+//! registry after the core's own words.
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
@@ -9,151 +9,141 @@ use std::process::ExitCode;
 use super::proxy::api;
 use super::proxy::login::{self, Granted};
 use super::proxy::plugins;
-use super::proxy::profile::{self, Profile};
+use super::proxy::profile::{self, Profile, ProxySection};
 use crate::text::fmt_tokens;
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-/// Handle `claudio proxy <args>`. Returns `Some(code)` when the subcommand
-/// was handled, `None` when `args` is not a proxy subcommand.
-pub fn dispatch(args: &[String]) -> Option<ExitCode> {
-    // args[0] must be "proxy".
-    if args.first().map(String::as_str) != Some("proxy") {
-        return None;
-    }
-    let sub = args.get(1).map(String::as_str).unwrap_or("--help");
-    let rest = if args.len() > 2 { &args[2..] } else { &[] };
+/// The words this addon claims: `vocdoni`, and `proxy` (its alias).
+pub const WORDS: &[&str] = &["vocdoni", "proxy"];
 
-    let code = match sub {
-        "login" => cmd_login(rest),
-        "status" => cmd_status(),
-        "logout" => cmd_logout(rest),
-        "use" => cmd_use(rest),
-        "-h" | "--help" | "help" => {
-            print!("{}", PROXY_HELP);
+/// Handle `claudio vocdoni <args>` or `claudio proxy <args>` (`args[0]` is
+/// the word). `None` when `args` is neither.
+pub fn dispatch(args: &[String]) -> Option<ExitCode> {
+    args.first().filter(|w| WORDS.contains(&w.as_str()))?;
+    let sub = args.get(1).map(String::as_str).unwrap_or("--help");
+    let rest = args.get(2..).unwrap_or_default();
+    let code = match (subcommand(sub), sub) {
+        (Some(run), _) => run(rest),
+        (None, "-h" | "--help" | "help") => {
+            print!("{HELP}");
             ExitCode::SUCCESS
         }
-        other => {
-            eprintln!("claudio proxy: unknown subcommand '{other}'");
-            eprintln!("{PROXY_HELP}");
+        (None, other) => {
+            eprintln!("claudio vocdoni: unknown subcommand '{other}'");
+            eprintln!("{HELP}");
             ExitCode::FAILURE
         }
     };
     Some(code)
 }
 
-const PROXY_HELP: &str = "\
-claudio proxy — manage claude-proxy profiles
+/// What runs subcommand `sub`, under either word.
+fn subcommand(sub: &str) -> Option<fn(&[String]) -> ExitCode> {
+    match sub {
+        "login" => Some(cmd_login),
+        "status" => Some(|_| cmd_status()),
+        "logout" => Some(cmd_logout),
+        "use" => Some(cmd_use),
+        _ => None,
+    }
+}
+
+/// `claudio vocdoni --help`.
+pub const HELP: &str = "\
+claudio vocdoni — the Vocdoni proxy (claude-proxy) profiles and team plugins
+(`claudio proxy …` is an alias with the same subcommands)
 
 USAGE
-  claudio proxy login [URL]         Sign in through the browser (or paste a token)
-  claudio proxy status              Show profiles and live stats
-  claudio proxy logout [NAME]       Remove a proxy profile and its cached plugins
-  claudio proxy use NAME|none       Set the default profile
+  claudio vocdoni login [URL]       Sign in through the browser (or paste a token)
+  claudio vocdoni status            Show profiles and live stats
+  claudio vocdoni logout [NAME]     Remove a proxy profile and its cached plugins
+  claudio vocdoni use NAME|none     Set the default profile
 
 OPTIONS (login)
-  URL            The proxy (default: the default profile's)
+  URL            The proxy (default: the default profile's, else
+                 https://claude.vocdoni.net)
   --name NAME    Profile name (default: the default profile's when URL is not
                  given, else the first DNS label of the host)
   --token        Paste a token instead of signing in through the browser
+                 (read from stdin when it is not a terminal)
   --unverified   Save the profile even if token verification fails
 
 The sign-in page opens in a browser when there is a display; set
 CLAUDIO_NO_BROWSER=1 to only print its URL.
 ";
 
+/// The addon's lines in `claudio --help`.
+pub const APPENDIX: &str = "\n\
+\x20Vocdoni addon\n\
+\x20─────────────\n\
+\x20  claudio vocdoni login [URL] [--token]   Sign in to the Vocdoni proxy (default https://claude.vocdoni.net)\n\
+\x20  claudio vocdoni status|use NAME|logout  Profiles, the default one, stats (`claudio vocdoni --help`)\n\
+\x20  claudio proxy …                         The same subcommands (alias)\n\
+\x20  CLAUDIO_PROXY_URL=<token>@<host>        An ephemeral proxy profile for this run (overrides the\n\
+\x20                                          default); http:// only for 127.0.0.1/localhost.\n";
+
 // ── login ─────────────────────────────────────────────────────────────────────
 
-fn cmd_login(args: &[String]) -> ExitCode {
-    // Parse flags.
-    let mut name_override: Option<String> = None;
-    let mut url_arg: Option<String> = None;
-    let mut unverified = false;
-    let mut paste = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--name" => {
-                i += 1;
-                name_override = args.get(i).cloned();
-            }
-            "--unverified" => {
-                unverified = true;
-            }
-            "--token" => {
-                paste = true;
-            }
-            a if !a.starts_with('-') => {
-                url_arg = Some(a.to_owned());
-            }
-            other => {
-                eprintln!("claudio proxy login: unknown flag '{other}'");
-                return ExitCode::FAILURE;
-            }
+/// `login`'s arguments.
+#[derive(Debug, Default, PartialEq)]
+struct LoginArgs {
+    name: Option<String>,
+    url: Option<String>,
+    unverified: bool,
+    paste: bool,
+}
+
+fn parse_login(args: &[String]) -> Result<LoginArgs, String> {
+    let mut out = LoginArgs::default();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--name" => out.name = args.next().cloned(),
+            "--unverified" => out.unverified = true,
+            "--token" => out.paste = true,
+            a if !a.starts_with('-') => out.url = Some(a.to_owned()),
+            other => return Err(format!("unknown flag '{other}'")),
         }
-        i += 1;
     }
+    Ok(out)
+}
 
-    let sec = match profile::load() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("claudio proxy login: could not read config.toml: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Get URL: given, else the default profile's (keeping its name), else
-    // asked for.
+/// The proxy to sign in to, normalized: `url` as given, else the default
+/// profile's (and its name), else [`super::DEFAULT_URL`]. Never a token.
+fn login_target(
+    url: Option<String>,
+    sec: &ProxySection,
+) -> Result<(String, Option<String>), String> {
     let default = sec
         .default
         .as_ref()
         .and_then(|n| sec.profiles.get(n).map(|p| (p.url.clone(), n.clone())));
-    let (url_raw, default_name) = match (url_arg, default) {
+    let (raw, name) = match (url, default) {
         (Some(u), _) => (u, None),
-        (None, Some((url, name))) => (url, Some(name)),
-        (None, None) => {
-            eprint!("Proxy URL (e.g. https://claude.example.net): ");
-            let _ = io::stderr().flush();
-            let mut line = String::new();
-            if io::stdin().lock().read_line(&mut line).is_err() || line.trim().is_empty() {
-                eprintln!("claudio proxy login: no URL provided");
-                return ExitCode::FAILURE;
-            }
-            (line.trim().to_owned(), None)
-        }
+        (None, Some((u, n))) => (u, Some(n)),
+        (None, None) => (super::DEFAULT_URL.to_owned(), None),
     };
-
-    // Reject TOKEN@HOST format: tokens are never accepted as arguments.
-    // Tokens must come from the interactive prompt, stdin pipe, or CLAUDIO_PROXY_URL.
-    if url_raw.contains('@') {
-        eprintln!("claudio proxy login: tokens are never accepted as arguments;");
-        eprintln!("  use the interactive prompt, pipe it on stdin, or set CLAUDIO_PROXY_URL");
-        return ExitCode::FAILURE;
+    // TOKEN@HOST: tokens come from the prompt, stdin or CLAUDIO_PROXY_URL.
+    if raw.contains('@') {
+        return Err("tokens are never accepted as arguments;\n  \
+             use the interactive prompt, pipe it on stdin, or set CLAUDIO_PROXY_URL"
+            .to_owned());
     }
+    Ok((profile::normalize_url(&raw)?, name))
+}
 
-    // Normalize host string to a proper URL.
-    let url = match profile::normalize_url(&url_raw) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("claudio proxy login: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let name = name_override
-        .or(default_name)
-        .unwrap_or_else(|| profile::name_from_url(&url));
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    // The browser sign-in, unless a token is to be pasted (asked, or the
-    // proxy has none).
+/// The token for `url` and the e-mail it was granted for: pasted when
+/// asked (or when the proxy has no browser sign-in), else signed in.
+fn obtain_token(
+    rt: &tokio::runtime::Runtime,
+    url: &str,
+    paste: bool,
+) -> Result<(String, Option<String>), String> {
     let (token, email) = if paste {
         (read_token_from_tty_or_stdin(), None)
     } else {
-        match rt.block_on(browser_login(&url)) {
+        match rt.block_on(browser_login(url)) {
             Ok(Some(granted)) => {
                 let email = Some(granted.email).filter(|e| !e.is_empty());
                 (granted.token, email)
@@ -162,20 +152,19 @@ fn cmd_login(args: &[String]) -> ExitCode {
                 eprintln!("This proxy has no browser login; paste a token.");
                 (read_token_from_tty_or_stdin(), None)
             }
-            Err(e) => {
-                eprintln!("claudio proxy login: {e}");
-                return ExitCode::FAILURE;
-            }
+            Err(e) => return Err(e.to_string()),
         }
     };
     if token.is_empty() {
-        eprintln!("claudio proxy login: no token provided");
-        return ExitCode::FAILURE;
+        return Err("no token provided".to_owned());
     }
+    Ok((token, email))
+}
 
-    // Validate with the proxy.
-    let verified = rt.block_on(async {
-        match api::check_root(&url, &token).await {
+/// Whether the proxy at `url` accepts `token`, saying what it found.
+fn verify_token(rt: &tokio::runtime::Runtime, url: &str, token: &str) -> bool {
+    rt.block_on(async {
+        match api::check_root(url, token).await {
             Ok(true) => {
                 println!("✓  Proxy responded at {url}");
                 true
@@ -184,38 +173,63 @@ fn cmd_login(args: &[String]) -> ExitCode {
                 // Endpoint doesn't exist — try /v1/models to at least check auth.
                 eprintln!("notice: /v1/claudio not found; proxy may not support the Claudio API");
                 eprintln!("        Checking auth with /v1/models …");
-                match api::check_models_fallback(&url, &token).await {
+                match api::check_models_fallback(url, token).await {
                     Ok(()) => {
                         println!("✓  Token accepted at {url} (no Claudio API, stats unavailable)");
                         true
                     }
                     Err(e) => {
-                        eprintln!("claudio proxy login: {e}");
+                        eprintln!("claudio vocdoni login: {e}");
                         false
                     }
                 }
             }
             Err(e) => {
-                eprintln!("claudio proxy login: could not reach {url}: {e}");
+                eprintln!("claudio vocdoni login: could not reach {url}: {e}");
                 false
             }
         }
-    });
+    })
+}
 
-    if !verified {
-        if unverified {
-            eprintln!("warning: token NOT verified — saving profile as unverified");
-        } else {
+fn cmd_login(args: &[String]) -> ExitCode {
+    let fail = |why: String| {
+        eprintln!("claudio vocdoni login: {why}");
+        ExitCode::FAILURE
+    };
+    let args = match parse_login(args) {
+        Ok(args) => args,
+        Err(why) => return fail(why),
+    };
+    let sec = match profile::load() {
+        Ok(s) => s,
+        Err(e) => return fail(format!("could not read config.toml: {e}")),
+    };
+    let (url, default_name) = match login_target(args.url, &sec) {
+        Ok(target) => target,
+        Err(why) => return fail(why),
+    };
+    let name = args
+        .name
+        .or(default_name)
+        .unwrap_or_else(|| profile::name_from_url(&url));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (token, email) = match obtain_token(&rt, &url, args.paste) {
+        Ok(got) => got,
+        Err(why) => return fail(why),
+    };
+    if !verify_token(&rt, &url, &token) {
+        if !args.unverified {
             return ExitCode::FAILURE;
         }
+        eprintln!("warning: token NOT verified — saving profile as unverified");
     }
-
-    let (as_default, sec) = match save_login(&name, url.clone(), token, email.clone()) {
+    let (as_default, sec) = match save_login(&name, url, token, email.clone()) {
         Ok(saved) => saved,
-        Err(e) => {
-            eprintln!("claudio proxy login: could not save config.toml: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(e) => return fail(format!("could not save config.toml: {e}")),
     };
     let saved = if as_default {
         format!("Profile \"{name}\" saved as default.")
@@ -226,7 +240,6 @@ fn cmd_login(args: &[String]) -> ExitCode {
         Some(email) => println!("Signed in as {}. {saved}", printable(email)),
         None => println!("{saved}"),
     }
-
     // The new token's plugins, so the next session has them.
     if let Some(p) = sec.profiles.get(&name) {
         rt.block_on(refresh_plugins(&name, p));
@@ -412,7 +425,7 @@ fn read_token_no_echo() -> String {
     let mut saved = MaybeUninit::<libc::termios>::uninit();
     // SAFETY: tcgetattr writes into the pointer on success.
     if unsafe { libc::tcgetattr(stdin_fd, saved.as_mut_ptr()) } != 0 {
-        eprintln!("\nclaudio proxy login: cannot query terminal state; aborting");
+        eprintln!("\nclaudio vocdoni login: cannot query terminal state; aborting");
         std::process::exit(1);
     }
     // SAFETY: tcgetattr succeeded, so saved is fully initialized.
@@ -438,7 +451,7 @@ fn read_token_no_echo() -> String {
             libc::signal(libc::SIGINT, old_sigint);
         }
         SIGINT_FD.store(-1, Ordering::Release);
-        eprintln!("\nclaudio proxy login: cannot disable echo; aborting");
+        eprintln!("\nclaudio vocdoni login: cannot disable echo; aborting");
         std::process::exit(1);
     }
 
@@ -463,7 +476,7 @@ fn cmd_status() -> ExitCode {
     let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("claudio proxy: could not read config.toml: {e}");
+            eprintln!("claudio vocdoni: could not read config.toml: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -478,7 +491,7 @@ fn cmd_status() -> ExitCode {
 
     if sec.profiles.is_empty() && env_profile.is_none() {
         println!("No proxy profiles configured.");
-        println!("Run `claudio proxy login` or set CLAUDIO_PROXY_URL.");
+        println!("Run `claudio vocdoni login` or set CLAUDIO_PROXY_URL.");
         return ExitCode::SUCCESS;
     }
 
@@ -594,7 +607,7 @@ fn cmd_logout(args: &[String]) -> ExitCode {
     let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("claudio proxy: could not read config.toml: {e}");
+            eprintln!("claudio vocdoni: could not read config.toml: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -604,19 +617,19 @@ fn cmd_logout(args: &[String]) -> ExitCode {
         None => match &sec.default {
             Some(d) => d.clone(),
             None => {
-                eprintln!("claudio proxy logout: no profile name given and no default set");
+                eprintln!("claudio vocdoni logout: no profile name given and no default set");
                 return ExitCode::FAILURE;
             }
         },
     };
 
     if !sec.profiles.contains_key(&name) {
-        eprintln!("claudio proxy logout: profile '{name}' not found");
+        eprintln!("claudio vocdoni logout: profile '{name}' not found");
         return ExitCode::FAILURE;
     }
     // Its plugins' secrets go with it.
     if let Err(e) = plugins::remove_cache(&name) {
-        eprintln!("claudio proxy logout: could not update plugins.json: {e}");
+        eprintln!("claudio vocdoni logout: could not update plugins.json: {e}");
         return ExitCode::FAILURE;
     }
 
@@ -628,7 +641,7 @@ fn cmd_logout(args: &[String]) -> ExitCode {
         }
     });
     if let Err(e) = saved {
-        eprintln!("claudio proxy logout: could not save config.toml: {e}");
+        eprintln!("claudio vocdoni logout: could not save config.toml: {e}");
         return ExitCode::FAILURE;
     }
     println!("Removed profile '{name}'.");
@@ -641,7 +654,7 @@ fn cmd_use(args: &[String]) -> ExitCode {
     let name = match args.first() {
         Some(n) => n.clone(),
         None => {
-            eprintln!("claudio proxy use: missing NAME or 'none'");
+            eprintln!("claudio vocdoni use: missing NAME or 'none'");
             return ExitCode::FAILURE;
         }
     };
@@ -649,18 +662,18 @@ fn cmd_use(args: &[String]) -> ExitCode {
     let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("claudio proxy: could not read config.toml: {e}");
+            eprintln!("claudio vocdoni: could not read config.toml: {e}");
             return ExitCode::FAILURE;
         }
     };
 
     if name != "none" && !sec.profiles.contains_key(&name) {
-        eprintln!("claudio proxy use: profile '{name}' not found");
+        eprintln!("claudio vocdoni use: profile '{name}' not found");
         return ExitCode::FAILURE;
     }
     let default = (name != "none").then(|| name.clone());
     if let Err(e) = profile::update(|sec| sec.default = default) {
-        eprintln!("claudio proxy use: could not save config.toml: {e}");
+        eprintln!("claudio vocdoni use: could not save config.toml: {e}");
         return ExitCode::FAILURE;
     }
     if name == "none" {
@@ -674,6 +687,65 @@ fn cmd_use(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn proxy_alias_runs_the_same_subcommands() {
+        for sub in ["login", "status", "logout", "use"] {
+            assert!(subcommand(sub).is_some(), "{sub}");
+        }
+        assert!(subcommand("nope").is_none());
+        for word in WORDS {
+            assert_eq!(dispatch(&words(&[word, "--help"])), Some(ExitCode::SUCCESS));
+            assert_eq!(dispatch(&words(&[word, "help"])), Some(ExitCode::SUCCESS));
+            assert_eq!(dispatch(&words(&[word, "nope"])), Some(ExitCode::FAILURE));
+            // A bad `login` flag fails before anything is read or asked.
+            let bad = words(&[word, "login", "--nope"]);
+            assert_eq!(dispatch(&bad), Some(ExitCode::FAILURE));
+        }
+        assert_eq!(dispatch(&words(&["proxies"])), None);
+        assert_eq!(dispatch(&[]), None);
+        assert!(HELP.contains("claudio vocdoni login") && HELP.contains("claudio proxy"));
+        assert!(APPENDIX.starts_with('\n') && APPENDIX.contains("claudio proxy"));
+    }
+
+    #[test]
+    fn login_takes_the_url_the_default_profile_or_the_vocdoni_proxy() {
+        assert_eq!(
+            parse_login(&words(&["https://p.example.net", "--name", "w", "--token"])),
+            Ok(LoginArgs {
+                name: Some("w".into()),
+                url: Some("https://p.example.net".into()),
+                unverified: false,
+                paste: true,
+            })
+        );
+        assert!(parse_login(&words(&["--what"])).is_err());
+        let mut sec = ProxySection::default();
+        let (url, name) = login_target(None, &sec).unwrap();
+        assert_eq!((url.as_str(), name), (super::super::DEFAULT_URL, None));
+        sec.profiles.insert(
+            "self".into(),
+            Profile {
+                url: "https://self.example.org".into(),
+                token: "t".into(),
+                first_party: false,
+                email: None,
+            },
+        );
+        sec.default = Some("self".into());
+        let (url, name) = login_target(None, &sec).unwrap();
+        assert_eq!(
+            (url.as_str(), name.as_deref()),
+            ("https://self.example.org", Some("self"))
+        );
+        let given = login_target(Some("https://other.example.org".into()), &sec).unwrap();
+        assert_eq!(given, ("https://other.example.org".to_owned(), None));
+        assert!(login_target(Some("tok@p.example.org".into()), &sec).is_err());
+    }
 
     #[test]
     fn relogin_keeps_first_party_mode() {
