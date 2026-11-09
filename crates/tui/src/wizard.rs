@@ -97,18 +97,9 @@ pub struct HostStep {
 }
 
 impl HostStep {
-    /// Build a host step without local dirs.
-    ///
-    /// - `active_host`: pre-selects the active session's host.
-    /// - `extra`: SSH host candidates (from `hosts::candidates()`).
-    ///
-    /// Use [`with_local_dirs`] to also populate the LOCAL section.
-    #[allow(dead_code)]
-    pub fn new(active_host: &str, extra: &[String]) -> HostStep {
-        HostStep::with_local_dirs(active_host, extra, &[])
-    }
-
-    /// Like `new` but also populates the LOCAL section with recent dirs.
+    /// Build a host step: `active_host` is pre-selected, `extra` are the SSH
+    /// host candidates (from `hosts::candidates()`) and `local_dirs` the
+    /// LOCAL section's recent dirs.
     pub fn with_local_dirs(active_host: &str, extra: &[String], local_dirs: &[String]) -> HostStep {
         let candidates: Vec<String> = extra
             .iter()

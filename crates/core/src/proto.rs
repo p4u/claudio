@@ -678,7 +678,6 @@ pub struct DirEntry {
 impl DirEntry {
     /// Construct a minimal entry with no enrichment. Used in tests and by
     /// callers that do their own field assignment.
-    #[allow(dead_code)]
     pub fn simple(name: impl Into<String>, dir: bool) -> Self {
         DirEntry {
             name: name.into(),

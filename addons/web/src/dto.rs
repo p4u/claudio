@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use super::hub::{HostState, SessionView};
 use claudio_core::proto::{SessionKind, SessionState};
 
-#[cfg_attr(not(test), allow(dead_code))] // the documented list, checked by the tests
+/// The documented Session DTO fields, checked by the tests.
+#[cfg(test)]
 pub(crate) const SESSION_FIELDS: &[&str] = &[
     "id",
     "host",
@@ -35,7 +36,8 @@ pub(crate) const SESSION_FIELDS: &[&str] = &[
     "prompt_pending",
 ];
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// The documented Host DTO fields, checked by the tests.
+#[cfg(test)]
 pub(crate) const HOST_FIELDS: &[&str] = &[
     "name",
     "connected",

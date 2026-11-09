@@ -23,7 +23,7 @@
 //! the hot spawn/kill paths use the split protocol above.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +71,10 @@ struct File {
 
 /// The journal file and its in-memory copy, in spawn order.
 pub struct Journal {
-    pub(crate) path: PathBuf,
+    /// Where the tests' persisting shortcuts write; the daemon writes its
+    /// snapshots to `Config::journal` outside the registry lock.
+    #[cfg(test)]
+    pub(crate) path: std::path::PathBuf,
     sessions: Vec<Entry>,
 }
 
@@ -124,6 +127,7 @@ impl Journal {
             }
         };
         Journal {
+            #[cfg(test)]
             path: path.to_path_buf(),
             sessions,
         }
@@ -187,10 +191,9 @@ impl Journal {
         }
     }
 
-    /// Record a spawn and persist immediately (convenience for tests and
-    /// non-hot paths). A failed write is returned; the caller decides whether
-    /// to propagate or log. Hot paths should use the split protocol instead.
-    #[allow(dead_code)] // used by unit tests; kept pub for future non-hot-path callers
+    /// Record a spawn and persist immediately (the tests' shortcut). A failed
+    /// write is returned. The daemon uses the split protocol instead.
+    #[cfg(test)]
     pub fn record_spawn(&mut self, spec: &SpawnSpec, kind: SessionKind) -> (Entry, io::Result<()>) {
         let entry = self.upsert_entry(spec, kind);
         let snap = self.snapshot();
@@ -270,9 +273,9 @@ impl Journal {
         }
     }
 
-    /// Forget a session and persist. Returns the write result; callers that
-    /// need durability (Kill) must propagate the error.
-    #[allow(dead_code)] // durable variant of remove_in_memory; kept for a Kill that must be durable
+    /// Forget a session and persist (the tests' shortcut); returns the write
+    /// result. The daemon uses `remove_in_memory` + snapshot instead.
+    #[cfg(test)]
     pub fn remove(&mut self, id: SessionId) -> io::Result<bool> {
         if !self.remove_in_memory(id) {
             return Ok(false);
@@ -369,7 +372,7 @@ mod tests {
         );
 
         let mut j = Journal {
-            path: PathBuf::new(),
+            path: std::path::PathBuf::new(),
             sessions: Vec::new(),
         };
         let id = Uuid::new_v4();

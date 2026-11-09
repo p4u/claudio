@@ -204,9 +204,8 @@ pub fn load() -> Config {
     }
 }
 
-/// Load configuration from an explicit path (used in tests to avoid mutating
-/// the global `XDG_CONFIG_HOME`).
-#[allow(dead_code)]
+/// Load configuration from an explicit path: the web addon's re-read of the
+/// file it watches, and tests that must not touch `XDG_CONFIG_HOME`.
 pub fn load_from(path: &Path) -> Config {
     match try_load_from(path) {
         Ok(cfg) => cfg,

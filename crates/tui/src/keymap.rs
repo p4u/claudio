@@ -533,19 +533,6 @@ impl Keymap {
         }
         entries
     }
-
-    /// Generate the status-bar hints line from the current effective bindings.
-    ///
-    /// Reflects overrides so the hint is always accurate.
-    #[allow(dead_code)]
-    pub fn hints(&self) -> String {
-        let parts: Vec<String> = self
-            .bindings
-            .iter()
-            .map(|b| format!("{} {}", key_str(b.code, b.mods), b.label))
-            .collect();
-        parts.join(" · ")
-    }
 }
 
 /// Parse a key spec string like `"alt+right"`, `"alt+g"`, `"ctrl+x"`.
@@ -1176,11 +1163,5 @@ mod tests {
             km.lookup(&key(KeyCode::Char('h'), KeyModifiers::ALT)),
             Some(Action::Help)
         );
-    }
-
-    #[test]
-    fn hints_string_not_empty() {
-        let km = Keymap::default();
-        assert!(!km.hints().is_empty());
     }
 }

@@ -166,21 +166,6 @@ pub fn tab_parts(index: usize, label: &str, cap: usize) -> (String, String) {
     (format!(" {index} "), suffix)
 }
 
-/// Like [`tab_parts`] but appends a proxy badge when `proxied` is true.
-///
-/// Kept for completeness; the tab bar no longer shows the badge (it was
-/// removed to reduce visual noise — the status bar shows proxy info instead).
-#[allow(dead_code)]
-pub fn tab_parts_proxy(index: usize, label: &str, cap: usize, proxied: bool) -> (String, String) {
-    let (prefix, mut suffix) = tab_parts(index, label, cap);
-    if proxied {
-        // Insert badge before the trailing space.
-        let trimmed = suffix.trim_end_matches(' ');
-        suffix = format!("{trimmed}{PROXY_BADGE} ");
-    }
-    (prefix, suffix)
-}
-
 /// Per-tab label widths so that every tab fits in `width` columns (tabs are
 /// separated by one column). Inactive tabs shrink first, all to a common
 /// cap; the active tab shrinks only once the others have no label left.
