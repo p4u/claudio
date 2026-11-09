@@ -1,12 +1,33 @@
 //! The `addons.*` ops' pure parts: launch and segment DTOs, id checks and
 //! the labelled launch flags.
 
+use std::sync::Arc;
+
 use super::*;
-use crate::addon::Tone;
+use crate::addon::test_support::TestAddon;
+use crate::addon::{FlagDecl, Tone};
 use crate::app::state::SavedRoute;
 
+/// A routing addon's flags: an option, and a labelled switch.
+const FLAGS: &[FlagDecl] = &[
+    FlagDecl {
+        name: "--team",
+        value: Some("NAME"),
+        help: "new sessions use NAME",
+        label: None,
+    },
+    FlagDecl {
+        name: "--first-party",
+        value: None,
+        help: "sessions are first-party",
+        label: Some("First-party session"),
+    },
+];
+
+/// A registry of one routing addon, `team`, that adopts pre-addon routes.
 fn addons() -> Addons {
-    Addons::new(crate::addons::all()).unwrap()
+    let team = TestAddon::new("team").launch_flags(FLAGS).adopts_legacy();
+    Addons::new(vec![Arc::new(team)]).unwrap()
 }
 
 /// A persisted pre-addon route.
@@ -30,9 +51,9 @@ fn a_session_launch_is_known_only_when_recorded_and_adopted() {
     let choice = choice.unwrap();
     assert_eq!(
         (choice.addon.as_str(), choice.option.as_str()),
-        ("vocdoni", "work")
+        ("team", "work")
     );
-    assert_eq!(choice.flags, ["first-party"]);
+    assert_eq!(choice.flags, ["--first-party"]);
     // No addon of this build adopts it: unknown, never direct (F4).
     let none = Addons::empty();
     assert_eq!(
@@ -44,7 +65,7 @@ fn a_session_launch_is_known_only_when_recorded_and_adopted() {
         known: true,
         choice: Some(choice),
         segments: vec![(
-            "vocdoni",
+            "team",
             Segment {
                 id: "proxy".into(),
                 text: "⇄ proxy:work".into(),
@@ -55,11 +76,11 @@ fn a_session_launch_is_known_only_when_recorded_and_adopted() {
     };
     assert_eq!(
         launch_dto(&a),
-        json!({"known": true, "choice": {"addon": "vocdoni", "option": "work", "flags": ["first-party"]}})
+        json!({"known": true, "choice": {"addon": "team", "option": "work", "flags": ["--first-party"]}})
     );
     assert_eq!(
         segments_dto(&a),
-        json!([{"addon": "vocdoni", "id": "proxy", "text": "⇄ proxy:work", "tone": "accent", "priority": 10}])
+        json!([{"addon": "team", "id": "proxy", "text": "⇄ proxy:work", "tone": "accent", "priority": 10}])
     );
     assert_eq!(
         launch_dto(&SessionAddons::default()),
@@ -69,7 +90,7 @@ fn a_session_launch_is_known_only_when_recorded_and_adopted() {
 
 #[test]
 fn ids_and_addons_are_checked() {
-    for good in ["a", "vocdoni-test", "x9", &"a".repeat(64)] {
+    for good in ["a", "team-test", "x9", &"a".repeat(64)] {
         assert!(check_id("id", good).is_ok(), "{good}");
     }
     for bad in ["", "A", "a b", "a_b", "../x", "é", &"a".repeat(65)] {
@@ -79,7 +100,7 @@ fn ids_and_addons_are_checked() {
         );
     }
     let addons = addons();
-    assert_eq!(addon_named(&addons, "vocdoni"), Ok("vocdoni"));
+    assert_eq!(addon_named(&addons, "team"), Ok("team"));
     assert_eq!(
         addon_named(&addons, "nope"),
         Err("bad request: addon: no such addon".to_owned())
@@ -89,10 +110,10 @@ fn ids_and_addons_are_checked() {
 #[test]
 fn labelled_flags_are_the_select_flags_the_wizard_shows() {
     let addons = addons();
-    let launch = addons.get("vocdoni").unwrap().launch().unwrap();
+    let launch = addons.get("team").unwrap().launch().unwrap();
     assert_eq!(
         labelled_flags(launch),
-        [json!({"name": "first-party", "label": "First-party session"})]
+        [json!({"name": "--first-party", "label": "First-party session"})]
     );
 }
 
@@ -105,17 +126,17 @@ fn a_v2_launch_is_checked_into_a_select() {
     let addons = addons();
     let select = select_of(
         &addons,
-        &arg(json!({"pick": "option", "addon": "vocdoni", "option": "work", "flags": ["first-party"]})),
+        &arg(json!({"pick": "option", "addon": "team", "option": "work", "flags": ["--first-party"]})),
     )
     .unwrap();
     assert_eq!(
         select.pick,
         Pick::Option {
-            addon: "vocdoni".into(),
+            addon: "team".into(),
             option: "work".into()
         }
     );
-    assert_eq!(select.flags, ["first-party"]);
+    assert_eq!(select.flags, ["--first-party"]);
     assert_eq!(
         select_of(&addons, &arg(json!({"pick": "default"}))).unwrap(),
         LaunchSelect::default()
@@ -132,15 +153,15 @@ fn a_v2_launch_is_checked_into_a_select() {
             "no such addon",
         ),
         (
-            json!({"pick": "option", "addon": "vocdoni", "option": ""}),
+            json!({"pick": "option", "addon": "team", "option": ""}),
             "option: 1..=128 bytes",
         ),
         (
-            json!({"pick": "option", "addon": "vocdoni"}),
+            json!({"pick": "option", "addon": "team"}),
             "addon and option go with \"option\" only",
         ),
         (
-            json!({"pick": "direct", "addon": "vocdoni"}),
+            json!({"pick": "direct", "addon": "team"}),
             "addon and option go with \"option\" only",
         ),
         (
@@ -148,8 +169,8 @@ fn a_v2_launch_is_checked_into_a_select() {
             "pick: default, direct or option",
         ),
         (
-            json!({"pick": "default", "flags": ["--first-party"]}),
-            "no flag --first-party",
+            json!({"pick": "default", "flags": ["first-party"]}),
+            "no flag first-party",
         ),
     ] {
         assert_eq!(
@@ -159,13 +180,13 @@ fn a_v2_launch_is_checked_into_a_select() {
         );
     }
     let defer: Vec<DeferArg> =
-        serde_json::from_value(json!([{"addon": "vocdoni", "id": "kb"}])).unwrap();
+        serde_json::from_value(json!([{"addon": "team", "id": "kb"}])).unwrap();
     assert_eq!(
         deferred_of(&addons, &defer),
-        Ok(vec![("vocdoni".to_owned(), "kb".to_owned())])
+        Ok(vec![("team".to_owned(), "kb".to_owned())])
     );
     let defer: Vec<DeferArg> =
-        serde_json::from_value(json!([{"addon": "vocdoni", "id": "../kb"}])).unwrap();
+        serde_json::from_value(json!([{"addon": "team", "id": "../kb"}])).unwrap();
     assert_eq!(
         deferred_of(&addons, &defer),
         Err("bad request: defer: not an id".to_owned())
