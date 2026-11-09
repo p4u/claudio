@@ -21,9 +21,9 @@ is in git history.
 | Method and path | Cookie | Origin check | Answer |
 |---|---|---|---|
 | `GET`/`HEAD` `/`, `/index.html`, any embedded asset path | no | no | the asset; `404` when unknown |
-| `POST /api/login` body `{"token":"<64 hex>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token; `429` locked; `400` bad body; `413` too large |
+| `POST /api/login` body `{"token":"<64 hex>"}` or `{"password":"<12–1024 bytes>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token or password, or a token from a non-local request with `--remote`; `429` locked; `400` bad body (neither or both fields, or a password without `--remote`); `413` too large; `503` no hashing slot within 2 s (does not count) |
 | `POST /api/logout` | yes | yes | `204` + an expiring `Set-Cookie` |
-| `GET /api/me` **(decided here)** | yes | no | `204`: the cookie is live (the page asks this at load when the URL has no token) |
+| `GET /api/me` **(decided here)** | yes | no | `204`: the cookie is live (the page asks this at load when the URL has no token). `401` without one, body `{"login":[…]}`: the methods this request may use, `"token"` and/or `"password"` (below) |
 | `GET /ws` (WebSocket upgrade) | yes | yes | `101`; `503` past 16 tabs **(decided here)** |
 | any other `/api/*` | yes | for non-GET | `404` once authenticated |
 
@@ -31,22 +31,43 @@ Checks run in this order on every request: `Host` not accepted → `421`; a meth
 `GET`/`HEAD`, or any WebSocket upgrade, without an accepted `Origin` → `403`; `/ws` or
 `/api/*` (but `/api/login`) without a live session cookie → `401`.
 
-- Accepted `Host` values: the `--listen` address itself (e.g. `127.0.0.2:<port>`),
-  `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>` (each also without the port when it
-  is 80), every `--allow-host NAME` as `NAME` or `NAME:<port>`, and every
-  `--allow-host NAME:PORT` as exactly that, compared case-insensitively.
-- Accepted `Origin`: `http://` or `https://` followed by an accepted Host value, nothing after
-  it. `null` is refused.
+**Local requests (`--remote`).** A request is local when its TCP peer (from the connection,
+never a header; `::ffff:127.0.0.1` counts as `127.0.0.1`) is a loopback address **and** its
+`Host` is one of the loopback forms at the listen port: `127.0.0.1:<port>`,
+`localhost:<port>`, `[::1]:<port>`, or the listen address itself when it is loopback. With
+`--remote` the token is accepted from local requests only; the password from any request.
+Without `--remote` every request may use the token and there is no password login.
+`/api/me`'s 401 lists `["token"]` without `--remote`, `["token","password"]` for a local
+request with it, `["password"]` for any other request.
+
+- Without `--remote`, accepted `Host` values: the `--listen` address itself (e.g.
+  `127.0.0.2:<port>`), `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>` (each also
+  without the port when it is 80), every `--allow-host NAME` as `NAME` or `NAME:<port>`, and
+  every `--allow-host NAME:PORT` as exactly that, compared case-insensitively.
+- With `--remote` (TLS only, one port): the loopback forms above, the listen address when it
+  is a specific one (never `0.0.0.0`/`[::]`), any IPv4 or bracketed IPv6 literal that is
+  neither unspecified nor multicast, this machine's host name and `<first label>.local`, and
+  each `--allow-host` name; all at the listen port, and also bare when the port is 443.
+- Accepted `Origin`: `https://` (and, without `--remote`, `http://`) followed by an accepted
+  Host value, nothing after it. `null` is refused.
 - Cookie: `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `; Secure` when the
-  server runs with any `--allow-host`. Server-side sessions: 24 h idle expiry, at most 64
+  server runs with `--remote` or with any `--allow-host`. Server-side sessions: 24 h idle expiry, at most 64
   (the least recently used goes).
-- Login limit: when 5 failed logins happened in the last 60 s, every login answers `429`
-  until the oldest of them is 60 s old. Only requests that passed the Origin check count.
+- Login limits, taken **before** a token is compared or a password hashed (a reservation,
+  so concurrent attempts cannot all pass): 5 attempts per peer per 60 s (every loopback
+  address is one peer; an IPv4 address is one, an IPv6 address counts as its /64), 30 per
+  60 s over all peers for password attempts and non-local token attempts (local token
+  attempts are exempt), at most 1024 peers tracked. A successful login gives its attempt
+  back; a failed one counts for 60 s; past a limit the answer is `429` without any check.
+  Password checks run at most 4 at once; one that waits 2 s for a slot answers `503` and
+  does not count. Only requests that passed the Origin check count.
 - Headers on every response, errors included:
   `Content-Security-Policy: default-src 'self'; script-src 'self'[ 'sha256-<import map>']; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
   `Cache-Control: no-store` on `/`, `/index.html` and `/api/*`; `Cache-Control: no-cache` plus
   an `ETag` on every other asset.
+- With `--remote` no `Strict-Transport-Security` header is sent (it would stop a browser from
+  accepting the self-signed certificate later).
 - **(decided here)** The one inline script allowed is `index.html`'s
   `<script type="importmap">`: an import map cannot be loaded from a file, and the vendored ES
   modules import bare specifiers. `build.rs` puts the SHA-256 (base64) of the map's exact text
@@ -57,7 +78,7 @@ Checks run in this order on every request: `Host` not accepted → `421`; a meth
 
 ## 2. WebSocket framing
 
-One socket per browser tab, `ws://<host>/ws` (or `wss://` behind a TLS proxy).
+One socket per browser tab, `ws://<host>/ws` (`wss://` with `--remote` or behind a TLS proxy; the page picks the scheme from its own URL).
 
 - Text frames: one JSON object each, UTF-8. Client → server text frames ≤ 128 KiB, so a
   request carrying a 64 KiB text (`session.paste`, `session.spawn`'s `prompt`, `snippets.save`)
