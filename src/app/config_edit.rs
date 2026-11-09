@@ -127,8 +127,9 @@ pub(crate) fn edit_text(text: &str, section: &str, old: &Table, new: &Table) -> 
     for key in keys {
         out = match (old.get(key), new.get(key)) {
             (a, b) if a == b => continue,
-            (Some(Value::Table(_)), Some(Value::Table(t))) => {
-                set_table(&out, section, key, Some(t))?
+            (Some(Value::Table(o)), Some(Value::Table(t))) => {
+                edit_table_keys(&out, section, key, o, t)
+                    .or_else(|| set_table(&out, section, key, Some(t)))?
             }
             (Some(Value::Table(_)), None) => set_table(&out, section, key, None)?,
             (None, Some(Value::Table(t))) => set_table(&out, section, key, Some(t))?,
@@ -267,6 +268,31 @@ fn set_key(text: &str, section: &str, key: &str, value: Option<&str>) -> Option<
         }
         None => Some(append(text, &format!("[{section}]{eol}{entry}"))),
     }
+}
+
+/// `text` with the keys of sub-table `[section.name]` changed from `old`
+/// to `new` one line at a time, as [`set_key`] does for a table: only a
+/// changed key's line is replaced (its indent and trailing comment kept),
+/// a removed key's line removed and a new key added after the last one;
+/// the header's comment and the comments between keys stay. `None` when
+/// the table has no header line of its own or either side holds a value
+/// this editor does not write on one line (a deeper table).
+fn edit_table_keys(
+    text: &str,
+    section: &str,
+    name: &str,
+    old: &Table,
+    new: &Table,
+) -> Option<String> {
+    let wanted = format!("{section}.{}", render_key(name));
+    let has_header = scan(text)
+        .iter()
+        .any(|l| l.is_header && l.table.as_deref() == Some(wanted.as_str()));
+    let flat = |t: &Table| t.values().all(|v| line_value(v).is_some());
+    if !(has_header && flat(old) && flat(new)) {
+        return None;
+    }
+    edit_text(text, &wanted, old, new)
 }
 
 /// `text` with sub-table `[section.name]` set to `table`, or removed.
@@ -620,6 +646,54 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             format!("{expected}\n")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A changed key inside an existing sub-table changes that key's line
+    /// only: the header's comment, the comments between keys and the
+    /// trailing comments stay (R17, B3).
+    #[test]
+    fn edit_section_keeps_comments_inside_a_sub_table() {
+        let text = "# top\n\
+                    [plugins.team] # the team's plugins\n\
+                    # why these are off\n\
+                    disabled = [\"mcp:a\"] # reviewed in June\n\
+                    \x20 # between keys\n\
+                    reviewed = \"0.9\"   # last review\n\
+                    seen = []\n\
+                    # after the table\n\
+                    \n\
+                    [ui]\n\
+                    notify = false\n";
+        let (dir, path) = scratch(Some(text));
+        let edit = |f: fn(&mut Table)| {
+            edit_section(&path, "plugins", |t| {
+                if let Some(Value::Table(team)) = t.get_mut("team") {
+                    f(team);
+                }
+            })
+            .unwrap();
+            std::fs::read_to_string(&path).unwrap()
+        };
+        let got = edit(|team| {
+            team.insert("reviewed".into(), Value::String("1.0.0".into()));
+            team.insert("seen".into(), strings(&["mcp:a"]));
+        });
+        let changed = text
+            .replace("reviewed = \"0.9\"   #", "reviewed = \"1.0.0\"   #")
+            .replace("seen = []", "seen = [\"mcp:a\"]");
+        assert_eq!(got, changed);
+        // A new key goes after the last one; a removed key's line goes and
+        // the comment above it stays.
+        let got = edit(|team| {
+            team.remove("disabled");
+            team.insert("extra".into(), Value::Boolean(true));
+        });
+        let expected = changed
+            .replace("disabled = [\"mcp:a\"] # reviewed in June\n", "")
+            .replace("seen = [\"mcp:a\"]\n", "seen = [\"mcp:a\"]\nextra = true\n");
+        assert_eq!(got, expected);
+        assert!(got.contains("[plugins.team] # the team's plugins\n# why these are off\n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
