@@ -248,7 +248,7 @@ impl App {
             return;
         }
         let call = AddonCall::OpenChecklist {
-            addon: *addon,
+            addon,
             id: setup.clone(),
             origin: Origin::Row {
                 back: Box::new(back),
