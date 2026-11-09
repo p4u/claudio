@@ -190,11 +190,14 @@ vocdoni, web, api; the API addon parses whatever argv is left, so it is last):
 front-ends share.
 
 **A3 across crates:** the core crates cannot import an addon (A2: no such dependency) and
-never branch on an addon's name; an addon imports `claudio_core::addon`, the documented core
-services (`proto`, `paths`, `text`, `version`, `release`, `client::Client`,
-`claude::{binary, SESSION_MARKERS}`, `app::label`, `app::browser`) and its own modules, and
-reads and writes only the `config.toml` tables it declares (the web addon, being the old
-`src/web`, still uses more of `app`).
+never branch on an addon's name; an addon imports `claudio_core::addon`, the core's public
+services and its own modules, and reads and writes only the `config.toml` tables it
+declares. The services addons use today: `paths` (all); `term::{probe, strip_escapes}`
+(api); `proto`, `text`, `client`, `remote::bootstrap` and `app::{addons, launch, browser}`
+(web and vocdoni); `claude::SESSION_MARKERS` and `app::config_edit` (vocdoni); `config`,
+`freshness`, `claude::{hooks, update}`, `remote::{hosts, validate_host}` and `app::label`
+(web). The web addon (the former in-tree web UI, a second front-end) also uses
+`app::{state, connections, extensions, snippets}`: the layer both front-ends share (A5).
 
 ### Session manager (bare `claudio`)
 
