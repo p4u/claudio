@@ -97,6 +97,13 @@ claude), so it never touches your own daemon or `~/.claude`. Needs Chromium in
 
 A bare `claudio` calls `tui::run()`. The manager's architecture spans:
 
+**Small shared modules** (no dependencies of ours): `text.rs` (`sanitize`
+and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
+(`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
+by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
+`version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
+`proto`).
+
 **`proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
 (`Envelope { req, msg: Msg }`); unknown `op` fields are ignored. Tag `D`
@@ -204,40 +211,22 @@ Connects to the socket; if unavailable, starts the daemon (double-fork +
 
 **`freshness.rs`** — keeps each host's daemon at least as new as the claudio
 binary on it. `Welcome.build`/`build_time` identify the daemon's binary;
-`ensure_current` runs before the local TUI connects and in the remote bridge
-before it relays. An older daemon is shut down (SIGTERM by the lock's PID if
+`ensure_current` (given the connected `Client`; the caller connects) runs
+before the local TUI connects and in the remote bridge before it relays. An older daemon is shut down (SIGTERM by the lock's PID if
 it predates `Shutdown`) and restarted from the current binary, unless
 `busy` (a claude turn or permission prompt, or a `--plain` session): then it
 is left running, the client is flagged `daemon_outdated` (over SSH the
 bridge prints `DEFERRED` on stderr), and the TUI reconnects that host once it
 is idle (checked every 2 min).
 
-**`tui/`** — the manager UI, driven by tokio + ratatui:
-- `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
-  `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
-  notifications (`ESC ] 9 ; … BEL`) for background sessions that need
-  attention. Parses the reader's answers off the UI thread
-  (`Effect::RenderAnswers` → `spawn_blocking` → `HostEvent::AnswersRendered`):
-  markdown into a `reader::doc::Doc`.
-- `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
-  state transitions and returns `Effect` values. No I/O here; all I/O is in
-  `mod.rs`. `Mode::Manager` or `Mode::Plain`.
-- `sessions.rs` — `SessionView` and spawning (`send_spawn`/`send_with_proxy`,
-  the one path that builds spawns, respawns and their proxy env), recovery,
-  the wizard's opening.
-- `interaction.rs` — keys, mouse, modals (`Modal`), daemon events and replies.
-- `wizard.rs` — the new-session wizard (start screen → directory browser →
-  resume?), a pure state machine.
-- `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
-  machine, and its `App` glue.
-- `stats_view.rs` — the multi-page proxy stats popup (Alt+s).
-- `reader/` — the reader view (Alt+u): `doc.rs` (an answer as markdown
-  blocks; a `<latex>` tag is kept as written, as inline code, through
-  placeholders; parsed off the UI thread), `layout.rs` (a `Doc` wrapped to
-  a width) and `mod.rs` (`ReaderView`: answer, scroll, layout cache).
-  Drawn by `ui/reader.rs`. The console draws claude's text as claude wrote
-  it: no formulas, diagrams or lens renderings (spec G5; those are the web
-  UI's).
+**`app/`** — the layer both front-ends share (the TUI and `src/web`), with no
+ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
+- `state.rs` — `ClientState`: persisted session order, names and recent dirs
+  (`state.json`).
+- `connections.rs` — local + SSH connections, reconnect backoff.
+- `snippets.rs` — the saved prompts of `~/.config/claudio/snippets/`; the TUI
+  (`tui/mod.rs`) and the web (`web/ext.rs`) both call its async functions
+  (`load_all`, `save_text`, `save_text_named`, `delete_named`).
 - `extensions/` — the extension registry (`mod.rs`: built-ins latex,
   diagram, search, snippets; `Registry`, `ActionResult`; the proxy plugins
   as `Source::Plugin` rows, `Registry::set_plugins`), external
@@ -250,6 +239,39 @@ is idle (checked every 2 min).
   killed on exit; it knows every loaded external extension, and one turned
   off is refused unstarted and its program stopped; driven by `mod.rs`,
   never by `App`).
+- `label.rs` — `sanitize_label`, for text that leaves the process as a label.
+- `browser.rs` — `browser_wanted` and `open_browser`, the sign-in page opener
+  (`claudio proxy login`, `claudio web`).
+- `test_support.rs` — session fixtures for unit tests.
+
+**`tui/`** — the manager UI, driven by tokio + ratatui:
+- `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
+  `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
+  notifications (`ESC ] 9 ; … BEL`) for background sessions that need
+  attention. Parses the reader's answers off the UI thread
+  (`Effect::RenderAnswers` → `spawn_blocking` → `HostEvent::AnswersRendered`):
+  markdown into a `reader::doc::Doc`.
+- `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
+  state transitions and returns `Effect` values. No I/O here; all I/O is in
+  `mod.rs`. `Mode::Manager` or `Mode::Plain`.
+- `sessions.rs` — `SessionView` (labels go through `app::label::sanitize_label`)
+  and spawning (`send_spawn`/`send_with_proxy`,
+  the one path that builds spawns, respawns and their proxy env), recovery,
+  the wizard's opening.
+- `interaction.rs` — keys, mouse, modals (`Modal`), daemon events and replies.
+- `wizard.rs` — the new-session wizard (start screen → directory browser →
+  resume?), a pure state machine.
+- `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
+  machine, and its `App` glue.
+- `stats_view.rs` — the multi-page proxy stats popup (Alt+s); its time
+  `Window` is `proxy::stats::Window`.
+- `reader/` — the reader view (Alt+u): `doc.rs` (an answer as markdown
+  blocks; a `<latex>` tag is kept as written, as inline code, through
+  placeholders; parsed off the UI thread), `layout.rs` (a `Doc` wrapped to
+  a width) and `mod.rs` (`ReaderView`: answer, scroll, layout cache).
+  Drawn by `ui/reader.rs`. The console draws claude's text as claude wrote
+  it: no formulas, diagrams or lens renderings (spec G5; those are the web
+  UI's).
 - `extensions_view.rs` — the extensions screen (Alt+i, or Alt+z e): rows,
   details, toggles. A toggle flips the registry at once and emits
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
@@ -259,7 +281,8 @@ is idle (checked every 2 min).
   plugin's row opens its setup screen, and `r` refetches the plugin lists
   and manifests and asks every host again. Drawn by `ui/extensions.rs`.
   The leader keys `u` and `e` are reserved.
-- `plugin_setup.rs` — a proxy plugin's setup screen, pure: every item of
+- `plugin_setup.rs` — a proxy plugin's setup screen, pure (the saved choices
+  are `plugins::choices::choices_for`): every item of
   its manifest with a checkbox (Space, `a`, `n`, Enter saves to
   `[plugins.<name>]` through `Effect::SavePluginChoices` and
   `config::save_plugin_choices`, Esc). It opens on first sight (no table
@@ -284,7 +307,6 @@ is idle (checked every 2 min).
   session full screen (no tab/status bar, wizard or state.json).
   `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
   the UI exits, and the UI exits with claude.
-- `connections.rs` — local + SSH connections, reconnect backoff.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
   ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
@@ -294,23 +316,10 @@ is idle (checked every 2 min).
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
   `Alt+Shift+<digit>` (go to tab N) is fixed, outside the table.
-- `state.rs` — `ClientState`: persisted session order, names and recent dirs
-  (`state.json`).
 - `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
-- `plugins.rs` — proxy plugins, pure: each profile's list (`plugins.json` at
-  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
-  plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
-  KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
-  each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
-  30 s while it lists `installing`, and a second after a `(retrying in N
-  s)` retry is due, no sooner than 30 s), and what a spawn gets
-  (`compose`: per answered plugin, ≤ 8, `--agents` then `--mcp-config`
-  after every other arg; env layers `[env]`, then the secrets, then the
-  profile env; the instructions in `SessionExtensions.instructions`, cut at
-  just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
-  A spawn whose host has not answered is deferred
-  (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
-  ≤ 20 s).
+- `plugins_glue.rs` — the `impl App` side of proxy plugins: lists, manifests
+  and host answers become state changes and `Effect`s (the pure state is
+  `plugins/state.rs`).
 - `notifications.rs` — debounce logic for attention notifications.
 - `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
   pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
@@ -320,7 +329,8 @@ is idle (checked every 2 min).
   with `Screen::text` and a "copied N chars" notice. The selection is
   cleared by a click, key, paste, tab switch, resize or re-attach. Glue:
   `App::select_mouse` in `interaction.rs`; highlight in `ui/mod.rs`.
-- `test_support.rs` — shared fixtures for the TUI's unit tests.
+- `test_support.rs` — shared fixtures for the TUI's unit tests (the session
+  fixtures are `app::test_support`).
 
 **`remote/`** — SSH bootstrap and bridge:
 - `bootstrap.rs` — `ensure_remote(host)`: runs `__probe` + `uname -sm` in one
@@ -349,8 +359,8 @@ is idle (checked every 2 min).
 - `cmd.rs` — `claudio proxy login|status|logout|use`.
 - `login.rs` — the browser sign-in (`/v1/claudio/login/start|poll`, device
   style: the member types the code; `--token` pastes one instead).
-- `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (names, https, hash,
-  env keys a plugin may not set (`key_ok`), caps), the `plugins.json` cache
+- `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (https, hash, caps; names and
+  env keys through `plugins::manifest`'s `name_ok`/`key_ok`), the `plugins.json` cache
   (0600, one entry per profile; a 401/403 drops it), `fetch_manifest`.
   `Debug` never shows a value. `test_http_ok` lets plain http to
   `127.0.0.1` through in a debug build run with
@@ -363,7 +373,23 @@ agents, instructions, env), shared by the client and the daemon: every cap,
 charset and `${NAME}` placeholder rule, item ids (`plugin:<name>@<market>`,
 `mcp:<name>`, `agent:<name>`, `instructions`, `env`), and the renderers
 (`mcp_json`, `agents_json`, checked against 64/32 KiB at parse time).
-Reasons name ids and fields, never values.
+Reasons name ids and fields, never values. It also owns `name_ok` and `key_ok`.
+- `state.rs` — the pure client-side plugin state: each profile's list (`plugins.json` at
+  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
+  plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
+  KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
+  each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
+  30 s while it lists `installing`, and a second after a `(retrying in N
+  s)` retry is due, no sooner than 30 s), and what a spawn gets
+  (`compose`: per answered plugin, ≤ 8, `--agents` then `--mcp-config`
+  after every other arg; env layers `[env]`, then the secrets, then the
+  profile env; the instructions in `SessionExtensions.instructions`, cut at
+  just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
+  A spawn whose host has not answered is deferred
+  (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
+  ≤ 20 s). Shared by the TUI and the web (`web/plugins.rs`).
+- `choices.rs` — `choices_for`, what a plugin's setup screen saves.
+- `stats.rs` — the proxy stats `Window` (24h/7d/30d).
 - `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
   `/pool/health` and `/session` (which credential a claude session is on).
 
@@ -385,9 +411,8 @@ Reasons name ids and fields, never values.
   socket.
 - `latex.rs` — `lens_tags` (the items of any tag lenses in an assistant
   text, code excluded, with their byte ranges), `extract_latex` and
-  `latex_tags` (its `<latex>` wrappers) and
-  `sanitize`, the character filter every formula and answer goes through
-  in the daemon and again in the client.
+  `latex_tags` (its `<latex>` wrappers). The character filter every formula
+  and answer goes through is `text::sanitize`.
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
 
@@ -417,7 +442,7 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 - `state.rs` — `web-state.json` (layout, order, per-session proxy name, remote hosts); reads
   the TUI's `state.json`, never writes it.
 - `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — spawns composed as the TUI does
-  (`tui::plugins::compose`, `Msg::merge_env`), proxy stats/credential/switch, the plugin
+  (`plugins::state::compose`, `Msg::merge_env`), proxy stats/credential/switch, the plugin
   state machine re-expressed async, and the extension registry, external host, snippets and
   config.toml toggles.
 - `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.

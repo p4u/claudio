@@ -106,7 +106,7 @@ Replies: `{"t":"res","id":<u32>,"ok":true,"data":<value>}` or
 
 ## 4. DTOs
 
-All strings the server sends were sanitized by the daemon (`claude::latex::sanitize` or
+All strings the server sends were sanitized by the daemon (`text::sanitize` or
 `daemon::git` sanitizing) and are still untrusted: render as text unless §7 says otherwise.
 Field order is not significant. No DTO ever carries a token, a plugin env value, `Spawn.env`,
 a socket path or a hook token.
