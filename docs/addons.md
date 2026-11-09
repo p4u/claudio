@@ -206,9 +206,12 @@ Blocks are plain text: the web renders them as text nodes, never markup; the TUI
 | `RowAction` | `Toggled(bool)` or `Refresh` |
 | `Notice` | `text`, `level` (`info`, `warn`, `error`) |
 
-**Segments** follow each session's status. The TUI draws priorities 0-99 on status line 1, left
-to right, and 100-255 on line 2, where the lowest priorities are dropped first when the
-terminal is narrow. The page shows them in the session's header in the same order.
+**Segments** follow each session's status. A lower number comes first. The TUI draws
+priorities 0-99 on status line 1, after the core's own, left to right, and 100-255 on line 2,
+among the core's gauges (cpu and context 100, git 101, memory 102, conversation totals 140);
+when the terminal is narrow, line 2 drops whole segments, the highest number (the least
+important) first. Tones map to the bar's colours (ok green, warn yellow, hot red, muted dim,
+accent green). The page shows them in the session's header in the same order.
 
 **Panels** are bound to a key with `PanelDecl.key` (a keymap action name and its default key
 spec, checked for collisions by the keymap; `[keys] <action>` overrides it). A panel's
@@ -297,6 +300,18 @@ checklist once per run; putting the offer off (`Defer`) asks no host for it in t
 launch still asks for its review. A host whose daemon lacks
 `addon:vocdoni` gets the proxy env without plugins and a notice. Legacy `proxy`/`first_party`
 fields are adopted as `{addon: "vocdoni", option: <profile>, flags: ["first-party"]?}`.
+
+**Ui.** A session it routes gets the segments `⇄ proxy:<profile>` (10), its credential as the
+proxy names it for the conversation, `work-max (max)` (20), `⇆ switched 3m ago` for ten
+minutes after a switch (21), and the credential's windows `5h 37%` (110) and `7d 12%` (150),
+toned by use (below 60 % ok, below 85 % warn, then hot). A focused proxied session's credential
+is asked of the proxy every 30 s, and 5 s after its conversation changes. The panel `proxy`
+("Proxy stats", key action `proxy_stats`, default `alt+s`, windows `24h`, `7d`, `30d`) shows
+the session's profile, else the default, else the first: pages Overview, Models, Trends, Pool &
+limits and Sessions, fetched as the page needs them (stats younger than 10 s are reused, the
+catalogue once); without a profile, how to connect one. Its action `switch` (key `n`, asked
+first) moves the session's conversation to another subscription; the profile and conversation
+are the addon's own snapshot of the session, never the request's.
 
 **Client side.** `state/` is the addon's pure plugin state machine and proxy config cache (A5,
 A6): each profile's list (`plugins.json`, then the proxy every 15 min), each plugin's manifest,

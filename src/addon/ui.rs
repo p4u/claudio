@@ -33,7 +33,7 @@ pub struct Segment {
     pub text: String,
     /// Its colour.
     pub tone: Tone,
-    /// Its place: lower first; on line 2, the lowest are dropped first.
+    /// Its place: lower first; on a narrow line 2 the highest go first.
     pub priority: u8,
 }
 
