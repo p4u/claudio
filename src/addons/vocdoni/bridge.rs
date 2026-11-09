@@ -18,6 +18,18 @@ use super::{Vocdoni, NAME};
 use crate::addon::{AddonError, Addons};
 use crate::proto::Msg;
 
+/// A `vocdoni/apply` request a spawn waits for; its answer goes to
+/// [`Bridge::on_applied_reply`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    /// The plugin.
+    pub name: String,
+    /// The manifest hash asked for.
+    pub sha256: String,
+    /// The request (secret names, never values).
+    pub msg: Msg,
+}
+
 /// A handle on the registered Vocdoni addon's runner.
 #[derive(Clone)]
 pub struct Bridge(pub(super) Arc<Runner>);
@@ -71,6 +83,12 @@ impl Bridge {
         state.plugin_details(name, profile, refused)
     }
 
+    /// Whether the start's lists and choices are in (a spawn at start
+    /// waits for them).
+    pub fn loaded(&self) -> bool {
+        self.0.state().loaded
+    }
+
     /// The plugins whose first-sight setup is due.
     pub fn first_sight(&self) -> Vec<String> {
         self.0.state().first_sight()
@@ -116,12 +134,16 @@ impl Bridge {
     }
 
     /// What `profile`'s enabled plugins bring to a spawn on `host`, and the
-    /// `vocdoni/apply` requests of those `host` has not answered (by name).
-    pub fn plugin_parts(&self, host: &str, profile: &str) -> (Vec<PluginPart>, Vec<(String, Msg)>) {
+    /// `vocdoni/apply` requests of those `host` has not answered.
+    pub fn plugin_parts(&self, host: &str, profile: &str) -> (Vec<PluginPart>, Vec<Pending>) {
         let (parts, pending) = self.0.state().plugin_parts(host, profile, &[]);
         let pending = pending
             .into_iter()
-            .map(|(name, body)| (name, apply_msg(&body)))
+            .map(|(name, body)| Pending {
+                name,
+                sha256: body.sha256.clone(),
+                msg: apply_msg(&body),
+            })
             .collect();
         (parts, pending)
     }

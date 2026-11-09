@@ -1,8 +1,5 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
-// P3.8b: the bridge lands before the TUI reads it (P3.8c), which removes
-// this allow.
-#[allow(dead_code)]
 pub mod bridge;
 pub mod daemon;
 pub mod plugins;

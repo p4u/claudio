@@ -13,7 +13,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::app::{App, Effect, Mode};
+use super::app::{App, BridgeCall, Effect, Mode};
 use super::interaction::Modal;
 use super::keymap::Action;
 use crate::app::extensions::{ActionDecl, Extension, Source};
@@ -266,18 +266,14 @@ impl App {
                 self.notify(format!("plugin {} is refused: {why}", clean(&name)));
                 return;
             }
-            // Kept for a list that comes later; on: the hosts get its
-            // manifest (unless they answered for it already).
-            self.plugins.config.insert(name.clone(), on);
+            // The addon keeps it for a list that comes later; on, the hosts
+            // get its manifest and its setup is due if it was never set up.
             self.extensions.extensions[index].enabled = on;
-            if on {
-                // Its setup if it was never set up, else its manifest.
-                let sha = self.plugins.manifests.get(&name).map(|(s, _)| s.clone());
-                if let Some(sha) = sha {
-                    self.on_manifest_ready(&name, &sha);
-                }
-                self.request_all();
-            }
+            let call = BridgeCall::SetEnabled {
+                name: name.clone(),
+                on,
+            };
+            self.emit(Effect::Bridge(call));
             self.emit(Effect::SaveExtension { name, on });
             self.redraw = true;
             return;
@@ -299,7 +295,6 @@ mod tests {
     use super::*;
     use crate::addons::vocdoni::daemon::{applied_reply, Applied};
     use crate::app::extensions::{manifest::Program, Lens, Registry};
-    use crate::tui::app::ReplyTo;
     use crate::tui::test_support::{alt, app_with, info, press};
 
     /// An app with one session and an external extension `fake` (a tag
@@ -339,6 +334,7 @@ mod tests {
             .map(|e| match e {
                 Effect::SetExtension { name, on } => ("host", name, on),
                 Effect::SaveExtension { name, on } => ("save", name, on),
+                Effect::Bridge(BridgeCall::SetEnabled { name, on }) => ("addon", name, on),
                 other => ("other", format!("{other:?}"), false),
             })
             .collect()
@@ -538,22 +534,18 @@ mod tests {
     /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
     /// and `latex` (a taken name), and `local` connected.
     fn app_with_plugins() -> App {
-        use crate::addons::vocdoni::plugins::state::PluginsFetch;
-        use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
+        use crate::tui::test_support::{plugin_host, serve};
         let mut app = app_with_fake("");
-        app.on_plugin_host("local");
-        let list = PluginList {
-            profile: "work".into(),
-            fetched_at: 1,
-            plugins: vec![sample("kb"), sample("latex")],
-        };
-        app.on_plugins("work", PluginsFetch::Listed(list));
+        plugin_host(&mut app, "local");
+        serve(&mut app, "work", &["kb", "latex"]);
         app.take_effects();
         app
     }
 
     #[test]
     fn plugins_are_listed_with_their_state_on_each_host() {
+        use crate::addons::vocdoni::plugins::choices::PluginChoices;
+        use crate::tui::test_support::{bridge, changed, manifest_arrives};
         let mut app = app_with_plugins();
         let lines = row_lines(&app.extension_rows());
         assert_eq!(lines[5], "[x] kb        plugin    —          —");
@@ -570,8 +562,12 @@ mod tests {
         let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
         let manifest = crate::addons::vocdoni::plugins::manifest::Manifest::parse(src).unwrap();
         let sha = "a".repeat(64);
-        app.plugins.choices.insert("kb".into(), Default::default());
-        app.on_manifest("kb", &sha, Ok(manifest));
+        let b = bridge(&app);
+        b.state()
+            .plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
+        manifest_arrives(&mut app, "kb", manifest);
         assert_eq!(
             details(&app, 5)[2..],
             [
@@ -585,22 +581,15 @@ mod tests {
             version: "1.4.0".into(),
             ..Default::default()
         });
-        let to = ReplyTo::Manifest {
-            host: "local".into(),
-            name: "kb".into(),
-            sha256: sha,
-        };
-        app.on_reply(to.clone(), Ok(ready));
+        b.on_applied_reply("local", "kb", &sha, Ok(ready));
+        changed(&mut app);
         assert_eq!(
             details(&app, 5)[4],
             "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
         );
-        app.on_reply(
-            to,
-            Err(std::io::Error::other(
-                "manifest kb: download failed: HTTP 404",
-            )),
-        );
+        let failed = std::io::Error::other("manifest kb: download failed: HTTP 404");
+        b.on_applied_reply("local", "kb", &sha, Err(failed));
+        changed(&mut app);
         assert_eq!(
             details(&app, 5)[4],
             "local: failed: download failed: HTTP 404"
@@ -621,19 +610,44 @@ mod tests {
 
     #[test]
     fn a_plugin_toggle_is_saved_and_kept_for_later_lists() {
+        use crate::tui::test_support::{bridge, run_bridge, serve};
         let mut app = app_with_plugins();
         app.on_terminal(alt('i'));
         for _ in 0..5 {
             app.on_terminal(press(KeyCode::Down));
         }
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), false)]);
+        assert_eq!(
+            toggles(&mut app),
+            [
+                ("addon", "kb".to_owned(), false),
+                ("save", "kb".to_owned(), false)
+            ]
+        );
+        app.emit(Effect::Bridge(BridgeCall::SetEnabled {
+            name: "kb".into(),
+            on: false,
+        }));
+        run_bridge(&mut app);
         assert!(app.plugin_parts("local", "work").0.is_empty());
-        assert_eq!(app.plugins.config.get("kb"), Some(&false));
-        // Back on: saved, and the hosts are asked for its manifest again
-        // only when they have no answer at its hash (here: no manifest).
+        assert_eq!(bridge(&app).enabled().get("kb"), Some(&false));
+        // Kept for a list that comes later.
+        serve(&mut app, "work", &["kb", "latex"]);
+        assert!(!app
+            .extensions
+            .extensions
+            .iter()
+            .any(|e| e.name == "kb" && e.enabled));
+        // Back on: saved, and the addon asks the hosts for its manifest
+        // again only when they have no answer at its hash.
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), true)]);
+        assert_eq!(
+            toggles(&mut app),
+            [
+                ("addon", "kb".to_owned(), true),
+                ("save", "kb".to_owned(), true)
+            ]
+        );
         // A refused one does not toggle.
         app.on_terminal(press(KeyCode::Down));
         app.on_terminal(press(KeyCode::Char(' ')));
@@ -644,20 +658,32 @@ mod tests {
 
     #[test]
     fn r_fetches_the_plugin_lists_again() {
+        use crate::addons::vocdoni::state::Task;
+        use crate::tui::test_support::bridge;
         let mut app = app_with_plugins();
-        app.proxy_default = Some("home".into());
         app.on_terminal(alt('i'));
         app.on_terminal(press(KeyCode::Char('r')));
-        let fetched: Vec<String> = app
+        let calls: Vec<String> = app
             .take_effects()
             .into_iter()
-            .filter_map(|e| match e {
-                Effect::FetchPlugins { profile } => Some(profile),
+            .map(|e| format!("{e:?}"))
+            .collect();
+        assert_eq!(calls, ["Bridge(Refresh)"]);
+        assert_eq!(app.notice.as_ref().unwrap().text, "refreshing plugins…");
+        assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
+        // The addon fetches every list in use again (the default's too).
+        let b = bridge(&app);
+        b.state().default = Some("home".into());
+        let fetched: Vec<String> = b
+            .state()
+            .refresh()
+            .into_iter()
+            .filter_map(|t| match t {
+                Task::FetchList { profile } => Some(profile),
                 _ => None,
             })
             .collect();
         assert_eq!(fetched, ["home", "work"]);
-        assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
     }
 
     #[test]

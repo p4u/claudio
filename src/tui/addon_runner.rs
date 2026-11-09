@@ -5,13 +5,13 @@
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::app::{App, Effect, LaunchCall, Launched, Mode, ReplyTo};
-use super::{fetch_proxy_config, wait_manifests, HostEvent};
+use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mode, ReplyTo};
+use super::{wait_manifests, HostEvent};
 use crate::addon::{Addons, Frontend, SessionSnap};
+use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
 use crate::app::launch::{self, LaunchSpec, Step};
@@ -26,8 +26,14 @@ pub(super) struct Runner {
 }
 
 /// The runtime for `addons`, reading the TUI's config.toml. The TUI does
-/// not watch the file (D15).
-pub(super) fn start(addons: Arc<Addons>) -> Runner {
+/// not watch the file (D15). The Vocdoni addon runs the TUI's plugins:
+/// it learns the names `app`'s own extensions hold first.
+pub(super) fn start(addons: Arc<Addons>, app: &App) -> Runner {
+    if let Some(bridge) = Bridge::of(&addons) {
+        let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
+        bridge.set_taken(own.map(|e| e.name.clone()).collect());
+        bridge.activate();
+    }
     let opts = RuntimeOptions {
         config_path: paths::config_file(),
         watch_config: false,
@@ -73,8 +79,12 @@ pub(super) fn on_reply(app: &mut App, runtime: &AddonRuntime, to: ReplyTo, reply
 }
 
 /// The sessions as `App` has them now, its active one focused. The runtime
-/// sends events only for what changed.
+/// sends events only for what changed; the Vocdoni addon learns the
+/// profiles they use.
 pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
+    if let Some(bridge) = Bridge::of(runtime.addons()) {
+        bridge.use_profiles(app.plugin_profiles());
+    }
     let active = app.active_view().map(|v| v.id);
     let snaps = app
         .sessions
@@ -97,11 +107,27 @@ pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
     runtime.sessions_reset(snaps);
 }
 
-/// What the runtime tells the UI: notices are shown; the rest has no
-/// reader in the TUI yet.
+/// What the runtime tells the UI: notices are shown, a change re-reads
+/// what `App` shows of the addon; offers have no reader yet (P3.11).
 pub(super) fn on_out(app: &mut App, out: RuntimeOut) {
-    if let RuntimeOut::Notice { addon, notice } = out {
-        app.notify(format!("{addon}: {}", notice.text));
+    match out {
+        RuntimeOut::Notice { addon, notice } => app.notify(format!("{addon}: {}", notice.text)),
+        RuntimeOut::Changed { addon } => app.on_addon(AddonResult::Changed { addon }),
+        RuntimeOut::Offer { .. } => {}
+    }
+}
+
+/// Run a call into the Vocdoni addon's plugin state: the transition is
+/// immediate, its I/O runs on the runtime's tasks.
+pub(super) fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
+    let Some(bridge) = Bridge::of(runtime.addons()) else {
+        return;
+    };
+    match call {
+        BridgeCall::SaveChoices { name, choices } => bridge.save_choices(&name, choices),
+        BridgeCall::Defer(name) => bridge.defer(&name),
+        BridgeCall::SetEnabled { name, on } => bridge.set_enabled(&name, on),
+        BridgeCall::Refresh => bridge.refresh(),
     }
 }
 
@@ -197,32 +223,6 @@ pub(super) fn save_extension(name: String, on: bool, tx: &mpsc::Sender<HostEvent
     });
 }
 
-/// Set `[plugins.<name>]` to `choices` in config.toml through the config
-/// editor, off the UI thread; the outcome comes back as a notice.
-pub(super) fn save_plugin_choices(
-    name: String,
-    choices: crate::addons::vocdoni::plugins::choices::PluginChoices,
-    tx: &mpsc::Sender<HostEvent>,
-) {
-    use crate::addons::vocdoni::plugins::choices;
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let own = name.clone();
-        let set = move |t: &mut toml::Table| choices::set(t, &own, &choices);
-        let path = paths::config_file();
-        let saved = tokio::task::spawn_blocking(move || {
-            crate::app::config_edit::edit_section(&path, "plugins", set)
-        })
-        .await;
-        let text = match saved {
-            Ok(Ok(_)) => format!("plugin {name} set up (saved)"),
-            Ok(Err(e)) => format!("could not save: {e}"),
-            Err(_) => "could not save: the save stopped".to_owned(),
-        };
-        let _ = tx.send(HostEvent::Notice(text)).await;
-    });
-}
-
 /// Run a [`Effect::SpawnWithProxy`]: fetch the profile's config unless it
 /// is cached (5 s), wait for the pending manifests, compose the plugins'
 /// share and the proxy env, then send the request; the reply goes to
@@ -249,13 +249,18 @@ pub(super) fn spawn_with_proxy(
     // Resolve the client now (synchronous, cheap) so we can move it
     // into the async task. Client is Clone + Send + 'static.
     let client = conns.client(&host).cloned();
-    let cached = app.proxy_config_cached(&proxy_name).cloned();
+    let bridge = app.bridge();
     let tx = reply_tx.clone();
     let notices = ev_tx.clone();
     tokio::spawn(async move {
         // Meanwhile, wait for the plugin manifests.
-        let config = proxy_config(cached, &proxy_name);
-        let waits = wait_manifests(client.as_ref(), pending, &tx);
+        let config = async {
+            match &bridge {
+                Some(b) => b.config(&proxy_name).await,
+                None => None,
+            }
+        };
+        let waits = wait_manifests(client.as_ref(), &host, pending, bridge.clone());
         let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
         if !left_out.is_empty() {
             let names = left_out.join(", ");
@@ -303,23 +308,9 @@ pub(super) fn spawn_with_proxy(
     });
 }
 
-/// `cached`, else `name`'s config fetched with a 5 s timeout, so the first
-/// spawn uses the real model/rate-limit overrides, not fallback defaults.
-async fn proxy_config(
-    cached: Option<crate::addons::vocdoni::proxy::api::ConfigResponse>,
-    name: &str,
-) -> Option<crate::addons::vocdoni::proxy::api::ConfigResponse> {
-    match cached {
-        Some(cfg) => Some(cfg),
-        None => tokio::time::timeout(Duration::from_secs(5), fetch_proxy_config(name))
-            .await
-            .ok()
-            .flatten(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
 
     use super::*;
     use crate::addon::test_support::TestAddon;

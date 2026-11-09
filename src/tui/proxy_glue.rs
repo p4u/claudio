@@ -2,12 +2,11 @@
 //! a session with a proxy profile is sent. The Vocdoni addon takes it over
 //! (core-addons plan, P3.5b-P3.12).
 
-use std::time::Instant;
-
-use super::app::{App, Effect, Modal, PendingManifest, ReplyTo};
+use super::app::{App, Effect, Modal, ReplyTo};
 use super::proxy_state::{ProxyFetch, SessionCred};
 use super::sessions::SessionView;
 use super::HostEvent;
+use crate::addons::vocdoni::bridge::Pending;
 use crate::addons::vocdoni::plugins::state::{compose, with_plugins, PluginPart};
 use crate::addons::vocdoni::proxy::api::{
     ConfigResponse, SessionCredential, SwitchError, SwitchOutcome,
@@ -15,14 +14,10 @@ use crate::addons::vocdoni::proxy::api::{
 use crate::proto::{Msg, SessionId};
 
 impl App {
-    /// A proxy answer from a background fetch: config, stats, a session's
+    /// A proxy answer from a background fetch: stats, a session's
     /// credential or a subscription switch. Other events are not the proxy's.
     pub(super) fn on_proxy_event(&mut self, ev: HostEvent) {
         match ev {
-            HostEvent::ProxyConfig {
-                profile_name,
-                config: Some(cfg),
-            } => self.on_proxy_config(profile_name, cfg),
             HostEvent::ProxyStats {
                 profile_name,
                 fetch,
@@ -37,13 +32,6 @@ impl App {
             }
             _ => {}
         }
-    }
-
-    /// Called when a `FetchProxyConfig` effect completes.
-    pub fn on_proxy_config(&mut self, profile_name: String, cfg: ConfigResponse) {
-        self.proxy_config
-            .insert(profile_name, (cfg, Instant::now()));
-        self.redraw = true;
     }
 
     /// Called when a `FetchProxyStats` effect completes.
@@ -146,24 +134,9 @@ impl App {
         entry.cred.as_ref()
     }
 
-    /// Proxy config for a profile, if cached and fresh (5 min).
-    pub fn proxy_config_cached(&self, name: &str) -> Option<&ConfigResponse> {
-        self.proxy_config.get(name).and_then(|(cfg, when)| {
-            if when.elapsed().as_secs() < 300 {
-                Some(cfg)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Schedule a proxy config fetch if the cache is stale.
-    pub fn maybe_fetch_proxy_config(&mut self, name: &str) {
-        if self.proxy_config_cached(name).is_none() {
-            self.emit(Effect::FetchProxyConfig {
-                profile_name: name.to_owned(),
-            });
-        }
+    /// Proxy config for a profile, if the Vocdoni addon has it fresh (5 min).
+    pub fn proxy_config_cached(&self, name: &str) -> Option<ConfigResponse> {
+        self.bridge()?.config_cached(name)
     }
 
     /// Called when a `SwitchSubscription` effect completes: say what the
@@ -203,7 +176,9 @@ impl App {
     ) -> Result<Vec<(String, String)>, String> {
         crate::addons::vocdoni::proxy::resolve::proxy_env_for(
             proxy_name,
-            proxy_name.and_then(|n| self.proxy_config_cached(n)),
+            proxy_name
+                .and_then(|n| self.proxy_config_cached(n))
+                .as_ref(),
             first_party,
         )
     }
@@ -223,7 +198,7 @@ impl App {
         first_party: bool,
         to: ReplyTo,
         plugins: Vec<PluginPart>,
-        pending: Vec<PendingManifest>,
+        pending: Vec<Pending>,
     ) -> Result<(), String> {
         match proxy {
             Some(name) if self.proxy_config_cached(name).is_none() || !pending.is_empty() => {

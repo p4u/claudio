@@ -13,19 +13,24 @@
 //! first-sight screen ignores keys for a moment after appearing, like a
 //! prompt, so a keystroke meant for a session cannot answer it.
 //!
-//! Pure, like `confirm.rs`: saving is [`Effect::SavePluginChoices`]; drawn
-//! by `ui/plugin_setup.rs`.
+//! Pure, like `confirm.rs`: it reads the Vocdoni addon's plugin state
+//! through its bridge, and saving or deferring is an [`Effect::Bridge`];
+//! drawn by `ui/plugin_setup.rs`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::addons::vocdoni::plugins::choices::choices_for;
 use crate::addons::vocdoni::plugins::manifest::{Manifest, Section};
 
-use super::app::{App, Effect, Mode};
+use std::collections::BTreeSet;
+
+use super::app::{AddonResult, App, BridgeCall, Effect, Mode};
 use super::confirm::Queued;
 use super::extensions_view::ExtensionsView;
 use super::interaction::Modal;
-use crate::addons::vocdoni::plugins::state::ManifestState;
+use crate::addons::vocdoni::bridge::{Bridge, Pending};
+use crate::addons::vocdoni::plugins::state::{ManifestState, PluginPart};
+use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::app::extensions::Source;
 
 /// Ticks (250 ms each) during which a first-sight screen ignores keys.
@@ -98,6 +103,14 @@ impl PluginSetup {
         *self = next;
     }
 
+    /// Whether `m` is not the manifest the screen shows (another version
+    /// or other items).
+    fn differs(&self, m: &Manifest) -> bool {
+        let items = m.items();
+        let ids = items.iter().map(|i| &i.id);
+        self.version != m.version || !self.items.iter().map(|i| &i.id).eq(ids)
+    }
+
     /// The ids turned off.
     pub fn off_ids(&self) -> Vec<String> {
         self.items
@@ -141,6 +154,45 @@ impl PluginSetup {
 }
 
 impl App {
+    /// The Vocdoni addon's plugin state, when this build has the addon.
+    pub(super) fn bridge(&self) -> Option<Bridge> {
+        Bridge::of(&self.addons)
+    }
+
+    /// What the addon runtime says: an addon's data changed.
+    pub fn on_addon(&mut self, result: AddonResult) {
+        match result {
+            AddonResult::Changed { .. } => self.on_plugins_changed(),
+        }
+    }
+
+    /// The plugin state changed: the registry's plugin rows, the setup
+    /// screens open or queued (a newer manifest replaces their items), and
+    /// the first-sight screens now due.
+    fn on_plugins_changed(&mut self) {
+        let Some(bridge) = self.bridge() else {
+            return;
+        };
+        let lists = bridge.lists();
+        let lists: Vec<&PluginList> = lists.iter().collect();
+        self.extensions.set_plugins(&lists, &bridge.enabled());
+        for name in self.setup_names() {
+            if let Some(ManifestState::Ready(m)) = bridge.manifest(&name) {
+                if let Some(setup) = self.setup_of(&name).filter(|s| s.differs(&m)) {
+                    setup.replace(&m);
+                }
+            }
+        }
+        for name in bridge.first_sight() {
+            if let (false, Some(ManifestState::Ready(m))) =
+                (self.setup_shown(&name), bridge.manifest(&name))
+            {
+                self.queue_setup(PluginSetup::new(&m, &[], true));
+            }
+        }
+        self.redraw = true;
+    }
+
     /// The setup screen of plugin `name`, if one is open or queued.
     fn setup_of(&mut self, name: &str) -> Option<&mut PluginSetup> {
         if let Some(Modal::PluginSetup(s)) = &mut self.modal {
@@ -154,47 +206,22 @@ impl App {
         })
     }
 
+    /// The plugins whose setup screen is open or queued.
+    fn setup_names(&self) -> Vec<String> {
+        let open = match &self.modal {
+            Some(Modal::PluginSetup(s)) => Some(s.name.clone()),
+            _ => None,
+        };
+        let queued = self.confirms.iter().filter_map(|q| match q {
+            Queued::Setup(s) => Some(s.name.clone()),
+            _ => None,
+        });
+        open.into_iter().chain(queued).collect()
+    }
+
     /// Whether a setup screen of plugin `name` is open or queued.
     pub(super) fn setup_shown(&mut self, name: &str) -> bool {
         self.setup_of(name).is_some()
-    }
-
-    /// Plugin `name`'s manifest `m` arrived: a first sight queues its setup
-    /// screen (unless deferred in this run); an open or queued screen shows
-    /// it instead; with choices saved, ids not seen before are named once.
-    pub(super) fn on_manifest_ready(&mut self, name: &str, sha256: &str) {
-        let Some((_, ManifestState::Ready(m))) = self.plugins.manifests.get(name) else {
-            return;
-        };
-        let m = m.clone();
-        if let Some(setup) = self.setup_of(name) {
-            setup.replace(&m);
-            self.redraw = true;
-            return;
-        }
-        match self.plugins.choices.get(name) {
-            None if !self.plugins.deferred.contains(name) && self.plugin_enabled(name) => {
-                let setup = PluginSetup::new(&m, &[], true);
-                self.queue_setup(setup);
-            }
-            None => {}
-            Some(_) if !self.plugin_enabled(name) => {}
-            Some(choices) => {
-                let new: Vec<String> = m
-                    .ids()
-                    .into_iter()
-                    .filter(|id| !choices.seen.contains(id))
-                    .collect();
-                let key = (name.to_owned(), sha256.to_owned());
-                if !new.is_empty() && self.plugins.noticed.insert(key) {
-                    self.notify(format!(
-                        "{name} {} adds {}; Alt+i, Enter to review",
-                        m.version,
-                        new.join(", ")
-                    ));
-                }
-            }
-        }
     }
 
     /// Show `setup` now, or once no other modal is open.
@@ -217,9 +244,10 @@ impl App {
             self.notify(format!("plugin {name} is refused: {why}"));
             return;
         }
-        let m = match self.plugins.manifests.get(&name) {
-            Some((_, ManifestState::Ready(m))) => m.clone(),
-            Some((_, ManifestState::Failed(why))) => {
+        let bridge = self.bridge();
+        let m = match bridge.as_ref().and_then(|b| b.manifest(&name)) {
+            Some(ManifestState::Ready(m)) => m,
+            Some(ManifestState::Failed(why)) => {
                 self.notify(format!("manifest of {name}: {why}"));
                 return;
             }
@@ -228,11 +256,9 @@ impl App {
                 return;
             }
         };
-        let disabled = self
-            .plugins
-            .choices
-            .get(&name)
-            .map(|c| c.disabled.clone())
+        let disabled = bridge
+            .and_then(|b| b.choices(&name))
+            .map(|c| c.disabled)
             .unwrap_or_default();
         let mut setup = PluginSetup::new(&m, &disabled, false);
         setup.back = Some(back);
@@ -263,77 +289,103 @@ impl App {
                 return;
             }
             Outcome::Save => self.save_setup(&setup),
-            _ if setup.first_sight => {
-                self.plugins.deferred.insert(name);
-            }
+            _ if setup.first_sight => self.emit(Effect::Bridge(BridgeCall::Defer(name))),
             _ => {}
         }
         if let Some(back) = setup.back {
             self.modal = Some(Modal::ExtensionsMenu(back));
         }
         self.show_next_confirm();
-        self.plain_try_start();
+        // A save reaches the addon with the effects: `--plain`'s session
+        // starts at the next tick, with the choices.
+        if outcome != Outcome::Save {
+            self.plain_try_start();
+        }
     }
 
     /// Whether plugin `name`'s manifest is being fetched again.
     fn manifest_refetching(&self, name: &str) -> bool {
-        matches!(
-            self.plugins.manifests.get(name),
-            Some((_, ManifestState::Fetching))
-        )
+        let state = self.bridge().and_then(|b| b.manifest(name));
+        matches!(state, Some(ManifestState::Fetching))
     }
 
-    /// Enter on `setup`: save the choices and ask every host again.
+    /// Enter on `setup`: save the choices (the addon asks every host again).
     fn save_setup(&mut self, setup: &PluginSetup) {
-        let name = setup.name.clone();
-        let Some((_, ManifestState::Ready(m))) = self.plugins.manifests.get(&name) else {
+        let Some(bridge) = self.bridge() else {
             return;
         };
-        let choices = choices_for(m, &setup.off_ids(), self.plugins.choices.get(&name));
-        self.plugins.deferred.remove(&name);
-        self.plugins.choices.insert(name.clone(), choices.clone());
-        self.emit(Effect::SavePluginChoices {
-            name: name.clone(),
-            choices,
-        });
-        self.request_again(&name);
+        let name = setup.name.clone();
+        let Some(ManifestState::Ready(m)) = bridge.manifest(&name) else {
+            return;
+        };
+        let choices = choices_for(&m, &setup.off_ids(), bridge.choices(&name).as_ref());
+        self.emit(Effect::Bridge(BridgeCall::SaveChoices { name, choices }));
     }
 
-    /// The setup line of plugin `name`'s details on the extensions screen.
-    pub(super) fn setup_details(&self, name: &str) -> Option<String> {
-        let ids = match self.plugins.manifests.get(name) {
-            Some((_, ManifestState::Ready(m))) => m.ids(),
-            _ => return None,
-        };
-        match self.plugins.choices.get(name) {
-            None => Some("setup pending (Enter)".to_owned()),
-            Some(c) => {
-                let off = c.disabled.iter().filter(|d| ids.contains(d)).count();
-                Some(format!("{off} items disabled (Enter to change)"))
-            }
+    /// What `profile`'s enabled plugins bring to a spawn on `host`, and the
+    /// requests of those `host` has not answered (the spawn waits for them).
+    pub(super) fn plugin_parts(
+        &self,
+        host: &str,
+        profile: &str,
+    ) -> (Vec<PluginPart>, Vec<Pending>) {
+        self.bridge()
+            .map(|b| b.plugin_parts(host, profile))
+            .unwrap_or_default()
+    }
+
+    /// What the extensions screen says about plugin `name` of `profile`.
+    pub(super) fn plugin_details(
+        &self,
+        name: &str,
+        profile: &str,
+        refused: Option<&str>,
+    ) -> Vec<String> {
+        self.bridge()
+            .map(|b| b.plugin_details(name, profile, refused, self.now))
+            .unwrap_or_default()
+    }
+
+    /// `r` on the extensions screen: every list, manifest and host answer
+    /// again.
+    pub(super) fn refresh_plugins(&mut self) {
+        self.emit(Effect::Bridge(BridgeCall::Refresh));
+        self.notify("refreshing plugins…");
+    }
+
+    /// The profiles sessions use: the one new sessions get, and every open
+    /// session's.
+    pub fn plugin_profiles(&self) -> BTreeSet<String> {
+        let mut profiles: BTreeSet<String> = self
+            .sessions
+            .iter()
+            .filter_map(|v| v.proxy.clone())
+            .collect();
+        if let Some(p) = self.proxy_override.pick(self.proxy_default.as_deref()) {
+            profiles.insert(p.to_owned());
         }
+        profiles
     }
 
     // ── --plain ───────────────────────────────────────────────────────────────
 
-    /// Whether `--plain`'s session must wait for plugin setup: its profile
-    /// has an enabled plugin without saved choices whose manifest has not
-    /// arrived (before `deadline`) or whose setup screen is open or queued.
+    /// Whether `--plain`'s session must wait for plugin setup: the addon has
+    /// not read its lists yet, or its profile has an enabled plugin without
+    /// saved choices whose manifest has not arrived (both before
+    /// `deadline`) or whose setup screen is open or queued.
     fn plain_waits(&mut self, profile: &str, deadline: u64) -> bool {
-        let names: Vec<String> = self
-            .enabled_plugins(profile)
-            .iter()
-            .filter(|p| !self.plugins.choices.contains_key(&p.name))
-            .map(|p| p.name.clone())
-            .collect();
         let now = self.now;
-        names.iter().any(|name| {
-            let fetching = !matches!(
-                self.plugins.manifests.get(name),
-                Some((_, ManifestState::Ready(_) | ManifestState::Failed(_)))
-            );
-            (fetching && now < deadline) || self.setup_shown(name)
-        })
+        let Some(bridge) = self.bridge() else {
+            return false;
+        };
+        // The cached lists and the choices are read at start, off this thread.
+        if !bridge.loaded() {
+            return now < deadline;
+        }
+        let unsaved = bridge.unsaved(profile);
+        unsaved
+            .iter()
+            .any(|(name, ended)| (!ended && now < deadline) || self.setup_shown(name))
     }
 
     /// Start `--plain`'s deferred session once nothing holds it.
@@ -366,13 +418,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::vocdoni::daemon::apply_request_of;
     use crate::addons::vocdoni::plugins::choices::PluginChoices;
-    use crate::addons::vocdoni::plugins::state::PluginsFetch;
-    use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
+    use crate::addons::vocdoni::plugins::state::ApplyState;
     use crate::proto::Msg;
     use crate::tui::confirm::{Choice, ConfirmPrompt};
-    use crate::tui::test_support::{alt, app_with, press};
+    use crate::tui::test_support::{
+        alt, app_with, bridge, changed, manifest_arrives, plugin_host, press, run_bridge, serve,
+    };
 
     const TEAM: &str = r#"
 format = 1
@@ -406,22 +458,13 @@ prompt = "Review."
         .unwrap()
     }
 
-    fn sha() -> String {
-        "a".repeat(64)
-    }
-
     /// An app (no modal open) with `local` connected and profile `work`
     /// serving `names`, whose manifests are being fetched.
     fn app_serving(names: &[&str]) -> App {
         let mut app = app_with(&[]);
         app.modal = None;
-        app.on_plugin_host("local");
-        let list = PluginList {
-            profile: "work".into(),
-            fetched_at: 1,
-            plugins: names.iter().map(|n| sample(n)).collect(),
-        };
-        app.on_plugins("work", PluginsFetch::Listed(list));
+        plugin_host(&mut app, "local");
+        serve(&mut app, "work", names);
         app.take_effects();
         app
     }
@@ -440,17 +483,42 @@ prompt = "Review."
         }
     }
 
-    /// The `vocdoni/apply` requests queued, as (host, name, disabled).
-    fn requests(app: &mut App) -> Vec<(String, String, Vec<String>)> {
-        app.take_effects()
+    /// What `local` was asked for plugin `name` (`None`: nothing).
+    fn asked(app: &App, name: &str) -> Option<ApplyState> {
+        bridge(app).state().apply_state("local", name).cloned()
+    }
+
+    /// The disabled ids of the apply request a spawn on `local` with
+    /// profile `work` would wait for.
+    fn disabled_asked(app: &App) -> Vec<Vec<String>> {
+        let (_, pending) = bridge(app).plugin_parts("local", "work");
+        pending
+            .iter()
+            .filter_map(|p| crate::addons::vocdoni::daemon::apply_request_of(&p.msg))
+            .map(|r| r.disabled)
+            .collect()
+    }
+
+    /// The bridge calls among `effects`.
+    fn calls(effects: Vec<Effect>) -> Vec<BridgeCall> {
+        effects
             .into_iter()
             .filter_map(|e| match e {
-                Effect::Request { host, msg, .. } => {
-                    apply_request_of(&msg).map(|r| (host, r.name, r.disabled))
-                }
+                Effect::Bridge(call) => Some(call),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Queue `calls` again for [`run_bridge`].
+    fn emit_all(app: &mut App, calls: &[BridgeCall]) {
+        for call in calls {
+            app.emit(Effect::Bridge(call.clone()));
+        }
+    }
+
+    fn setup_details(app: &App, name: &str) -> Option<String> {
+        bridge(app).state().setup_details(name)
     }
 
     #[test]
@@ -499,13 +567,10 @@ prompt = "Review."
     #[test]
     fn first_sight_shows_every_item_and_nothing_is_asked_until_enter() {
         let mut app = app_serving(&["team"]);
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         let s = setup(&app);
         assert!(s.first_sight && s.items.iter().all(|i| i.on));
-        assert!(
-            requests(&mut app).is_empty(),
-            "nothing before the setup closes"
-        );
+        assert_eq!(asked(&app, "team"), None, "nothing before the setup closes");
         // Keys are swallowed while it arms, Alt+n included.
         app.on_terminal(press(KeyCode::Char(' ')));
         app.on_terminal(alt('n'));
@@ -517,74 +582,72 @@ prompt = "Review."
         app.on_terminal(press(KeyCode::Enter));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
-        let saved = effects.iter().find_map(|e| match e {
-            Effect::SavePluginChoices { name, choices } => Some((name.clone(), choices.clone())),
-            _ => None,
-        });
+        assert_eq!(effects.len(), 1, "{effects:?}");
         let ids = team().ids();
+        let saved = BridgeCall::SaveChoices {
+            name: "team".to_owned(),
+            choices: PluginChoices {
+                disabled: vec!["mcp:kb".into()],
+                reviewed: "1.0.0".into(),
+                seen: ids,
+            },
+        };
+        let calls = calls(effects);
+        assert_eq!(calls, [saved]);
+        // The addon asks every host, with what is off.
+        emit_all(&mut app, &calls);
+        assert!(run_bridge(&mut app).is_empty());
+        assert_eq!(asked(&app, "team"), Some(ApplyState::Pending));
+        assert_eq!(disabled_asked(&app), [["mcp:kb"]]);
         assert_eq!(
-            saved,
-            Some((
-                "team".to_owned(),
-                PluginChoices {
-                    disabled: vec!["mcp:kb".into()],
-                    reviewed: "1.0.0".into(),
-                    seen: ids,
-                }
-            ))
-        );
-        let asked: Vec<&Effect> = effects
-            .iter()
-            .filter(|e| matches!(e, Effect::Request { msg, .. } if apply_request_of(msg).is_some_and(|r| r.disabled == ["mcp:kb"])))
-            .collect();
-        assert_eq!(asked.len(), 1, "{effects:?}");
-        assert_eq!(
-            app.setup_details("team").as_deref(),
+            setup_details(&app, "team").as_deref(),
             Some("1 items disabled (Enter to change)")
         );
+        assert!(app.modal.is_none(), "set up: no screen again");
     }
 
     #[test]
     fn esc_on_first_sight_defers_for_the_run() {
         let mut app = app_serving(&["team"]);
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         arm(&mut app);
         app.on_terminal(press(KeyCode::Esc));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::SavePluginChoices { .. } | Effect::Request { .. })),
-            "{effects:?}"
-        );
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        let calls = calls(effects);
+        assert_eq!(calls, [BridgeCall::Defer("team".into())]);
+        emit_all(&mut app, &calls);
+        run_bridge(&mut app);
         assert_eq!(
-            app.setup_details("team").as_deref(),
+            setup_details(&app, "team").as_deref(),
             Some("setup pending (Enter)")
         );
-        // Fetched again in this run: no screen.
+        // Fetched again in this run: no screen, nothing asked.
         app.refresh_plugins();
-        app.on_manifest("team", &sha(), Ok(team()));
+        run_bridge(&mut app);
+        manifest_arrives(&mut app, "team", team());
         assert!(app.modal.is_none());
-        assert!(requests(&mut app).is_empty());
+        assert_eq!(asked(&app, "team"), None);
     }
 
     #[test]
     fn setup_screens_wait_their_turn_with_the_prompts() {
         let mut app = app_serving(&["team", "two"]);
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         app.queue_confirm(ConfirmPrompt::new(
             "Q",
             "Update?",
             vec![Choice::new('n', "no", None)],
         ));
-        app.on_manifest("two", &sha(), Ok(other("two")));
+        manifest_arrives(&mut app, "two", other("two"));
         assert_eq!(setup(&app).name, "team");
         // A newer fetch of a queued screen's manifest replaces its items.
         let two_v3 = Manifest::parse("format = 1\nname = \"two\"\nversion = \"3\"").unwrap();
-        app.on_manifest("two", &sha(), Ok(two_v3));
+        manifest_arrives(&mut app, "two", two_v3);
         arm(&mut app);
         app.on_terminal(press(KeyCode::Enter));
+        run_bridge(&mut app);
         assert!(
             matches!(app.modal, Some(Modal::Confirm(_))),
             "then the prompt"
@@ -612,11 +675,14 @@ prompt = "Review."
         assert_eq!((s.selected, s.armed, s.first_sight), (3, ARM_TICKS, true));
     }
 
+    /// Set up before: no screen, and `local` is asked with the saved
+    /// choices. (The notice naming the new items is the addon's now:
+    /// `vocdoni::state::tests::new_items_of_a_newer_version_are_named_once_and_on`.)
     #[test]
     fn new_items_of_a_newer_version_are_named_once_and_on() {
         let mut app = app_serving(&["team"]);
         let seen = vec!["plugin:a@m".to_owned(), "mcp:kb".to_owned()];
-        app.plugins.choices.insert(
+        bridge(&app).state().plugins.choices.insert(
             "team".into(),
             PluginChoices {
                 disabled: vec!["mcp:kb".into()],
@@ -624,47 +690,35 @@ prompt = "Review."
                 seen,
             },
         );
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         assert!(app.modal.is_none(), "set up before: no screen");
-        let notice = app.notice.as_ref().unwrap().text.clone();
-        assert_eq!(
-            notice,
-            "team 1.0.0 adds agent:reviewer, instructions; Alt+i, Enter to review"
-        );
-        assert_eq!(
-            requests(&mut app),
-            [("local".into(), "team".into(), vec!["mcp:kb".into()])]
-        );
-        app.notice = None;
-        app.on_manifest("team", &sha(), Ok(team()));
-        assert!(app.notice.is_none(), "once per manifest");
+        assert_eq!(asked(&app, "team"), Some(ApplyState::Pending));
+        assert_eq!(disabled_asked(&app), [["mcp:kb"]]);
     }
 
+    /// Off: no screen. (No notice either:
+    /// `vocdoni::state::tests::a_plugin_turned_off_gets_no_new_items_notice`.)
     #[test]
     fn a_plugin_turned_off_gets_no_new_items_notice() {
         let mut app = app_serving(&["team"]);
-        app.plugins.choices.insert(
-            "team".into(),
-            PluginChoices {
-                disabled: vec![],
-                reviewed: "0.9".into(),
-                seen: vec!["plugin:a@m".to_owned()],
-            },
-        );
-        app.plugins.config.insert("team".into(), false);
-        app.list_plugins();
-        app.on_manifest("team", &sha(), Ok(team()));
+        bridge(&app).set_enabled("team", false);
+        changed(&mut app);
+        manifest_arrives(&mut app, "team", team());
         assert!(app.notice.is_none(), "off: nothing to review");
         assert!(app.modal.is_none(), "off: no screen");
+        let row = app.extensions.extensions.iter().find(|e| e.name == "team");
+        assert!(row.is_some_and(|e| !e.enabled), "its row is off");
     }
 
     #[test]
     fn enter_on_a_plugin_row_opens_its_setup_and_esc_goes_back() {
         let mut app = app_serving(&["team"]);
-        app.plugins
+        bridge(&app)
+            .state()
+            .plugins
             .choices
             .insert("team".into(), PluginChoices::default());
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         app.take_effects();
         let row = app
             .extensions
@@ -693,9 +747,15 @@ prompt = "Review."
         // Space still toggles the plugin.
         app.on_terminal(press(KeyCode::Char(' ')));
         let effects = app.take_effects();
-        assert!(effects
+        let saved = effects
             .iter()
-            .any(|e| matches!(e, Effect::SaveExtension { name, on: false } if name == "team")));
+            .any(|e| matches!(e, Effect::SaveExtension { name, on: false } if name == "team"));
+        assert!(saved, "{effects:?}");
+        let off = BridgeCall::SetEnabled {
+            name: "team".into(),
+            on: false,
+        };
+        assert_eq!(calls(effects), [off]);
         // Enter on a row that is not a plugin toggles it.
         app.on_terminal(press(KeyCode::Home));
         app.on_terminal(press(KeyCode::Enter));
@@ -708,11 +768,12 @@ prompt = "Review."
     #[test]
     fn enter_on_a_manifest_being_refetched_reopens_with_a_notice() {
         let mut app = app_serving(&["team"]);
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         arm(&mut app);
         app.on_terminal(press(KeyCode::Char(' ')));
         // The list changed: the manifest is fetched again under the screen.
-        app.plugins.manifests.get_mut("team").unwrap().1 = ManifestState::Fetching;
+        let b = bridge(&app);
+        b.state().plugins.manifests.get_mut("team").unwrap().1 = ManifestState::Fetching;
         app.take_effects();
         app.on_terminal(press(KeyCode::Enter));
         assert_eq!(
@@ -723,7 +784,7 @@ prompt = "Review."
         assert!(app.take_effects().is_empty(), "nothing saved");
         // The new items arrive: the open screen shows them, toggles kept.
         let newer = TEAM.replace("1.0.0", "1.1.0");
-        app.on_manifest("team", &sha(), Ok(Manifest::parse(&newer).unwrap()));
+        manifest_arrives(&mut app, "team", Manifest::parse(&newer).unwrap());
         assert_eq!(setup(&app).version, "1.1.0");
         assert!(!setup(&app).items[0].on);
         app.on_terminal(press(KeyCode::Enter));
@@ -732,6 +793,7 @@ prompt = "Review."
 
     /// A `--plain` app with profile `work` (serving `team`, cached).
     fn plain_app() -> App {
+        use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
         use crate::tui::app::{AppConfig, Mode};
         let mut app = App::new(AppConfig {
             mode: Mode::Plain,
@@ -745,8 +807,12 @@ prompt = "Review."
             fetched_at: 1,
             plugins: vec![sample("team")],
         };
-        app.load_plugins(vec![list], Default::default(), Default::default());
-        app.on_plugin_host("local");
+        let profiles = (vec!["work".to_owned()], Some("work".to_owned()));
+        let b = bridge(&app);
+        b.state()
+            .load(profiles, Default::default(), Default::default(), vec![list]);
+        b.state().host_up("local", true);
+        changed(&mut app);
         app.take_effects();
         app
     }
@@ -776,10 +842,13 @@ prompt = "Review."
         let mut app = plain_app();
         start(&mut app);
         assert_eq!(spawned(&mut app), None, "the manifest is on its way");
-        app.on_manifest("team", &sha(), Ok(team()));
+        manifest_arrives(&mut app, "team", team());
         assert_eq!(spawned(&mut app), None, "the setup is open");
         arm(&mut app);
         app.on_terminal(press(KeyCode::Enter));
+        // The choices reach the addon with the effects; the tick starts it.
+        assert!(run_bridge(&mut app).is_empty());
+        app.plain_try_start();
         assert_eq!(
             spawned(&mut app),
             Some(vec!["team".to_owned()]),
@@ -790,7 +859,9 @@ prompt = "Review."
     #[test]
     fn plain_spawns_at_once_when_set_up_and_after_20_s_without_a_manifest() {
         let mut app = plain_app();
-        app.plugins
+        bridge(&app)
+            .state()
+            .plugins
             .choices
             .insert("team".into(), PluginChoices::default());
         start(&mut app);
@@ -804,5 +875,22 @@ prompt = "Review."
         app.now = 1020;
         app.plain_try_start();
         assert_eq!(spawned(&mut app), Some(Vec::new()), "without the plugin");
+    }
+
+    /// Until the addon has read its lists, `--plain` waits (20 s at most).
+    #[test]
+    fn plain_waits_for_the_addon_to_read_its_lists() {
+        use crate::tui::app::{AppConfig, Mode};
+        let mut app = App::new(AppConfig {
+            mode: Mode::Plain,
+            proxy_default: Some("work".into()),
+            ..crate::tui::test_support::config()
+        });
+        app.now = 1000;
+        start(&mut app);
+        assert_eq!(spawned(&mut app), None);
+        app.now = 1020;
+        app.plain_try_start();
+        assert!(spawned(&mut app).is_some());
     }
 }

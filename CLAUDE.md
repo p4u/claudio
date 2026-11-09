@@ -278,20 +278,24 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
   (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
   a minimal line edit of config.toml, never a whole-file rewrite); a
-  plugin's toggle (Space) also updates `App::plugins.config`, Enter on a
-  plugin's row opens its setup screen, and `r` refetches the plugin lists
-  and manifests and asks every host again. Drawn by `ui/extensions.rs`.
+  plugin's toggle (Space) also goes to the Vocdoni addon
+  (`Effect::Bridge`), Enter on a plugin's row opens its setup screen, and
+  `r` has the addon refetch the plugin lists and manifests and ask every
+  host again. Drawn by `ui/extensions.rs`.
   The leader keys `u` and `e` are reserved.
 - `plugin_setup.rs` — a proxy plugin's setup screen, pure (the saved choices
   are `plugins::choices::choices_for`): every item of
   its manifest with a checkbox (Space, `a`, `n`, Enter saves to
-  `[plugins.<name>]` through `Effect::SavePluginChoices` and the config
-  editor, off the UI thread, Esc). It opens on first sight (no table
-  yet; Esc then defers for the run: nothing written or sent) and from the
-  extensions screen; it waits its turn in the confirm queue (`Queued`) and
-  swallows every key. `--plain` holds its spawn (`App::plain_pending`)
-  until the profile's new manifests arrived (≤ 20 s) and their screens
-  closed. Drawn by `ui/plugin_setup.rs`.
+  `[plugins.<name>]` through the Vocdoni addon, `Effect::Bridge`, Esc). It
+  reads the addon's plugin state through `addons::vocdoni::bridge` (the
+  temporary core-to-addon import, until P3.11/P3.13) and re-reads it on
+  the runtime's `Changed` (`App::on_addon`). It opens on first sight (no
+  table yet; Esc then defers for the run: nothing written or sent) and
+  from the extensions screen; it waits its turn in the confirm queue
+  (`Queued`) and swallows every key. `--plain` holds its spawn
+  (`App::plain_pending`) until the addon has read its lists and the
+  profile's new manifests arrived (≤ 20 s) and their screens closed.
+  Drawn by `ui/plugin_setup.rs`.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -302,8 +306,9 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   `[claude] install` (`auto` by default, `ask`, `off`): a host whose
   `Welcome` has no claude, `local` included (`check_local_install`, also in
   `--plain`, whose session waits for it), gets the installer once per run
-  (`claude_checked`). A successful install asks that host again for every
-  manifest (`reapply_host`).
+  (`claude_checked`). A successful install goes to the addon runtime
+  (`ClaudeInstalled`), so the Vocdoni addon asks that host again for every
+  manifest.
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
   `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
@@ -318,9 +323,6 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   (defaults + config overrides); `parse_key_spec`; collision detection.
   `Alt+Shift+<digit>` (go to tab N) is fixed, outside the table.
 - `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
-- `plugins_glue.rs` — the `impl App` side of proxy plugins: lists, manifests
-  and host answers become state changes and `Effect`s (the pure state is
-  `plugins/state.rs`).
 - `notifications.rs` — debounce logic for attention notifications.
 - `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
   pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
@@ -375,9 +377,9 @@ charset and `${NAME}` placeholder rule, item ids (`plugin:<name>@<market>`,
 `mcp:<name>`, `agent:<name>`, `instructions`, `env`), and the renderers
 (`mcp_json`, `agents_json`, checked against 64/32 KiB at parse time).
 Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok` (their code is `names.rs`).
-- `state.rs` — the pure client-side plugin state: each profile's list (`plugins.json` at
-  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
-  plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
+- `state.rs` — the client-side plugin state's types: each profile's list (`plugins.json` at
+  start, fetched at start, every 15 min and on `r`), each
+  plugin's manifest (fetched by the client, 256
   KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
   each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
   30 s while it lists `installing`, and a second after a `(retrying in N
@@ -388,8 +390,11 @@ Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok
   just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
   A spawn whose host has not answered is deferred
   (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
-  ≤ 20 s). Shared by the TUI and the web (`web/plugins.rs`).
-- `choices.rs` — `choices_for`, what a plugin's setup screen saves.
+  ≤ 20 s). Shared by the addon's state machine (`addons/vocdoni/state/`,
+  driven by `runner.rs`, which the TUI reads through `bridge.rs`) and the
+  web (`web/plugins.rs`, until P3.10).
+- `choices.rs` — `PluginChoices` (`[plugins.<name>]`, the addon's section:
+  `from_table`, `set`) and `choices_for`, what a plugin's setup screen saves.
 - `stats.rs` — the proxy stats `Window` (24h/7d/30d).
 - `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
   `/pool/health` and `/session` (which credential a claude session is on).

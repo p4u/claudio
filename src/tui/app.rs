@@ -21,10 +21,8 @@
 //!   `interaction`)
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
 
 use crate::addon::{LaunchChoice, LaunchOp, LaunchSelect};
-use crate::addons::vocdoni::proxy::api::ConfigResponse;
 use crate::addons::vocdoni::proxy::ProxyChoice;
 use crate::proto::{Msg, SessionId, SessionState};
 
@@ -105,9 +103,6 @@ pub enum Effect {
     Save,
     /// Read the SSH host candidates again; they go to [`App::on_ssh_hosts`].
     LoadSshHosts,
-    /// Fetch proxy config (env) for a profile name. Result goes to
-    /// [`App::on_proxy_config`].
-    FetchProxyConfig { profile_name: String },
     /// Fetch proxy stats (one request per window) plus pool health, and the
     /// model catalogue when `models` is set. Result goes to
     /// [`App::on_proxy_stats`].
@@ -147,8 +142,8 @@ pub enum Effect {
         to: ReplyTo,
         /// The profile's enabled plugins, in registry order.
         plugins: Vec<crate::addons::vocdoni::plugins::state::PluginPart>,
-        /// The `Manifest` requests of the plugins `host` has not answered.
-        pending: Vec<PendingManifest>,
+        /// The `vocdoni/apply` requests of the plugins `host` has not answered.
+        pending: Vec<crate::addons::vocdoni::bridge::Pending>,
     },
     /// Launch a claude session through the launch composer
     /// ([`crate::app::launch`]); the outcome goes to [`App::on_launched`].
@@ -184,21 +179,32 @@ pub enum Effect {
         id: SessionId,
         answers: Vec<crate::proto::Answer>,
     },
-    /// Fetch `profile`'s plugin list, then save it to (or drop it from)
-    /// `plugins.json`; the outcome goes to [`App::on_plugins`].
-    FetchPlugins { profile: String },
-    /// Fetch plugin `name`'s manifest (https, 256 KiB, hash checked) and
-    /// parse it; the outcome goes to [`App::on_manifest`].
-    FetchManifest {
-        name: String,
-        url: String,
-        sha256: String,
-    },
-    /// Write `[plugins.<name>]` to config.toml; a failure is a notice.
-    SavePluginChoices {
+    /// A call into the Vocdoni addon's plugin state (`addon_runner::bridge`).
+    Bridge(BridgeCall),
+}
+
+/// What the setup screen and the extensions screen ask of the Vocdoni
+/// addon's plugin state (temporary: P3.11 and P3.13 replace them).
+#[derive(Debug, Clone, PartialEq)]
+pub enum BridgeCall {
+    /// Write the member's choices for a plugin and ask every host again.
+    SaveChoices {
         name: String,
         choices: crate::addons::vocdoni::plugins::choices::PluginChoices,
     },
+    /// Put a plugin's first-sight setup off for this run.
+    Defer(String),
+    /// Turn a plugin on or off.
+    SetEnabled { name: String, on: bool },
+    /// `r`: every list, manifest and host answer again.
+    Refresh,
+}
+
+/// What the addon runtime tells `App` (`addon_runner::on_out`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddonResult {
+    /// The addon's data changed: re-read what is shown of it.
+    Changed { addon: &'static str },
 }
 
 /// A launch for the event loop's runner (`addon_runner::launch`). It holds
@@ -232,15 +238,6 @@ pub struct Launched {
     pub notices: Vec<String>,
     /// The daemon's reply, or why the launch failed.
     pub result: Result<Msg, String>,
-}
-
-/// A plugin manifest a deferred spawn waits for: its `Manifest` request,
-/// and how the answer reaches [`App::on_reply`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingManifest {
-    pub name: String,
-    pub msg: Msg,
-    pub to: ReplyTo,
 }
 
 /// What a request's reply is for.
@@ -298,12 +295,6 @@ pub enum ReplyTo {
         gen: u64,
         host: String,
     },
-    /// `Manifest` of plugin `name` at hash `sha256` on `host`.
-    Manifest {
-        host: String,
-        name: String,
-        sha256: String,
-    },
 }
 
 impl ReplyTo {
@@ -350,8 +341,6 @@ pub struct App {
     launch_seq: u64,
     /// Sessions whose launch has not ended: not attached until it has.
     pub(super) launching: HashSet<SessionId>,
-    /// Cached proxy config (env vars) per profile name, with fetch time.
-    pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
     pub proxy_status: HashMap<String, ProxyStatus>,
     /// Profiles whose model catalogue has been requested once for the stats
@@ -424,9 +413,9 @@ pub struct App {
     /// The external extensions the extension host disabled after
     /// failures (until claudio restarts), by name.
     pub failed_extensions: Vec<String>,
-    /// The proxy plugins: lists, saved choices, manifests, each host's
-    /// answers.
-    pub plugins: crate::addons::vocdoni::plugins::state::Plugins,
+    /// The addons this run has: `App` only queries them (the Vocdoni
+    /// bridge's plugin state).
+    pub addons: std::sync::Arc<crate::addon::Addons>,
     /// `--plain`'s session while plugin setup holds it: what to start, its
     /// proxy profile, and until when (Unix seconds) manifests are awaited.
     pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
@@ -464,6 +453,8 @@ pub struct AppConfig {
     /// The SSH hosts the wizard offers (refreshed through
     /// [`Effect::LoadSshHosts`]).
     pub ssh_hosts: Vec<String>,
+    /// The addons this run has.
+    pub addons: std::sync::Arc<crate::addon::Addons>,
 }
 
 impl App {
@@ -490,7 +481,6 @@ impl App {
             effects: Vec::new(),
             launch_seq: 0,
             launching: HashSet::new(),
-            proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
             models_requested: HashSet::new(),
             session_creds: HashMap::new(),
@@ -524,7 +514,7 @@ impl App {
             ),
             pending_action: None,
             failed_extensions: Vec::new(),
-            plugins: Default::default(),
+            addons: cfg.addons,
             plain_pending: None,
         }
     }
@@ -807,7 +797,6 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.now = crate::paths::unix_now();
         self.confirm_tick();
-        self.reask_installing();
         self.plain_try_start();
         self.refresh_session_cred(SESSION_CRED_POLL_SECS);
         if let Some(n) = &mut self.notice {

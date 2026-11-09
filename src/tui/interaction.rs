@@ -687,9 +687,6 @@ impl App {
             }
             Outcome::Spawn { cwd, resume, proxy } => {
                 self.modal = None;
-                if let Some(ref pname) = proxy {
-                    self.maybe_fetch_proxy_config(pname);
-                }
                 self.spawn(wizard_host, cwd, resume, proxy);
             }
         }
@@ -791,7 +788,6 @@ impl App {
                 // Handled in the event loop before on_incoming_from is called.
             }
             Incoming::Disconnected => {
-                self.plugin_host_gone(host);
                 if host == "local" {
                     self.on_disconnected_local();
                 } else {
@@ -993,9 +989,6 @@ impl App {
                 }
             }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
-            (ReplyTo::Manifest { host, name, sha256 }, reply) => {
-                self.on_applied(&host, &name, &sha256, reply)
-            }
             // Typing a path that doesn't exist (yet) is not an error.
             (ReplyTo::DirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {

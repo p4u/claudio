@@ -24,7 +24,6 @@ mod leader;
 mod notifications;
 mod plain;
 pub(crate) mod plugin_setup;
-mod plugins_glue;
 mod proxy_glue;
 mod proxy_state;
 mod reader;
@@ -75,7 +74,7 @@ use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::Addons;
 use crate::addons::vocdoni::daemon::applied_of;
-use crate::addons::vocdoni::{plugins::manifest::Manifest, plugins::state as plugin_state, proxy};
+use crate::addons::vocdoni::proxy;
 use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
 use crate::app::extensions;
@@ -282,15 +281,10 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             Some(_) => Vec::new(),
             None => crate::remote::hosts::candidates(),
         },
+        addons: Arc::clone(&addons),
     });
     app.extensions = registry;
-    app.load_plugins(
-        cached_plugins,
-        config.extensions.clone(),
-        crate::addons::vocdoni::plugins::choices::from_table(&config.others.section("plugins")),
-    );
-    let runner = addon_runner::start(addons);
-    app.on_daemon_host("local", &local_client.welcome().features);
+    let runner = addon_runner::start(addons, &app);
     runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
     let start = match plain {
@@ -476,11 +470,6 @@ enum HostEvent {
     /// Drop `host`'s connection and connect again: its outdated daemon has
     /// become idle (see [`retry_outdated`]).
     Reconnect { host: String, generation: u64 },
-    /// Proxy config fetched (or failed).
-    ProxyConfig {
-        profile_name: String,
-        config: Option<proxy::api::ConfigResponse>,
-    },
     /// Proxy stats, pool health and model catalogue fetched (or failed).
     ProxyStats {
         profile_name: String,
@@ -526,18 +515,6 @@ enum HostEvent {
     ActionDone {
         gen: u64,
         result: Result<extensions::ActionResult, String>,
-    },
-    /// A profile's plugin list was fetched (and the cache updated), or not.
-    Plugins {
-        profile: String,
-        fetch: plugin_state::PluginsFetch,
-    },
-    /// Plugin `name`'s manifest at hash `sha256` was fetched and parsed, or
-    /// why not.
-    Manifest {
-        name: String,
-        sha256: String,
-        result: Result<Manifest, String>,
     },
     /// A notice from a background task.
     Notice(String),
@@ -661,9 +638,6 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The plugin lists: now, then every 15 minutes.
-    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugin_state::REFRESH_SECS));
-    plugins_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 60-second proxy stats refresh.
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
     proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -776,8 +750,7 @@ async fn event_loop(
                     }
                 }
                 Some(
-                    ev @ (HostEvent::ProxyConfig { .. }
-                    | HostEvent::ProxyStats { .. }
+                    ev @ (HostEvent::ProxyStats { .. }
                     | HostEvent::SessionCredential { .. }
                     | HostEvent::SubscriptionSwitch { .. }),
                 ) => app.on_proxy_event(ev),
@@ -802,10 +775,6 @@ async fn event_loop(
                     app.on_snippets(gen, &dir, result);
                 }
                 Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
-                Some(HostEvent::Plugins { profile, fetch }) => app.on_plugins(&profile, fetch),
-                Some(HostEvent::Manifest { name, sha256, result }) => {
-                    app.on_manifest(&name, &sha256, result);
-                }
                 Some(HostEvent::Notice(text)) => app.notify(text),
                 Some(HostEvent::Launched(done)) => app.on_launched(done),
                 None => return Ok(Default::default()),
@@ -821,7 +790,6 @@ async fn event_loop(
                     app.schedule_proxy_stats(&name, vec![proxy::stats::Window::H24]);
                 }
             }
-            _ = plugins_tick.tick() => app.fetch_plugin_lists(),
             _ = outdated_tick.tick() => retry_outdated_hosts(conns, &ev_tx),
             _ = tokio::time::sleep(wait), if app.redraw => {}
         }
@@ -930,9 +898,7 @@ fn run_effect(
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
-        Effect::SavePluginChoices { name, choices } => {
-            addon_runner::save_plugin_choices(name, choices, ev_tx)
-        }
+        Effect::Bridge(call) => addon_runner::bridge(call, runtime),
         Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.
@@ -949,40 +915,6 @@ fn run_effect(
             if let Err(e) = app.to_state().save(&paths::client_state()) {
                 app.notify(format!("could not save state: {e}"));
             }
-        }
-        Effect::FetchPlugins { profile } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetch = fetch_plugins(&profile, &tx).await;
-                let _ = tx.send(HostEvent::Plugins { profile, fetch }).await;
-            });
-        }
-        Effect::FetchManifest { name, url, sha256 } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetched = proxy::plugins::fetch_manifest(&url, &sha256).await;
-                let result = fetched.and_then(|text| Manifest::parse_named(&text, &name));
-                let _ = tx
-                    .send(HostEvent::Manifest {
-                        name,
-                        sha256,
-                        result,
-                    })
-                    .await;
-            });
-        }
-        Effect::FetchProxyConfig { profile_name } => {
-            let tx = ev_tx.clone();
-            let name = profile_name.clone();
-            tokio::spawn(async move {
-                let config = fetch_proxy_config(&name).await;
-                let _ = tx
-                    .send(HostEvent::ProxyConfig {
-                        profile_name: name,
-                        config,
-                    })
-                    .await;
-            });
         }
         Effect::FetchProxyStats {
             profile_name,
@@ -1040,14 +972,16 @@ fn run_effect(
 /// How long a spawn waits for a host to answer its plugin manifests.
 pub(super) const MANIFEST_WAIT: Duration = Duration::from_secs(20);
 
-/// Ask `client` for each of `pending` and wait up to [`MANIFEST_WAIT`]: the
-/// answers that came back (`Applied`, by plugin name), and the names of
-/// those that did not (late, failed, or no client). Every answer, even a
-/// late one, also goes to `App` through `tx`.
+/// Ask `client` (`host`'s) for each of `pending` and wait up to
+/// [`MANIFEST_WAIT`]: the answers that came back (`Applied`, by plugin
+/// name), and the names of those that did not (late, failed, or no
+/// client). Every answer, even a late one, also goes to the addon through
+/// `bridge`.
 async fn wait_manifests(
     client: Option<&Client>,
-    pending: Vec<app::PendingManifest>,
-    tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
+    host: &str,
+    pending: Vec<crate::addons::vocdoni::bridge::Pending>,
+    bridge: Option<crate::addons::vocdoni::bridge::Bridge>,
 ) -> (
     std::collections::HashMap<String, crate::addons::vocdoni::daemon::Applied>,
     Vec<String>,
@@ -1063,7 +997,7 @@ async fn wait_manifests(
         };
         let reply = client.request(m.msg);
         let (done, answer) = tokio::sync::oneshot::channel();
-        let tx = tx.clone();
+        let (bridge, host, name) = (bridge.clone(), host.to_owned(), m.name.clone());
         tokio::spawn(async move {
             let reply = reply.await;
             let applied = reply
@@ -1072,7 +1006,9 @@ async fn wait_manifests(
                 .cloned()
                 .and_then(|r| applied_of(r).ok());
             let _ = done.send(applied);
-            let _ = tx.send((m.to, reply));
+            if let Some(bridge) = bridge {
+                bridge.on_applied_reply(&host, &name, &m.sha256, reply);
+            }
         });
         waiting.push((m.name, answer));
     }
@@ -1085,49 +1021,6 @@ async fn wait_manifests(
         }
     }
     (ready, left_out)
-}
-
-/// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list
-/// is saved, a 401/403 drops the profile's entry (its secrets), anything
-/// else leaves it. A failed write is a notice.
-async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_state::PluginsFetch {
-    use plugin_state::PluginsFetch;
-    use proxy::api::ApiError;
-    use proxy::plugins as cache;
-    let Some(p) = proxy::resolve::find_profile(profile) else {
-        return PluginsFetch::Unreachable;
-    };
-    let (fetch, write) = match cache::fetch(profile, &p).await {
-        Ok(list) => {
-            let saved = list.clone();
-            let write = tokio::task::spawn_blocking(move || cache::save_cache(&saved));
-            (PluginsFetch::Listed(list), Some(write))
-        }
-        Err(ApiError::Http(s)) if s.as_u16() == 401 || s.as_u16() == 403 => {
-            let name = profile.to_owned();
-            let write = tokio::task::spawn_blocking(move || cache::remove_cache(&name));
-            (PluginsFetch::SignedOut, Some(write))
-        }
-        Err(_) => (PluginsFetch::Unreachable, None),
-    };
-    if let Some(write) = write {
-        if let Ok(Err(e)) = write.await {
-            let _ = tx
-                .send(HostEvent::Notice(format!("could not save plugins: {e}")))
-                .await;
-        }
-    }
-    fetch
-}
-
-/// Fetch proxy config for a named profile. Returns `None` on any error.
-async fn fetch_proxy_config(profile_name: &str) -> Option<proxy::api::ConfigResponse> {
-    let (url, token) = proxy::resolve::resolve_profile(profile_name)?;
-    match proxy::api::fetch_config(&url, &token).await {
-        Ok(Some(cfg)) => Some(cfg),
-        Ok(None) => None,
-        Err(_) => None,
-    }
 }
 
 /// Fetch proxy stats for `windows`, pool health, and (when `models`) the
