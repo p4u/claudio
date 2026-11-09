@@ -152,7 +152,10 @@ front-end shows that checklist (queued like a confirm prompt) and the 25 s clock
 is open. Enter saves it (`save_checklist(id, Save { revision, off })`) and prepares that addon
 again; "skip" prepares it again with the checklist id in `deferred`, for this launch only; Esc
 cancels the launch. Skip and Esc never reach the addon. A revision change while the checklist is
-open reopens it. A respawn or a recovery never waits for a review.
+open reopens it: the front-end shows the new items, and a save of the old revision that the
+addon refuses prepares the addon again, which asks for the review again (the refusal is a
+notice). A respawn or a recovery never waits for a review. The web protocol v1 has no
+checklists: there a review is skipped for that launch, with a notice.
 
 Outside a launch, an addon asks for a first-sight review with `ctx.offer_checklist(id)`: the TUI
 queues it until it is idle; the web ignores offers.
@@ -279,7 +282,19 @@ through the proxy), removes `ANTHROPIC_API_KEY` (and `CLAUDE_CODE_USE_GATEWAY` f
 session) from the inherited env, and adds the plugins' share: for a new session it asks the host
 for the manifests it has not answered (≤ 20 s), then each plugin's `--agents`/`--mcp-config` as
 optional args, its `[env]` and secrets (under the profile's env, which wins) and its
-instructions. A respawn or recovery takes what is answered now. A host whose daemon lacks
+instructions. A respawn or recovery takes what is answered now.
+
+**Review.** A plugin's setup is the checklist whose id is the plugin's name: one item per
+manifest item (`plugin:<name>@<market>`, `mcp:<name>`, `agent:<name>`, `instructions`, `env`),
+under its section's heading, on unless `[plugins.<name>] disabled` lists it (all on at first
+sight); its revision is the manifest's sha256, so saving a revision since replaced is refused
+`stale`. Saving writes `[plugins.<name>]` and asks every host again. A new session or a resume
+whose profile has an enabled plugin without saved choices waits (within the budget) for the
+addon's start, the profile's list and that manifest, then answers `NeedsReview`; one skipped
+for this launch is left out, its secrets too, and so is one whose manifest failed or did not
+arrive, with a notice. When a manifest arrives for a plugin never set up, the addon offers its
+checklist once per run; putting the offer off (`Defer`) asks no host for it in this run, and a
+launch still asks for its review. A host whose daemon lacks
 `addon:vocdoni` gets the proxy env without plugins and a notice. Legacy `proxy`/`first_party`
 fields are adopted as `{addon: "vocdoni", option: <profile>, flags: ["first-party"]?}`.
 
@@ -287,8 +302,8 @@ fields are adopted as `{addon: "vocdoni", option: <profile>, flags: ["first-part
 A6): each profile's list (`plugins.json`, then the proxy every 15 min), each plugin's manifest,
 what each host answered, and the member's `[plugins.<name>]` choices. `runner.rs` drives it from
 the runtime's events and does its tasks through the `AddonCtx` (fetches, `vocdoni/apply` asks,
-`edit_config("plugins", …)`). Until the TUI's setup screen and extension rows become a checklist
-and rows (P3.11, P3.13), the TUI reads it through `bridge.rs`.
+`edit_config("plugins", …)`). Until the extension rows become the addon's rows (P3.13), the TUI
+reads them through `bridge.rs`.
 
 ## Config sections and reserved words
 
