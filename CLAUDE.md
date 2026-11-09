@@ -97,7 +97,9 @@ make test-web                                 # node tests, then Playwright e2e 
 
 The e2e starts a real `claudio web` per spec file in `~/.cache/claudio/web-e2e/<hex>/`
 with an isolated env (`XDG_*`, `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDIO_CLAUDE_PATH` = a fake
-claude), so it never touches your own daemon or `~/.claude`. Needs Chromium in
+claude), so it never touches your own daemon or `~/.claude`. The `--remote` tests (the Rust
+suites and `remote.spec.mjs`) use the committed fixture password
+(`addons/web/web/e2e/fixtures/web-password`, password `claudio-e2e-password`). Needs Chromium in
 `~/.cache/ms-playwright` and `npm ci` in `addons/web/web/e2e`. Run one spec:
 `cd addons/web/web/e2e && npx playwright test board`.
 
@@ -117,7 +119,7 @@ One binary, `claudio`, built from a Cargo workspace (`docs/addons.md`, "Crates")
 Cargo.toml       [workspace] + the `claudio` package (features api, web, vocdoni: default; diag)
 src/main.rs      wiring only: the core's words, `addons()` (the cfg'd registry), help, passthrough
 crates/core      claudio-core     addon/ app/ claude/ client config daemon/ freshness paths proto
-                                  release remote/ term/ text upgrade version
+                                  release remote/ sys term/ text upgrade version
 crates/tui       claudio-tui      the console manager and `--plain`        tests/manager.rs, tests/common/
 addons/api       claudio-api      print/, api/, cli.rs, msglog.rs          tests/integration.rs
 addons/web       claudio-web      src/ (the server), web/ (the page), build.rs   tests/web.rs, tests/manager.rs
@@ -193,10 +195,10 @@ front-ends share.
 never branch on an addon's name; an addon imports `claudio_core::addon`, the core's public
 services and its own modules, and reads and writes only the `config.toml` tables it
 declares. The services addons use today: `paths` (all); `term::{probe, strip_escapes}`
-(api); `proto`, `text`, `client`, `remote::bootstrap` and `app::{addons, launch, browser}`
-(web and vocdoni); `claude::SESSION_MARKERS` and `app::config_edit` (vocdoni); `config`,
-`freshness`, `claude::{hooks, update}`, `remote::{hosts, validate_host}` and `app::label`
-(web). The web addon (the former in-tree web UI, a second front-end) also uses
+(api); `proto`, `text`, `client`, `remote::bootstrap`, `term::secret` and
+`app::{addons, launch, browser}` (web and vocdoni); `claude::SESSION_MARKERS` and
+`app::config_edit` (vocdoni); `config`, `freshness`, `claude::{hooks, update}`,
+`remote::{hosts, validate_host}`, `sys::hostname` and `app::label` (web). The web addon (the former in-tree web UI, a second front-end) also uses
 `app::{state, connections, extensions, snippets}`: the layer both front-ends share (A5).
 
 ### Session manager (bare `claudio`)
@@ -207,9 +209,9 @@ A bare `claudio` calls `claudio_tui::run()`. The manager's architecture spans cl
 **Small shared modules** (`crates/core/src/`, no dependencies of ours): `text.rs` (`sanitize`
 and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
 (`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
-by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
+by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`),
 `version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
-`proto`).
+`proto`) and `sys.rs` (`hostname()`).
 
 **`crates/core/src/proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
@@ -472,6 +474,8 @@ no ratatui, crossterm or axum. The web imports nothing from claudio-tui:
 are the TUI's `pane.rs` and `keys.rs`):
 - `screen.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.
 - `probe.rs` — answers the terminal probes Ink sends at startup (print mode and the daemon).
+- `secret.rs` — `read_line_no_echo`: one line from a terminal with echo off, restored on every
+  exit path (SIGINT included); the web's `--set-password` and the Vocdoni addon's token prompt.
 - `mod.rs` — `strip_escapes`.
 
 **`crates/core/src/claude/`** — claude knowledge:
@@ -500,12 +504,24 @@ browser: one more client of the daemons, like the TUI, over the same socket and 
 `docs/web-protocol.md` is the contract between server and page (version 2: `addons.*` ops,
 the Session's `launch` and `segments`); change it first, in its own commit. User docs, the security model and the TUI parity table: `docs/web.md`.
 
-**`addons/web/src/`** (claudio-web; axum, loopback only):
-- `lib.rs` — args (`--listen`, `--allow-host`, `--no-open`, `--print-url`, `--rotate-token`),
-  routes, startup, graceful shutdown (tabs closed 1001, `web-state.json` written).
+**`addons/web/src/`** (claudio-web; axum, loopback only unless `--remote`):
+- `lib.rs` — args (`--listen`, `--remote`, `--rotate-cert`, `--allow-host`, `--no-open`,
+  `--print-url`, `--rotate-token`, `--set-password`, `--print-cert`), routes, startup,
+  graceful shutdown (tabs closed 1001, `web-state.json` written).
 - `auth.rs` — token file (`<config>/web-token`, 0600, constant-time compare), cookie sessions
-  (24 h idle, 64), login rate limit, `guard` (Host 421, Origin 403, cookie 401), the CSP
-  (`csp`, with the import-map hash) and security headers on every response.
+  (24 h idle, 64), the `Host`/`Origin` sets (loopback, or `--remote`'s with IP literals and
+  https only), the local rule (`Auth::caller`), `guard` (Host 421, Origin 403, cookie 401,
+  `/api/me`'s login methods), the CSP (`csp`, with the import-map hash) and security headers
+  on every response.
+- `login.rs` — `POST /api/login`: token (local requests only with `--remote`) or password
+  (argon2 in `spawn_blocking`, 4 at once).
+- `limit.rs` — login reservations: 5 per peer, 30 global per minute, taken before any check.
+- `peer.rs` — `Peer` (`ConnectInfo`), `PeerKey`.
+- `password.rs` — `web-password` (argon2id, fixed parameters), `--set-password`.
+- `remote.rs` — `--remote`'s address grammar, certificate names, start-up banner, `prepare`.
+- `tls/` — `cert.rs` (self-signed certificate kept in `web-tls/`, fingerprint, `--print-cert`),
+  `listener.rs` (the `axum::serve::Listener` over TLS: handshake tasks, connection caps,
+  header deadline).
 - `assets.rs` — the embedded app, gzipped by `build.rs`; `CLAUDIO_WEB_DIR=<dir>` serves from
   disk in a debug build.
 - `ws.rs` — the WebSocket: `hello` + `snapshot`, JSON requests (§5 ops), binary PTY frames,
@@ -627,6 +643,13 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
   (mermaid reduction rule) but never edit one; every file is in `MANIFEST.txt`.
 - **The web never writes `state.json`.** It reads it; its own state is `web-state.json` and
   `web-token`, both written with `paths::write_atomic` (0600).
+- **`--remote` is the only non-loopback listener, and it is TLS.** `listen_addr` still refuses
+  non-loopback `--listen`; with `--remote` the token works for local requests only (loopback
+  peer **and** loopback `Host`), so a reverse proxy on the same host never turns internet users
+  into token holders. No HSTS: it would stop browsers from accepting the self-signed
+  certificate later.
+- **The suites' remote peer is a debug-only hook** (`CLAUDIO_TEST_REMOTE_PEER`); it only ever
+  takes the token away.
 - **DTO fields are fixed by `docs/web-protocol.md`.** A new field or message changes the doc
   first. Session ids are `sid` in every request and event (an `id` argument would collide with
   the request id); only the Session DTO keeps `id`.
