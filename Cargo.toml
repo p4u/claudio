@@ -3,19 +3,52 @@ name = "claudio"
 version = "0.8.0"
 edition = "2021"
 description = "Drop-in `claude` wrapper emulating `-p`, with an optional OpenAI-compatible API server (--api) routed through the same PTY-driven backend (responsible-disclosure research)"
+# Every integration suite is listed below. They drive the claudio binary, so they are this
+# package's targets even where the file lives next to the crate it tests (P4 plan, D1).
+autotests = false
 
 [[bin]]
 name = "claudio"
 path = "src/main.rs"
 
 [[test]]
+name = "manager"
+path = "crates/tui/tests/manager.rs"
+
+[[test]]
+name = "web"
+path = "addons/web/tests/web.rs"
+required-features = ["web"]
+
+[[test]]
+name = "web_manager"
+path = "addons/web/tests/manager.rs"
+required-features = ["web"]
+
+[[test]]
+name = "vocdoni_manager"
+path = "addons/vocdoni/tests/manager.rs"
+required-features = ["vocdoni"]
+
+[[test]]
+name = "vocdoni_web"
+path = "addons/vocdoni/tests/web.rs"
+required-features = ["vocdoni", "web"]
+
+[[test]]
+name = "integration"
+path = "addons/api/tests/integration.rs"
+required-features = ["api"]
+
+[[test]]
 name = "remote"
 path = "tests/remote.rs"
-required-features = ["diag"]
+required-features = ["diag", "vocdoni"]
 
 [[test]]
 name = "screenshots"
 path = "tests/screenshots.rs"
+required-features = ["vocdoni"]
 
 [features]
 default = ["api", "web", "vocdoni"]

@@ -6,6 +6,7 @@
 //! Run with:
 //!   cargo test --test web_manager -- --test-threads=1
 
+#[path = "../../../crates/tui/tests/common/mod.rs"]
 mod common;
 
 use std::time::{Duration, Instant};

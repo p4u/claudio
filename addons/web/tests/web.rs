@@ -2,6 +2,7 @@
 //! and request checks, the browser protocol against a fake claude, direct
 //! launches. Run single-threaded: `cargo test --test web -- --test-threads=1`.
 
+#[path = "../../../crates/tui/tests/common/mod.rs"]
 mod common;
 mod web_harness;
 

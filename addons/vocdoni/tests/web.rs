@@ -3,7 +3,9 @@
 //! launch options, against a fake claude-proxy. Run single-threaded:
 //! `cargo test --test vocdoni_web -- --test-threads=1`.
 
+#[path = "../../../crates/tui/tests/common/mod.rs"]
 mod common;
+#[path = "../../web/tests/web_harness/mod.rs"]
 mod web_harness;
 
 use std::io::{Read, Write};

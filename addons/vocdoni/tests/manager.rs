@@ -9,6 +9,7 @@
 //! For the gated real-claude scenario through a proxy:
 //!   CLAUDIO_E2E=1 CLAUDIO_PROXY_URL=… cargo test --test vocdoni_manager -- --test-threads=1
 
+#[path = "../../../crates/tui/tests/common/mod.rs"]
 mod common;
 
 use std::time::{Duration, Instant};
