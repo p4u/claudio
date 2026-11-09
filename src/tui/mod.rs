@@ -19,6 +19,7 @@ mod notifications;
 mod plain;
 pub(crate) mod plugin_setup;
 pub(crate) mod plugins;
+mod plugins_glue;
 mod proxy_state;
 mod reader;
 mod selection;
