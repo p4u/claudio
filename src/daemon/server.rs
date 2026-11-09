@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions, Permissions, TryLockError};
+use std::future::Future;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -500,24 +501,15 @@ impl Client {
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
             Msg::Answers { id } => {
-                // A transcript read: run beside the client loop and reply
-                // from the task, like `UpdateClaude`.
+                // A transcript read.
                 let conversation = self.daemon.conversation(id);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = answers(id, conversation).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, answers(id, conversation));
                 return;
             }
             Msg::LastPrompt { id } => {
-                // A transcript read, like `Answers`.
+                // A transcript read.
                 let conversation = self.daemon.conversation(id);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = last_prompt(id, conversation).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, last_prompt(id, conversation));
                 return;
             }
             Msg::RecentProjects { limit } => recent_projects(limit).await,
@@ -550,14 +542,9 @@ impl Client {
                 Msg::Ok
             }
             Msg::UpdateClaude { install } => {
-                // Minutes long: run beside the client loop and reply from
-                // the task, like `Attach`.
+                // Minutes long.
                 let daemon = Arc::clone(&self.daemon);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = update::run(&daemon, install).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, async move { update::run(&daemon, install).await });
                 return;
             }
             Msg::Search { query, limit } => match self.spawn_search(req, query, limit) {
@@ -571,13 +558,10 @@ impl Client {
                 secrets,
                 disabled,
             } => {
-                // A download (up to minutes): reply from a task, like
-                // `UpdateClaude`. The installs run after the reply.
+                // A download (up to minutes); the installs run after the reply.
                 let daemon = Arc::clone(&self.daemon);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = manifest::handle(&daemon, name, url, sha256, secrets, disabled).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+                self.reply_later(req, async move {
+                    manifest::handle(&daemon, name, url, sha256, secrets, disabled).await
                 });
                 return;
             }
@@ -678,6 +662,16 @@ impl Client {
             let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
         });
         Ok(())
+    }
+
+    /// Run a slow request's `work` beside the client loop and queue its
+    /// reply to `req` when done, so the loop keeps answering meanwhile.
+    fn reply_later(&self, req: Option<u64>, work: impl Future<Output = Msg> + Send + 'static) {
+        let queue = self.queue.clone();
+        tokio::spawn(async move {
+            let msg = work.await;
+            let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+        });
     }
 
     /// Send `cmd` to a live session; the reply is `Ok` or `Error`.
