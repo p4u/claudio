@@ -10,6 +10,8 @@
 //!     interactive claude, type the prompt, read the answer from the session
 //!     JSONL, and emit text/json/stream-json.
 
+mod addon;
+mod addons;
 mod api;
 mod app;
 mod claude;
@@ -42,6 +44,7 @@ use print::emit::Outcome;
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    let _addons = registry(); // no consumer yet; later P3 tasks hand it to each entry point
 
     // Remote probe: `claudio __probe` prints one JSON line describing this
     // binary (version, proto, os, arch, sha256 of the exe). Must run before
@@ -296,6 +299,15 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// The addon registry this binary runs with; a refused registration exits.
+fn registry() -> std::sync::Arc<addon::Addons> {
+    let addons = addon::Addons::new(addons::all()).unwrap_or_else(|e| {
+        eprintln!("claudio: {e}");
+        std::process::exit(1)
+    });
+    std::sync::Arc::new(addons)
 }
 
 /// Optional message-flow logging (CLI⇄claudio⇄claude). Flag or env enables it;
