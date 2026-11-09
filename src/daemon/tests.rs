@@ -2022,7 +2022,7 @@ fn journaled_lenses(entry: &serde_json::Value) -> Option<Vec<String>> {
 
 #[test]
 fn effective_extensions_follow_request_then_journal_then_legacy() {
-    use super::effective_extensions;
+    use super::admit::effective_extensions;
     let names = |e: proto::SessionExtensions| -> Vec<String> {
         e.lenses.into_iter().map(|l| l.name).collect()
     };

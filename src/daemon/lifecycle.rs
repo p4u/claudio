@@ -5,6 +5,7 @@
 use std::io;
 use std::sync::Arc;
 
+use super::journal::Entry;
 use super::session::{self, Cmd};
 use super::{in_progress, Daemon};
 use crate::proto::{RespawnSpec, SessionEvent, SessionId, SessionState, SpawnSpec};
@@ -75,10 +76,7 @@ impl Daemon {
     /// Respawn (or a Spawn) is refused meanwhile, and a Kill is deferred to
     /// `to_kill` and wins, so a killed session is never brought back.
     pub(super) async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
-        if let Some(ext) = &req.extensions {
-            ext.validate()
-                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
-        }
+        super::admit::check_respawn(&req)?;
         let id = req.id;
         let (entry, old) = {
             let mut reg = self.registry();
@@ -112,22 +110,8 @@ impl Daemon {
         if req.fresh {
             self.forget_conversation(id);
         }
-        let mut args = without_conversation(&entry.args);
-        if let Some(conversation) = entry.claude_session_id.filter(|_| !req.fresh) {
-            args.extend(["--resume".to_owned(), conversation]);
-        }
-        let spec = SpawnSpec {
-            id,
-            cwd: entry.cwd,
-            name: entry.name,
-            args,
-            env: req.env,
-            rows: req.rows,
-            cols: req.cols,
-            ephemeral: entry.ephemeral,
-            extensions: req.extensions.or(entry.extensions),
-        };
-        let spawned = self.spawn_reserved(spec, entry.kind).await;
+        let kind = entry.kind;
+        let spawned = self.spawn_reserved(respawn_spec(entry, req), kind).await;
         match (&spawned, self.session(id)) {
             (Ok(_), Some(tx)) => {
                 for (client, queue) in subscribers {
@@ -203,6 +187,27 @@ impl Daemon {
         session::remove_context(&self.config.socket, id);
         tracing::info!(%id, "session closed after its process exited");
         self.broadcast(id, SessionEvent::Removed);
+    }
+}
+
+/// What a respawn starts: the journaled cwd, name and args (resuming the
+/// journaled conversation unless `fresh`), with the request's env, size and
+/// extensions (else the journaled extensions).
+fn respawn_spec(entry: Entry, req: RespawnSpec) -> SpawnSpec {
+    let mut args = without_conversation(&entry.args);
+    if let Some(conversation) = entry.claude_session_id.filter(|_| !req.fresh) {
+        args.extend(["--resume".to_owned(), conversation]);
+    }
+    SpawnSpec {
+        id: req.id,
+        cwd: entry.cwd,
+        name: entry.name,
+        args,
+        env: req.env,
+        rows: req.rows,
+        cols: req.cols,
+        ephemeral: entry.ephemeral,
+        extensions: req.extensions.or(entry.extensions),
     }
 }
 

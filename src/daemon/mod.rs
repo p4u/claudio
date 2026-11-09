@@ -18,6 +18,8 @@
 //! and live sessions, and the all-clients event broadcast.
 
 mod addon_ops;
+mod admit;
+mod command;
 pub mod ctl;
 mod git;
 mod git_status;
@@ -45,8 +47,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::paths;
 use crate::proto::{
-    Envelope, Frame, HostInfo, LensKind, LensSpec, Msg, SessionEvent, SessionExtensions, SessionId,
-    SessionInfo, SessionKind, SessionState, SpawnSpec,
+    Envelope, Frame, HostInfo, Msg, SessionEvent, SessionId, SessionInfo, SessionKind,
+    SessionState, SpawnSpec,
 };
 use crate::remote::probe::Probe;
 use journal::{Entry, Journal};
@@ -403,10 +405,7 @@ impl Daemon {
         spec: SpawnSpec,
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
-        if let Some(ext) = &spec.extensions {
-            ext.validate()
-                .map_err(|why| io::Error::other(format!("bad extensions: {why}")))?;
-        }
+        admit::check_spawn(&spec)?;
         // Phase 1: idempotency check and reservation (fast, no I/O).
         let kind = {
             let mut reg = self.registry();
@@ -434,23 +433,7 @@ impl Daemon {
         mut spec: SpawnSpec,
         kind: SessionKind,
     ) -> io::Result<Option<u32>> {
-        if kind == SessionKind::Shell {
-            spec.args.clear();
-            spec.env.clear();
-            spec.extensions = None;
-        } else {
-            let journaled = {
-                let reg = self.registry();
-                let entry = reg.journal.entries().iter().find(|e| e.id == spec.id);
-                entry.and_then(|e| e.extensions.clone())
-            };
-            let requested = spec.extensions.take();
-            spec.extensions = Some(effective_extensions(
-                requested,
-                journaled,
-                self.config.latex,
-            ));
-        }
+        self.prepare(&mut spec, kind);
 
         // Phase 2: PTY open + process spawn + thread creation (blocking,
         // outside the registry lock).
@@ -735,31 +718,6 @@ impl Daemon {
         }
         ours
     }
-}
-
-/// The extensions a claude launch runs with: the request's when it has
-/// them, else the journaled ones, else the legacy value (the latex lens
-/// when this host's `[claude] latex` is on). Lenses of a kind this daemon
-/// does not know are dropped, and `[claude] latex = false` drops the latex
-/// lens whatever the client asked: a host that turned math off stays off.
-fn effective_extensions(
-    requested: Option<SessionExtensions>,
-    journaled: Option<SessionExtensions>,
-    latex: bool,
-) -> SessionExtensions {
-    let mut ext = requested
-        .or(journaled)
-        .unwrap_or_else(|| SessionExtensions {
-            lenses: vec![LensSpec {
-                name: "latex".to_owned(),
-                kind: LensKind::Tag,
-                instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
-            }],
-            ..Default::default()
-        });
-    ext.lenses
-        .retain(|l| l.kind != LensKind::Unknown && (latex || l.name != "latex"));
-    ext
 }
 
 /// The refusal for a spawn or respawn of an id that is mid-(re)spawn; the
