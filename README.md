@@ -204,22 +204,22 @@ A multi-page popup for the session's claude-proxy profile:
 
 Each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. This is on by default; `latex = false` under `[claude]` in `config.toml` turns it off. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
 
-In the pane, each tag is replaced by a one-line Unicode rendering in cyan, such as `E = mc²` or `x = (-b ± √(b² - 4ac))/(2a)`. Nothing else on the screen moves, and selecting still copies the original text. A formula claudio cannot render, or does not recognise on screen, stays as written. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
+Formulas are rendered in the web UI ([`claudio web`](#web-ui)), with KaTeX, in its reader (Answers and Formulas). The console shows claude's screen exactly as claude drew it, so there a formula stays as its `<latex>…</latex>` text. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
 
-`Alt+u` opens the reader view over the pane: claude's latest answer, rendered by claudio from the transcript, with its prompt on top. Markdown is laid out (headings, emphasis, lists, quotes, tables, code blocks) and every formula is typeset in 2D: a formula on its own line is a display formula, as tall as it needs; one inside a sentence grows its line by a row above and below at most (taller ones stay on one line). `←`/`→` (or `h`/`l`) go to the previous and next of the last 10 answers; `↑`/`↓`, `PgUp`/`PgDn`, `g`/`G` and the mouse wheel scroll; `Tab` switches to the session's last 64 formulas, each drawn in 2D above its LaTeX source; `Esc` or `Alt+u` closes. It works over SSH and in `--plain` too. A daemon older than the client shows "run `claudio daemon restart`" instead. In a terminal tab, `Alt+u` shadows readline's upcase-word.
+`Alt+u` opens the reader view over the pane: claude's latest answer, laid out by claudio from the transcript, with its prompt on top. Markdown is laid out (headings, emphasis, lists, quotes, tables, code blocks); a formula is its `<latex>…</latex>` source, dimmed like inline code and exactly as claude wrote it (backslashes included), and a diagram is its code block. `←`/`→` (or `h`/`l`) go to the previous and next of the last 10 answers; `↑`/`↓`, `PgUp`/`PgDn`, `g`/`G` and the mouse wheel scroll; `Esc` or `Alt+u` closes. It works over SSH and in `--plain` too. A daemon older than the client shows "run `claudio daemon restart`" instead. In a terminal tab, `Alt+u` shadows readline's upcase-word.
 
 ### Extensions (`Alt+z`)
 
 `Alt+z` opens a small popup of extension actions; the next key runs one, and `Esc` closes it. The built-in extensions:
 
-- **diagram**: claude is asked to draw diagrams as ```` ```mermaid ```` blocks (flowcharts and sequence diagrams), and the reader view (`Alt+u`) draws them with box characters. A diagram it cannot draw, or one wider than the view, stays as its code block.
+- **diagram**: claude is asked to draw diagrams as ```` ```mermaid ```` blocks, and the web UI draws them. The console's reader view (`Alt+u`) shows them as their code block.
 - **search** (`Alt+z s`): searches every claude conversation on the active session's host (prompts and answers, not tool output) and lists the matches, newest first. Enter resumes the chosen one in a new tab, or switches to the tab that has it.
 - **snippets** (`Alt+z p`): a filterable list of the prompts saved in `~/.config/claudio/snippets/` (`*.md`, `*.txt`); Enter pastes one into claude's prompt without sending it. `Alt+z P` saves the session's last prompt as a new snippet.
-- **latex**: the formulas above.
+- **latex**: the formulas above (rendered in the web UI).
 
 `Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
 
-`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile, setup and state on each host). `Space` turns it on or off, and so does `Enter` except on a plugin's row, where it opens the plugin's setup screen; `r` fetches the plugin lists and manifests again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
+`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile, setup and state on each host). `Space` turns it on or off, and so does `Enter` except on a plugin's row, where it opens the plugin's setup screen; `r` fetches the plugin lists and manifests again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering in the web UI) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
 
 ### Keeping claude up to date
 
@@ -247,7 +247,7 @@ Manager keys use `Alt`, so they don't clash with Claude Code. In terminal tabs t
 | `Alt+g` | Overview of all sessions |
 | `Alt+s` | Proxy stats |
 | `Alt+s` → `n` | Move the session to the next proxy subscription (asks first) |
-| `Alt+u` | Reader view: the session's answers, formulas typeset (see [Formulas](#formulas-and-the-reader-view-altu)) |
+| `Alt+u` | Reader view: the session's answers as markdown (see [Formulas](#formulas-and-the-reader-view-altu)) |
 | `Alt+z` | Extension actions: `s` search, `p`/`P` snippets, `u` reader, `e` extensions screen, and your own (see [Extensions](#extensions-altz)) |
 | `Alt+i` | Extensions screen: describe each extension, turn it on or off (saved in `config.toml`) |
 | `Alt+h` | Help |
@@ -310,7 +310,7 @@ allow_skip_permissions = true   # start claude with --allow-dangerously-skip-per
 update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
 remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
 install = "auto"                # install claude where a host has none: "auto" | "ask" | "off"
-latex = true                    # ask claude to write math in <latex> tags, rendered in the pane
+latex = true                    # ask claude to write math in <latex> tags, rendered in the web UI
                                 # (this host's sessions; `claudio daemon restart` after a change)
 
 [extensions]                    # every extension is on unless turned off here

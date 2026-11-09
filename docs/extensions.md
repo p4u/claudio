@@ -1,8 +1,8 @@
 # Extensions
 
 An extension adds to what claudio shows and does. It has **lenses** (things
-claudio renders from claude's answers) and **actions** (keys under the leader,
-`Alt+z`). Four extensions are built in: `latex`, `diagram`, `search` and
+claudio renders from claude's answers, in the web UI) and **actions** (keys
+under the leader, `Alt+z`). Four extensions are built in: `latex`, `diagram`, `search` and
 `snippets`. You can add your own as a small program in any language.
 
 - [Using extensions](#using-extensions)
@@ -14,8 +14,8 @@ claudio renders from claude's answers) and **actions** (keys under the leader,
 
 | Extension | Lens | Keys | What it does |
 |---|---|---|---|
-| `latex` | tag `<latex>` | — | Math typeset in the pane (one line) and the reader (2D). |
-| `diagram` | fence ```` ```mermaid ```` | — | Mermaid flowcharts and sequence diagrams drawn with box characters in the reader. |
+| `latex` | tag `<latex>` | — | Math typeset with KaTeX in the web UI's reader. |
+| `diagram` | fence ```` ```mermaid ```` | — | Mermaid diagrams drawn in the web UI's reader. |
 | `search` | — | `Alt+z s` | Search the claude conversations on the active session's host; Enter resumes one. |
 | `snippets` | — | `Alt+z p`, `Alt+z P` | Paste a saved prompt; save the last prompt as one. |
 
@@ -23,6 +23,14 @@ claudio renders from claude's answers) and **actions** (keys under the leader,
 run it; `Esc` or any other key closes the popup and nothing reaches claude.
 `Alt+z u` opens the reader view (also `Alt+u`), and `Alt+z e` the extensions
 screen (also `Alt+i`).
+
+Lenses render in the web UI (`claudio web`) only. The console TUI shows
+claude's screen as claude drew it: in the pane and in its reader view, a
+`<latex>…</latex>` tag, any other lens's tag and a ```` ```mermaid ```` block
+stay as their text (the reader shows a formula's tag as inline code, exactly
+as written, and a diagram as its code block). The lenses still matter to
+console sessions: their instructions reach claude, so the same session's
+answers render in the web UI.
 
 ### The extensions screen (`Alt+i`)
 
@@ -44,9 +52,8 @@ lenses. `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the mouse wheel move;
 on a plugin's row, where it opens the plugin's setup screen; `r` fetches the
 plugin lists and manifests again; `Esc` or `Alt+i` closes the screen.
 
-A change applies at once: the extension's keys leave the `Alt+z` popup, its
-tag lenses stop rendering in the pane (at the next draw) and in the reader,
-and sessions started from then on carry only the lenses that are on.
+A change applies at once: the extension's keys leave the `Alt+z` popup, and
+sessions started from then on carry only the lenses that are on.
 Sessions already running keep the instructions they started with; `Alt+e`
 restarts one with the new ones. Turning an external extension off stops its
 program; turning it on starts it again on the next request. An extension
@@ -73,9 +80,7 @@ diagram = false        # by name, built-in or external; every extension is on by
 
 `[claude] latex = false` still turns math off. On the client it turns the
 `latex` extension off; on a host it keeps the latex instruction out of that
-host's sessions. On a host whose daemon has `[claude] latex = false`, a new
-client overlays no `<latex>` tags for that host's sessions (the daemon extracts
-none); v0.5.0 clients still get them through `Latex`.
+host's sessions, and its daemon extracts no `<latex>` tags for the web UI.
 
 ### Proxy plugins
 
@@ -207,9 +212,10 @@ id = "stamp"                       # ^[a-z][a-z0-9_-]{0,31}$, passed back to the
 input = "label"                    # optional: ask for a line of input first
 ```
 
-- A **tag lens** renders `<tag>…</tag>` in the pane (on one line, nothing moves)
-  and in the reader. A **fence lens** renders a fenced code block whose info
-  string starts with its name, in the reader only.
+- A **tag lens** gathers the `<tag>…</tag>` items of claude's answers; the web
+  UI's reader lists them, rendered by the program. A **fence lens** names a
+  fenced code block whose info string starts with its name. The console TUI
+  renders neither: it shows the tags and blocks as claude wrote them.
 - A tag that is an HTML element name (`kbd`, `code`, `sub`, …) is refused,
   because claude and markdown use those as HTML. Add `html = true` to the lens
   to take the name anyway.
@@ -242,10 +248,10 @@ plus `CLAUDIO_EXTENSION=<name>` and `CLAUDIO_EXTENSION_PROTOCOL=1`.
 ← {"id":1,"result":{"inline":"⌃C","block":["┌────┐","│ ⌃C │","└────┘"]}}
 ```
 
-`inline` is one line: it replaces the tag in the pane and in a sentence of the
-reader. `block` is a list of rows: the reader shows it for a tag alone in its
-paragraph and for a fence lens. Both are optional. A missing or failed
-rendering leaves the source as claude wrote it.
+The web UI asks for it (`extensions.render`) to show a tag lens's items in its
+reader: `block`, a list of rows, when there is one, else `inline`, one line.
+Both are optional. A missing or failed rendering leaves the source as claude
+wrote it. The console TUI never asks.
 
 ### action
 
@@ -261,7 +267,7 @@ one of:
 
 | kind | fields | claudio |
 |---|---|---|
-| `document` | `title`, `markdown` | shows the markdown like the reader, with its lenses rendered |
+| `document` | `title`, `markdown` | shows the markdown like the reader (tags and fences as written) |
 | `notice` | `text` | shows it in the status bar |
 | `paste` | `text` | pastes it into the active claude session, without Enter |
 | `list` | `title`, `items: [{label, detail?, result}]` | lets the user pick; Enter applies the item's `result` (not a `list`) |
