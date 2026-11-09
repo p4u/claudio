@@ -58,6 +58,12 @@ curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | 
 | `CLAUDIO_INSTALL_DIR` | `~/.local/bin` | Where to place the `claudio` binary |
 
 **From source:** `make install` builds a static binary, installs it, and restarts a running daemon.
+`make` builds `target/release/claudio`, `make static` a static `dist/claudio`, `make check` runs the
+acceptance checks and `make test-unit` the unit tests (`cargo test --workspace --lib --bins`). The
+source is a Cargo workspace: the core in `crates/core` and `crates/tui`, the addons (API, web
+UI, Vocdoni) in `addons/`, each a cargo feature, all on by default. To build without some,
+pick the ones you want: `cargo build --release --no-default-features --features web,vocdoni`
+(no features at all is the core alone; `make matrix` builds and tests each combination).
 
 **Platforms:** Linux and macOS, x86\_64 and arm64.
 
@@ -287,7 +293,7 @@ It listens on loopback only; use `ssh -L 7337:127.0.0.1:7337 host` or a TLS reve
 
 ## Drop-in `-p` and the API server
 
-`claudio -p` is a drop-in for `claude -p` that drives the interactive Claude Code UI and reads the real answer and token usage from the session transcript. `claudio --api` serves an OpenAI-compatible HTTP API on the same backend. See [docs/print-and-api.md](docs/print-and-api.md).
+`claudio -p` is a drop-in for `claude -p` that drives the interactive Claude Code UI and reads the real answer and token usage from the session transcript. `claudio --api` serves an OpenAI-compatible HTTP API on the same backend. See [docs/print-and-api.md](docs/print-and-api.md). Both are the API addon's: a claudio built without it refuses `-p`, `--print` and `--api` with exit 2 (it never runs `claude -p`).
 
 ---
 

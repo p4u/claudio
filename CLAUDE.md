@@ -6,14 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `claudio` is a session manager TUI and drop-in wrapper for the `claude` CLI: a generic core
 plus addons built into the same binary (the web UI, the API, the Vocdoni proxy client; see
-"Core and addons" below). It has four modes; `src/main.rs` only routes argv to the core's
-words or an addon's (`Addons::relay`, the core words, `Addons::dispatch`, `--help`,
+"Workspace" and "Core and addons" below). It has four modes; `src/main.rs` only routes argv to
+the core's words or an addon's (`Addons::relay`, the core words, `Addons::dispatch`, `--help`,
 passthrough):
 
 - **No arguments (bare `claudio`)**: it opens the **session manager** TUI — a terminal multiplexer for many Claude Code sessions, local and over SSH.
 - **No `-p`/`--print`**: it `exec`s the real `claude` unchanged (passthrough).
 - **`-p`** (the API addon): it emulates print mode by driving the *interactive* TUI under a PTY. It types the prompt, waits for the `Stop` hook, then reads the answer and real token usage from the session JSONL.
 - **`--api`** (the API addon): it serves an OpenAI-compatible server (axum) on the same PTY backend, using a pool of persistent interactive sessions.
+
+A build without the API addon refuses `-p`/`--print`/`--api` (before a bare `--`) with exit 2:
+`claudio: print mode and the API server need the api addon; this build has none`.
 
 **claudio never invokes `claude -p`.** Every path goes through the interactive TUI. Don't install the binary *as* `claude`, because it has to find the real one on `PATH` (or `$CLAUDIO_CLAUDE_PATH`).
 
@@ -31,7 +34,8 @@ make                 # release build → target/release/claudio
 make static          # static musl binary → dist/claudio (ARCH=aarch64 for cross)
 make dev             # install this checkout to ~/.local/bin for testing, no release (make dev-undo reverts)
 make check           # acceptance checks (ACCEPTANCE.md): fmt, clippy -D warnings, rules, core-only build, unit tests
-make test-unit       # unit tests only: cargo test --locked --bin claudio (no claude needed)
+make matrix          # the feature matrix: core only, each addon alone, all (make features FEATURES=web for one cell)
+make test-unit       # unit tests only: cargo test --locked --workspace --lib --bins (no claude needed)
 make test-manager    # manager integration tests (fake claude, no API key required)
 make test            # unit + E2E (E2E needs an authenticated `claude` on PATH, ~5 min)
 make e2e             # E2E only
@@ -44,21 +48,25 @@ make fmt             # cargo fmt
 
 ```bash
 make test-manager
-# equivalent:
+# equivalent (crates/tui/tests/manager.rs):
 cargo test --test manager -- --test-threads=1
+# the same suite against the core alone (ACCEPTANCE A4):
+cargo test --no-default-features --test manager -- --test-threads=1
+# the TUI with the Vocdoni addon (addons/vocdoni/tests/manager.rs):
+cargo test --test vocdoni_manager -- --test-threads=1
 ```
 
-Must run single-threaded. Two tests inside are gated:
+Must run single-threaded. Gated tests:
 
 - `CLAUDIO_E2E=1` — enables `test_real_claude_session` (sends a prompt to the
   real `claude`, costs tokens, requires an authenticated `claude` on PATH).
-- `CLAUDIO_PROXY_TEST=1` — enables the proxy-integration test. It builds and
+- `CLAUDIO_PROXY_TEST=1` — enables the proxy-integration test (`vocdoni_manager`). It builds and
   runs claude-proxy from source (`$CLAUDIO_PROXY_SRC`, default `../claude-proxy`;
   needs `go`).
   The test for real-claude via proxy additionally needs `CLAUDIO_E2E=1` and
   `CLAUDIO_PROXY_URL`.
 
-**Print-mode / API E2E tests** (tests/integration.rs):
+**Print-mode / API E2E tests** (addons/api/tests/integration.rs):
 
 ```bash
 CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration -- --test-threads=1 --nocapture
@@ -70,9 +78,9 @@ real Claude API and must run single-threaded.
 **Remote / SSH tests** (tests/remote.rs):
 
 ```bash
-CLAUDIO_SSH_TEST_HOST=<host> cargo test --test remote -- --test-threads=1 --nocapture
-# diag subcommands (compiled in by default; may be gated behind --features diag in future):
+# the suite needs the diag subcommands (required-features = ["diag", "vocdoni"]):
 cargo test --features diag --test remote -- --test-threads=1 --nocapture
+CLAUDIO_SSH_TEST_HOST=<host> cargo test --features diag --test remote -- --test-threads=1 --nocapture
 ```
 
 Tests `t1`, `t7`, `t8` are unit-style and always run. Tests `t2`–`t6` require
@@ -81,48 +89,85 @@ Tests `t1`, `t7`, `t8` are unit-style and always run. Tests `t2`–`t6` require
 **Web UI** (`claudio web`; fake claude and fake proxy, no API key):
 
 ```bash
-cargo test --test web -- --test-threads=1   # server: auth, hub, spawn, proxy, plugins (tests/web.rs)
-node --test web/tests/*.test.mjs            # browser logic, no browser (glob form: the directory form fails on Node 22)
-make test-web                               # node tests, then Playwright e2e against a debug build (web/e2e)
+cargo test --test web --test web_manager -- --test-threads=1   # server and TUI-with-web (addons/web/tests/)
+cargo test --test vocdoni_web -- --test-threads=1              # proxy and plugins in the web (addons/vocdoni/tests/web.rs)
+node --test addons/web/web/tests/*.test.mjs   # browser logic, no browser (glob form: the directory form fails on Node 22)
+make test-web                                 # node tests, then Playwright e2e against a debug build (addons/web/web/e2e)
 ```
 
 The e2e starts a real `claudio web` per spec file in `~/.cache/claudio/web-e2e/<hex>/`
 with an isolated env (`XDG_*`, `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDIO_CLAUDE_PATH` = a fake
 claude), so it never touches your own daemon or `~/.claude`. Needs Chromium in
-`~/.cache/ms-playwright` and `npm ci` in `web/e2e`. Run one spec: `cd web/e2e && npx playwright test board`.
+`~/.cache/ms-playwright` and `npm ci` in `addons/web/web/e2e`. Run one spec:
+`cd addons/web/web/e2e && npx playwright test board`.
 
-- Run one unit test: `cargo test --bin claudio <name_substring>`.
+- Run one unit test: `cargo test --workspace --lib --bins <name_substring>`, or one crate's:
+  `cargo test -p claudio-tui <name_substring>`.
 - Run one E2E test: `CLAUDIO_E2E=1 CLAUDIO_CADENCE=0 cargo test --test integration <name> -- --test-threads=1 --nocapture`.
-- CI runs only the release build and unit tests, on Linux and macOS (claudio is Unix-only). Keep code compiling on both.
+- CI runs the release build, the unit tests, `make check` and the feature matrix (`make features`,
+  each cell), on Linux and macOS (claudio is Unix-only). Keep code compiling on both.
 
 ## Architecture
 
+### Workspace
+
+One binary, `claudio`, built from a Cargo workspace (`docs/addons.md`, "Crates"):
+
+```
+Cargo.toml       [workspace] + the `claudio` package (features api, web, vocdoni: default; diag)
+src/main.rs      wiring only: the core's words, `addons()` (the cfg'd registry), help, passthrough
+crates/core      claudio-core     addon/ app/ claude/ client config daemon/ freshness paths proto
+                                  release remote/ term/ text upgrade version
+crates/tui       claudio-tui      the console manager and `--plain`        tests/manager.rs, tests/common/
+addons/api       claudio-api      print/, api/, cli.rs, msglog.rs          tests/integration.rs
+addons/web       claudio-web      src/ (the server), web/ (the page), build.rs   tests/web.rs, tests/manager.rs
+addons/vocdoni   claudio-vocdoni  the claude-proxy client, the team plugins     tests/manager.rs, tests/web.rs
+tests/           remote.rs, screenshots.rs (the whole binary), fixtures/
+```
+
+- **Dependencies (ACCEPTANCE A2, checked by `scripts/check_rules.py`):** the binary depends on
+  everything; claudio-tui and each addon on claudio-core only; claudio-core on none of ours.
+  An addon's dev-dependencies may add the TUI or another addon; the core's and the TUI's may
+  not. `cargo build --no-default-features` is the core alone (A4).
+- **`test-support`:** claudio-core's fixtures for other crates' tests (`TestAddon`, the daemon
+  harness, the fake host) are `#[cfg(any(test, feature = "test-support"))]`, enabled only by
+  dev-dependencies, so a release never links them.
+- **Integration suites are root targets.** They drive the `claudio` binary, and Cargo gives
+  `CARGO_BIN_EXE_claudio` only to its own package, so each file lives next to the crate it tests
+  but is a `[[test]]` of the root `Cargo.toml` with the `required-features` it needs (`autotests
+  = false` everywhere). The PTY harness is one file, `crates/tui/tests/common/mod.rs`, included
+  by the other suites with `#[path]`.
+- **`src/main.rs`** names `claudio_core::…`, `claudio_tui::run`, `claudio_tui::plain::args::run`
+  and the addon crates directly; `addons()` registers vocdoni, web, api (api last: it parses
+  whatever argv is left). Without the api feature, `route` refuses `-p`/`--print`/`--api`.
+
 ### Core and addons
 
-The core (everything outside `src/addons/`) wraps claude: the manager, `--plain`, the
-daemon, SSH hosts, the installer, the passthrough. Addons add the rest through one API.
+The core (claudio-core and claudio-tui) wraps claude: the manager, `--plain`, the
+daemon, SSH hosts, the installer, the passthrough. Addons (`addons/*`) add the rest through one API.
 `docs/addons.md` is that API; `docs/daemon-protocol.md` is the daemon protocol (addon ops,
 `env_remove`, `optional`, `Welcome.features`); `docs/web-protocol.md` (v2) is the page's.
 
-**`addon/`** — the addon API: `mod.rs` (`Addon` and its capabilities, `Commands`,
+**`crates/core/src/addon/`** — the addon API: `mod.rs` (`Addon` and its capabilities, `Commands`,
 `AddonCtx`, `AddonEvent`, `AddonError`, `name_ok`), `launch.rs` (`Launch`, `LaunchSelect`,
 `LaunchChoice`, `LaunchPart` with a C1 `Debug`, `Routing`, `LegacyChoice`), `ui.rs`
 (`Ui`, segments, panels, checklists, extension rows, notices), `daemon.rs` (`DaemonOps`,
 `DaemonCtx`, `ClaudeFlags`), `clean.rs` (the C2 sanitising and caps every addon string
 goes through before a front-end sees it, applied by the runtime), `registry.rs` (`Addons`:
 the immutable registry, its refusals — reserved words, core sections, shared flags or
-panel keys — and `relay`/`dispatch`/`help`), `test_support.rs` (`TestAddon`, cfg(test)).
+panel keys — and `relay`/`dispatch`/`help`), `test_support.rs` (`TestAddon`, `test-support`).
 
-**`addons/`** — the addons this build registers (`mod.rs`: `all()`, in registry order
+**`addons/`** — the addon crates (`src/main.rs`'s `addons()` registers them, in registry order
 vocdoni, web, api; the API addon parses whatever argv is left, so it is last):
-- `api/` — `Commands` only: the print relays (`is_relay`), `-p`/`--print` and `--api`
-  (decided by `cli::parse`), `--help`'s `HELP_APPENDIX`. `print/`, `api/`, `cli.rs`,
+- `api/` (claudio-api, `addons/api/src/`) — `Commands` only: the print relays (`is_relay`),
+  `-p`/`--print` and `--api` (decided by `cli::parse`), `--help`'s `HELP_APPENDIX`. `print/`, `api/`, `cli.rs`,
   `msglog.rs` as described under "Print-mode pipeline" and "API server" below.
-- `web/` — `claudio web` (below), plus `addon.rs` (`WebAddon`: `Commands` for `web …`;
-  `Launch` gives every session the `latex` and `mermaid` lenses while `[extensions]
-  latex`/`diagram` are on (`[claude] latex = false` is the alias the runtime maps); `Ui`
+- `web/` (claudio-web, `addons/web/src/`) — `claudio web` (below), plus `addon.rs`
+  (`WebAddon`: `Commands` for `web …`; `Launch` gives every session the `latex` and
+  `mermaid` lenses while `[extensions] latex`/`diagram` are on (`[claude] latex = false` is the alias the runtime maps); `Ui`
   lists those two rows; `DIAGRAM_CONTEXT`).
-- `vocdoni/` — the claude-proxy client and the team plugins: `mod.rs` (`Vocdoni`, `NAME`,
+- `vocdoni/` (claudio-vocdoni, `addons/vocdoni/src/`) — the claude-proxy client and the team
+  plugins: `lib.rs` (`Vocdoni`, `NAME`,
   `DEFAULT_URL`, `Commands` for `vocdoni …` and its alias `proxy …`), `cmd.rs`
   (`login|status|use|logout`), `proxy/` (`profile.rs` `[proxy]` profiles and
   `CLAUDIO_PROXY_URL`, `resolve.rs`, `env.rs` the session env and `env_diff`, `login.rs`
@@ -141,34 +186,36 @@ vocdoni, web, api; the API addon parses whatever argv is left, so it is last):
   with `claude plugin … --json`, back-off, `Applied`; cache `<cache>/vocdoni/`), `diag.rs`
   (`__remote-manifest`, `--features diag`).
 
-**`app/`** (below) holds the addon runtime and the launch composer the front-ends share.
+**`crates/core/src/app/`** (below) holds the addon runtime and the launch composer the
+front-ends share.
 
-**A3 inside one crate (until P4 makes crates):** core code never imports `crate::addons`
-(only `main.rs` calls `crate::addons::all()`) and never branches on an addon's name; an addon
-imports `crate::addon`, the documented core services (`proto`, `paths`, `text`, `version`,
-`release`, `client::Client`, `claude::{binary, SESSION_MARKERS}`, `app::label`,
-`app::browser`) and its own modules, and reads and writes only the `config.toml` tables it
-declares (the web addon, being the old `src/web`, still uses more of `app`).
+**A3 across crates:** the core crates cannot import an addon (A2: no such dependency) and
+never branch on an addon's name; an addon imports `claudio_core::addon`, the documented core
+services (`proto`, `paths`, `text`, `version`, `release`, `client::Client`,
+`claude::{binary, SESSION_MARKERS}`, `app::label`, `app::browser`) and its own modules, and
+reads and writes only the `config.toml` tables it declares (the web addon, being the old
+`src/web`, still uses more of `app`).
 
 ### Session manager (bare `claudio`)
 
-A bare `claudio` calls `tui::run()`. The manager's architecture spans:
+A bare `claudio` calls `claudio_tui::run()`. The manager's architecture spans claudio-core
+(`crates/core/src/`: every path below not under `crates/tui/src/`) and claudio-tui:
 
-**Small shared modules** (no dependencies of ours): `text.rs` (`sanitize`
+**Small shared modules** (`crates/core/src/`, no dependencies of ours): `text.rs` (`sanitize`
 and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
 (`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
 by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
 `version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
 `proto`).
 
-**`proto.rs`** — wire framing shared by daemon and client. Frames are
+**`crates/core/src/proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
 (`Envelope { req, msg: Msg }`); unknown `op` fields are ignored. Tag `D`
 carries terminal bytes: `[16-byte session UUID][raw bytes]`. The protocol
 version (`PROTO = 1`) is embedded in the socket file name so old and new
 daemons coexist.
 
-**`daemon/`** — the per-host session daemon (invoked as `claudio --daemon`):
+**`crates/core/src/daemon/`** — the per-host session daemon (invoked as `claudio --daemon`):
 - `mod.rs` — shared `Daemon` state: the registry of journaled and live
   sessions, spawn as reserve → spawn → commit (`in_flight`/`to_kill`), kill,
   `respawn` (Alt+e; a reserved transition, so a concurrent Kill wins), and
@@ -253,11 +300,11 @@ daemons coexist.
   memory samples. `ctl.rs` — `claudio daemon status|stop|restart` (status
   shows the claude path and version the daemon uses).
 
-**`client.rs`** — generic client connection and local daemon autostart.
+**`crates/core/src/client.rs`** — generic client connection and local daemon autostart.
 Connects to the socket; if unavailable, starts the daemon (double-fork +
 `setsid`, or `systemd-run --user` on systemd hosts) and retries.
 
-**`freshness.rs`** — keeps each host's daemon at least as new as the claudio
+**`crates/core/src/freshness.rs`** — keeps each host's daemon at least as new as the claudio
 binary on it. `Welcome.build`/`build_time` identify the daemon's binary;
 `ensure_current` (given the connected `Client`; the caller connects) runs
 before the local TUI connects and in the remote bridge before it relays. An older daemon is shut down (SIGTERM by the lock's PID if
@@ -267,8 +314,8 @@ is left running, the client is flagged `daemon_outdated` (over SSH the
 bridge prints `DEFERRED` on stderr), and the TUI reconnects that host once it
 is idle (checked every 2 min).
 
-**`app/`** — the layer both front-ends share (the TUI and the web addon), with no
-ratatui, crossterm or axum. The web imports nothing from `src/tui`:
+**`crates/core/src/app/`** — the layer both front-ends share (the TUI and the web addon), with
+no ratatui, crossterm or axum. The web imports nothing from claudio-tui:
 - `addons/` — `AddonRuntime`, the one `AddonCtx` implementation (one per addon, D2):
   events (`Started`, `Tick` 1 s, hosts, sessions, `ClaudeInstalled`, `ConfigChanged`),
   `ctx.spawn` (≤ 64 tasks per addon, 300 s), `ctx.request` (`AddonOp`, 170 s), config
@@ -292,7 +339,7 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
   started elsewhere, R19).
 - `connections.rs` — local + SSH connections, reconnect backoff.
 - `snippets.rs` — the saved prompts of `~/.config/claudio/snippets/`; the TUI
-  (`tui/mod.rs`) and the web (`ext.rs`) both call its async functions
+  (`crates/tui/src/lib.rs`) and the web (`ext.rs`) both call its async functions
   (`load_all`, `save_text`, `save_text_named`, `delete_named`).
 - `extensions/` — the extension registry (`mod.rs`: built-ins search and snippets;
   `Registry`, `ActionResult`, `core_choices`; the addons' rows as `Source::Addon`,
@@ -304,15 +351,15 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
   program per extension, lazy start, scrubbed env, own process group,
   ≤ 16 in flight, render 1 s / action 15 s, 3 failures in 5 min disable it,
   killed on exit; it knows every loaded external extension, and one turned
-  off is refused unstarted and its program stopped; driven by `mod.rs`,
-  never by `App`).
+  off is refused unstarted and its program stopped; driven by the TUI's
+  `lib.rs`, never by `App`).
 - `label.rs` — `sanitize_label`, for text that leaves the process as a label.
 - `browser.rs` — `browser_wanted` and `open_browser`, the sign-in page opener
   (`claudio vocdoni login`, `claudio web`).
 - `test_support.rs` — session fixtures for unit tests.
 
-**`tui/`** — the manager UI, driven by tokio + ratatui:
-- `mod.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
+**`crates/tui/src/`** (claudio-tui) — the manager UI, driven by tokio + ratatui:
+- `lib.rs` — I/O edge: owns the terminal, runs the event loop, gathers the
   `AppConfig`, drives daemon connections and every `Effect`. Emits OSC 9
   notifications (`ESC ] 9 ; … BEL`) for background sessions that need
   attention. Parses the reader's answers off the UI thread
@@ -320,7 +367,7 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
   markdown into a `reader::doc::Doc`.
 - `app.rs` — pure coordinator (`App::new(AppConfig)`): processes events into
   state transitions and returns `Effect` values. No I/O here; all I/O is in
-  `mod.rs`. `Mode::Manager` or `Mode::Plain`.
+  `lib.rs`. `Mode::Manager` or `Mode::Plain`.
 - `sessions.rs` — `SessionView` (labels go through `app::label::sanitize_label`)
   and spawning (`send_spawn`, the one path that builds spawns and
   respawns: a claude session is an `Effect::Launch` with a `LaunchSelect`,
@@ -334,7 +381,7 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
   resume?), a pure state machine.
 - `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
   machine, and its `App` glue.
-- `addon_runner.rs` — the TUI's edge of the addon runtime (built in `main`, fed
+- `addon_runner.rs` — the TUI's edge of the addon runtime (built in `run`, fed
   from the event loop: hosts, sessions, focus, installs) and of the launch
   composer (`Effect::Launch` → `app::launch`, parked launches for a review kept
   here, never in `App`); runs `App`'s `AddonCall`s (`addon_calls.rs`: panel
@@ -354,7 +401,7 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
 - `extensions_view.rs` — the extensions screen (Alt+i, or Alt+z e): rows,
   details, toggles. A toggle flips the registry at once and emits
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
-  (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
+  (`lib.rs` writes `[extensions] name = on` with `config::save_extension`,
   a minimal line edit of config.toml, never a whole-file rewrite); an
   addon's row (`Source::Addon`, set by `Registry::set_addon_rows`) is
   toggled through `AddonCall::ToggleRow` (the runtime writes
@@ -377,7 +424,10 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
   `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
-  the UI exits, and the UI exits with claude.
+  the UI exits, and the UI exits with claude. `plain/args.rs` — its argv (`run`, called
+  by `src/main.rs`).
+- `keys.rs` — key → byte encoding (crossterm events) for input forwarding to the PTY.
+- `pane.rs` — draws a core `term::screen::Screen` into a ratatui buffer.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
   ctx gauge, git, mem, conversation and the addons' segments by priority
@@ -400,7 +450,7 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
 - `test_support.rs` — shared fixtures for the TUI's unit tests (the session
   fixtures are `app::test_support`).
 
-**`remote/`** — SSH bootstrap and bridge:
+**`crates/core/src/remote/`** — SSH bootstrap and bridge:
 - `bootstrap.rs` — `ensure_remote(host)`: runs `__probe` + `uname -sm` in one
   ssh round trip; uploads the binary if missing or stale (SHA-256 check).
   Same-platform: uploads self. Cross-platform: downloads release asset to
@@ -413,12 +463,15 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
   aliases.
 - `probe.rs` — `__probe` subcommand: prints `{version, proto, os, arch,
   build, mtime}` as JSON (`Probe::own()`: this binary, hashed once).
+- `diag.rs` — the SSH test harness's `__…` words (`--features diag`, never in a release).
 
-**`term/`** — terminal primitives:
-- `mod.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.
-- `keys.rs` — key → byte encoding for input forwarding to the PTY.
+**`crates/core/src/term/`** — terminal primitives (no UI toolkit; drawing and key encoding
+are the TUI's `pane.rs` and `keys.rs`):
+- `screen.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.
+- `probe.rs` — answers the terminal probes Ink sends at startup (print mode and the daemon).
+- `mod.rs` — `strip_escapes`.
 
-**`claude/`** — claude knowledge:
+**`crates/core/src/claude/`** — claude knowledge:
 - `mod.rs` — `SESSION_MARKERS` (env a parent claude sets for its children),
   `binary()`, `exec()`.
 - `projects.rs` — scan `~/.claude/projects/` for existing sessions (feeds the
@@ -437,15 +490,15 @@ ratatui, crossterm or axum. The web imports nothing from `src/tui`:
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
 
-### Web UI (`claudio web`, `src/addons/web/`, `web/`)
+### Web UI (`claudio web`, `addons/web/src/`, `addons/web/web/`)
 
 `claudio web` (the web addon's `Commands`; flags in `docs/web.md`) serves the manager to a
 browser: one more client of the daemons, like the TUI, over the same socket and ssh bridge.
 `docs/web-protocol.md` is the contract between server and page (version 2: `addons.*` ops,
 the Session's `launch` and `segments`); change it first, in its own commit. User docs, the security model and the TUI parity table: `docs/web.md`.
 
-**`src/addons/web/`** (axum, loopback only):
-- `mod.rs` — args (`--listen`, `--allow-host`, `--no-open`, `--print-url`, `--rotate-token`),
+**`addons/web/src/`** (claudio-web; axum, loopback only):
+- `lib.rs` — args (`--listen`, `--allow-host`, `--no-open`, `--print-url`, `--rotate-token`),
   routes, startup, graceful shutdown (tabs closed 1001, `web-state.json` written).
 - `auth.rs` — token file (`<config>/web-token`, 0600, constant-time compare), cookie sessions
   (24 h idle, 64), login rate limit, `guard` (Host 421, Origin 403, cookie 401), the CSP
@@ -467,9 +520,10 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
   the `addons.*` ops and the Session's `launch`/`segments` (`addons.rs`), the runtime's
   notices, changes and host feed (`addon_feed.rs`; no plugin state or proxy cache of its own),
   and the extension registry, external host, snippets and config.toml toggles.
-- `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.
+- `addons/web/build.rs` — gzips `addons/web/web/` into `$OUT_DIR`, writes the import map's
+  SHA-256 for the CSP.
 
-**`web/`** (no build step; ES modules through the import map):
+**`addons/web/web/`** (the page; no build step; ES modules through the import map):
 - `index.html` — the import map (the only inline script) and the stylesheet links.
 - `app/` — `boot.js` (login, CSP violation log `window.__claudioCsp`), `store.js` (model +
   WebSocket), `proto.js`, `term.js` (xterm.js), pure logic with node tests (`queue.js`,
@@ -497,7 +551,7 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
   must be accepted (ignored) by older daemons. New `SessionEvent` variants
   deserialize to `SessionEvent::Unknown` so an old client never panics.
 - **The PTY test harness asserts on the rendered screen model, never on raw
-  bytes.** All `wait_for` calls in `tests/manager.rs` operate on the
+  bytes.** All `wait_for` calls in the manager suites (`crates/tui/tests/common/mod.rs`) operate on the
   `alacritty_terminal::Term` VT model. Asserting on raw bytes is fragile and
   forbidden.
 - **Don't send `ESC` immediately before `Alt+key` in tests.** `ESC ESC q` is
@@ -537,8 +591,8 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
   and would swallow the keys a test types, and an install would run the
   installer (`test_missing_claude_is_installed_at_start` turns it on with a
   fake `curl` and a `PATH` that reaches no real one).
-- **`app.rs` is pure; I/O is only in `tui/mod.rs`.** `App::update` takes
-  events and returns `Effect` values. `mod.rs` drives the effects. Don't add
+- **`app.rs` is pure; I/O is only in `crates/tui/src/lib.rs`.** `App::update` takes
+  events and returns `Effect` values. `lib.rs` drives the effects. Don't add
   I/O to `app.rs`.
 - **The console TUI stays plain (A7, spec G5).** The pane shows claude's
   screen as claude drew it, and the reader shows formulas and diagrams as
@@ -560,13 +614,13 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
   decisions on top of it: text sizes stay at the owner's larger scale (not DESIGN.md's
   marketing-site 11–14px), and session states map to working = green, waiting = Syntax
   Violet `#c58aff`, stopped = Steel `#818284`, error = Syntax Coral `#ff6285`. The tokens live
-  in `web/styles/tokens.css`; never hard-code a colour, radius or font outside it.
+  in `addons/web/web/styles/tokens.css`; never hard-code a colour, radius or font outside it.
 
 - **The import map is the only inline script, and its hash is in the CSP.** `build.rs`
   hashes the map's exact text; editing it changes the hash (a rebuild picks it up). No other
   inline script, inline handler, `eval` or CDN, ever. The e2e asserts zero
   `securitypolicyviolation` events.
-- **Vendored files under `web/vendor/` are byte-identical to upstream.** Delete whole files
+- **Vendored files under `addons/web/web/vendor/` are byte-identical to upstream.** Delete whole files
   (mermaid reduction rule) but never edit one; every file is in `MANIFEST.txt`.
 - **The web never writes `state.json`.** It reads it; its own state is `web-state.json` and
   `web-token`, both written with `paths::write_atomic` (0600).
@@ -584,16 +638,16 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
 - **Stable `data-testid`s are the e2e's interface** (listed in the plan's Global Constraints); rename one and
   the Playwright specs break.
 
-### Print-mode pipeline (`-p`, the API addon: `src/addons/api/`)
+### Print-mode pipeline (`-p`, the API addon: `addons/api/src/`)
 
 1. `cli.rs` handles arguments *dynamically*. It owns only a few flags (`-p`, `--api`, `--fast`, `--log-messages[-file]`, `--output-format`, `--input-format`, `--settings`, `--session-id`), drops `--bare` and `--no-session-persistence` with a warning (they would disable hooks and the JSONL), and forwards everything else verbatim. Never add a mirror of claude's flag grammar. Wrapper-only knobs belong in `CLAUDIO_*` env vars (`WrapperEnv`) so the CLI surface stays exactly claude's. `cli::HELP_APPENDIX` documents these flags and env vars and is appended to `claudio --help`; update it when you add one.
-2. `driver.rs` spawns claude under a PTY (`portable-pty`). `PtySession` is the reusable unit: spawn, then `turn(prompt)` repeatedly. `driver::run` is the single-shot `-p` path built on it.
-3. `vt.rs` answers the terminal probes that Ink sends at startup (DA1/DA2, DSR, XTVERSION, OSC colors…), byte-for-byte as xterm-380 would.
-4. `hooks.rs` signals completion. `SessionStart`/`Stop` hooks are injected via a merged `--settings` and report back over loopback TCP (default) or a watched directory (`CLAUDIO_HOOK_TRANSPORT=file`). The hook command is a copy of this binary under a random hex name in `/tmp`, so relay invocations are recognized first (`ApiAddon::is_relay`, run by `Addons::relay` before any core word): argv `<EventName> <port>` (concealed relay) or `__hook <Event>` (legacy; the five-word `__hook` is the core's manager relay).
-5. `session.rs` reads the session JSONL, which is the source of truth for the final assistant text and usage. The terminal render is never parsed for answers.
-6. `emit.rs` formats output as `text`, `json`, or `stream-json`, shaped like `claude -p`.
+2. `print/driver.rs` spawns claude under a PTY (`portable-pty`). `PtySession` is the reusable unit: spawn, then `turn(prompt)` repeatedly. `driver::run` is the single-shot `-p` path built on it.
+3. `claudio_core::term::probe` answers the terminal probes that Ink sends at startup (DA1/DA2, DSR, XTVERSION, OSC colors…), byte-for-byte as xterm-380 would.
+4. `print/hooks.rs` signals completion. `SessionStart`/`Stop` hooks are injected via a merged `--settings` and report back over loopback TCP (default) or a watched directory (`CLAUDIO_HOOK_TRANSPORT=file`). The hook command is a copy of this binary under a random hex name in `/tmp`, so relay invocations are recognized first (`ApiAddon::is_relay`, run by `Addons::relay` before any core word): argv `<EventName> <port>` (concealed relay) or `__hook <Event>` (legacy; the five-word `__hook` is the core's manager relay).
+5. `print/session.rs` reads the session JSONL, which is the source of truth for the final assistant text and usage. The terminal render is never parsed for answers.
+6. `print/emit.rs` formats output as `text`, `json`, or `stream-json`, shaped like `claude -p`.
 
-### API server (`--api`, `src/addons/api/api/`)
+### API server (`--api`, `addons/api/src/api/`)
 
 - `routes/chat.rs` takes a request down one of two paths:
   - **plain**: `prompt.rs` flattens `messages[]`.

@@ -148,8 +148,8 @@ capture there too. `Alt+←` / `Alt+→` are the browser's history keys, claudio
 
 ## TUI parity
 
-One row per capability of the TUI. `Test` is the e2e test title (`web/e2e/tests`) or the Rust
-test in `tests/web.rs`; rows without an automated test say how they were checked.
+One row per capability of the TUI. `Test` is the e2e test title (`addons/web/web/e2e/tests`) or the
+Rust test in `addons/web/tests/web.rs`; rows without an automated test say how they were checked.
 
 | Capability | TUI key | Web action | WS op(s) | Test |
 |---|---|---|---|---|
@@ -190,20 +190,24 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 
 ## Developing the page
 
+The page is `addons/web/web/`, the server `addons/web/src/` (the claudio-web crate, the `web`
+feature of the binary):
+
 ```bash
-node --test web/tests/*.test.mjs   # pure logic, no browser (Node 22)
-node web/dev/mock-server.mjs       # the page against a mock server on :7338 (MOCK_MANY=1, MOCK_FOREIGN=1)
-cargo test --test web -- --test-threads=1   # the server, with a fake claude
-make test-web                      # node tests, then Playwright against a debug build
+node --test addons/web/web/tests/*.test.mjs   # pure logic, no browser (Node 22)
+node addons/web/web/dev/mock-server.mjs       # the page against a mock server on :7338 (MOCK_MANY=1, MOCK_FOREIGN=1)
+cargo test --test web --test web_manager -- --test-threads=1   # the server, with a fake claude
+make test-web                                 # node tests, then Playwright against a debug build
 ```
 
-A debug build run with `CLAUDIO_WEB_DIR=web` serves the files from disk, so edits show on
-reload; every build embeds them gzipped (`build.rs`). `make test-web` needs the Playwright browsers in `~/.cache/ms-playwright`
-(`npx playwright install chromium` once, in `web/e2e`).
+A debug build run with `CLAUDIO_WEB_DIR=addons/web/web` serves the files from disk, so edits
+show on reload; every build embeds them gzipped (`addons/web/build.rs`). `make test-web` needs
+the Playwright browsers in `~/.cache/ms-playwright` (`npx playwright install chromium` once, in
+`addons/web/web/e2e`).
 
-A file added or removed directly under `web/` is not noticed by cargo until another embedded
-file changes or `build.rs` is touched (`web/` itself is not watched because of
-`web/e2e/node_modules`).
+A file added or removed directly under `addons/web/web/` is not noticed by cargo until another
+embedded file changes or `build.rs` is touched (the directory itself is not watched because of
+`addons/web/web/e2e/node_modules`).
 
 ## The list, state icons, hover info and text size
 
@@ -211,7 +215,7 @@ file changes or `build.rs` is touched (`web/` itself is not watched because of
   one fixed height: state icon, name, host chip (only with more than one host connected) and age.
   Hover and selection change colours only. There is no "Needs you" queue; `Alt+a`/`a` still jump
   to the next session that needs you, and Approve/Deny sit in the pane header and the board row.
-- **State icon** (`stateClass` in `web/app/queue.js`): working (a green `●` LED that pulses
+- **State icon** (`stateClass` in `addons/web/web/app/queue.js`): working (a green `●` LED that pulses
   softly, still when the system asks for reduced motion), waiting (violet `?`: a permission
   prompt, a question, a plan to approve), stopped (steel `■`: finished or not running), error
   (coral `✗`). Shell sessions show `$`. Every icon has a text label or tooltip; the board shows
@@ -226,5 +230,5 @@ file changes or `build.rs` is touched (`web/` itself is not watched because of
 - **Style**: the page follows [DESIGN.md](../DESIGN.md), dark only: Void, Carbon and Graphite
   surfaces with 1px Slate hairlines, radius 1px, no shadows, weight 400, JetBrains Mono for
   labels, tabs, badges and buttons, Inter for prose, Phosphor Green only for active and status.
-  Every colour, radius and font is a token in `web/styles/tokens.css`, the terminal's ANSI
+  Every colour, radius and font is a token in `addons/web/web/styles/tokens.css`, the terminal's ANSI
   colours included; no ligatures anywhere.
