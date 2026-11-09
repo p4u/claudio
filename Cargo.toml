@@ -6,7 +6,7 @@ members = ["crates/core", "crates/tui", "addons/api", "addons/web", "addons/vocd
 resolver = "2"
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 
 [workspace.dependencies]
