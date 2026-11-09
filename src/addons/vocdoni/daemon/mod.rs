@@ -36,11 +36,11 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use super::Daemon;
 use crate::addons::vocdoni::plugins::manifest::{self, Manifest, Marketplace, PluginRef};
 use crate::addons::vocdoni::plugins::manifest::{key_ok, name_ok};
 use crate::addons::vocdoni::proxy::plugins::{sha256_ok, test_http_ok};
 use crate::claude::SESSION_MARKERS;
+use crate::daemon::Daemon;
 use crate::paths;
 use crate::proto::{retrying, Applied, Msg};
 use crate::text::sanitize;
@@ -363,7 +363,7 @@ pub(crate) async fn handle(
         (files.unwrap_or_default(), flags.unwrap_or_default())
     };
     let (mut applied, jobs) = manifests.decide(&m, &sha256, &secrets, &disabled, &files);
-    applied.dropped = super::host::plugin_flags_dropped(&flags);
+    applied.dropped = crate::daemon::host::plugin_flags_dropped(&flags);
     tracing::info!(
         manifest = %name,
         version = %m.version,
@@ -666,7 +666,7 @@ async fn run_claude(daemon: &Daemon, args: &[&str]) -> Outcome {
         Ok((Ok(status), out, err)) => outcome(status.success(), status.code(), &out, &err),
         Ok((Err(e), _, _)) => Outcome::Failed(format!("claude failed: {e}")),
         Err(_) => {
-            super::update::kill_group(&mut child).await;
+            crate::daemon::update::kill_group(&mut child).await;
             Outcome::Failed(format!("timed out after {} s", RUN_TIMEOUT.as_secs()))
         }
     }
@@ -871,7 +871,7 @@ async fn download(
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]
@@ -1011,3 +1011,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests;

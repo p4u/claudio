@@ -1,7 +1,10 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
+pub mod daemon;
 pub mod plugins;
 pub mod proxy;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::addon::Addon;
 

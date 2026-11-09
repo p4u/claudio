@@ -2,7 +2,7 @@
 file src/claude/projects.rs 927
 file src/client.rs 857
 file src/daemon/git.rs 978
-file src/daemon/manifest.rs 872
+file src/addons/vocdoni/daemon/mod.rs 872
 file src/daemon/server.rs 914
 file src/daemon/session.rs 1036
 file src/addons/vocdoni/plugins/manifest.rs 828

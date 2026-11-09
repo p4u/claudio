@@ -23,17 +23,19 @@ mod command;
 pub mod ctl;
 mod git;
 mod git_status;
-mod host;
+pub(crate) mod host;
 mod journal;
 mod lifecycle;
 mod login_path;
-mod manifest;
+use crate::addons::vocdoni::daemon as manifest;
 mod server;
 mod session;
 mod stats;
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;
-mod update;
+pub(crate) mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -229,7 +231,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// State shared by every connection and session actor.
 pub(crate) struct Daemon {
-    config: Config,
+    pub(crate) config: Config,
     registry: Mutex<Registry>,
     /// Serializes journal disk writes; **never** held while `registry` is held.
     journal_write: Mutex<()>,
@@ -240,7 +242,7 @@ pub(crate) struct Daemon {
     host: tokio::sync::Mutex<Option<HostInfo>>,
     /// Held while `claude update` or one `claude plugin …` runs: one at a
     /// time, so `~/.claude` has one writer.
-    updating: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) updating: Arc<tokio::sync::Mutex<()>>,
     /// Which optional flags this claude knows (`--allow-dangerously-skip-
     /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
     /// `claude --help`). Probed on first use, and again after a claude

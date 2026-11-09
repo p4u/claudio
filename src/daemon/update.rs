@@ -182,7 +182,7 @@ async fn execute(
 
 /// Stop the update's whole process group: SIGTERM, a grace period for the
 /// leader to exit, then SIGKILL for whatever is left. Reaps the leader.
-pub(super) async fn kill_group(child: &mut Child) {
+pub(crate) async fn kill_group(child: &mut Child) {
     // The leader's pid is the group id (`process_group(0)`); `None` once
     // it has been reaped, and then its pid may already be reused.
     let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
