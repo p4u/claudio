@@ -5,6 +5,7 @@
 use std::io;
 use std::sync::Arc;
 
+use super::admit::SessionEnv;
 use super::journal::Entry;
 use super::session::{self, Cmd};
 use super::{in_progress, Daemon};
@@ -14,23 +15,29 @@ impl Daemon {
     /// Retry spawning a session without `--resume` after a quick-exit failure.
     ///
     /// Called by the session actor (§2.3). Looks up the journal entry, strips
-    /// `--resume`/`--session-id` args, and re-spawns with a fresh conversation.
+    /// `--resume`/`--session-id` args, and re-spawns with a fresh conversation
+    /// and the env the failed spawn had (kept in memory, never journaled; a
+    /// daemon restarted meanwhile has none, and the retry goes without).
     pub(crate) async fn retry_spawn_fresh(self: &Arc<Self>, id: SessionId) {
         // Build a stripped spec from the journal entry.
         let spec_opt = {
             let reg = self.registry();
             reg.journal.entries().iter().find(|e| e.id == id).map(|e| {
+                let kept = reg.session_env.get(&id).cloned().unwrap_or_else(|| {
+                    tracing::warn!(%id, "retry_spawn_fresh: no spawn env kept; retrying without");
+                    SessionEnv::default()
+                });
                 let spec = crate::proto::SpawnSpec {
                     id,
                     cwd: e.cwd.clone(),
                     name: e.name.clone(),
                     args: without_conversation(&e.args),
-                    env: vec![], // env is not stored in journal (by design)
+                    env: kept.env,
                     rows: 24,
                     cols: 80,
                     ephemeral: e.ephemeral,
                     extensions: e.extensions.clone(),
-                    env_remove: None,
+                    env_remove: kept.env_remove,
                     optional: e.optional.clone(),
                 };
                 (spec, e.kind)
@@ -168,7 +175,7 @@ impl Daemon {
     /// committed it): then the new process owns it and nothing is closed.
     /// The check and the removal are one step under the registry lock.
     pub(crate) fn close_exited(&self, id: SessionId) {
-        let (entry, snap) = {
+        let ((entry, env), snap) = {
             let mut reg = self.registry();
             if reg.live.contains_key(&id) || reg.in_flight.contains(&id) {
                 tracing::info!(%id, "exited session was replaced; not closing it");
@@ -178,12 +185,17 @@ impl Daemon {
                 return; // already killed
             };
             reg.journal.remove_in_memory(id);
-            (entry, reg.journal.snapshot())
+            let env = reg.session_env.remove(&id);
+            ((entry, env), reg.journal.snapshot())
         };
         if let Err(e) = self.write_journal(&snap) {
             // Not removed on disk: keep it, dormant, rather than lie.
             tracing::warn!(%id, error = %e, "could not close exited session");
-            self.registry().journal.reinsert(entry);
+            let mut reg = self.registry();
+            reg.journal.reinsert(entry);
+            if let Some(env) = env {
+                reg.session_env.insert(id, env);
+            }
             return;
         }
         session::remove_context(&self.config.socket, id);

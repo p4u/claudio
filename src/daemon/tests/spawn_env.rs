@@ -89,3 +89,81 @@ async fn optional_is_journaled_and_applied_on_respawn() {
         serde_json::json!(["--x-test"])
     );
 }
+
+/// A fake claude that fails at once on `--resume` (a deleted conversation)
+/// and otherwise saves its env to `retry.env` and its args to `retry.argv`
+/// in its cwd, then behaves like the normal fake.
+fn fake_claude_resume_fails_recording() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-rr-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--resume\" ]; then exit 1; fi\n\
+             done\n\
+             env > retry.env\n\
+             printf '%s\\n' \"$@\" > retry.argv\n\
+             echo {BANNER}\n\
+             exec cat\n"
+        );
+        crate::daemon::host::write_executable(&bin, &script);
+        bin
+    })
+}
+
+/// The fresh retry after a failed `--resume` starts with the env and
+/// `env_remove` of the spawn it replaces (kept in the daemon's memory,
+/// never journaled), and with its optional flags dropped again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resume_retry_keeps_the_session_env() {
+    // HOME stands in for an inherited variable the spawn removes: a test
+    // must not change this process's env, which the daemon's sessions
+    // inherit.
+    assert!(std::env::var_os("HOME").is_some(), "the test needs a HOME");
+    let claude = fake_claude_resume_fails_recording().to_path_buf();
+    let d = TestDaemon::start_with_claude(TestDaemon::new_dir(), claude).await;
+    let mut c = d.client().await;
+    let id = Uuid::new_v4();
+    let spec = SpawnSpec {
+        args: vec![
+            "--resume".into(),
+            "gone".into(),
+            "--x-test".into(),
+            "v".into(),
+        ],
+        env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "spawn-token".into())],
+        env_remove: Some(vec!["ANTHROPIC_API_KEY".into(), "HOME".into()]),
+        optional: vec!["--x-test".into()],
+        ..d.spec(id)
+    };
+    c.spawn(spec).await;
+    let argv_file = d.work().join("retry.argv");
+    let argv = within(async {
+        loop {
+            match std::fs::read_to_string(&argv_file) {
+                Ok(argv) if argv.ends_with('\n') => return argv,
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await;
+    let env = std::fs::read_to_string(d.work().join("retry.env")).unwrap();
+    let set = |key: &str| env.lines().any(|l| l.starts_with(&format!("{key}=")));
+    // Values are never printed (C1): the messages name the keys only.
+    let token = "ANTHROPIC_AUTH_TOKEN=spawn-token";
+    assert!(
+        env.lines().any(|l| l == token),
+        "the retry lost the spawn's env"
+    );
+    assert!(!set("ANTHROPIC_API_KEY"), "an API key reached the retry");
+    assert!(!set("HOME"), "the retry lost the spawn's env_remove");
+    let args: Vec<&str> = argv.lines().skip(2).collect();
+    assert_eq!(args, ["-n", "test"], "fresh, and the optional flag dropped");
+    let entry = &d.journal()["sessions"][0];
+    assert!(entry.get("env").is_none() && entry.get("env_remove").is_none());
+}

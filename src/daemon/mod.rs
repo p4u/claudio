@@ -264,6 +264,9 @@ struct Registry {
     /// IDs that received a Kill while their spawn was still in-flight.
     /// When the spawn commits, it checks this set and kills the actor.
     to_kill: HashSet<SessionId>,
+    /// Each journaled session's last spawn env, for a retry; dropped with
+    /// its journal entry.
+    session_env: HashMap<SessionId, admit::SessionEnv>,
 }
 
 impl Daemon {
@@ -285,6 +288,7 @@ impl Daemon {
                 live: HashMap::new(),
                 in_flight: HashSet::new(),
                 to_kill: HashSet::new(),
+                session_env: HashMap::new(),
             }),
             journal_write: Mutex::new(()),
             events,
@@ -459,7 +463,7 @@ impl Daemon {
             match spawn_result {
                 Ok((handle, committed_tx)) => {
                     let pid = handle.pid;
-                    let entry = reg.journal.upsert_entry(&spec, kind);
+                    let entry = reg.commit_entry(&spec, kind);
                     reg.live.insert(spec.id, handle);
                     let snap = reg.journal.snapshot();
                     // A shell has no hooks to say otherwise: it is idle.
@@ -539,7 +543,7 @@ impl Daemon {
     async fn kill(&self, id: SessionId) -> io::Result<()> {
         // Take the live handle and save the journal entry, then remove both
         // from the in-memory registry, before doing any disk I/O.
-        let (live, saved_entry, was_known, journal_snapshot) = {
+        let (live, (saved_entry, saved_env), was_known, journal_snapshot) = {
             let mut reg = self.registry();
             // If the spawn is in-flight, defer the kill.
             if reg.in_flight.contains(&id) && !reg.live.contains_key(&id) {
@@ -555,6 +559,7 @@ impl Daemon {
             let live = reg.live.remove(&id);
             // Save a copy of the journal entry so we can re-insert on failure.
             let saved_entry = reg.journal.entries().iter().find(|e| e.id == id).cloned();
+            let saved_env = reg.session_env.remove(&id);
             let was_journaled = reg.journal.remove_in_memory(id);
             let was_known = was_journaled || live.is_some();
             let snap = if was_known {
@@ -562,7 +567,7 @@ impl Daemon {
             } else {
                 None
             };
-            (live, saved_entry, was_known, snap)
+            (live, (saved_entry, saved_env), was_known, snap)
         };
 
         if !was_known {
@@ -583,6 +588,9 @@ impl Daemon {
                 }
                 if let Some(entry) = saved_entry {
                     reg.journal.reinsert(entry);
+                }
+                if let Some(env) = saved_env {
+                    reg.session_env.insert(id, env);
                 }
                 return Err(io::Error::other(format!(
                     "could not durably remove session {id}: {e}"

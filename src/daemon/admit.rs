@@ -1,12 +1,45 @@
 //! What the daemon takes from a spawn or respawn request: the caps it
-//! checks before anything starts, and the spec a session's process is
-//! actually started with (a terminal's, and a claude session's effective
-//! extensions).
+//! checks before anything starts, the spec a session's process is actually
+//! started with (a terminal's, and a claude session's effective
+//! extensions), and the spawn env it keeps in memory for a retry.
 
 use std::io;
 
-use super::{command, Daemon};
+use super::journal::Entry;
+use super::{command, Daemon, Registry};
 use crate::proto::{LensKind, LensSpec, RespawnSpec, SessionExtensions, SessionKind, SpawnSpec};
+
+/// A session's last spawn env and `env_remove`, kept in memory only (never
+/// journaled: the env may carry secrets) so the fresh retry after a failed
+/// `--resume` starts with what the spawn it replaces had. `Debug` prints
+/// the env's keys only (C1).
+#[derive(Clone, Default)]
+pub(super) struct SessionEnv {
+    pub(super) env: Vec<(String, String)>,
+    pub(super) env_remove: Option<Vec<String>>,
+}
+
+impl std::fmt::Debug for SessionEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("SessionEnv")
+            .field("env", &keys)
+            .field("env_remove", &self.env_remove)
+            .finish()
+    }
+}
+
+impl Registry {
+    /// Journal a committed spawn (in memory) and keep its env for a retry.
+    pub(super) fn commit_entry(&mut self, spec: &SpawnSpec, kind: SessionKind) -> Entry {
+        let kept = SessionEnv {
+            env: spec.env.clone(),
+            env_remove: spec.env_remove.clone(),
+        };
+        self.session_env.insert(spec.id, kept);
+        self.journal.upsert_entry(spec, kind)
+    }
+}
 
 /// Refuse a spawn whose request breaks a cap, before anything is reserved.
 pub(super) fn check_spawn(spec: &SpawnSpec) -> io::Result<()> {
