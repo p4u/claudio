@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::version::PROTO;
@@ -135,7 +135,8 @@ pub fn socket_test_dir(tag: &str) -> PathBuf {
 }
 
 /// Atomically replace `path` with `contents` (temp file + fsync + rename +
-/// parent-dir fsync, mode 0600), creating the parent directory.
+/// parent-dir fsync, mode 0600), creating missing parent directories 0700
+/// (an existing directory's mode is left as it is).
 ///
 /// Security properties:
 /// - The temp file is created exclusively (`O_CREAT|O_EXCL`) with a random
@@ -148,7 +149,12 @@ pub fn socket_test_dir(tag: &str) -> PathBuf {
 ///   update is durable on power loss.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(dir)?;
+    // Missing directories are made private (C4); an existing one is never
+    // chmodded: it may be shared on purpose.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
     // Unique random name: no two processes share a temp file, and a stale temp
     // from a previous crash at a predictable name cannot be reused.
@@ -238,6 +244,21 @@ mod tests {
             fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn write_atomic_makes_missing_dirs_private_and_leaves_existing_ones() {
+        let base = scratch();
+        fs::create_dir_all(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        write_atomic(&base.join("a/b/f"), b"x").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&base.join("a")), 0o700);
+        assert_eq!(mode(&base.join("a/b")), 0o700);
+        assert_eq!(mode(&base), 0o755, "an existing directory is not chmodded");
+        write_atomic(&base.join("g"), b"y").unwrap();
+        assert_eq!(mode(&base), 0o755);
         fs::remove_dir_all(&base).unwrap();
     }
 
