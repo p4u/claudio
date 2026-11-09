@@ -4,8 +4,8 @@
 
 use std::io::Write;
 
-use crate::cli::OutputFormat;
-use crate::print::session::Summary;
+use crate::addons::api::cli::OutputFormat;
+use crate::addons::api::print::session::Summary;
 
 pub struct Outcome<'a> {
     pub summary: &'a Summary,

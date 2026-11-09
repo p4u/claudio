@@ -15,10 +15,10 @@ file src/web/hub.rs 2229
 fn src/addons/vocdoni/plugins/manifest.rs::check 130
 fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
 fn src/addons/vocdoni/proxy/cmd.rs::cmd_login 169
-fn src/api/agentic.rs::tool_preamble 85
-fn src/api/pool.rs::resolve_turn 98
-fn src/api/routes/chat.rs::completions 91
-fn src/cli.rs::parse#2 138
+fn src/addons/api/api/agentic.rs::tool_preamble 85
+fn src/addons/api/api/pool.rs::resolve_turn 98
+fn src/addons/api/api/routes/chat.rs::completions 91
+fn src/addons/api/cli.rs::parse#2 138
 fn src/client.rs::handshake_flagged 91
 fn src/daemon/login_path.rs::capture 91
 fn src/daemon/mod.rs::spawn_reserved 98
@@ -26,8 +26,8 @@ fn src/daemon/server.rs::request 142
 fn src/daemon/session.rs::run 86
 fn src/daemon/session.rs::spawn 105
 fn src/main.rs::main 241
-fn src/print/driver.rs::start 184
-fn src/print/driver.rs::turn 82
+fn src/addons/api/print/driver.rs::start 184
+fn src/addons/api/print/driver.rs::turn 82
 fn src/remote/bootstrap.rs::upload_bytes 108
 fn src/remote/bootstrap.rs::upload_release 91
 fn src/remote/diag.rs::remote_session_cmd 101
@@ -52,7 +52,7 @@ fn src/web/hub.rs::handle 194
 fn src/web/ws.rs::dispatch 251
 fn src/web/ws.rs::tab 103
 unwrap src/addons/vocdoni/proxy/cmd.rs 2
-unwrap src/api/pool.rs 9
+unwrap src/addons/api/api/pool.rs 9
 unwrap src/daemon/host.rs 4
-unwrap src/print/hooks.rs 3
+unwrap src/addons/api/print/hooks.rs 3
 unwrap src/tui/keymap.rs 2

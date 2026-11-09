@@ -8,7 +8,7 @@
 //! protocol), so a streaming request gets a small fixed SSE chunk set (see
 //! `routes::chat`).
 
-use crate::cli::WrapperEnv;
+use crate::addons::api::cli::WrapperEnv;
 
 use super::config::{AppState, Config};
 use super::error::{AppError, AppResult};

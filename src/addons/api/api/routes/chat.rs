@@ -17,15 +17,15 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use crate::api::backend::{self, map_finish_reason, map_model};
-use crate::api::config::AppState;
-use crate::api::error::{AppError, AppResult};
-use crate::api::types::{
+use crate::addons::api::api::backend::{self, map_finish_reason, map_model};
+use crate::addons::api::api::config::AppState;
+use crate::addons::api::api::error::{AppError, AppResult};
+use crate::addons::api::api::types::{
     ChatCompletion, ChatCompletionChunk, ChatRequest, Choice, ChunkChoice, Delta, Message,
     ResponseMessage, Tool, ToolCallDelta, Usage,
 };
-use crate::api::{agentic, prompt, util};
-use crate::msglog;
+use crate::addons::api::api::{agentic, prompt, util};
+use crate::addons::api::msglog;
 
 /// An SSE payload item (matches what `axum`'s `Sse` body yields).
 type SseItem = Result<Event, std::convert::Infallible>;

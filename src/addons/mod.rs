@@ -1,6 +1,7 @@
 //! The addons this build registers (docs/addons.md). The core never names
 //! them; `main` hands `all()` to `addon::Addons::new`.
 
+pub mod api;
 pub mod vocdoni;
 
 use std::sync::Arc;

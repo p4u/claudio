@@ -12,18 +12,14 @@
 
 mod addon;
 mod addons;
-mod api;
 mod app;
 mod claude;
-mod cli;
 mod client;
 mod config;
 mod daemon;
 mod freshness;
-mod msglog;
 mod paths;
 mod plain;
-mod print;
 mod proto;
 mod release;
 mod remote;
@@ -36,6 +32,7 @@ mod web;
 
 use std::io::{IsTerminal, Read, Write};
 
+use addons::api::{api, cli, msglog, print};
 use cli::{OutputFormat, WrapperEnv};
 use print::emit::Outcome;
 
