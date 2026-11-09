@@ -15,7 +15,9 @@ use super::{server, Config, Daemon};
 use crate::addon::Addons;
 use crate::proto::{self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SpawnSpec, PROTO};
 
+/// What the shared fake claude prints first: its session is up.
 pub const BANNER: &str = "FAKE-CLAUDE-BANNER";
+/// How long any read of the harness waits before it fails the test.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Make `dir` (and its parents) and keep it private: 0700 (C4). What a
@@ -135,12 +137,16 @@ pub fn fake_claude() -> &'static Path {
 
 /// A daemon running in its own temp dir.
 pub struct TestDaemon {
+    /// Its private temp dir (socket, journal, `work/`), removed on drop.
     pub dir: PathBuf,
+    /// The config it was started with.
     pub config: Config,
+    /// Its shared state, for tests that drive it directly.
     pub daemon: Arc<Daemon>,
 }
 
 impl TestDaemon {
+    /// A test config under `dir`, with the shared fake claude.
     pub fn config(dir: &Path) -> Config {
         Config {
             socket: dir.join("rt/d.sock"),
@@ -157,6 +163,7 @@ impl TestDaemon {
         }
     }
 
+    /// A new private temp dir with a `work/` subdir, short enough for a socket path.
     pub fn new_dir() -> PathBuf {
         let dir = crate::paths::socket_test_dir("cl-d");
         make_private(&dir);
@@ -164,15 +171,18 @@ impl TestDaemon {
         dir
     }
 
+    /// A daemon with the test config, in `dir`.
     pub async fn start_in(dir: PathBuf) -> TestDaemon {
         let config = Self::config(&dir);
         Self::start_with_config(dir, config)
     }
 
+    /// A daemon with `config` and no addons, in `dir`.
     pub fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
         Self::start_with_addons(dir, config, Addons::empty())
     }
 
+    /// A daemon with `config` running `addons`' daemon ops, in `dir`.
     pub fn start_with_addons(dir: PathBuf, config: Config, addons: Addons) -> TestDaemon {
         let listening = server::start(config.clone(), Arc::new(addons))
             .unwrap()
@@ -186,6 +196,7 @@ impl TestDaemon {
         }
     }
 
+    /// A daemon with the test config, in a new temp dir.
     pub async fn start() -> TestDaemon {
         Self::start_in(Self::new_dir()).await
     }
@@ -199,14 +210,17 @@ impl TestDaemon {
         Self::start_with_config(dir, config)
     }
 
+    /// The sessions' working directory.
     pub fn work(&self) -> PathBuf {
         self.dir.join("work")
     }
 
+    /// A client that has said Hello.
     pub async fn client(&self) -> Client {
         Client::connect(&self.config.socket).await
     }
 
+    /// A spawn of session `id` in `work/`, with one env secret to check redaction against.
     pub fn spec(&self, id: SessionId) -> SpawnSpec {
         SpawnSpec {
             id,
@@ -251,6 +265,7 @@ impl TestDaemon {
         .await
     }
 
+    /// The journal as written on disk.
     pub fn journal(&self) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(&self.config.journal).unwrap()).unwrap()
     }
@@ -262,6 +277,7 @@ impl Drop for TestDaemon {
     }
 }
 
+/// `f`, or a panic after [`READ_TIMEOUT`].
 pub async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(READ_TIMEOUT, f)
         .await
@@ -270,11 +286,14 @@ pub async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
 
 /// A protocol client over a real socket.
 pub struct Client {
+    /// The connection.
     pub stream: UnixStream,
+    /// The last request id sent.
     pub next_req: u64,
 }
 
 impl Client {
+    /// Connected, before any Hello.
     pub async fn raw(socket: &Path) -> Client {
         Client {
             stream: UnixStream::connect(socket).await.unwrap(),
@@ -282,6 +301,7 @@ impl Client {
         }
     }
 
+    /// Connected, and welcomed at this build's protocol version.
     pub async fn connect(socket: &Path) -> Client {
         let mut c = Self::raw(socket).await;
         match c.call(Msg::Hello(hello(PROTO))).await {
@@ -291,10 +311,12 @@ impl Client {
         c
     }
 
+    /// Write one frame.
     pub async fn send(&mut self, frame: Frame) {
         proto::write_frame(&mut self.stream, &frame).await.unwrap();
     }
 
+    /// Send `msg` as the next request; its id.
     pub async fn request(&mut self, msg: Msg) -> u64 {
         self.next_req += 1;
         self.send(Frame::Control(Envelope::request(self.next_req, msg)))
@@ -302,6 +324,7 @@ impl Client {
         self.next_req
     }
 
+    /// The next frame (`None` at the end), within the read timeout.
     pub async fn recv(&mut self) -> Option<Frame> {
         within(proto::read_frame(&mut self.stream)).await.unwrap()
     }
@@ -406,6 +429,7 @@ impl Client {
         }
     }
 
+    /// Spawn `spec`; the pid the daemon reports.
     pub async fn spawn(&mut self, spec: SpawnSpec) -> Option<u32> {
         match self.call(Msg::Spawn(spec)).await {
             Msg::Spawned { pid, .. } => pid,
@@ -413,6 +437,7 @@ impl Client {
         }
     }
 
+    /// The daemon's session list.
     pub async fn sessions(&mut self) -> Vec<crate::proto::SessionInfo> {
         match self.call(Msg::ListSessions).await {
             Msg::Sessions { sessions } => sessions,
@@ -421,6 +446,7 @@ impl Client {
     }
 }
 
+/// A test client's Hello at protocol `proto`.
 pub fn hello(proto: u32) -> Hello {
     Hello {
         claudio_version: "test".into(),
@@ -429,6 +455,7 @@ pub fn hello(proto: u32) -> Hello {
     }
 }
 
+/// Send hook `event` as the relay does (`__hook`), authenticated by `token`.
 pub async fn send_hook(socket: &Path, token: &str, event: &str, payload: serde_json::Value) {
     let mut c = Client::raw(socket).await;
     let hook = Msg::Hook {
