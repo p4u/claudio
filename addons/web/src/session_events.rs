@@ -3,7 +3,7 @@
 
 use super::hub::SessionView;
 use super::lenses;
-use crate::proto::{LensItem, SessionEvent, SessionState};
+use claudio_core::proto::{LensItem, SessionEvent, SessionState};
 
 /// What [`apply_event`] made of one event.
 #[derive(Debug, Default, PartialEq)]

@@ -1,6 +1,6 @@
 //! The `addons.*` ops (docs/web-protocol.md v2 §5, "Addons") and what the
 //! hub shows of the addons in a Session DTO: its launch and its segments.
-//! Everything an addon hands the page goes through `crate::addon::clean`
+//! Everything an addon hands the page goes through `claudio_core::addon::clean`
 //! here (C2); a session-bound request names only the session, whose
 //! launch and conversation the addons read from the server's own state
 //! (the runtime's snapshots), never from the page.
@@ -14,14 +14,14 @@ use serde_json::{json, Value};
 use super::hub::SessionView;
 use super::ws::parse;
 use super::AppState;
-use crate::addon::{
+use claudio_core::addon::{
     self, error_panel, line, ActionRequest, Addons, FlagArg, LaunchChoice, PanelDecl, PanelRequest,
     Segment, SessionSnap, Ui, TEXT_BYTES,
 };
-use crate::addon::{ChecklistAnswer, LaunchSelect, Pick, RowAction};
-use crate::app::addons::AddonRuntime;
-use crate::app::extensions::Source;
-use crate::proto::SessionId;
+use claudio_core::addon::{ChecklistAnswer, LaunchSelect, Pick, RowAction};
+use claudio_core::app::addons::AddonRuntime;
+use claudio_core::app::extensions::Source;
+use claudio_core::proto::SessionId;
 
 /// An addon's panel (D13).
 const PANEL_WAIT: Duration = Duration::from_secs(10);
@@ -51,7 +51,7 @@ pub(crate) struct SessionAddons {
 /// R19/F4, AC8).
 pub(crate) fn launch_of(
     addons: &Addons,
-    meta: Option<&crate::app::state::SavedRoute>,
+    meta: Option<&claudio_core::app::state::SavedRoute>,
 ) -> (bool, Option<LaunchChoice>) {
     match meta.map(|route| route.resolve(addons)) {
         Some(Ok(choice)) => (true, choice),
@@ -361,7 +361,7 @@ fn list(rt: &AddonRuntime) -> Value {
 
 /// A launch addon's labelled switches as `{"name","label"}`: `name` is
 /// what its `select` makes of the switch (a `LaunchSelect` flag).
-pub(crate) fn labelled_flags(launch: &dyn crate::addon::Launch) -> Vec<Value> {
+pub(crate) fn labelled_flags(launch: &dyn claudio_core::addon::Launch) -> Vec<Value> {
     launch
         .flags()
         .iter()
@@ -514,7 +514,7 @@ async fn row_action(state: &AppState, a: RowArgs) -> Result<Value, String> {
     let ours = {
         let registry = state.ctx.ext.registry();
         let registry = registry.lock().unwrap_or_else(|p| p.into_inner());
-        let of = |e: &&crate::app::extensions::Extension| matches!(&e.source, Source::Addon { addon: x, .. } if *x == addon);
+        let of = |e: &&claudio_core::app::extensions::Extension| matches!(&e.source, Source::Addon { addon: x, .. } if *x == addon);
         registry
             .extensions
             .iter()

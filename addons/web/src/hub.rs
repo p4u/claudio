@@ -31,12 +31,12 @@ use super::input::{self, Decision};
 use super::lenses;
 pub(crate) use super::session_events::{apply_event, on_attached};
 use super::state::{self, Layout, SessionMeta, WebState};
-use crate::app::connections::Connections;
-use crate::claude::update::{decide, needs_update, short, Decision as Policy};
-use crate::client::{Client, Incoming};
-use crate::config::UpdatePolicy;
-use crate::freshness;
-use crate::proto::{
+use claudio_core::app::connections::Connections;
+use claudio_core::claude::update::{decide, needs_update, short, Decision as Policy};
+use claudio_core::client::{Client, Incoming};
+use claudio_core::config::UpdatePolicy;
+use claudio_core::freshness;
+use claudio_core::proto::{
     ClaudeInfo, GitStatus, LensItem, Msg, SessionEvent, SessionId, SessionInfo, SessionState,
     Welcome, UPDATE_BUSY,
 };
@@ -332,7 +332,7 @@ pub(crate) struct SessionView {
     pub size: Option<(u16, u16)>,
     pub prompt: Option<PendingPrompt>,
     /// Its persisted launch, when known.
-    pub meta: Option<crate::app::state::SavedRoute>,
+    pub meta: Option<claudio_core::app::state::SavedRoute>,
     /// Its launch and its addons' segments (`addons::refresh`).
     pub addon: super::addons::SessionAddons,
 }
@@ -366,15 +366,15 @@ pub(crate) enum HubEvent {
 }
 
 pub(crate) struct HubConfig {
-    pub config: crate::config::Config,
+    pub config: claudio_core::config::Config,
     /// web-state.json
     pub state_path: PathBuf,
     /// Read at start, never written.
-    pub tui_state: crate::app::state::ClientState,
+    pub tui_state: claudio_core::app::state::ClientState,
     /// web-state.json as read at start (in `spawn_blocking`, by `serve`).
     pub web: WebState,
     /// Fed with the sessions after every change (`addon_feed`).
-    pub runtime: crate::app::addons::AddonRuntime,
+    pub runtime: claudio_core::app::addons::AddonRuntime,
 }
 
 /// A session as a request handler needs it.
@@ -384,7 +384,7 @@ pub(crate) struct SessionRef {
     pub features: Vec<String>,
     pub info: SessionInfo,
     /// Its persisted launch, when known.
-    pub route: Option<crate::app::state::SavedRoute>,
+    pub route: Option<claudio_core::app::state::SavedRoute>,
 }
 
 type Reply<T> = oneshot::Sender<T>;
@@ -485,7 +485,7 @@ enum Cmd {
     },
     /// config.toml's `[claude]` was re-read.
     SetClaude {
-        claude: crate::config::ClaudeSection,
+        claude: claudio_core::config::ClaudeSection,
     },
     Shutdown {
         reply: Reply<()>,
@@ -585,7 +585,7 @@ pub(crate) fn start(cfg: HubConfig) -> HubHandle {
 /// A host name the web may connect to: what `remote::validate_host` takes,
 /// at most 255 bytes, no whitespace or control characters.
 fn host_ok(host: &str) -> Result<(), String> {
-    crate::remote::validate_host(host)?;
+    claudio_core::remote::validate_host(host)?;
     if host.len() > 255 || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("invalid host {:?}", clean(host, 80)));
     }
@@ -769,7 +769,7 @@ impl HubHandle {
 
     /// config.toml's `[claude]` changed: the install and update policy of
     /// the hosts not offered yet.
-    pub(crate) async fn set_claude_policy(&self, claude: crate::config::ClaudeSection) {
+    pub(crate) async fn set_claude_policy(&self, claude: claudio_core::config::ClaudeSection) {
         let _ = self.tx.send(Cmd::SetClaude { claude }).await;
     }
 
@@ -783,8 +783,8 @@ type PendingSpawn = (SessionMeta, Option<(PendingPrompt, (u16, u16))>);
 
 /// The actor's state.
 struct Hub {
-    claude: crate::config::ClaudeSection,
-    tui_state: crate::app::state::ClientState,
+    claude: claudio_core::config::ClaudeSection,
+    tui_state: claudio_core::app::state::ClientState,
     web: WebState,
     dirty: bool,
     last_save: Instant,
@@ -801,7 +801,7 @@ struct Hub {
     writer: mpsc::UnboundedSender<WriteJob>,
     /// The local claude's `--version` line, from the local Welcome.
     local_claude: Option<String>,
-    runtime: crate::app::addons::AddonRuntime,
+    runtime: claudio_core::app::addons::AddonRuntime,
 }
 
 async fn run(mut hub: Hub, mut rx: mpsc::Receiver<Cmd>) {
@@ -842,7 +842,10 @@ fn now_secs() -> u64 {
 
 /// `text` sanitized and cut at `max` characters.
 fn clean(text: &str, max: usize) -> String {
-    crate::text::sanitize(text).chars().take(max).collect()
+    claudio_core::text::sanitize(text)
+        .chars()
+        .take(max)
+        .collect()
 }
 
 /// A daemon error for the browser: sanitized, ≤ 300 characters, and the
@@ -858,7 +861,7 @@ pub(crate) fn daemon_error(e: impl std::fmt::Display) -> String {
 
 /// The last `TAIL_MAX` bytes of `text`, sanitized, on a char boundary.
 fn tail(text: &str) -> String {
-    let text = crate::text::sanitize(text);
+    let text = claudio_core::text::sanitize(text);
     let mut at = text.len().saturating_sub(TAIL_MAX);
     while !text.is_char_boundary(at) {
         at += 1;
@@ -1674,7 +1677,7 @@ impl Hub {
         let dto = self.hosts.get(host).map(dto::host).unwrap_or(Value::Null);
         if host != "local" {
             let name = host.to_owned();
-            tokio::task::spawn_blocking(move || crate::remote::hosts::touch(&name));
+            tokio::task::spawn_blocking(move || claudio_core::remote::hosts::touch(&name));
             if !self.web.hosts.iter().any(|h| h == host) {
                 self.web.hosts.push(host.to_owned());
                 self.dirty = true;
@@ -2063,7 +2066,7 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{Attention, SessionKind};
+    use claudio_core::proto::{Attention, SessionKind};
     use uuid::Uuid;
 
     fn info(state: SessionState) -> SessionInfo {
@@ -2231,12 +2234,12 @@ mod tests {
 
     #[tokio::test]
     async fn ephemeral_sessions_are_never_listed() {
-        let opts = crate::app::addons::RuntimeOptions {
+        let opts = claudio_core::app::addons::RuntimeOptions {
             config_path: "/nonexistent/claudio/config.toml".into(),
             watch_config: false,
         };
-        let addons = Arc::new(crate::addon::Addons::empty());
-        let (runtime, _out) = crate::app::addons::AddonRuntime::start(addons, opts);
+        let addons = Arc::new(claudio_core::addon::Addons::empty());
+        let (runtime, _out) = claudio_core::app::addons::AddonRuntime::start(addons, opts);
         let (tx, _rx) = mpsc::channel(8);
         let (events, _) = broadcast::channel(8);
         let (writer, _jobs) = mpsc::unbounded_channel();

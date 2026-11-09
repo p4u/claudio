@@ -7,10 +7,10 @@ use tokio::sync::mpsc;
 
 use super::hub::Done;
 use super::state::{self, WebState};
-use crate::client::{self, Client};
-use crate::freshness::DaemonCheck;
-use crate::paths;
-use crate::proto::{Msg, SessionInfo};
+use claudio_core::client::{self, Client};
+use claudio_core::freshness::DaemonCheck;
+use claudio_core::paths;
+use claudio_core::proto::{Msg, SessionInfo};
 
 /// Connect `host` and list its sessions. The error says whether the
 /// bootstrap failed (the next attempt runs it again).
@@ -31,7 +31,7 @@ pub(super) async fn connect_once(
         client
     } else {
         if bootstrap {
-            crate::remote::bootstrap::ensure_remote(host)
+            claudio_core::remote::bootstrap::ensure_remote(host)
                 .await
                 .map_err(|e| (format!("bootstrap: {e}"), true))?;
         }

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use super::*;
-use crate::addon::{AddonError, ConfigEdit, Frontend, LaunchOp, Routing, SessionSnap};
+use claudio_core::addon::{AddonError, ConfigEdit, Frontend, LaunchOp, Routing, SessionSnap};
 
 /// A context that answers `extension_on` from `on` and nothing else.
 #[derive(Default)]
@@ -108,7 +108,7 @@ async fn lenses_are_on_by_default_and_follow_their_rows() {
     assert_eq!(part.lenses[0].kind, LensKind::Tag);
     assert_eq!(
         part.lenses[0].instruction,
-        crate::claude::hooks::LATEX_CONTEXT
+        claudio_core::claude::hooks::LATEX_CONTEXT
     );
     assert_eq!(part.lenses[1].kind, LensKind::Fence);
     assert_eq!(part.lenses[1].instruction, DIAGRAM_CONTEXT);

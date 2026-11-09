@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::events::{ev, extensions_changed};
 use super::ext::Extensions;
 use super::hub::{HubEvent, HubHandle, SessionView};
-use crate::addon::{Addons, SessionSnap};
-use crate::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
+use claudio_core::addon::{Addons, SessionSnap};
+use claudio_core::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
 
 /// Follow the hub's host events into `runtime` (from a resync of the hosts
 /// connected already), send the runtime's notices to every tab, an addon's
@@ -68,7 +68,7 @@ impl Feed {
     fn started(&self) {
         let (changed, unknown) = self.ext.set_rows(&self.runtime.extension_rows());
         for notice in unknown {
-            tracing::warn!("web: {}", crate::text::sanitize(&notice));
+            tracing::warn!("web: {}", claudio_core::text::sanitize(&notice));
         }
         if changed {
             self.hub.broadcast(extensions_changed());

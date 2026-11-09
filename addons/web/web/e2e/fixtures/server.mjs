@@ -13,7 +13,7 @@ import WebSocket from 'ws';
 import { startFakeProxy, PROXY_TOKEN } from './fake-proxy.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repo = path.resolve(here, '../../..');
+const repo = path.resolve(here, '../../../../..');
 const BIN = process.env.CLAUDIO_BIN ?? path.join(repo, 'target/debug/claudio');
 
 const freePort = () => new Promise((resolve, reject) => {

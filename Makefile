@@ -81,9 +81,9 @@ test-manager:
 ## Browser app: node unit tests, then Playwright e2e against a debug build
 ## (fake claude and proxy; uses the browsers cached in ~/.cache/ms-playwright).
 test-web:
-	node --test web/tests/*.test.mjs
+	node --test addons/web/web/tests/*.test.mjs
 	$(CARGO) build --locked
-	cd web/e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --no-audit --no-fund && npx playwright test
+	cd addons/web/web/e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --no-audit --no-fund && npx playwright test
 
 ## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
