@@ -12,6 +12,17 @@ pub struct Notice {
     pub ticks_left: u32,
 }
 
+impl super::app::App {
+    /// The upgrade check found a newer claudio release (`None`: it did not):
+    /// the status bar's `↑ vX.Y.Z`.
+    pub(super) fn on_upgrade_available(&mut self, tag: Option<String>) {
+        if let Some(t) = tag {
+            self.upgrade_notice = Some(t);
+            self.redraw = true;
+        }
+    }
+}
+
 /// Check for background sessions that entered a notification-worthy state
 /// since the last check, and populate `pending_notifs` with their labels.
 ///

@@ -1,28 +1,94 @@
 //! The TUI's edge of the addon runtime (`app::addons`): it is built in
 //! `main` and fed from the event loop: host connections and losses, the
 //! session list and focus as `App` holds them, claude installs, and what
-//! the runtime tells the UI. `App` itself never sees the runtime (A6).
+//! the runtime tells the UI. It runs `App`'s [`AddonCall`]s, and its
+//! launches through the composer, keeping those parked for a review until
+//! the member answers. `App` itself never sees the runtime (A6).
 
+use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::app::{AddonResult, App, BridgeCall, LaunchCall, Launched, Mode, ReplyTo};
+use super::addon_calls::{AddonCall, Origin};
+use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mode, ReplyTo};
 use super::HostEvent;
-use crate::addon::{option as clean_option, Addons, Frontend, LaunchOption, Pick, SessionSnap};
+use crate::addon::{
+    checklist as clean_checklist, line, option as clean_option, Addons, Checklist, ChecklistAnswer,
+    Frontend, LaunchOp, LaunchOption, Level, Notice, Pick, SessionSnap, TEXT_BYTES,
+};
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
-use crate::app::launch::{self, LaunchSpec, Step};
-use crate::client::Incoming;
+use crate::app::launch::{self, LaunchSpec, Parked, ReviewAnswer, Step};
+use crate::client::{Client, Incoming};
 use crate::paths;
-use crate::proto::Msg;
+use crate::proto::{Msg, SessionId};
+
+/// Launches waiting for a review at once; one more fails.
+const MAX_PARKED: usize = 8;
+/// A checklist's save outside a launch (an addon's action, D13).
+const SAVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The runtime and what it tells the UI, as the event loop holds them.
 pub(super) struct Runner {
-    pub(super) runtime: AddonRuntime,
+    pub(super) runtime: Edge,
     pub(super) rx: RuntimeRx,
+}
+
+/// The runtime, and the launches parked for a review: their parts (the
+/// secrets) stay here, never in `App` (C1). Dropped at exit.
+#[derive(Clone)]
+pub(super) struct Edge {
+    rt: AddonRuntime,
+    parked: Arc<Mutex<HashMap<u64, Waiting>>>,
+}
+
+impl Deref for Edge {
+    type Target = AddonRuntime;
+
+    fn deref(&self) -> &AddonRuntime {
+        &self.rt
+    }
+}
+
+impl Edge {
+    /// `rt`, no launch parked.
+    pub(super) fn new(rt: AddonRuntime) -> Edge {
+        Edge {
+            rt,
+            parked: Arc::default(),
+        }
+    }
+
+    fn parked(&self) -> MutexGuard<'_, HashMap<u64, Waiting>> {
+        self.parked.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drop the parked launches and stop the runtime.
+    pub(super) fn shutdown(&self) {
+        self.parked().clear();
+        self.rt.shutdown();
+    }
+}
+
+/// What a launch's outcome reports.
+struct Pending {
+    id: u64,
+    op: LaunchOp,
+    sid: SessionId,
+    client: Client,
+}
+
+/// A launch parked for `addon`'s checklist.
+struct Waiting {
+    parked: Parked,
+    addon: &'static str,
+    checklist: String,
+    pending: Pending,
 }
 
 /// The proxy profiles' names, read now (blocking, at the start): the
@@ -45,9 +111,12 @@ pub(super) fn start(addons: Arc<Addons>, app: &mut App) -> Runner {
         config_path: paths::config_file(),
         watch_config: false,
     };
-    let (runtime, rx) = AddonRuntime::start(addons, opts);
-    app.on_addon(AddonResult::Options(options(&runtime)));
-    Runner { runtime, rx }
+    let (rt, rx) = AddonRuntime::start(addons, opts);
+    app.on_addon(AddonResult::Options(options(&rt)));
+    Runner {
+        runtime: Edge::new(rt),
+        rx,
+    }
 }
 
 /// Every Launch addon's options, cleaned (C2), in registry order.
@@ -139,25 +208,68 @@ pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
 }
 
 /// What the runtime tells the UI: notices are shown, a change re-reads
-/// what `App` shows of the addon and the launch options; offers have no
-/// reader yet (P3.11).
+/// what `App` shows of the addon (its open checklists too) and the launch
+/// options; an offer is shown when idle.
 pub(super) fn on_out(app: &mut App, runtime: &AddonRuntime, out: RuntimeOut) {
     match out {
         RuntimeOut::Notice { addon, notice } => app.notify(format!("{addon}: {}", notice.text)),
         RuntimeOut::Changed { addon } => {
             app.on_addon(AddonResult::Changed { addon });
+            for (shown, id) in app.checklists_shown() {
+                if let Some(c) = checklist_of(runtime, shown, &id).filter(|_| shown == addon) {
+                    app.refresh_checklist(shown, &c);
+                }
+            }
             let options = options(runtime);
             if options != app.launch_options {
                 app.on_addon(AddonResult::Options(options));
             }
         }
-        RuntimeOut::Offer { .. } => {}
+        RuntimeOut::Offer { addon, checklist } => app.on_addon(AddonResult::Offer {
+            addon,
+            id: checklist,
+        }),
+    }
+}
+
+/// `addon`'s checklist `id` as it is now, cleaned (C2).
+fn checklist_of(runtime: &AddonRuntime, addon: &'static str, id: &str) -> Option<Checklist> {
+    let entry = runtime.addons().get(addon)?;
+    let checklist = entry.ui()?.checklist(id, runtime.ctx(addon).as_ref())?;
+    Some(clean_checklist(checklist))
+}
+
+/// Run an addon effect: a bridge call, or an [`AddonCall`].
+pub(super) fn run(effect: Effect, app: &mut App, edge: &Edge, tx: &mpsc::Sender<HostEvent>) {
+    match effect {
+        Effect::Bridge(call) => bridge(call, edge),
+        Effect::Addon(AddonCall::OpenChecklist { addon, id, origin }) => {
+            match checklist_of(edge, addon, &id) {
+                Some(checklist) => app.on_addon(AddonResult::Checklist {
+                    addon,
+                    origin,
+                    checklist,
+                }),
+                None if origin == Origin::Offer => {}
+                None => app.notify(format!("{addon}: {}: nothing to set up yet", line(&id, 64))),
+            }
+        }
+        Effect::Addon(AddonCall::SaveChecklist {
+            addon,
+            id,
+            answer,
+            origin,
+        }) => save_checklist(edge, (addon, id), answer, origin, tx),
+        Effect::Addon(AddonCall::ReviewAnswer { launch, answer }) => {
+            answer_review(edge, launch, answer, tx)
+        }
+        _ => {}
     }
 }
 
 /// Run a call into the Vocdoni addon's plugin state: the transition is
 /// immediate, its I/O runs on the runtime's tasks.
-pub(super) fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
+fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
     let Some(bridge) = Bridge::of(runtime.addons()) else {
         return;
     };
@@ -169,13 +281,90 @@ pub(super) fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
     }
 }
 
+/// Save the member's answer to `addon`'s checklist `id` on a task (15 s);
+/// a refused save is a notice and opens the checklist again from `origin`.
+fn save_checklist(
+    edge: &Edge,
+    (addon, id): (&'static str, String),
+    answer: ChecklistAnswer,
+    origin: Origin,
+    tx: &mpsc::Sender<HostEvent>,
+) {
+    let Some(entry) = edge.addons().get(addon).cloned() else {
+        return;
+    };
+    let (rt, tx) = (edge.rt.clone(), tx.clone());
+    tokio::spawn(async move {
+        let Some(ui) = entry.ui() else {
+            return;
+        };
+        let reopen = matches!(answer, ChecklistAnswer::Save { .. });
+        let saving = ui.save_checklist(id.clone(), answer, rt.ctx(addon));
+        let why = match tokio::time::timeout(SAVE_TIMEOUT, saving).await {
+            Ok(Ok(())) => return,
+            Ok(Err(why)) => why,
+            Err(_) => "timed out".to_owned(),
+        };
+        let text = format!(
+            "{addon}: {}: not saved: {}",
+            line(&id, 64),
+            line(&why, TEXT_BYTES)
+        );
+        let notice = Notice {
+            text,
+            level: Level::Warn,
+        };
+        let _ = tx.send(HostEvent::Addon(AddonResult::Notice(notice))).await;
+        if let Some(checklist) = checklist_of(&rt, addon, &id).filter(|_| reopen) {
+            let shown = AddonResult::Checklist {
+                addon,
+                origin,
+                checklist,
+            };
+            let _ = tx.send(HostEvent::Addon(shown)).await;
+        }
+    });
+}
+
+/// The member answered launch `id`'s review: the parked launch goes on
+/// (or is dropped) on a task. An answer for a launch no longer parked is
+/// dropped.
+fn answer_review(edge: &Edge, id: u64, answer: ReviewAnswer, tx: &mpsc::Sender<HostEvent>) {
+    let Some(waiting) = edge.parked().remove(&id) else {
+        return;
+    };
+    let (edge, tx) = (edge.clone(), tx.clone());
+    tokio::spawn(async move {
+        let Waiting {
+            parked,
+            addon,
+            checklist,
+            pending,
+        } = waiting;
+        let saved = matches!(answer, ReviewAnswer::Save(_));
+        let client = pending.client.clone();
+        let step = launch::resume(&edge.rt, parked, answer, client).await;
+        let again = matches!(&step, Step::Review { checklist: c, .. } if *c == checklist);
+        if saved && again {
+            let text = format!("{addon}: {checklist} changed while open: review it again");
+            let notice = Notice {
+                text,
+                level: Level::Warn,
+            };
+            let _ = tx.send(HostEvent::Addon(AddonResult::Notice(notice))).await;
+        }
+        settle(&edge, step, pending, &tx).await;
+    });
+}
+
 /// Run an [`Effect::Launch`] on a task: `app::launch::run` with this
-/// host's client; the outcome comes back as [`HostEvent::Launched`]. The
-/// addons' parts (their env) live only in that task.
+/// host's client; the outcome comes back as [`HostEvent::Launched`], or,
+/// for a review, as the checklist to show. The addons' parts (their env)
+/// live only in that task and in the parked launches.
 pub(super) fn launch(
     call: LaunchCall,
     mode: Mode,
-    runtime: &AddonRuntime,
+    edge: &Edge,
     conns: &Connections,
     tx: &mpsc::Sender<HostEvent>,
 ) {
@@ -198,46 +387,111 @@ pub(super) fn launch(
         Mode::Manager => Frontend::Tui,
     };
     let client = conns.client(&host).cloned();
-    let (rt, tx) = (runtime.clone(), tx.clone());
+    let (edge, tx) = (edge.clone(), tx.clone());
     tokio::spawn(async move {
-        let (choice, notices, result) = match client {
-            None => (None, Vec::new(), Err(format!("{host}: not connected"))),
-            Some(client) => {
-                let spec = LaunchSpec {
-                    op,
-                    sid,
-                    host,
-                    cwd,
-                    select,
-                    frontend,
-                    base,
-                    core_lenses: core_lenses.unwrap_or_default(),
-                };
-                match launch::run(&rt, spec, client).await {
-                    Step::Sent {
-                        choice,
-                        notices,
-                        reply,
-                    } => (choice, notices, reply.map_err(|e| e.to_string())),
-                    // The TUI shows checklists from P3.11 on; until then
-                    // such a launch fails (the parked parts are dropped).
-                    Step::Review { addon, .. } => {
-                        (None, Vec::new(), Err(format!("{addon}: review needed")))
-                    }
-                    Step::Failed(why) => (None, Vec::new(), Err(why)),
-                }
-            }
+        let Some(client) = client else {
+            let failed = Err(format!("{host}: not connected"));
+            report(&tx, (id, op, sid), None, Vec::new(), failed).await;
+            return;
         };
-        let done = Launched {
+        let spec = LaunchSpec {
+            op,
+            sid,
+            host,
+            cwd,
+            select,
+            frontend,
+            base,
+            core_lenses: core_lenses.unwrap_or_default(),
+        };
+        let step = launch::run(&edge.rt, spec, client.clone()).await;
+        let pending = Pending {
             id,
             op,
             sid,
-            choice,
-            notices,
-            result,
+            client,
         };
-        let _ = tx.send(HostEvent::Launched(done)).await;
+        settle(&edge, step, pending, &tx).await;
     });
+}
+
+/// Where a launch got to: sent or failed is reported; a review parks it
+/// and shows the checklist (one the addon cannot show is skipped).
+async fn settle(edge: &Edge, mut step: Step, pending: Pending, tx: &mpsc::Sender<HostEvent>) {
+    let key = (pending.id, pending.op, pending.sid);
+    let (choice, notices, result) = loop {
+        match step {
+            Step::Sent {
+                choice,
+                notices,
+                reply,
+            } => break (choice, notices, reply.map_err(|e| e.to_string())),
+            Step::Failed(why) => break (None, Vec::new(), Err(why)),
+            Step::Review {
+                addon,
+                checklist,
+                parked,
+                ..
+            } => {
+                let Some(shown) = checklist_of(edge, addon, &checklist) else {
+                    let client = pending.client.clone();
+                    step = launch::resume(edge, parked, ReviewAnswer::Skip, client).await;
+                    continue;
+                };
+                let waiting = Waiting {
+                    parked,
+                    addon,
+                    checklist,
+                    pending,
+                };
+                if !park(edge, waiting) {
+                    let failed = Err("too many launches wait for a review".to_owned());
+                    break (None, Vec::new(), failed);
+                }
+                let origin = Origin::Launch {
+                    id: key.0,
+                    sid: key.2,
+                };
+                let open = AddonResult::Checklist {
+                    addon,
+                    origin,
+                    checklist: shown,
+                };
+                let _ = tx.send(HostEvent::Addon(open)).await;
+                return;
+            }
+        }
+    };
+    report(tx, key, choice, notices, result).await;
+}
+
+/// Keep `waiting` until its answer; `false` when [`MAX_PARKED`] wait.
+fn park(edge: &Edge, waiting: Waiting) -> bool {
+    let mut parked = edge.parked();
+    if parked.len() >= MAX_PARKED {
+        return false;
+    }
+    parked.insert(waiting.pending.id, waiting);
+    true
+}
+
+/// A launch's outcome, for `App::on_launched`.
+async fn report(
+    tx: &mpsc::Sender<HostEvent>,
+    (id, op, sid): (u64, LaunchOp, SessionId),
+    choice: Option<crate::addon::LaunchChoice>,
+    notices: Vec<String>,
+    result: Result<Msg, String>,
+) {
+    let done = Launched {
+        id,
+        op,
+        sid,
+        choice,
+        notices,
+        result,
+    };
+    let _ = tx.send(HostEvent::Launched(done)).await;
 }
 
 /// Set `[extensions] name = on` in config.toml off the UI thread; the
@@ -381,7 +635,7 @@ mod tests {
             }),
         };
         let (tx, mut rx) = mpsc::channel(4);
-        launch(call, Mode::Plain, &runtime, &conns, &tx);
+        launch(call, Mode::Plain, &Edge::new(runtime.clone()), &conns, &tx);
         let Some(HostEvent::Launched(done)) = rx.recv().await else {
             panic!("no outcome")
         };
@@ -401,12 +655,204 @@ mod tests {
             host: "far".into(),
             ..launch_call_like(sid)
         };
-        launch(call, Mode::Manager, &runtime, &conns, &tx);
+        launch(
+            call,
+            Mode::Manager,
+            &Edge::new(runtime.clone()),
+            &conns,
+            &tx,
+        );
         let Some(HostEvent::Launched(done)) = rx.recv().await else {
             panic!("no outcome")
         };
         assert_eq!(done.result.unwrap_err(), "far: not connected");
         runtime.shutdown();
+    }
+
+    /// A runtime whose one addon routes every launch and needs checklist
+    /// `setup` (revision 1) reviewed first; a daemon on `local` that
+    /// records the spawns it is sent.
+    async fn reviewing() -> (
+        Arc<TestAddon>,
+        Edge,
+        Connections,
+        mpsc::UnboundedReceiver<Msg>,
+    ) {
+        use crate::addon::test_support::Script;
+        use crate::addon::{LaunchChoice, LaunchPart, Routing};
+        use crate::app::addons::test_support::{fake_host, next_request, reply};
+        let checklist = Checklist {
+            id: "setup".into(),
+            revision: "1".into(),
+            title: "Set up".into(),
+            intro: String::new(),
+            items: Vec::new(),
+        };
+        let choice = LaunchChoice {
+            addon: "route".into(),
+            option: "work".into(),
+            flags: Vec::new(),
+        };
+        let part = LaunchPart {
+            env: vec![("R".into(), "r".into())],
+            ..LaunchPart::default()
+        };
+        let route = Arc::new(
+            TestAddon::new("route")
+                .routing(Ok(Routing::Required(choice)))
+                .prepare(Script::Review(part))
+                .checklist(checklist),
+        );
+        let addons = Arc::new(Addons::new(vec![route.clone() as Arc<dyn Addon>]).unwrap());
+        let opts = RuntimeOptions {
+            config_path: "/nonexistent/claudio/config.toml".into(),
+            watch_config: false,
+        };
+        let (runtime, _rx) = AddonRuntime::start(addons, opts);
+        let (seen_tx, seen) = mpsc::unbounded_channel();
+        let client = fake_host(&[], move |mut s| async move {
+            while let Some((req, msg)) = next_request(&mut s).await {
+                if let Msg::Spawn(spec) = &msg {
+                    let id = spec.id;
+                    let _ = seen_tx.send(msg);
+                    reply(&mut s, req, Msg::Spawned { id, pid: None }).await;
+                }
+            }
+        })
+        .await;
+        (
+            route,
+            Edge::new(runtime),
+            Connections::with_local(client),
+            seen,
+        )
+    }
+
+    /// Launch `id`, a new session; its review's checklist comes back.
+    async fn parked_launch(
+        edge: &Edge,
+        conns: &Connections,
+        id: u64,
+        tx: &mpsc::Sender<HostEvent>,
+        rx: &mut mpsc::Receiver<HostEvent>,
+    ) -> SessionId {
+        let sid = uuid::Uuid::new_v4();
+        let call = LaunchCall {
+            id,
+            sid,
+            select: crate::addon::LaunchSelect::default(),
+            ..launch_call_like(sid)
+        };
+        launch(call, Mode::Manager, edge, conns, tx);
+        match rx.recv().await {
+            Some(HostEvent::Addon(AddonResult::Checklist {
+                addon,
+                origin,
+                checklist,
+            })) => {
+                assert_eq!((addon, checklist.id.as_str()), ("route", "setup"));
+                assert_eq!(origin, Origin::Launch { id, sid });
+            }
+            other => panic!("no checklist: {:?}", other.is_some()),
+        }
+        assert_eq!(edge.parked().len(), 1);
+        sid
+    }
+
+    async fn launched(rx: &mut mpsc::Receiver<HostEvent>) -> Launched {
+        match rx.recv().await {
+            Some(HostEvent::Launched(done)) => done,
+            other => panic!("no outcome: {:?}", other.is_some()),
+        }
+    }
+
+    /// The 25 s budget stops while the checklist is open: the member takes
+    /// longer than that, and the saved answer still launches the session.
+    #[tokio::test(start_paused = true)]
+    async fn a_review_stops_the_clock_and_enter_saves_then_launches() {
+        let (route, edge, conns, mut seen) = reviewing().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let sid = parked_launch(&edge, &conns, 1, &tx, &mut rx).await;
+        // Longer than the whole budget (the client's own keepalive bounds
+        // how long a paused test may sleep).
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert!(seen.try_recv().is_err(), "nothing sent while it waits");
+        let save = ReviewAnswer::Save(ChecklistAnswer::Save {
+            revision: "1".into(),
+            off: Vec::new(),
+        });
+        answer_review(&edge, 1, save, &tx);
+        let done = launched(&mut rx).await;
+        assert_eq!((done.id, done.sid), (1, sid));
+        assert!(done.result.is_ok(), "{:?}", done.result);
+        assert!(route.saved());
+        let Some(Msg::Spawn(spec)) = seen.recv().await else {
+            panic!("no spawn")
+        };
+        assert_eq!(spec.env, [("R".to_owned(), "r".to_owned())]);
+        assert!(edge.parked().is_empty());
+        // A second answer to the same launch is dropped.
+        answer_review(&edge, 1, ReviewAnswer::Skip, &tx);
+        edge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn skip_launches_without_saving_and_the_next_launch_asks_again() {
+        let (route, edge, conns, mut seen) = reviewing().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        parked_launch(&edge, &conns, 1, &tx, &mut rx).await;
+        answer_review(&edge, 1, ReviewAnswer::Skip, &tx);
+        assert!(launched(&mut rx).await.result.is_ok());
+        assert!(!route.saved());
+        assert!(seen.recv().await.is_some());
+        parked_launch(&edge, &conns, 2, &tx, &mut rx).await;
+        edge.shutdown();
+        assert!(edge.parked().is_empty(), "dropped at exit");
+    }
+
+    #[tokio::test]
+    async fn esc_cancels_the_launch_and_nothing_is_sent() {
+        let (route, edge, conns, mut seen) = reviewing().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        parked_launch(&edge, &conns, 1, &tx, &mut rx).await;
+        answer_review(&edge, 1, ReviewAnswer::Cancel, &tx);
+        assert_eq!(launched(&mut rx).await.result.unwrap_err(), "cancelled");
+        assert!(!route.saved());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(seen.try_recv().is_err(), "nothing sent");
+        edge.shutdown();
+    }
+
+    #[tokio::test]
+    async fn at_most_eight_launches_wait_for_a_review() {
+        let (_route, edge, conns, _seen) = reviewing().await;
+        let (tx, mut rx) = mpsc::channel(32);
+        for id in 1..=MAX_PARKED as u64 {
+            let sid = uuid::Uuid::new_v4();
+            let call = LaunchCall {
+                id,
+                sid,
+                select: crate::addon::LaunchSelect::default(),
+                ..launch_call_like(sid)
+            };
+            launch(call, Mode::Manager, &edge, &conns, &tx);
+            assert!(matches!(rx.recv().await, Some(HostEvent::Addon(_))));
+        }
+        let sid = uuid::Uuid::new_v4();
+        let call = LaunchCall {
+            id: 99,
+            sid,
+            select: crate::addon::LaunchSelect::default(),
+            ..launch_call_like(sid)
+        };
+        launch(call, Mode::Manager, &edge, &conns, &tx);
+        let done = launched(&mut rx).await;
+        assert_eq!(done.id, 99);
+        assert_eq!(
+            done.result.unwrap_err(),
+            "too many launches wait for a review"
+        );
+        edge.shutdown();
     }
 
     fn launch_call_like(sid: crate::proto::SessionId) -> LaunchCall {

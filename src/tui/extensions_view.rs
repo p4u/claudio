@@ -4,7 +4,8 @@
 //! the selected one's description, actions and lenses (for a plugin, its
 //! manifest and its state on each host). Space turns it on or off, as
 //! Enter does on every row but a plugin's, where Enter opens its setup
-//! screen (`plugin_setup.rs`); `r` fetches the plugin lists again.
+//! (the addon's checklist, `checklist.rs`); `r` fetches the plugin lists
+//! again.
 //!
 //! Pure, like `app.rs`: a toggle changes the registry at once and returns
 //! [`Effect::SaveExtension`] (the event loop writes `config.toml`) and, for
@@ -251,6 +252,25 @@ impl App {
             Outcome::Refresh => self.refresh_plugins(),
         }
         self.redraw = true;
+    }
+
+    /// What the extensions screen says about plugin `name` of `profile`.
+    pub(super) fn plugin_details(
+        &self,
+        name: &str,
+        profile: &str,
+        refused: Option<&str>,
+    ) -> Vec<String> {
+        self.bridge()
+            .map(|b| b.plugin_details(name, profile, refused, self.now))
+            .unwrap_or_default()
+    }
+
+    /// `r` on the extensions screen: every list, manifest and host answer
+    /// again.
+    pub(super) fn refresh_plugins(&mut self) {
+        self.emit(Effect::Bridge(BridgeCall::Refresh));
+        self.notify("refreshing plugins…");
     }
 
     /// Turn extension `index` on or off: the registry at once (the leader,

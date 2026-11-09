@@ -15,6 +15,9 @@ use super::runner::Runner;
 use super::{Vocdoni, NAME};
 use crate::addon::Addons;
 
+/// The addon whose checklists the extensions screen's plugin rows open.
+pub const ADDON: &str = NAME;
+
 /// A handle on the registered Vocdoni addon's runner.
 #[derive(Clone)]
 pub struct Bridge(pub(super) Arc<Runner>);

@@ -67,9 +67,9 @@ pub enum Modal {
     Picker(Box<Picker>),
     /// The extensions screen (Alt+i, see `extensions_view.rs`).
     ExtensionsMenu(ExtensionsView),
-    /// A plugin's setup screen (see `plugin_setup.rs`): swallows every
-    /// key, like `Confirm`.
-    PluginSetup(Box<super::plugin_setup::PluginSetup>),
+    /// An addon's checklist (see `checklist.rs`): swallows every key,
+    /// like `Confirm`.
+    Checklist(Box<super::checklist::ChecklistView>),
 }
 
 impl Modal {
@@ -405,7 +405,7 @@ impl App {
             Modal::ActionInput(_) => self.action_input_key(&key),
             Modal::Picker(_) => self.picker_key(&key),
             Modal::ExtensionsMenu(_) => self.extensions_menu_key(&key),
-            Modal::PluginSetup(_) => self.plugin_setup_key(&key),
+            Modal::Checklist(_) => self.checklist_key(&key),
         }
     }
 
@@ -476,7 +476,7 @@ impl App {
                 | Modal::Leader
                 | Modal::Picker(_)
                 | Modal::ExtensionsMenu(_)
-                | Modal::PluginSetup(_),
+                | Modal::Checklist(_),
             ) => {}
             Some(Modal::ActionInput(input)) => {
                 let line = text.lines().next().unwrap_or("");

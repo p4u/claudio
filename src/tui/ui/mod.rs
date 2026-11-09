@@ -11,11 +11,11 @@ use ratatui::Frame;
 
 use crate::proto::{SessionKind, SessionState};
 
+mod checklist;
 mod confirm;
 mod extensions;
 mod git;
 mod leader;
-mod plugin_setup;
 mod reader;
 mod stats;
 mod status;
@@ -108,7 +108,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::ActionInput(input)) => leader::draw_action_input(frame, input),
         Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
         Some(Modal::ExtensionsMenu(view)) => extensions::draw_extensions(frame, app, view),
-        Some(Modal::PluginSetup(setup)) => plugin_setup::draw_plugin_setup(frame, setup),
+        Some(Modal::Checklist(view)) => checklist::draw_checklist(frame, view),
         None => {}
     }
 }

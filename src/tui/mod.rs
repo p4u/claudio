@@ -4,9 +4,11 @@
 //! connections (local + remote) and runs the event loop. State and update
 //! logic live in [`app`], rendering in [`ui`].
 
+mod addon_calls;
 mod addon_runner;
 pub mod app;
 mod builtins;
+mod checklist;
 mod claude_update;
 mod confirm;
 mod extensions_view;
@@ -23,7 +25,6 @@ mod keymap;
 mod leader;
 mod notifications;
 mod plain;
-pub(crate) mod plugin_setup;
 mod proxy_glue;
 mod proxy_state;
 mod reader;
@@ -75,7 +76,6 @@ use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::{Addons, LaunchSelect};
 use crate::addons::vocdoni::proxy;
-use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
@@ -478,6 +478,8 @@ enum HostEvent {
     Notice(String),
     /// A launch through the composer ended (`addon_runner::launch`).
     Launched(app::Launched),
+    /// What an addon call's task found (`addon_runner`).
+    Addon(app::AddonResult),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -712,12 +714,7 @@ async fn event_loop(
                     | HostEvent::SessionCredential { .. }
                     | HostEvent::SubscriptionSwitch { .. }),
                 ) => app.on_proxy_event(ev),
-                Some(HostEvent::UpgradeAvailable(tag)) => {
-                    if let Some(t) = tag {
-                        app.upgrade_notice = Some(t);
-                        app.redraw = true;
-                    }
-                }
+                Some(HostEvent::UpgradeAvailable(tag)) => app.on_upgrade_available(tag),
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
                     Ok(answers) => app.on_answers_rendered(gen, id, answers),
@@ -735,6 +732,7 @@ async fn event_loop(
                 Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
                 Some(HostEvent::Notice(text)) => app.notify(text),
                 Some(HostEvent::Launched(done)) => app.on_launched(done),
+                Some(HostEvent::Addon(result)) => app.on_addon(result),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
@@ -761,7 +759,7 @@ fn run_effect(
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
     ext_host: &extensions::host::ExtensionHost,
-    runtime: &AddonRuntime,
+    runtime: &addon_runner::Edge,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -856,7 +854,7 @@ fn run_effect(
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
-        Effect::Bridge(call) => addon_runner::bridge(call, runtime),
+        e @ (Effect::Bridge(_) | Effect::Addon(_)) => addon_runner::run(e, app, runtime, ev_tx),
         Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.

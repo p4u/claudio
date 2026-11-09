@@ -11,6 +11,8 @@
 //! - `interaction`   – Modal; terminal input, wizard routing, daemon events
 //!   and request replies
 //! - `confirm`       – the generic multiple-choice prompt
+//! - `checklist`     – addon checklists (a plugin's setup, a review)
+//! - `addon_calls`   – what `App` asks of the addons, and their answers
 //! - `claude_update` – keeping claude up to date on every host
 //! - `stats_view`    – the proxy stats popup (Alt+s)
 //! - `git_app`       – the history viewer's glue (its state is `git_view`)
@@ -34,6 +36,7 @@ use crate::addons::vocdoni::proxy::stats::Window;
 use crate::app::state::{ClientState, KillTombstone};
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
+pub use super::addon_calls::{AddonCall, AddonResult};
 pub use super::interaction::Modal;
 pub use super::notifications::Notice;
 pub use super::proxy_state::ProxyStatus;
@@ -158,12 +161,14 @@ pub enum Effect {
         id: SessionId,
         answers: Vec<crate::proto::Answer>,
     },
-    /// A call into the Vocdoni addon's plugin state (`addon_runner::bridge`).
+    /// A call into the Vocdoni addon's plugin state (`addon_runner::run`).
     Bridge(BridgeCall),
+    /// A call into an addon (`addon_runner::run`).
+    Addon(AddonCall),
 }
 
-/// What the setup screen and the extensions screen ask of the Vocdoni
-/// addon's plugin state (temporary: P3.11 and P3.13 replace them).
+/// What the extensions screen asks of the Vocdoni addon's plugin state
+/// (temporary: P3.13 replaces them).
 #[derive(Debug, Clone, PartialEq)]
 pub enum BridgeCall {
     /// Write the member's choices for a plugin and ask every host again.
@@ -177,15 +182,6 @@ pub enum BridgeCall {
     SetEnabled { name: String, on: bool },
     /// `r`: every list, manifest and host answer again.
     Refresh,
-}
-
-/// What the addon runtime tells `App` (`addon_runner::on_out`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum AddonResult {
-    /// The addon's data changed: re-read what is shown of it.
-    Changed { addon: &'static str },
-    /// Every Launch addon's options, cleaned, in registry order (F11).
-    Options(Vec<(&'static str, LaunchOption)>),
 }
 
 /// A launch for the event loop's runner (`addon_runner::launch`). It holds
@@ -356,7 +352,7 @@ pub struct App {
     pub(super) claude_checked: HashSet<String>,
     /// Hosts where an install of claude is under way.
     pub(super) claude_installing: HashSet<String>,
-    /// Prompts and plugin setup screens waiting for the open modal to close.
+    /// Prompts and checklists waiting for the open modal to close.
     pub(super) confirms: VecDeque<super::confirm::Queued>,
     /// The SSH hosts the wizard offers: recently used ones, then
     /// `~/.ssh/config` aliases.

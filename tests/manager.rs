@@ -3434,6 +3434,118 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     tui.quit(WAIT);
 }
 
+/// The wizard's host and directory steps for `dir`, without waiting for
+/// the session (a review may come first).
+fn wizard_enter_dir(tui: &mut TuiProcess, dir: &std::path::Path) {
+    tui.send_keys(ENTER);
+    thread::sleep(Duration::from_millis(80));
+    tui.send_paste(dir.to_str().expect("UTF-8 dir"));
+    thread::sleep(Duration::from_millis(50));
+    tui.send_keys(ENTER);
+}
+
+/// The first-sight offer put off (Esc), a launch still reviews the unsaved
+/// plugin: its checklist opens before the session starts, `s` skips it for
+/// that launch (the session starts without the plugin's secret or flags),
+/// and the next launch asks again; Esc then cancels that launch and its tab.
+#[test]
+fn test_a_launch_reviews_an_unsaved_plugin_and_skip_starts_without_it() {
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude(&h, &dumps);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(&claude_config).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+        cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+        cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    tui.wait_for("Esc later", Region::Screen, WAIT);
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Set up vocdoni-test", Region::Screen), WAIT);
+
+    tui.send_keys(ALT_N);
+    wizard_enter_dir(&mut tui, &h.dirs[0]);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    tui.wait_for("s skip · Esc cancel", Region::Screen, WAIT);
+    assert!(
+        !dumps.join("launches/0").exists(),
+        "nothing starts before the review"
+    );
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(b"s");
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(
+        !argv.iter().any(|a| a == "--agents" || a == "--mcp-config"),
+        "{argv:?}"
+    );
+    assert!(
+        !env.contains(PLUGIN_KEY),
+        "skipped: no plugin secret: {env}"
+    );
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap_or_default();
+    assert!(!config.contains("[plugins."), "nothing saved: {config}");
+
+    // The next launch asks again; Esc cancels it, and its tab goes.
+    tui.send_keys(ALT_N);
+    wizard_enter_dir(&mut tui, &h.dirs[1]);
+    tui.wait_for("s skip · Esc cancel", Region::Screen, WAIT);
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ESC);
+    tui.wait_for("launch cancelled", Region::StatusBar, WAIT);
+    thread::sleep(Duration::from_millis(500));
+    assert!(!dumps.join("launches/1").exists(), "nothing started");
+    tui.quit(WAIT);
+}
+
+/// `--plain` with a plugin never set up: its checklist comes before the
+/// session starts; Enter saves it and the session gets the plugin.
+#[test]
+fn test_plain_reviews_before_starting() {
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude(&h, &dumps);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(&claude_config).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut cmd = CommandBuilder::new(BINARY);
+    cmd.arg("--plain");
+    cmd.cwd(&h.dirs[0]);
+    h.apply(&mut cmd);
+    cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+    cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+    cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+    cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    let mut tui = TuiProcess::spawn(cmd);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, DAEMON_WAIT);
+    tui.wait_for(
+        "[x] kb (http https://kb.example.org/mcp)",
+        Region::Screen,
+        WAIT,
+    );
+    assert!(
+        !dumps.join("launches/0").exists(),
+        "nothing starts before the review"
+    );
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ENTER);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Screen, WAIT);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(env.contains(&format!("{PLUGIN_KEY}=s3cret")), "{env}");
+    let mcp = flag_value(&argv, "--mcp-config").expect("--mcp-config");
+    assert!(mcp.contains("Bearer ${VOCDONI_TEST_TOKEN}"), "{mcp}");
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains(&format!("[plugins.{PLUGIN}]")), "{config}");
+    drop(tui);
+}
+
 /// A daemon of the previous release (no `addon:vocdoni`): a new client
 /// starts the session through the proxy without the plugins, and says why
 /// (spec "Mixed versions", row 2; AC8). The old daemon's own scrub drops
