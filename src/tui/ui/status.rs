@@ -142,8 +142,11 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
     if v.created_at > 0 && app.now >= v.created_at {
         segments.push(vec![dim(fmt_age(app.now.saturating_sub(v.created_at)))]);
     }
-    // A session no addon routes says so; an addon's route is its segment.
-    if v.launch.is_none() {
+    // A session no addon routes says so (or that its route is unknown
+    // here); an addon's route is its segment.
+    if v.unknown.is_some() {
+        segments.push(vec![dim("route unknown")]);
+    } else if v.launch.is_none() {
         segments.push(vec![dim("direct")]);
     }
     let line_one = addon_segments(app, v).filter(|s| s.priority < LINE_TWO);
@@ -675,6 +678,9 @@ mod tests {
         app.sessions[0].launch = None;
         app.segments.clear();
         assert_eq!(line(&app), "/srv · opus-5-5[1m] · idle · direct");
+        // One started elsewhere is not called direct (R19).
+        app.sessions[0].unknown = Some(crate::tui::sessions::UnknownRoute::Foreign);
+        assert_eq!(line(&app), "/srv · opus-5-5[1m] · idle · route unknown");
     }
 
     // ── gauges ───────────────────────────────────────────────────────────────

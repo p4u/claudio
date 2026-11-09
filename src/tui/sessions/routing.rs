@@ -2,18 +2,29 @@
 //! route, its Enter, and a restart's or recovery's select (`impl App`).
 
 use crate::addon::LaunchSelect;
+use crate::proto::SessionKind;
 
-use super::SessionView;
+use super::{SessionView, UnknownRoute};
 use crate::tui::app::App;
+
+/// Why a session started elsewhere is not launched again here (R19).
+const FOREIGN: &str = "started elsewhere: restart it where it was started, or start a new session";
 
 impl App {
     /// How session `v` is launched again (a restart, a recovery): as it was
-    /// (a run's switches added), or `Err` for a saved routing no addon
-    /// adopts, which never becomes direct (F4).
+    /// (a run's switches added), or `Err` when its routing is unknown here
+    /// (started elsewhere, or a saved routing no addon adopts), which never
+    /// becomes direct (R19, F4).
     pub(in crate::tui) fn relaunch_select(&self, v: &SessionView) -> Result<LaunchSelect, String> {
-        if let Some(legacy) = &v.unadopted {
-            let why = crate::app::launch::adopt_legacy(&self.addons, legacy).err();
-            return Err(why.unwrap_or_else(|| "its saved routing is unknown".to_owned()));
+        match &v.unknown {
+            // A terminal skips the addons: it has no routing to know.
+            _ if v.kind == SessionKind::Shell => return Ok(LaunchSelect::of(None)),
+            Some(UnknownRoute::Foreign) => return Err(FOREIGN.to_owned()),
+            Some(UnknownRoute::Unadopted(legacy)) => {
+                let why = crate::app::launch::adopt_legacy(&self.addons, legacy).err();
+                return Err(why.unwrap_or_else(|| "its saved routing is unknown".to_owned()));
+            }
+            None => {}
         }
         let mut select = LaunchSelect::of(v.launch.as_ref());
         if v.launch.is_some() {

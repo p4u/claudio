@@ -109,6 +109,11 @@ pub struct SavedSession {
     /// state.json without it reads as gateway, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_party: bool,
+    /// Known only from its daemon (another front-end started it): its
+    /// routing is unknown here, so a restart or recovery refuses rather
+    /// than start it direct (R19). Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub route_unknown: bool,
     /// A terminal tab never resumes and never gets proxy env.
     #[serde(default)]
     pub kind: SessionKind,
@@ -227,6 +232,9 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
             created_at: info.created_at,
             proxy: saved.and_then(|s| s.proxy.clone()),
             first_party: saved.is_some_and(|s| s.first_party),
+            // A session state.json does not know was started elsewhere.
+            route_unknown: info.kind == SessionKind::Claude
+                && saved.is_none_or(|s| s.route_unknown),
             // The daemon's journal is authoritative.
             kind: info.kind,
         },
@@ -269,6 +277,7 @@ mod tests {
             created_at: 1,
             proxy: None,
             first_party: false,
+            route_unknown: false,
             kind: SessionKind::Claude,
         }
     }

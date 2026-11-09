@@ -186,7 +186,7 @@ Gauges turn yellow above 60% and red above 85%. A narrow terminal drops whole se
 
 ### Restart a session (`Alt+e`)
 
-`Alt+e` restarts the active session in its tab. `r` restarts claude and resumes the same conversation, which picks up a claude update or proxy change or unsticks a wedged process. `n` starts a new conversation in the same directory. In a terminal tab it restarts the shell.
+`Alt+e` restarts the active session in its tab. `r` restarts claude and resumes the same conversation, which picks up a claude update or proxy change or unsticks a wedged process. `n` starts a new conversation in the same directory. In a terminal tab it restarts the shell. A session started from another window (the web UI, or a manager with its own saved state) has a route this one does not know: `Alt+e` refuses rather than restart it without its proxy, and its status bar says `route unknown`. Restart it where it was started, or start a new session.
 
 ### Proxy stats (`Alt+s`)
 

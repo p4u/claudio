@@ -140,6 +140,11 @@ flags }` (`LaunchSelect::of`). Each addon's `resolve` answers:
 - `Err(message)`: an unknown or unusable choice of this addon (a profile that no longer
   exists). The launch fails with the message; it never becomes a direct session.
 
+A front-end knows a session's routing as direct, a choice, or unknown. A session it knows only
+from its daemon (another front-end started it, and its own state file has no entry) is unknown:
+a respawn or recovery of it refuses with a notice and is never launched direct, and the state
+file keeps it unknown (`state.json`'s `route_unknown`).
+
 **2. Prepare.** Each addon that is not `Off` gets a `LaunchRequest { op, sid, host, cwd, choice,
 routing, frontend, deferred }` and returns a `LaunchPart`. All addons share one 25 s budget. A
 `Required` addon's error or timeout fails the launch and no `Spawn` is sent; an `Optional` one's

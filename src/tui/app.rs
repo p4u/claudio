@@ -708,7 +708,7 @@ mod tests {
         let live = [info(Some(1), None), info(None, Some("c2"))];
         let saved = ClientState {
             active: Some(live[1].id),
-            ..Default::default()
+            ..test_support::known(&live)
         };
         let mut app = test_support::app();
         app.recover(&saved, &live);
@@ -1022,6 +1022,7 @@ mod tests {
             created_at: 1,
             proxy: Some("work".into()),
             first_party: false,
+            route_unknown: false,
             kind: SessionKind::Claude,
         };
         let mut app = test_support::app();
@@ -1712,6 +1713,7 @@ mod tests {
     fn dormant_terminal_respawns_as_a_shell_without_resume_or_proxy() {
         let mut live = [shell_info(None), info(None, Some("c2"))];
         live[0].claude_session_id = Some("stale".into());
+        let known = test_support::known(&live[1..]).sessions;
         let saved = ClientState {
             sessions: vec![SavedSession {
                 id: live[0].id,
@@ -1722,8 +1724,12 @@ mod tests {
                 created_at: 1,
                 proxy: Some("work".into()),
                 first_party: false,
+                route_unknown: false,
                 kind: SessionKind::Shell,
-            }],
+            }]
+            .into_iter()
+            .chain(known)
+            .collect(),
             ..Default::default()
         };
         let mut app = test_support::app();
@@ -1870,6 +1876,7 @@ mod tests {
             created_at: 1,
             proxy: Some("work".into()),
             first_party: true,
+            route_unknown: false,
             kind: SessionKind::Claude,
         };
         let state = ClientState {
@@ -1906,6 +1913,83 @@ mod tests {
             notice.starts_with("cannot restart: saved proxy work"),
             "{notice}"
         );
+    }
+
+    /// The notice now, or "".
+    fn notice_text(app: &App) -> String {
+        app.notice
+            .as_ref()
+            .map(|n| n.text.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether `effects` launch anything or send a `Spawn`/`Respawn`.
+    fn launches_any(effects: &[Effect]) -> bool {
+        !test_support::launches(effects).is_empty()
+            || requests(effects)
+                .iter()
+                .any(|m| matches!(m, Msg::Spawn(_) | Msg::Respawn(_)))
+    }
+
+    /// R19: a session another client created (a web-started proxied one
+    /// reaches the TUI as `Created` with no routing) is Unknown, never
+    /// direct: a restart refuses, state.json keeps it unknown, and its
+    /// recovery from that state refuses too.
+    #[test]
+    fn a_session_from_another_client_is_never_restarted_direct() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        let other = info(Some(2), Some("c2"));
+        let id = other.id;
+        let event = SessionEvent::Created {
+            info: other.clone(),
+        };
+        app.on_incoming_from("local", Incoming::Event { id, event });
+        let i = app.index_of(id).expect("a tab for it");
+        app.take_effects();
+        app.reset_session(id, false);
+        let effects = app.take_effects();
+        assert!(!launches_any(&effects), "{effects:?}");
+        assert!(
+            notice_text(&app).contains("restart it where it was started"),
+            "{}",
+            notice_text(&app)
+        );
+        assert_eq!(app.sessions[i].launch, None);
+        let saved = serde_json::to_value(app.to_state()).unwrap();
+        let entry = saved["sessions"][i].clone();
+        assert_eq!(entry["route_unknown"], serde_json::json!(true), "{entry}");
+        assert_eq!(entry["proxy"], serde_json::Value::Null, "{entry}");
+
+        // A fresh manager recovering it dormant from that state.json.
+        let state: ClientState = serde_json::from_value(saved).unwrap();
+        let mut app = test_support::app();
+        let dormant = SessionInfo { pid: None, ..other };
+        app.recover(&state, &[dormant]);
+        let effects = app.take_effects();
+        assert!(!launches_any(&effects), "{effects:?}");
+        assert!(
+            notice_text(&app).starts_with("cannot respawn '/srv/app'"),
+            "{}",
+            notice_text(&app)
+        );
+    }
+
+    /// R19: a session only the daemon lists (state.json does not know it)
+    /// is Unknown: its dormant recovery and its restart refuse, never direct.
+    #[test]
+    fn a_session_unknown_to_state_json_is_never_relaunched_direct() {
+        let (dormant, running) = (info(None, Some("c1")), info(Some(2), Some("c2")));
+        let mut app = test_support::app();
+        app.recover(&ClientState::default(), &[dormant, running.clone()]);
+        let effects = app.take_effects();
+        assert!(!launches_any(&effects), "{effects:?}");
+        app.reset_session(running.id, true);
+        let effects = app.take_effects();
+        assert!(!launches_any(&effects), "{effects:?}");
+        let saved = serde_json::to_value(app.to_state()).unwrap();
+        for entry in saved["sessions"].as_array().unwrap() {
+            assert_eq!(entry["route_unknown"], serde_json::json!(true), "{entry}");
+        }
     }
 
     #[test]

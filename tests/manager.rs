@@ -1753,6 +1753,63 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     tui.quit(WAIT);
 }
 
+/// R19: a session another client started (a raw `Spawn` over the daemon
+/// socket, carrying a proxy token as a web-started one would) is unknown
+/// to a manager whose state.json does not have it: its status says so,
+/// Alt+e refuses with a notice and never restarts it direct, and
+/// state.json keeps it unknown.
+#[test]
+fn test_restart_of_a_session_started_elsewhere_never_goes_direct() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("other.env");
+    harness.write_env_recording_fake_claude(&env_file, &["ANTHROPIC_AUTH_TOKEN"], &[]);
+    // The daemon runs; this manager's state.json knows no session.
+    let mut tui = harness.start_tui();
+    tui.quit(WAIT);
+    let reply = harness.daemon_request(serde_json::json!({
+        "op": "spawn",
+        "id": "6d1f6a52-3c55-4a8e-9a39-5d1c0b0e0019",
+        "cwd": harness.dirs[0],
+        "env": [["ANTHROPIC_AUTH_TOKEN", "other-client-token"]],
+        "rows": 24,
+        "cols": 80,
+    }));
+    assert_eq!(reply["op"], "spawned", "the daemon refused the spawn");
+    let proxied = || {
+        fs::read_to_string(&env_file)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l == "ANTHROPIC_AUTH_TOKEN=other-client-token")
+    };
+    let deadline = Instant::now() + WAIT;
+    while !proxied() {
+        assert!(Instant::now() < deadline, "the session never started");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut tui = harness.start_tui();
+    let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(n0, Region::TabBar, WAIT);
+    tui.wait_for("route unknown", Region::StatusBar, WAIT);
+    tui.wait_for("nonce=", Region::Pane, WAIT);
+    let before = current_nonce(&tui);
+    tui.send_keys(ALT_E);
+    tui.wait_for("restart & resume", Region::Screen, WAIT);
+    tui.send_keys(b"r");
+    tui.wait_for("restart it where it was started", Region::StatusBar, WAIT);
+    // Nothing restarted: the same process, still on its proxy token.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(current_nonce(&tui), before);
+    assert!(proxied(), "restarted without its proxy");
+    tui.quit(WAIT);
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(harness.state_json()).unwrap()).unwrap();
+    let entry = &state["sessions"][0];
+    assert_eq!(entry["route_unknown"], true, "{state}");
+    assert!(entry["proxy"].is_null(), "{state}");
+}
+
 // ── Scope guard ───────────────────────────────────────────────────────────────
 
 /// Minimal scope guard: runs `f` when dropped.

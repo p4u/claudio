@@ -103,7 +103,8 @@ pub(crate) fn save(path: &Path, s: &WebState) -> io::Result<()> {
 }
 
 /// What is known of `sid`'s proxy: the web's own record first, then the
-/// TUI's state.json (read only). `None`: nothing is known.
+/// TUI's state.json (read only; an entry the TUI marks as started
+/// elsewhere knows nothing, R19). `None`: nothing is known.
 pub(crate) fn known_proxy(
     web: &WebState,
     tui: &ClientState,
@@ -114,7 +115,7 @@ pub(crate) fn known_proxy(
     }
     tui.sessions
         .iter()
-        .find(|s| s.id == sid)
+        .find(|s| s.id == sid && !s.route_unknown)
         .map(|s| (s.proxy.clone(), s.first_party))
 }
 
@@ -245,6 +246,7 @@ mod tests {
             created_at: 0,
             proxy: Some(proxy.into()),
             first_party: true,
+            route_unknown: false,
             kind: Default::default(),
         };
         let tui = ClientState {
@@ -257,6 +259,19 @@ mod tests {
             Some((Some("tui-b".into()), true))
         );
         assert_eq!(known_proxy(&web, &tui, c), None);
+    }
+
+    /// R19: a session the TUI only knows from its daemon (another client
+    /// started it) is unknown here too, never direct.
+    #[test]
+    fn a_tui_entry_started_elsewhere_is_not_known() {
+        let sid = Uuid::new_v4();
+        let entry = serde_json::json!({
+            "id": sid, "cwd": "/", "host": "local", "route_unknown": true,
+        });
+        let tui: ClientState =
+            serde_json::from_value(serde_json::json!({ "sessions": [entry] })).unwrap();
+        assert_eq!(known_proxy(&WebState::default(), &tui, sid), None);
     }
 
     #[test]

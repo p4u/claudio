@@ -37,12 +37,12 @@ pub struct SessionView {
     /// Mirror of the daemon's screen; fed only while attached.
     pub mirror: Screen,
     pub attached: bool,
-    /// What it was launched with (`None`: direct): an addon's option and
-    /// switches, never a secret. A restart keeps it.
+    /// What it was launched with (`None`: direct, unless `unknown`): an
+    /// addon's option and switches, never a secret. A restart keeps it.
     pub launch: Option<LaunchChoice>,
-    /// A saved pre-addon routing no addon adopts: kept as saved, and its
-    /// launches fail, never direct (F4).
-    pub unadopted: Option<LegacyChoice>,
+    /// Why its routing is unknown here, if it is: its launches then
+    /// refuse, never direct. A routing is direct, a choice, or unknown.
+    pub unknown: Option<UnknownRoute>,
     /// Git branch of the session's cwd, if any.
     pub branch: Option<String>,
     /// Short human-readable model name from the last assistant turn.
@@ -57,6 +57,15 @@ pub struct SessionView {
     pub turns: Option<u32>,
     /// Claude, or a plain terminal tab.
     pub kind: SessionKind,
+}
+
+/// Why a session's routing is unknown to this front-end (R19, F4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnknownRoute {
+    /// A saved pre-addon routing no addon of this build adopts: kept as saved.
+    Unadopted(LegacyChoice),
+    /// Known only from its daemon: another front-end started it.
+    Foreign,
 }
 
 impl SessionView {
@@ -85,7 +94,7 @@ impl SessionView {
             mirror: Screen::new(size.0, size.1),
             attached: false,
             launch: None,
-            unadopted: None,
+            unknown: None,
             branch: None,
             model: None,
             context_tokens: None,
@@ -96,9 +105,10 @@ impl SessionView {
         }
     }
 
-    /// The view of a session `host`'s daemon reports.
+    /// The view of a session `host`'s daemon reports, started elsewhere.
     pub fn from_info(host: &str, info: &SessionInfo, size: (u16, u16)) -> SessionView {
         SessionView {
+            unknown: (info.kind == SessionKind::Claude).then_some(UnknownRoute::Foreign),
             name: info.name.clone(),
             state: info.state,
             title: info.title.clone(),
@@ -118,16 +128,17 @@ impl SessionView {
             proxy: saved.proxy,
             first_party: saved.first_party,
         };
-        let (launch, unadopted) = match crate::app::launch::adopt_legacy(addons, &legacy) {
+        let (launch, unknown) = match crate::app::launch::adopt_legacy(addons, &legacy) {
+            _ if saved.route_unknown => (None, Some(UnknownRoute::Foreign)),
             Ok(choice) => (choice, None),
-            Err(_) => (None, Some(legacy)),
+            Err(_) => (None, Some(UnknownRoute::Unadopted(legacy))),
         };
         SessionView {
             name: saved.name,
             claude_session_id: saved.claude_session_id,
             created_at: saved.created_at,
             launch,
-            unadopted,
+            unknown,
             ..SessionView::new(saved.id, saved.host, saved.cwd, saved.kind, size)
         }
     }
@@ -164,9 +175,9 @@ impl SessionView {
 
     /// The record for state.json; the routing in its pre-addon fields.
     pub fn saved(&self, addons: &Addons) -> SavedSession {
-        let legacy = match &self.unadopted {
-            Some(legacy) => legacy.clone(),
-            None => crate::app::launch::legacy(addons, self.launch.as_ref()),
+        let legacy = match &self.unknown {
+            Some(UnknownRoute::Unadopted(legacy)) => legacy.clone(),
+            _ => crate::app::launch::legacy(addons, self.launch.as_ref()),
         };
         SavedSession {
             id: self.id,
@@ -177,6 +188,7 @@ impl SessionView {
             created_at: self.created_at,
             proxy: legacy.proxy,
             first_party: legacy.first_party,
+            route_unknown: self.unknown == Some(UnknownRoute::Foreign),
             kind: self.kind,
         }
     }

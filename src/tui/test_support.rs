@@ -10,7 +10,7 @@ use crate::addons::vocdoni::bridge::Bridge;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::plugins::state::PluginsFetch;
 use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
-use crate::app::state::ClientState;
+use crate::app::state::{ClientState, SavedSession};
 use crate::proto::{Msg, SessionInfo};
 
 pub use crate::app::test_support::{info, shell_info};
@@ -52,14 +52,38 @@ pub fn app() -> App {
     App::new(config())
 }
 
-/// An app that recovered `live` from the local daemon (and nothing from
-/// state.json), with the effects of that drained. Without sessions, the
-/// wizard is open.
+/// An app that recovered `live` from the local daemon, each one known to
+/// state.json as a direct session this manager started (a session only
+/// the daemon knows is unknown, R19), with the effects of that drained.
+/// Without sessions, the wizard is open.
 pub fn app_with(live: &[SessionInfo]) -> App {
     let mut app = app();
-    app.recover(&ClientState::default(), live);
+    app.recover(&known(live), live);
     app.take_effects();
     app
+}
+
+/// state.json knowing each of `live` as a direct session started here.
+pub fn known(live: &[SessionInfo]) -> ClientState {
+    let sessions = live
+        .iter()
+        .map(|info| SavedSession {
+            id: info.id,
+            name: info.name.clone(),
+            cwd: info.cwd.clone(),
+            host: "local".to_owned(),
+            claude_session_id: info.claude_session_id.clone(),
+            created_at: info.created_at,
+            proxy: None,
+            first_party: false,
+            route_unknown: false,
+            kind: info.kind,
+        })
+        .collect();
+    ClientState {
+        sessions,
+        ..ClientState::default()
+    }
 }
 
 /// A key press with `mods`, as the terminal reports it.
