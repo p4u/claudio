@@ -146,6 +146,8 @@ pub(crate) struct Inner {
     /// Serialises this runtime's config edits (the file's own lock is
     /// process-wide, in `config_edit`).
     edit: tokio::sync::Mutex<()>,
+    /// The addons have started ([`AddonRuntime::started`]).
+    started: tokio::sync::watch::Sender<bool>,
 }
 
 impl AddonRuntime {
@@ -177,9 +179,19 @@ impl AddonRuntime {
             outbox: Arc::clone(&outbox),
             events,
             edit: tokio::sync::Mutex::new(()),
+            started: tokio::sync::watch::channel(false).0,
         });
         events::start(&inner, rx);
         (AddonRuntime { inner }, RuntimeRx::new(outbox))
+    }
+
+    /// Once the addons have started: `Started` delivered and every task an
+    /// addon spawned while handling it ended (an addon reads its state off
+    /// the executor there; a launch resolves after it). Pending until then,
+    /// and forever after a shutdown before it: callers bound the wait.
+    pub async fn started(&self) {
+        let mut started = self.inner.started.subscribe();
+        let _ = started.wait_for(|s| *s).await;
     }
 
     /// The addons this runtime runs.

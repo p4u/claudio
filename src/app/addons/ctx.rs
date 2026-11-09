@@ -52,6 +52,8 @@ impl AddonCtx for Ctx {
             return;
         };
         let (limit, timeout) = (inner.limits.tasks, inner.limits.task_timeout);
+        // A task of the addon's start holds the start's guard until it ends.
+        let start = super::events::start_guard();
         let mut tasks = inner.tasks();
         if tasks.stopped {
             return;
@@ -68,6 +70,7 @@ impl AddonCtx for Ctx {
         }
         let addon = self.addon;
         let run = async move {
+            let _start = start;
             if tokio::time::timeout(timeout, task).await.is_err() {
                 tracing::warn!(addon, "addon task timed out");
             }

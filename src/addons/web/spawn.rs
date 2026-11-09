@@ -254,6 +254,7 @@ pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<Value,
     check_spawn(&req)?;
     let hub = &ctx.hub;
     let (client, _) = hub.host_client(&req.host).await?;
+    launch::addons_started(&ctx.runtime).await;
     let (select, deferred) = how_of(ctx, &req)?;
     let args = req
         .resume

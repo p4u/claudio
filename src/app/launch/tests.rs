@@ -641,3 +641,32 @@ fn split_flags_consumes_leading_addon_flags_in_any_order() {
         "launch flags pick two different routes"
     );
 }
+
+/// A launch right after the runtime starts (a `--plain` session, the web's
+/// first spawn) resolves once the addons' start is done: the tasks an addon
+/// spawned for `Started` read its state off the executor, and `resolve`
+/// reads it without I/O.
+#[tokio::test]
+async fn a_launch_at_the_start_resolves_after_the_addons_start() {
+    let addon = Arc::new(
+        TestAddon::new("route")
+            .loads_at_start(Duration::from_millis(300))
+            .routing(Ok(Routing::Optional)),
+    );
+    let (rt, _rx) = runtime(vec![addon.clone() as Arc<dyn Addon>]);
+    let (client, sent) = daemon().await;
+    let step = run(&rt, spec(LaunchOp::New, LaunchSelect::default()), client).await;
+    assert!(matches!(step, Step::Sent { .. }), "{step:?}");
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    let calls = addon.calls();
+    let started = calls.iter().position(|c| c == "event Started");
+    let resolved = calls.iter().position(|c| c.starts_with("resolve"));
+    assert!(started.is_some() && started < resolved, "{calls:?}");
+    // Started once: a later launch does not wait again.
+    let (client, _) = daemon().await;
+    let begun = std::time::Instant::now();
+    let step = run(&rt, spec(LaunchOp::New, LaunchSelect::default()), client).await;
+    assert!(matches!(step, Step::Sent { .. }), "{step:?}");
+    assert!(begun.elapsed() < Duration::from_millis(250));
+    rt.shutdown();
+}

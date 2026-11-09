@@ -46,6 +46,10 @@ pub(crate) struct TestAddon {
     saved: AtomicBool,
     installs: AtomicUsize,
     calls: Mutex<Vec<String>>,
+    /// How long its start's task reads its state, if it has one.
+    start_load: Option<Duration>,
+    /// That task has read it.
+    loaded: Arc<AtomicBool>,
 }
 
 impl TestAddon {
@@ -71,6 +75,8 @@ impl TestAddon {
             saved: AtomicBool::new(false),
             installs: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
+            start_load: None,
+            loaded: Arc::default(),
         }
     }
 
@@ -99,6 +105,14 @@ impl TestAddon {
     /// (and `legacy` the reverse, for its own choices).
     pub fn adopts_legacy(mut self) -> Self {
         self.adopts = true;
+        self.has_launch = true;
+        self
+    }
+
+    /// Has `Launch`, and reads its state at its start: `Started` spawns a
+    /// task that takes `wait`; until it is done, `resolve` fails.
+    pub fn loads_at_start(mut self, wait: Duration) -> Self {
+        self.start_load = Some(wait);
         self.has_launch = true;
         self
     }
@@ -251,8 +265,14 @@ impl Addon for TestAddon {
         self.has_daemon.then_some(self as &dyn DaemonOps)
     }
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
-        let _ = ctx;
         self.record(format!("event {event:?}"));
+        if let (AddonEvent::Started, Some(wait)) = (event, self.start_load) {
+            let loaded = Arc::clone(&self.loaded);
+            ctx.spawn(Box::pin(async move {
+                tokio::time::sleep(wait).await;
+                loaded.store(true, Ordering::SeqCst);
+            }));
+        }
     }
 }
 
@@ -316,6 +336,9 @@ impl Launch for TestAddon {
     fn resolve(&self, select: &LaunchSelect, ctx: &dyn AddonCtx) -> Result<Routing, String> {
         let _ = ctx;
         self.record(format!("resolve {:?}", select.pick));
+        if self.start_load.is_some() && !self.loaded.load(Ordering::SeqCst) {
+            return Err("not started".to_owned());
+        }
         lock(&self.routing).clone()
     }
     fn prepare<'a>(

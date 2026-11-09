@@ -105,7 +105,11 @@ request, config read and edit is attributed to it.
 `HostUp { host, features }`, `HostDown { host }`, `SessionAdded { sid, conversation }`,
 `SessionRemoved { sid }`, `SessionChanged { sid, conversation }` (a new conversation id is how
 `/clear` is seen; focus moves too), `ClaudeInstalled { host }`, `ConfigChanged`, and `Tick` every
-second.
+second. The tasks an addon spawns while it handles `Started` are its start:
+it reads there what `options()` and `resolve()` answer from (its own files, off the executor).
+The runtime has started once they all ended (`AddonRuntime::started`), and a launch waits for
+that, at most 10 s, before it resolves, so a launch at a front-end's start (a `--plain` session,
+the web's first spawn) never resolves on an addon that has not read its state yet.
 
 **Rules for a runner.** `segments()`, `extension_rows()`, `options()`, `checklist()` and
 `resolve()` return at once without I/O: they read a snapshot under a `std::sync::Mutex` that is

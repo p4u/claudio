@@ -2,6 +2,7 @@
 //! (addons' `on_event`, in order, never under a runtime lock), the tick, the
 //! config poll, and the [`Outbox`] behind [`RuntimeRx`].
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -13,6 +14,18 @@ use crate::addon::{AddonCtx, AddonEvent};
 
 /// Notices and offers waiting for the front-end.
 const OUT_QUEUE: usize = 256;
+
+thread_local! {
+    /// Set on the event task's thread while it delivers `Started`: every
+    /// task an addon spawns then carries a clone (`Ctx::spawn`), and the
+    /// runtime has started once the last one is dropped.
+    static STARTING: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+}
+
+/// The start's guard, while `Started` is being delivered on this thread.
+pub(super) fn start_guard() -> Option<mpsc::Sender<()>> {
+    STARTING.with(|s| s.borrow().clone())
+}
 
 /// The runtime's side of [`RuntimeRx`].
 #[derive(Default)]
@@ -124,7 +137,8 @@ pub(super) fn start(inner: &Arc<Inner>, rx: mpsc::Receiver<AddonEvent>) {
     inner.tasks().background.extend(handles);
 }
 
-/// Read config.toml, deliver `Started`, then every event in order.
+/// Read config.toml, deliver `Started` (the runtime has started once the
+/// tasks the addons spawned for it are done), then every event in order.
 async fn deliver_all(inner: Weak<Inner>, mut rx: mpsc::Receiver<AddonEvent>) {
     let Some(path) = inner.upgrade().map(|i| i.opts.config_path.clone()) else {
         return;
@@ -154,19 +168,38 @@ async fn deliver_all(inner: Weak<Inner>, mut rx: mpsc::Receiver<AddonEvent>) {
             })
             .collect()
     };
-    let mut next = Some(AddonEvent::Started);
-    while let Some(event) = match next.take() {
-        Some(event) => Some(event),
-        None => rx.recv().await,
-    } {
+    let Some(strong) = inner.upgrade() else {
+        return;
+    };
+    let (guard, done) = mpsc::channel::<()>(1);
+    STARTING.with(|s| *s.borrow_mut() = Some(guard));
+    deliver(&strong, &ctxs, &AddonEvent::Started);
+    STARTING.with(|s| s.borrow_mut().take());
+    strong.spawn_internal(started_once_done(Arc::downgrade(&strong), done));
+    drop(strong);
+    while let Some(event) = rx.recv().await {
         let Some(strong) = inner.upgrade() else {
             return;
         };
-        for (name, ctx) in &ctxs {
-            if let Some(addon) = strong.addons.get(name) {
-                addon.on_event(&event, ctx);
-            }
+        deliver(&strong, &ctxs, &event);
+    }
+}
+
+/// `event` to every addon, in registry order.
+fn deliver(inner: &Inner, ctxs: &[(String, Arc<dyn AddonCtx>)], event: &AddonEvent) {
+    for (name, ctx) in ctxs {
+        if let Some(addon) = inner.addons.get(name) {
+            addon.on_event(event, ctx);
         }
+    }
+}
+
+/// Once every task spawned while `Started` was delivered has ended (its
+/// guard dropped: done, timed out or aborted), the runtime has started.
+async fn started_once_done(inner: Weak<Inner>, mut done: mpsc::Receiver<()>) {
+    while done.recv().await.is_some() {}
+    if let Some(inner) = inner.upgrade() {
+        inner.started.send_replace(true);
     }
 }
 

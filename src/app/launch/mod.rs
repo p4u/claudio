@@ -33,6 +33,10 @@ pub use review::{resume, Parked, ReviewAnswer};
 /// before addons). The clock stops while a review is open.
 pub const BUDGET: Duration = Duration::from_secs(25);
 
+/// How long a launch waits for the addons' start before it resolves
+/// ([`AddonRuntime::started`]); past it, it resolves on what they have.
+pub const START_WAIT: Duration = Duration::from_secs(10);
+
 /// The most bytes of an addon name quoted from a member's choice.
 const NAME_BYTES: usize = 64;
 
@@ -167,6 +171,13 @@ pub fn legacy(addons: &Addons, choice: Option<&LaunchChoice>) -> LegacyChoice {
         .unwrap_or_default()
 }
 
+/// Until the addons have started, at most [`START_WAIT`]: `resolve` reads
+/// their state without I/O, and a launch at a front-end's start (a
+/// `--plain` session, the web's first spawn) must not resolve before it.
+pub async fn addons_started(rt: &AddonRuntime) {
+    let _ = tokio::time::timeout(START_WAIT, rt.started()).await;
+}
+
 /// Every Launch addon's routing, in registry order, and the launch's
 /// effective choice (the Required addon's). Errors: a `Pick::Option` of no
 /// registered Launch addon, or one that addon did not take; an addon's
@@ -257,6 +268,7 @@ async fn start(
     if !matches!(spec.base, Msg::Spawn(_) | Msg::Respawn(_)) {
         return Step::Failed("only a claude spawn or respawn is launched".to_owned());
     }
+    addons_started(rt).await;
     let (choice, routings) = match resolve(rt, &spec.select) {
         Ok(resolved) => resolved,
         Err(e) => return Step::Failed(e),
