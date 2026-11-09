@@ -140,6 +140,11 @@ flags }` (`LaunchSelect::of`). Each addon's `resolve` answers:
 - `Err(message)`: an unknown or unusable choice of this addon (a profile that no longer
   exists). The launch fails with the message; it never becomes a direct session.
 
+A wizard never turns a pick its options lack into direct. A chosen option they do not list (a
+`--proxy NAME` whose profile is gone, or one that vanished while the wizard was open) is shown
+as unavailable and refused until it comes back or the member picks direct; `Default` without an
+option marked default stays `Default`, for `resolve` to decide.
+
 A front-end knows a session's routing as direct, a choice, or unknown. A session it knows only
 from its daemon (another front-end started it, and its own state file has no entry) is unknown:
 a respawn or recovery of it refuses with a notice and is never launched direct, and the state
