@@ -15,8 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::config::PluginChoices;
+use crate::envmerge::merge_env_pairs;
 use crate::plugins::manifest::Manifest;
-use crate::proto::merge_env_pairs;
 use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
 use crate::proxy::plugins::PluginList;
 

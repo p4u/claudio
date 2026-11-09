@@ -5,4 +5,5 @@
 
 pub mod choices;
 pub mod manifest;
+mod names;
 pub mod state;

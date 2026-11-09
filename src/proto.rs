@@ -654,14 +654,14 @@ impl Msg {
     }
 
     /// `self` with the proxy env added after the plugin env it carries
-    /// ([`merge_env_pairs`]: the proxy wins, no key twice).
+    /// ([`crate::envmerge::merge_env_pairs`]: the proxy wins, no key twice).
     pub fn merge_env(self, proxy: Vec<(String, String)>) -> Msg {
         let plugin = match &self {
             Msg::Spawn(spec) => spec.env.clone(),
             Msg::Respawn(spec) => spec.env.clone(),
             _ => return self,
         };
-        self.with_env(merge_env_pairs(&plugin, proxy))
+        self.with_env(crate::envmerge::merge_env_pairs(&plugin, proxy))
     }
 
     /// `self` with the plugins' flags (`--agents <json>`, `--mcp-config
@@ -1326,25 +1326,6 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// A session's env from the plugins' env (`plugin`, in registry order) and
-/// the proxy's (`proxy`, `proxy::env::session_env`): the plugin pairs whose key the
-/// proxy does not set, the first of a key repeated among plugins, then the
-/// proxy's. The proxy wins, and no key appears twice.
-pub fn merge_env_pairs(
-    plugin: &[(String, String)],
-    proxy: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::with_capacity(plugin.len() + proxy.len());
-    for (k, v) in plugin {
-        let taken = proxy.iter().chain(out.iter()).any(|(p, _)| p == k);
-        if !taken {
-            out.push((k.clone(), v.clone()));
-        }
-    }
-    out.extend(proxy);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,33 +1460,6 @@ mod tests {
             serde_json::from_str::<Msg>(minimal).unwrap(),
             Msg::Manifest { secrets, disabled, .. } if secrets.is_empty() && disabled.is_empty()
         ));
-    }
-
-    #[test]
-    fn merge_puts_plugins_first_and_lets_the_proxy_win() {
-        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        let plugin = [
-            pair("KB_TOKEN", "kb"),
-            pair("API_TIMEOUT_MS", "1"),
-            pair("KB_TOKEN", "x"),
-        ];
-        let proxy = vec![
-            pair("ANTHROPIC_AUTH_TOKEN", "tok"),
-            pair("API_TIMEOUT_MS", "30000"),
-        ];
-        assert_eq!(
-            merge_env_pairs(&plugin, proxy.clone()),
-            [
-                pair("KB_TOKEN", "kb"),
-                pair("ANTHROPIC_AUTH_TOKEN", "tok"),
-                pair("API_TIMEOUT_MS", "30000"),
-            ]
-        );
-        assert_eq!(merge_env_pairs(&[], proxy.clone()), proxy);
-        assert_eq!(
-            merge_env_pairs(&plugin[..1], Vec::new()),
-            [pair("KB_TOKEN", "kb")]
-        );
     }
 
     #[test]

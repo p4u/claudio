@@ -102,7 +102,8 @@ and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
 (`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
 by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
 `version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
-`proto`).
+`proto`) and `envmerge.rs` (`merge_env_pairs`: the rule behind
+`Msg::merge_env`, also used by `plugins::state`).
 
 **`proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
@@ -373,7 +374,7 @@ agents, instructions, env), shared by the client and the daemon: every cap,
 charset and `${NAME}` placeholder rule, item ids (`plugin:<name>@<market>`,
 `mcp:<name>`, `agent:<name>`, `instructions`, `env`), and the renderers
 (`mcp_json`, `agents_json`, checked against 64/32 KiB at parse time).
-Reasons name ids and fields, never values. It also owns `name_ok` and `key_ok`.
+Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok` (their code is `names.rs`).
 - `state.rs` — the pure client-side plugin state: each profile's list (`plugins.json` at
   start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
   plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
