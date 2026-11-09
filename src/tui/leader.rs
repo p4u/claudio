@@ -8,10 +8,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, Effect};
-use super::extensions::protocol::SessionContext;
-use super::extensions::{ActionResult, ListItem, Source, MANAGE_KEY, READER_KEY};
 use super::interaction::Modal;
 use super::reader::ReaderView;
+use crate::app::extensions::protocol::SessionContext;
+use crate::app::extensions::{ActionResult, ListItem, Source, MANAGE_KEY, READER_KEY};
 use crate::proto::{Answer, SessionId, SessionKind};
 use crate::text::sanitize;
 
@@ -401,7 +401,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::extensions::{manifest::Program, ActionDecl, Extension, Registry};
+    use crate::app::extensions::{manifest::Program, ActionDecl, Extension, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
     fn key(c: char) -> crossterm::event::Event {

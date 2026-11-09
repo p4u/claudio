@@ -14,9 +14,9 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::app::{App, Effect, Mode};
-use super::extensions::{ActionDecl, Extension, Source};
 use super::interaction::Modal;
 use super::keymap::Action;
+use crate::app::extensions::{ActionDecl, Extension, Source};
 use crate::proto::LensKind;
 use crate::text::sanitize;
 
@@ -297,9 +297,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::extensions::{manifest::Program, Lens, Registry};
     use crate::proto::Msg;
     use crate::tui::app::ReplyTo;
-    use crate::tui::extensions::{manifest::Program, Lens, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
     /// An app with one session and an external extension `fake` (a tag

@@ -11,6 +11,7 @@
 //!     JSONL, and emit text/json/stream-json.
 
 mod api;
+mod app;
 mod claude;
 mod cli;
 mod client;

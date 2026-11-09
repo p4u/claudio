@@ -21,7 +21,7 @@ use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
 use crate::proxy::plugins::{Plugin, PluginList};
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};
-use super::extensions::Source;
+use crate::app::extensions::Source;
 
 /// `--agents`, `--mcp-config` (the daemon drops them for a claude without).
 const AGENTS: &str = "--agents";

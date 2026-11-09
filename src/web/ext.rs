@@ -11,11 +11,11 @@ use serde_json::{json, Value};
 
 use super::hub::HubHandle;
 use super::plugins::{extensions_changed, notice_event, Plugins};
+use crate::app::extensions::host::ExtensionHost;
+use crate::app::extensions::protocol::SessionContext;
+use crate::app::extensions::{manifest, ActionResult, Extension, Registry, Source};
 use crate::config::Config;
 use crate::proto::{LensKind, SessionExtensions, SessionId};
-use crate::tui::extensions::host::ExtensionHost;
-use crate::tui::extensions::protocol::SessionContext;
-use crate::tui::extensions::{manifest, ActionResult, Extension, Registry, Source};
 
 /// How often config.toml's mtime is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(5);
@@ -359,7 +359,7 @@ fn action_dto(r: &ActionResult) -> Value {
 }
 
 pub(crate) async fn snippets_list() -> Result<Value, String> {
-    use crate::tui::snippets;
+    use crate::app::snippets;
     let list = tokio::task::spawn_blocking(|| snippets::load(&snippets::dir()))
         .await
         .map_err(|_| "cannot read the snippets".to_owned())?
@@ -373,7 +373,7 @@ pub(crate) async fn snippets_list() -> Result<Value, String> {
 
 /// ≤ 64 KiB
 pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<Value, String> {
-    use crate::tui::snippets;
+    use crate::app::snippets;
     if text.len() > SNIPPET_MAX {
         return Err("bad request: text: at most 64 KiB".to_owned());
     }
@@ -395,7 +395,7 @@ pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<
 
 /// Delete the snippet `name` (as `snippets.list` returns it).
 pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
-    use crate::tui::snippets;
+    use crate::app::snippets;
     let r = tokio::task::spawn_blocking(move || snippets::delete(&snippets::dir(), &name))
         .await
         .map_err(|_| "cannot delete the snippet".to_owned())?;
@@ -446,7 +446,7 @@ mod tests {
     fn action_results_nest() {
         let r = ActionResult::List {
             title: "t".into(),
-            items: vec![crate::tui::extensions::ListItem {
+            items: vec![crate::app::extensions::ListItem {
                 label: "a".into(),
                 detail: None,
                 result: ActionResult::Notice { text: "hi".into() },

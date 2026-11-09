@@ -723,7 +723,7 @@ impl App {
             .active_view()
             .filter(|v| v.host == host)
             .map(|v| v.cwd.as_str());
-        let recent = super::state::recent_for_host(&self.recent_dirs, host);
+        let recent = crate::app::state::recent_for_host(&self.recent_dirs, host);
         super::wizard::assemble(active_cwd, recent, &[])
     }
 
@@ -737,7 +737,7 @@ impl App {
             .map(|v| v.cwd.as_str())
             .collect();
         let mut seen = HashSet::new();
-        super::state::recent_for_host(&self.recent_dirs, "local")
+        crate::app::state::recent_for_host(&self.recent_dirs, "local")
             .iter()
             .chain(&self.projects)
             .filter(|d| !open.contains(d.as_str()) && seen.insert(d.as_str()))
@@ -1033,8 +1033,8 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::extensions::Registry;
     use crate::tui::app::AppConfig;
-    use crate::tui::extensions::Registry;
     use crate::tui::test_support::{self, app_with, info, press};
     use crossterm::event::Event;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1233,7 +1233,7 @@ mod tests {
 
     /// A registry with an external extension `keys` (tag lens `keys`).
     fn with_keys(app: &mut App) {
-        use crate::tui::extensions::{manifest::Program, Extension, Lens, Source};
+        use crate::app::extensions::{manifest::Program, Extension, Lens, Source};
         let keys = Extension {
             name: "keys".into(),
             description: String::new(),

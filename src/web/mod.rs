@@ -238,7 +238,7 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         tokio::task::spawn_blocking(move || {
             let cfg = hub::HubConfig {
                 config: crate::config::load(),
-                tui_state: crate::tui::state::ClientState::load(&crate::paths::client_state()),
+                tui_state: crate::app::state::ClientState::load(&crate::paths::client_state()),
                 web: state::load(&state_path),
                 profiles: crate::proxy::resolve::load_proxy_profiles(),
                 state_path,

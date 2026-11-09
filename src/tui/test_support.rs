@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::app::{App, AppConfig, Mode};
 use super::keymap::Keymap;
-use super::state::ClientState;
+use crate::app::state::ClientState;
 use crate::proto::{SessionInfo, SessionKind, SessionState};
 
 /// A manager on a 100×30 terminal with home `/home/u`, the default keys, and

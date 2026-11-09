@@ -570,7 +570,7 @@ impl ExtensionHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::extensions::{Extension, Lens};
+    use crate::app::extensions::{Extension, Lens};
 
     /// A scratch dir with an extension program `prog.sh` (`script`).
     fn program(script: &str) -> (std::path::PathBuf, Program) {

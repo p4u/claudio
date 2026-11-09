@@ -8,8 +8,6 @@ pub mod app;
 mod builtins;
 mod claude_update;
 mod confirm;
-pub(crate) mod connections;
-pub(crate) mod extensions;
 mod extensions_view;
 mod fmt;
 mod git_app;
@@ -25,8 +23,6 @@ mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
-pub(crate) mod snippets;
-pub(crate) mod state;
 pub(crate) mod stats_view;
 
 /// `recent` without the local directories that no longer exist, so the
@@ -71,10 +67,12 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
 
+use crate::app::connections::Connections;
+use crate::app::extensions;
+use crate::app::snippets;
+use crate::app::state::ClientState;
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
-use connections::Connections;
 use plain::PlainStart;
-use state::ClientState;
 
 /// Animation / clock tick.
 const TICK: Duration = Duration::from_millis(250);

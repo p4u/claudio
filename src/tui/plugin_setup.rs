@@ -23,10 +23,10 @@ use crate::plugins::manifest::{Manifest, Section};
 
 use super::app::{App, Effect, Mode};
 use super::confirm::Queued;
-use super::extensions::Source;
 use super::extensions_view::ExtensionsView;
 use super::interaction::Modal;
 use super::plugins::ManifestState;
+use crate::app::extensions::Source;
 
 /// Ticks (250 ms each) during which a first-sight screen ignores keys.
 const ARM_TICKS: u8 = 4;

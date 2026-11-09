@@ -18,12 +18,12 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 use super::hub::{daemon_error, HubEvent, HubHandle};
+use crate::app::extensions::{Registry, Source};
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
 use crate::proto::{retry_secs, Applied, Msg};
 use crate::proxy::api::ApiError;
 use crate::proxy::plugins::{Plugin, PluginList};
-use crate::tui::extensions::{Registry, Source};
 use crate::tui::plugins::{
     reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
 };

@@ -26,6 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::dto;
 use super::input::{self, Decision};
 use super::state::{self, Layout, SessionMeta, WebState};
+use crate::app::connections::Connections;
 use crate::claude::update::{decide, needs_update, short, Decision as Policy};
 use crate::client::{self, Client, Incoming};
 use crate::config::UpdatePolicy;
@@ -35,7 +36,6 @@ use crate::proto::{
     ClaudeInfo, GitStatus, LensItem, Msg, SessionEvent, SessionId, SessionInfo, SessionState,
     Welcome, UPDATE_BUSY,
 };
-use crate::tui::connections::Connections;
 
 pub(crate) type TabId = u64;
 /// The hub's own subscription (an opening prompt), never a real tab.
@@ -548,7 +548,7 @@ pub(crate) struct HubConfig {
     /// web-state.json
     pub state_path: PathBuf,
     /// Read at start, never written.
-    pub tui_state: crate::tui::state::ClientState,
+    pub tui_state: crate::app::state::ClientState,
     pub profiles: (Vec<String>, Option<String>),
     /// web-state.json as read at start (in `spawn_blocking`, by `serve`).
     pub web: WebState,
@@ -978,7 +978,7 @@ type PendingSpawn = (SessionMeta, Option<(PendingPrompt, (u16, u16))>);
 /// The actor's state.
 struct Hub {
     claude: crate::config::ClaudeSection,
-    tui_state: crate::tui::state::ClientState,
+    tui_state: crate::app::state::ClientState,
     profiles: (Vec<String>, Option<String>),
     web: WebState,
     dirty: bool,

@@ -33,8 +33,8 @@ use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
 };
 use super::selection::{Clicks, Selection};
-use super::state::{ClientState, KillTombstone};
 use super::stats_view::{StatsOutcome, StatsView, Window};
+use crate::app::state::{ClientState, KillTombstone};
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
 pub use super::interaction::Modal;
@@ -165,7 +165,7 @@ pub enum Effect {
         extension: String,
         action: String,
         input: Option<String>,
-        session: Option<super::extensions::protocol::SessionContext>,
+        session: Option<crate::app::extensions::protocol::SessionContext>,
     },
     /// Turn external extension `name` on or off in the extension host
     /// (off: its program is stopped, off the UI thread).
@@ -378,7 +378,7 @@ pub struct App {
     pub(super) clicks: Clicks,
     /// The extensions (built-in and external) this client runs with; the
     /// event loop sets the configured ones at start.
-    pub extensions: super::extensions::Registry,
+    pub extensions: crate::app::extensions::Registry,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
     /// The external extensions the extension host disabled after
@@ -474,7 +474,7 @@ impl App {
             copy_on_select: cfg.copy_on_select,
             selection: None,
             clicks: Clicks::default(),
-            extensions: super::extensions::Registry::new(
+            extensions: crate::app::extensions::Registry::new(
                 &Default::default(),
                 latex,
                 Vec::new(),
@@ -911,10 +911,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::SavedSession;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
-    use crate::tui::state::SavedSession;
     use crate::tui::test_support::{self, alt, app_with, info, key, press, shell_info};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
@@ -1658,7 +1658,7 @@ mod tests {
             id,
             ..info(None, None)
         };
-        let merged = crate::tui::state::merge_for_host("local", &saved, &[dormant]);
+        let merged = crate::app::state::merge_for_host("local", &saved, &[dormant]);
         assert_eq!(merged[0].respawn, Some(vec![]));
     }
 
