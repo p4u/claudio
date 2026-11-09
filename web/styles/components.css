@@ -614,6 +614,48 @@ input[type="radio"] { accent-color: var(--accent); }
 .setup-title { color: var(--text-strong); }
 .setup-id { color: var(--text-muted); font-size: var(--fs-xs); margin-left: auto; }
 .setup-starting { margin: 0 0 var(--space-3); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--track-mono-wide); text-transform: uppercase; color: var(--accent); }
+.setup-detail { color: var(--text-muted); font-size: var(--fs-sm); }
+
+/* ---- addon segments (chips), panels and their blocks: tones from the tokens, text nodes only ---- */
+.segments { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; overflow: hidden; }
+.segment { --seg-tone: var(--text-2); --seg-ring: var(--ring-neutral); color: var(--seg-tone); box-shadow: var(--ring) var(--seg-ring); flex: none; }
+.segment[data-tone="ok"] { --seg-tone: var(--tone-ok); --seg-ring: var(--ring-working); }
+.segment[data-tone="warn"] { --seg-tone: var(--tone-warn); --seg-ring: var(--ring-waiting); }
+.segment[data-tone="hot"] { --seg-tone: var(--tone-hot); --seg-ring: var(--ring-error); }
+.segment[data-tone="muted"] { --seg-tone: var(--tone-muted); --seg-ring: var(--ring-stopped); }
+.segment[data-tone="accent"] { --seg-tone: var(--tone-accent); --seg-ring: var(--ring-tone-accent); }
+.dialog.panel-dialog { width: min(920px, calc(100vw - 32px)); }
+.pnl-head { display: flex; align-items: stretch; gap: var(--space-3); flex-wrap: wrap; border-bottom: var(--hair) solid var(--border); margin-bottom: var(--space-3); font-family: var(--font-mono); }
+.pnl-head .icon-btn { align-self: center; }
+.pnl-about { margin: 0 0 var(--space-3); font-size: var(--fs-sm); }
+.pnl-body { display: grid; gap: var(--space-4); min-height: 120px; }
+.pnl-body[data-loading="true"] { opacity: 0.7; }
+.pnl-text { margin: 0; color: var(--text); line-height: 1.5; }
+.pnl-text[data-tone="ok"] { color: var(--tone-ok); }
+.pnl-text[data-tone="warn"] { color: var(--tone-warn); }
+.pnl-text[data-tone="hot"] { color: var(--tone-hot); }
+.pnl-text[data-tone="muted"] { color: var(--tone-muted); }
+.pnl-text[data-tone="accent"] { color: var(--tone-accent); }
+.pnl-kv { margin: 0; display: grid; border-top: var(--hair) solid var(--border); }
+.pnl-table-wrap { overflow-x: auto; }
+.pnl-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); font-family: var(--font-mono); }
+.pnl-table th { text-align: left; color: var(--text-muted); font-size: var(--fs-2xs); letter-spacing: var(--track-mono-wide); text-transform: uppercase; padding: 4px 8px; border-bottom: var(--hair) solid var(--border); white-space: nowrap; }
+.pnl-table td { padding: 4px 8px; border-bottom: var(--hair) solid var(--border); color: var(--text); }
+.pnl-table td:first-child { color: var(--text-strong); }
+.pnl-label { display: flex; justify-content: space-between; gap: var(--space-3); margin-bottom: 6px; color: var(--text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--track-mono-wide); text-transform: uppercase; }
+.pnl-num { color: var(--text-strong); font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: var(--track-mono); }
+.pnl-track { display: block; position: relative; height: 10px; background: var(--gauge-track); border-radius: var(--radius); overflow: hidden; }
+.pnl-fill { display: block; height: 100%; background: var(--gauge-ok); }
+.pnl-gauge[data-level="warn"] .pnl-fill { background: var(--gauge-warn); }
+.pnl-gauge[data-level="hot"] .pnl-fill { background: var(--gauge-hot); }
+.pnl-note { margin: 6px 0 0; color: var(--state-error); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.pnl-bars { display: grid; gap: 4px; }
+.pnl-bar { display: grid; grid-template-columns: 8ch minmax(0, 1fr) 8ch; align-items: center; gap: var(--space-3); font-family: var(--font-mono); font-size: var(--fs-sm); }
+.pnl-bar-l { color: var(--text-muted); }
+.pnl-bar .pnl-num { text-align: right; }
+.pnl-bar .pnl-fill { background: var(--text-faint); border-top: 2px solid var(--accent); box-sizing: border-box; }
+.pnl-foot { align-items: center; }
+.pnl-updated { font-size: var(--fs-xs); }
 
 /* ---- claude toasts: in the one toast stack (.toasts, bottom right) ---- */
 .claude-toast { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); background: var(--surface-2); border: var(--hair) solid var(--border); border-radius: var(--radius); font-family: var(--font-sans); animation: toast-in 0.18s ease-out; }
