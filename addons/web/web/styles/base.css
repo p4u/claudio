@@ -48,6 +48,11 @@ code, kbd, pre, samp { font-family: var(--font-mono); }
 .boot-card h1 { font-family: var(--font-sans); font-size: var(--fs-2xl); letter-spacing: var(--track-display); color: var(--text-strong); margin-bottom: var(--space-3); }
 .boot-card p { font-family: var(--font-sans); color: var(--text-muted); }
 .boot-card code { color: var(--text); background: var(--surface-2); padding: 1px 6px; border-radius: var(--radius); }
+.login { display: grid; gap: var(--space-3); }
+.login h1 { margin-bottom: 0; }
+.login label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: var(--track-mono-wide); text-transform: uppercase; color: var(--text-muted); }
+.login .login-error { min-height: 1.4em; color: var(--state-error); }
+.login .btn { justify-self: start; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
