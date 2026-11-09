@@ -138,7 +138,10 @@ pub async fn poll(base_url: &str, start: &Start, unit: Duration) -> Result<Grant
             continue;
         };
         match resp.status().as_u16() {
-            200 => return resp.json().await.map_err(|_| LoginError::Http(200)),
+            200 => {
+                let granted = super::api::read_json(resp).await;
+                return granted.map_err(|_| LoginError::Http(200));
+            }
             428 => {}
             429 => interval *= 2,
             403 => return Err(LoginError::Denied),

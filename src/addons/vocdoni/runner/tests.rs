@@ -151,6 +151,35 @@ async fn runner_drops_the_cache_on_401() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R21: a list over its caps is refused before it is cached: the cached
+/// list stays as it was.
+#[tokio::test]
+async fn an_over_count_list_is_never_cached() {
+    let dir = std::env::temp_dir().join(format!("claudio-runner-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("plugins.json");
+    let cached = PluginList {
+        profile: "work".into(),
+        fetched_at: 1,
+        plugins: vec![sample("kb")],
+    };
+    cache::save_cache_to(&path, &cached).unwrap();
+    let many: Vec<serde_json::Value> = (0..33)
+        .map(|i| serde_json::json!({"name": format!("p{i}"), "version": "1"}))
+        .collect();
+    let body = serde_json::json!({ "plugins": many }).to_string();
+    let p = Profile {
+        url: crate::addons::vocdoni::test_support::serve_chunked(body).await,
+        token: "t".into(),
+        first_party: false,
+        email: None,
+    };
+    let (fetch, notice) = fetch_list_with("work", &p, &path).await;
+    assert_eq!((fetch, notice), (PluginsFetch::Unreachable, None));
+    assert_eq!(cache::load_cache_from(&path, "work"), Some(cached));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_bridge_finds_the_registered_vocdoni() {
     let addons = Addons::new(crate::addons::all()).unwrap();

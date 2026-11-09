@@ -328,6 +328,59 @@ pub(crate) async fn serve(body: &'static [u8]) -> (String, Arc<std::sync::atomic
     (format!("http://127.0.0.1:{port}/team.toml"), hits)
 }
 
+/// A loopback proxy that answers every request with a `Content-Length`
+/// of `declared` bytes and then only `{`, keeping the connection open: a
+/// reader that trusts the length waits; one that checks it refuses at once.
+pub(crate) async fn serve_declaring(declared: usize) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {declared}\r\n\r\n{{"
+                );
+                let _ = s.write_all(head.as_bytes()).await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A loopback proxy that answers every request with `body`, sent chunked
+/// (no `Content-Length`) in 16 KiB pieces.
+pub(crate) async fn serve_chunked(body: String) -> String {
+    let body: Arc<Vec<u8>> = Arc::new(body.into_bytes());
+    let router = axum::Router::new().fallback(move || {
+        let body = Arc::clone(&body);
+        async move {
+            let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                body.chunks(16 * 1024).map(|c| Ok(c.to_vec())).collect();
+            let stream = futures::stream::iter(chunks);
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                axum::body::Body::from_stream(stream),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A JSON object of `len` bytes: `fields` (`"k":v,` pairs) and padding in
+/// an unknown field, which a lenient reply type ignores.
+pub(crate) fn padded_json(fields: &str, len: usize) -> String {
+    let head = format!("{{{fields}\"pad\":\"");
+    let tail = "\"}";
+    format!("{head}{}{tail}", "x".repeat(len - head.len() - tail.len()))
+}
+
 pub(crate) fn files_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|rd| {

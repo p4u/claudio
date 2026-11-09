@@ -10,10 +10,19 @@
 use std::time::Duration;
 
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use thiserror::Error;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most bytes of a proxy reply that are read (the config, the plugin
+/// list, stats, …), like a plugin manifest's cap: a larger one is refused
+/// by its `Content-Length`, or while it is read, and never parsed.
+pub const MAX_REPLY_BYTES: usize = 256 * 1024;
+
+/// The most env keys a proxy config may recommend (as a plugin's env).
+pub const MAX_CONFIG_ENV: usize = 64;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -26,6 +35,37 @@ pub enum ApiError {
     /// The proxy returned an unexpected HTTP status.
     #[error("proxy returned {0}")]
     Http(reqwest::StatusCode),
+    /// The reply is over a cap or not the expected JSON; the reason names
+    /// no value.
+    #[error("bad reply from the proxy: {0}")]
+    Reply(String),
+}
+
+/// `resp`'s body as `T`, at most [`MAX_REPLY_BYTES`]: refused by its
+/// `Content-Length`, and while a chunked body is read, before parsing.
+pub async fn read_json<T: DeserializeOwned>(mut resp: reqwest::Response) -> Result<T, ApiError> {
+    let over = || ApiError::Reply(format!("over {} KiB", MAX_REPLY_BYTES / 1024));
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_REPLY_BYTES as u64)
+    {
+        return Err(over());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > MAX_REPLY_BYTES {
+            return Err(over());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    // serde's message may quote the reply: say where, never what.
+    serde_json::from_slice(&body).map_err(|e| {
+        ApiError::Reply(format!(
+            "not the expected JSON (line {}, column {})",
+            e.line(),
+            e.column()
+        ))
+    })
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -291,7 +331,12 @@ pub async fn fetch_config(base_url: &str, token: &str) -> Result<Option<ConfigRe
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    let cfg: ConfigResponse = resp.json().await?;
+    let cfg: ConfigResponse = read_json(resp).await?;
+    if cfg.env.len() > MAX_CONFIG_ENV {
+        return Err(ApiError::Reply(format!(
+            "more than {MAX_CONFIG_ENV} env keys"
+        )));
+    }
     Ok(Some(cfg))
 }
 
@@ -311,7 +356,7 @@ pub async fn fetch_stats(
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    Ok(resp.json().await?)
+    read_json(resp).await
 }
 
 /// `GET /v1/claudio/pool/health` — pool availability.
@@ -328,7 +373,7 @@ pub async fn fetch_pool_health(
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    Ok(resp.json().await?)
+    read_json(resp).await
 }
 
 /// `GET /v1/claudio/models` — the augmented model catalogue.
@@ -342,7 +387,7 @@ pub async fn fetch_models(base_url: &str, token: &str) -> Result<ModelsResponse,
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    Ok(resp.json().await?)
+    read_json(resp).await
 }
 
 /// `GET /v1/claudio/session?id=<claude_session_id>` — the credential the proxy
@@ -366,7 +411,7 @@ pub async fn fetch_session(
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    Ok(Some(resp.json().await?))
+    Ok(Some(read_json(resp).await?))
 }
 
 /// One side of a switch: the credential a session leaves or moves to.
@@ -438,7 +483,7 @@ pub async fn switch_session(
         }
         404 => Err(SwitchError::UnknownSession),
         409 => {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let body: serde_json::Value = read_json(resp).await.unwrap_or_default();
             let reason = body["error"]["message"]
                 .as_str()
                 .map(|m| m.trim_start_matches("claudio: ").to_owned())
@@ -447,7 +492,7 @@ pub async fn switch_session(
             Err(SwitchError::NoAlternative(reason))
         }
         405 => Err(SwitchError::TooOld),
-        _ if resp.status().is_success() => Ok(resp.json().await.map_err(ApiError::from)?),
+        _ if resp.status().is_success() => Ok(read_json(resp).await?),
         _ => Err(ApiError::Http(resp.status()).into()),
     }
 }
@@ -474,8 +519,7 @@ async fn has_capability(
         return false;
     };
     match resp.error_for_status() {
-        Ok(resp) => resp
-            .json::<Discovery>()
+        Ok(resp) => read_json::<Discovery>(resp)
             .await
             .is_ok_and(|d| d.capabilities.iter().any(|c| c == capability)),
         Err(_) => false,
@@ -843,5 +887,40 @@ mod tests {
             err.to_string(),
             "this session uses account-scoped resources and must keep its credential"
         );
+    }
+
+    /// R21: a config reply over 256 KiB is refused, never parsed: by its
+    /// `Content-Length` at once, and while reading a chunked one.
+    #[tokio::test]
+    async fn fetch_config_refuses_a_reply_over_its_cap() {
+        use crate::addons::vocdoni::test_support::{padded_json, serve_chunked, serve_declaring};
+        const CAP: usize = 256 * 1024;
+        let started = std::time::Instant::now();
+        let err = fetch_config(&serve_declaring(CAP + 1).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "it waited");
+        let body = padded_json(r#""version":1,"env":{"A":"b"},"#, CAP + 1);
+        let err = fetch_config(&serve_chunked(body).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+        // At the cap it is read.
+        let body = padded_json(r#""version":1,"env":{"A":"b"},"#, CAP);
+        let cfg = fetch_config(&serve_chunked(body).await, "tok").await;
+        assert_eq!(cfg.unwrap().unwrap().env["A"], "b");
+    }
+
+    /// R21: a config with more env keys than a session takes is refused.
+    #[tokio::test]
+    async fn fetch_config_refuses_too_many_env_keys() {
+        use crate::addons::vocdoni::test_support::serve_chunked;
+        let env: Vec<String> = (0..65).map(|i| format!("\"K{i}\":\"v\"")).collect();
+        let body = format!("{{\"version\":1,\"env\":{{{}}}}}", env.join(","));
+        let err = fetch_config(&serve_chunked(body).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("more than 64 env keys"), "{err}");
     }
 }

@@ -57,6 +57,7 @@ fn api_error(e: ApiError) -> String {
         ApiError::Http(s) => format!("proxy returned {}", s.as_u16()),
         ApiError::Request(e) if e.is_timeout() => "the proxy did not answer in time".to_owned(),
         ApiError::Request(_) => "the proxy is unreachable".to_owned(),
+        ApiError::Reply(why) => format!("the proxy's reply was refused: {why}"),
     }
 }
 

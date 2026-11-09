@@ -365,7 +365,8 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
 - `cmd.rs` — `claudio proxy login|status|logout|use`.
 - `login.rs` — the browser sign-in (`/v1/claudio/login/start|poll`, device
   style: the member types the code; `--token` pastes one instead).
-- `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (https, hash, caps; names and
+- `plugins.rs` — `GET /v1/claudio/plugins` (a list over 32 plugins, or a plugin over
+  64 env keys, is refused whole before it is cached), `admit` (https, hash, caps; names and
   env keys through `plugins::manifest`'s `name_ok`/`key_ok`), the `plugins.json` cache
   (0600, one entry per profile; a 401/403 drops it), `fetch_manifest`.
   `Debug` never shows a value. `test_http_ok` lets plain http to
@@ -401,6 +402,9 @@ Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok
 - `stats.rs` — the proxy stats `Window` (24h/7d/30d).
 - `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
   `/pool/health` and `/session` (which credential a claude session is on).
+  Every JSON reply goes through `read_json`: ≤ 256 KiB (`MAX_REPLY_BYTES`,
+  checked against `Content-Length` and while reading), parse errors name a
+  position, never the text; a config over 64 env keys is refused.
 
 **`term/`** — terminal primitives:
 - `mod.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.

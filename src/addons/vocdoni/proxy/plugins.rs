@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::api::{build_client, ApiError};
+use super::api::{build_client, read_json, ApiError};
 use super::profile::Profile;
 use crate::addons::vocdoni::plugins::manifest::{key_ok, name_ok};
 use crate::paths;
@@ -244,8 +244,25 @@ pub async fn fetch(name: &str, profile: &Profile) -> Result<PluginList, ApiError
     if !resp.status().is_success() {
         return Err(ApiError::Http(resp.status()));
     }
-    let reply: Reply = resp.json().await?;
+    let reply: Reply = read_json(resp).await?;
+    over_caps(&reply).map_err(ApiError::Reply)?;
     Ok(list_of(reply, name, paths::unix_now()))
+}
+
+/// Why a reply's list is over its caps: more than [`MAX_PLUGINS`] plugins,
+/// or one with more than [`MAX_ENV_KEYS`] env keys. Such a list is refused
+/// whole, never kept or cached.
+fn over_caps(reply: &Reply) -> Result<(), String> {
+    if reply.plugins.len() > MAX_PLUGINS {
+        return Err(format!("more than {MAX_PLUGINS} plugins"));
+    }
+    match reply.plugins.iter().find(|p| p.env.len() > MAX_ENV_KEYS) {
+        Some(p) => Err(format!(
+            "plugin {}: more than {MAX_ENV_KEYS} env keys",
+            crate::addon::line(&p.name, 64)
+        )),
+        None => Ok(()),
+    }
 }
 
 // ── Manifest ──────────────────────────────────────────────────────────────────
@@ -610,6 +627,67 @@ mod tests {
                 other => panic!("{status}: {other:?}"),
             }
         }
+    }
+
+    fn proxy_at(url: String) -> Profile {
+        Profile {
+            url,
+            token: "tok".into(),
+            first_party: false,
+            email: None,
+        }
+    }
+
+    /// One plugin entry of a reply, with `keys` env keys.
+    fn entry(name: &str, keys: usize) -> serde_json::Value {
+        let env: serde_json::Map<String, serde_json::Value> =
+            (0..keys).map(|i| (format!("K{i}"), "v".into())).collect();
+        serde_json::json!({"name": name, "version": "1",
+            "bundle": {"url": "https://e.org/p.zip", "sha256": "a".repeat(64)}, "env": env})
+    }
+
+    /// R21: a list reply over 256 KiB is refused (by `Content-Length` at
+    /// once, and while reading a chunked one), and so is a list over its
+    /// caps (33 plugins, or a plugin with 65 env keys), so none is cached.
+    #[tokio::test]
+    async fn fetch_refuses_a_reply_over_its_caps() {
+        use crate::addons::vocdoni::test_support::{padded_json, serve_chunked, serve_declaring};
+        const CAP: usize = 256 * 1024;
+        let started = std::time::Instant::now();
+        let err = fetch("work", &proxy_at(serve_declaring(CAP + 1).await))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "it waited"
+        );
+        let body = padded_json(r#""plugins":[],"#, CAP + 1);
+        let err = fetch("work", &proxy_at(serve_chunked(body).await))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+
+        let many: Vec<_> = (0..=MAX_PLUGINS)
+            .map(|i| entry(&format!("p{i}"), 1))
+            .collect();
+        let body = serde_json::json!({ "plugins": many }).to_string();
+        let err = fetch("work", &proxy_at(serve_chunked(body).await))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("more than 32 plugins"), "{err}");
+        let body = serde_json::json!({ "plugins": [entry("kb", MAX_ENV_KEYS + 1)] }).to_string();
+        let err = fetch("work", &proxy_at(serve_chunked(body).await))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("more than 64 env keys"), "{err}");
+        // At the caps it is read.
+        let full: Vec<_> = (0..MAX_PLUGINS)
+            .map(|i| entry(&format!("p{i}"), MAX_ENV_KEYS))
+            .collect();
+        let body = serde_json::json!({ "plugins": full }).to_string();
+        let list = fetch("work", &proxy_at(serve_chunked(body).await)).await;
+        assert_eq!(list.unwrap().plugins.len(), MAX_PLUGINS);
     }
 
     #[test]
