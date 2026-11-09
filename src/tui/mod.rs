@@ -74,6 +74,7 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::Addons;
+use crate::addons::vocdoni::daemon::applied_of;
 use crate::addons::vocdoni::{plugins::manifest::Manifest, plugins::state as plugin_state, proxy};
 use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
@@ -289,7 +290,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
         config.plugins.clone(),
     );
     let runner = addon_runner::start(addons);
-    app.on_plugin_host("local");
+    app.on_daemon_host("local", &local_client.welcome().features);
     runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
     let start = match plain {
@@ -1051,7 +1052,7 @@ async fn wait_manifests(
     pending: Vec<app::PendingManifest>,
     tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
 ) -> (
-    std::collections::HashMap<String, crate::proto::Applied>,
+    std::collections::HashMap<String, crate::addons::vocdoni::daemon::Applied>,
     Vec<String>,
 ) {
     let mut ready = std::collections::HashMap::new();
@@ -1068,10 +1069,11 @@ async fn wait_manifests(
         let tx = tx.clone();
         tokio::spawn(async move {
             let reply = reply.await;
-            let applied = match &reply {
-                Ok(Msg::Applied(a)) => Some(a.clone()),
-                _ => None,
-            };
+            let applied = reply
+                .as_ref()
+                .ok()
+                .cloned()
+                .and_then(|r| applied_of(r).ok());
             let _ = done.send(applied);
             let _ = tx.send((m.to, reply));
         });

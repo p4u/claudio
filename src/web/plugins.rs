@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 use super::hub::{daemon_error, HubEvent, HubHandle};
+use crate::addons::vocdoni::daemon::{self as apply, Applied};
 use crate::addons::vocdoni::plugins::choices::choices_for;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::plugins::state::{
@@ -28,7 +29,7 @@ use crate::addons::vocdoni::proxy::plugins::{self as cache, Plugin, PluginList};
 use crate::addons::vocdoni::proxy::resolve::load_proxy_profiles;
 use crate::app::extensions::{Registry, Source};
 use crate::config::PluginChoices;
-use crate::proto::{retry_secs, Applied, Msg};
+use crate::proto::Msg;
 
 /// How long a spawn waits for a host to answer its plugin manifests.
 const MANIFEST_WAIT: Duration = Duration::from_secs(20);
@@ -105,7 +106,7 @@ pub(crate) fn status_dto(host: &str, name: &str, apply: &Apply) -> Value {
                     json!({
                         "id": clean(id, 300),
                         "reason": clean(reason, 300),
-                        "retry_secs": retry_secs(reason),
+                        "retry_secs": apply::retry_secs(reason),
                     })
                 })
                 .collect()
@@ -193,21 +194,21 @@ fn requestable(st: &PluginState, p: &Plugin) -> bool {
     fetched && st.choices.contains_key(&p.name)
 }
 
-/// The `Manifest` request for `p`: its secrets' names (never the values)
-/// and the ids the member turned off.
+/// The `vocdoni/apply` request for `p`: its secrets' names (never the
+/// values) and the ids the member turned off.
 fn manifest_msg(st: &PluginState, p: &Plugin) -> Msg {
     let disabled = st
         .choices
         .get(&p.name)
         .map(|c| c.disabled.clone())
         .unwrap_or_default();
-    Msg::Manifest {
+    apply::apply_msg(&apply::ApplyRequest {
         name: p.name.clone(),
         url: p.bundle_url.clone(),
         sha256: p.bundle_sha256.clone(),
         secrets: p.env.iter().map(|(k, _)| k.clone()).collect(),
         disabled,
-    }
+    })
 }
 
 /// What a list fetch gave.
@@ -637,13 +638,13 @@ impl Plugins {
         let (host, name, sha) = (host.to_owned(), p.name.clone(), p.bundle_sha256.clone());
         tokio::spawn(async move {
             let reply = match this.hub.host_client(&host).await {
+                Ok((c, _)) if !apply::serves_apply(&c.welcome().features) => {
+                    Err("unsupported op: older than addons, not asked".into())
+                }
                 Ok((client, _)) => client.request(msg).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
-            let applied = match &reply {
-                Ok(Msg::Applied(a)) => Some(a.clone()),
-                _ => None,
-            };
+            let applied = reply.clone().ok().and_then(|r| apply::applied_of(r).ok());
             this.on_applied(&host, &name, &sha, reply);
             let _ = tx.send(applied);
         });
@@ -663,8 +664,7 @@ impl Plugins {
                 return;
             }
             let state = match reply {
-                Ok(Msg::Applied(applied)) => ApplyState::Ready(Box::new(applied)),
-                Ok(_) => ApplyState::Failed("unexpected reply".to_owned()),
+                Ok(reply) => ApplyState::of_reply(reply),
                 Err(e) if e.starts_with("unsupported op") => ApplyState::TooOld,
                 Err(e) => {
                     let prefix = format!("manifest {name}: ");

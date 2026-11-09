@@ -4,11 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::addons::vocdoni::daemon::{apply_msg, serves_apply, Applied, ApplyRequest};
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
 use crate::app::extensions::Source;
 use crate::config::PluginChoices;
-use crate::proto::{Applied, Msg};
+use crate::proto::Msg;
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};
 use crate::addons::vocdoni::plugins::state::{
@@ -127,6 +128,18 @@ impl App {
         self.redraw = true;
     }
 
+    /// `host`'s daemon is connected, with `features`: one without
+    /// `addon:vocdoni` (older than addons) is never asked, and every plugin
+    /// is `TooOld` there; another is asked for every enabled manifest.
+    pub(super) fn on_daemon_host(&mut self, host: &str, features: &[String]) {
+        if serves_apply(features) {
+            self.plugins.old_hosts.remove(host);
+        } else {
+            self.plugins.old_hosts.insert(host.to_owned());
+        }
+        self.on_plugin_host(host);
+    }
+
     /// `host`'s daemon is connected: ask it for every enabled manifest.
     pub fn on_plugin_host(&mut self, host: &str) {
         self.plugins.hosts.insert(host.to_owned());
@@ -138,6 +151,7 @@ impl App {
     /// `host`'s daemon is gone: its answers no longer hold.
     pub(super) fn plugin_host_gone(&mut self, host: &str) {
         self.plugins.hosts.remove(host);
+        self.plugins.old_hosts.remove(host);
         self.plugins.applies.retain(|(h, _), _| h != host);
     }
 
@@ -189,11 +203,25 @@ impl App {
         }
     }
 
-    /// Send `host` the `Manifest` request for `p`. A `Ready` answer at the
-    /// same hash stays until the new one comes.
+    /// Send `host` the `vocdoni/apply` request for `p`. A `Ready` answer at
+    /// the same hash stays until the new one comes. A daemon older than
+    /// addons is not asked: `TooOld` at once.
     fn ask(&mut self, host: &str, p: &Plugin) {
         let key = (host.to_owned(), p.name.clone());
         let now = self.now;
+        if self.plugins.old_hosts.contains(host) {
+            let sha = p.bundle_sha256.clone();
+            let state = ApplyState::TooOld;
+            self.plugins.applies.insert(
+                key,
+                Apply {
+                    sha,
+                    state,
+                    asked: now,
+                },
+            );
+            return;
+        }
         let apply = match self.plugins.applies.remove(&key) {
             Some(a) if a.sha == p.bundle_sha256 && matches!(a.state, ApplyState::Ready(_)) => {
                 Apply { asked: now, ..a }
@@ -219,8 +247,8 @@ impl App {
         self.request(host, msg, to);
     }
 
-    /// The `Manifest` request for `p`: the names of its proxy env (never the
-    /// values) and the ids the member turned off.
+    /// The `vocdoni/apply` request for `p`: the names of its proxy env
+    /// (never the values) and the ids the member turned off.
     pub(super) fn manifest_msg(&self, p: &Plugin) -> Msg {
         let disabled = self
             .plugins
@@ -228,13 +256,13 @@ impl App {
             .get(&p.name)
             .map(|c| c.disabled.clone())
             .unwrap_or_default();
-        Msg::Manifest {
+        apply_msg(&ApplyRequest {
             name: p.name.clone(),
             url: p.bundle_url.clone(),
             sha256: p.bundle_sha256.clone(),
             secrets: p.env.iter().map(|(k, _)| k.clone()).collect(),
             disabled,
-        }
+        })
     }
 
     /// Ask again a host whose answer still lists an install under way
@@ -301,8 +329,7 @@ impl App {
             return;
         }
         apply.state = match reply {
-            Ok(Msg::Applied(applied)) => ApplyState::Ready(Box::new(applied)),
-            Ok(other) => ApplyState::Failed(format!("unexpected reply {other:?}")),
+            Ok(reply) => ApplyState::of_reply(reply),
             Err(e) if App::older_daemon_notice(host, &e).is_some() => ApplyState::TooOld,
             Err(e) => {
                 let why = e.to_string();
@@ -498,6 +525,7 @@ fn ready_lines(host: &str, a: &Applied) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::vocdoni::daemon::{applied_reply, apply_request_of};
     use crate::addons::vocdoni::plugins::state::{applied, compose, with_plugins};
     use crate::addons::vocdoni::proxy::plugins::sample;
     use crate::tui::app::LaunchCall;
@@ -551,22 +579,14 @@ KB_REGION = "eu"
     /// A `Manifest` request: host, name, secrets, disabled.
     type Asked = (String, String, Vec<String>, Vec<String>);
 
-    /// The `Manifest` requests queued.
+    /// The `vocdoni/apply` requests queued.
     fn manifest_requests(app: &mut App) -> Vec<Asked> {
         app.take_effects()
             .into_iter()
             .filter_map(|e| match e {
-                Effect::Request {
-                    host,
-                    msg:
-                        Msg::Manifest {
-                            name,
-                            secrets,
-                            disabled,
-                            ..
-                        },
-                    ..
-                } => Some((host, name, secrets, disabled)),
+                Effect::Request { host, msg, .. } => {
+                    apply_request_of(&msg).map(|r| (host, r.name, r.secrets, r.disabled))
+                }
                 _ => None,
             })
             .collect()
@@ -683,7 +703,7 @@ KB_REGION = "eu"
     fn answers_set_each_hosts_state_and_stale_ones_are_dropped() {
         let mut app = app_with_kb(None);
         assert_eq!(app.apply_state("local", "kb"), Some(&ApplyState::Pending));
-        let ready = Msg::Applied(applied("kb"));
+        let ready = applied_reply(applied("kb"));
         app.on_applied("local", "kb", &"b".repeat(64), Ok(ready.clone()));
         assert_eq!(app.apply_state("local", "kb"), Some(&ApplyState::Pending));
         app.on_applied("local", "kb", &sha(), Ok(ready));
@@ -703,7 +723,7 @@ KB_REGION = "eu"
         // A failure is asked again on the next occasion; an answer is not.
         app.request_all();
         assert_eq!(asked(&mut app), [pair("local", "kb")]);
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(applied("kb"))));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(applied("kb"))));
         app.request_all();
         assert!(asked(&mut app).is_empty());
         // A host that left forgets its answers.
@@ -730,7 +750,7 @@ KB_REGION = "eu"
             PluginsFetch::Listed(list("work", vec![sample("kb")])),
         );
         app.on_manifest("kb", &sha(), Ok(manifest_of("kb")));
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(installing.clone())));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(installing.clone())));
         app.take_effects();
         app.now = 1029;
         app.reask_installing();
@@ -744,7 +764,7 @@ KB_REGION = "eu"
             Some(&ApplyState::Ready(Box::new(installing.clone())))
         );
         // As long as it installs.
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(installing)));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(installing)));
         app.now = 1030 + 30 * 60;
         app.reask_installing();
         assert_eq!(asked(&mut app), [pair("local", "kb")]);
@@ -752,7 +772,7 @@ KB_REGION = "eu"
         // A failed install: a second after its retry is due...
         let asked_at = app.now;
         let later = answer("network down (retrying in 120 s)");
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(later)));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(later)));
         app.now = asked_at + 120;
         app.reask_installing();
         assert!(asked(&mut app).is_empty());
@@ -762,7 +782,7 @@ KB_REGION = "eu"
         // ...and no sooner than 30 s.
         let asked_at = app.now;
         let soon = answer("network down (retrying in 5 s)");
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(soon)));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(soon)));
         app.now = asked_at + 29;
         app.reask_installing();
         assert!(asked(&mut app).is_empty());
@@ -775,7 +795,7 @@ KB_REGION = "eu"
             applied("kb"),
             answer("needs manual install: claude plugin install p@m"),
         ] {
-            app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(settled)));
+            app.on_applied("local", "kb", &sha(), Ok(applied_reply(settled)));
             app.now += 3600;
             app.reask_installing();
             assert!(asked(&mut app).is_empty());
@@ -796,7 +816,7 @@ KB_REGION = "eu"
         );
         app.on_manifest("kb", &sha(), Ok(manifest_of("kb")));
         for host in ["local", "devbox"] {
-            app.on_applied(host, "kb", &sha(), Ok(Msg::Applied(applied("kb"))));
+            app.on_applied(host, "kb", &sha(), Ok(applied_reply(applied("kb"))));
         }
         app.take_effects();
         let reply = |app: &mut App, install: bool, ok: bool| {
@@ -874,7 +894,7 @@ KB_REGION = "eu"
 
     #[test]
     fn a_spawn_gets_the_answered_plugins_flags_env_and_instructions() {
-        let mut app = app_with_kb(Some(Msg::Applied(applied("kb"))));
+        let mut app = app_with_kb(Some(applied_reply(applied("kb"))));
         let (args, env, instructions, waits) = spawn_with(&mut app, Some("work"));
         assert_eq!(
             args,
@@ -913,7 +933,7 @@ KB_REGION = "eu"
         // A host that answers with installs under way is ready.
         let mut installing = applied("kb");
         installing.skipped = vec![("plugin:p@m".into(), "installing".into())];
-        app.on_applied("local", "kb", &sha(), Ok(Msg::Applied(installing)));
+        app.on_applied("local", "kb", &sha(), Ok(applied_reply(installing)));
         let (args, _, _, waits) = spawn_with(&mut app, Some("work"));
         assert_eq!((args.len(), waits.len()), (5, 0));
     }
@@ -936,7 +956,7 @@ KB_REGION = "eu"
         let (args, _, _, waits) = spawn_with(&mut app, Some("work"));
         assert_eq!((args.len(), waits.len()), (1, 0));
 
-        let mut app = app_with_kb(Some(Msg::Applied(applied("kb"))));
+        let mut app = app_with_kb(Some(applied_reply(applied("kb"))));
         app.plugins.config.insert("kb".into(), false);
         app.list_plugins();
         let (args, env, instructions, waits) = spawn_with(&mut app, Some("work"));
@@ -948,7 +968,7 @@ KB_REGION = "eu"
 
     #[test]
     fn a_reset_sends_the_current_plugin_env_and_instructions_and_no_args() {
-        let mut app = app_with_kb(Some(Msg::Applied(applied("kb"))));
+        let mut app = app_with_kb(Some(applied_reply(applied("kb"))));
         spawn_with(&mut app, Some("work"));
         let id = app.sessions[0].id;
         app.reset_session(id, false);
@@ -979,7 +999,7 @@ KB_REGION = "eu"
             ("mcp:kb".into(), "missing secret KB_TOKEN".into()),
         ];
         a.dropped = vec!["--agents".into()];
-        let mut app = app_with_kb(Some(Msg::Applied(a)));
+        let mut app = app_with_kb(Some(applied_reply(a)));
         app.on_plugin_host("devbox");
         let old = std::io::Error::other("unsupported op: manifest");
         app.on_applied("devbox", "kb", &sha(), Err(old));
@@ -1106,7 +1126,7 @@ KB_REGION = "eu"
 
     #[test]
     fn r_asks_every_host_again_and_fetches_every_manifest() {
-        let mut app = app_with_kb(Some(Msg::Applied(applied("kb"))));
+        let mut app = app_with_kb(Some(applied_reply(applied("kb"))));
         app.refresh_plugins();
         let effects = app.take_effects();
         let again = effects
@@ -1114,10 +1134,7 @@ KB_REGION = "eu"
             .filter(|e| {
                 matches!(
                     e,
-                    Effect::Request {
-                        msg: Msg::Manifest { .. },
-                        ..
-                    }
+                    Effect::Request { msg, .. } if apply_request_of(msg).is_some()
                 )
             })
             .count();

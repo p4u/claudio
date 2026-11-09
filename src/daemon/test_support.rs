@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
+pub(crate) use super::host::write_executable;
 use super::{server, Config, Daemon};
 use crate::addon::Addons;
 use crate::proto::{self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SpawnSpec, PROTO};

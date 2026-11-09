@@ -42,9 +42,6 @@ pub(crate) fn features(daemon: &Daemon) -> Vec<String> {
 }
 
 /// The `DaemonCtx` of addon `addon` in this daemon.
-// Read only through `DaemonCtx`, whose callers are daemon-side addons: none is
-// registered until the first one moves in (P3.7 of the core-addons plan).
-#[allow(dead_code)]
 pub(crate) struct Ctx {
     daemon: Arc<Daemon>,
     addon: &'static str,

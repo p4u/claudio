@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use super::{apply_msg, ApplyRequest, VocdoniDaemon};
+use crate::addon::{Addon, Addons};
 use crate::addons::vocdoni::test_support::*;
+use crate::addons::vocdoni::Vocdoni;
 use crate::daemon::test_support::{within, TestDaemon};
 use crate::daemon::Config;
 use crate::proto::Msg;
@@ -169,12 +172,12 @@ async fn failed_installs_back_off_and_manual_ones_never_retry() {
 
     // Within the backoff nothing runs again; after it, one more run, and
     // the next wait is twice as long.
-    h.d.daemon.manifests.advance(Duration::from_secs(14));
+    h.manifests.advance(Duration::from_secs(14));
     let a = applied(c.call(team(&[], &[])).await);
     assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 1);
     h.idle().await;
     assert_eq!(installs(&h, "a@market"), 1);
-    h.d.daemon.manifests.advance(Duration::from_secs(1));
+    h.manifests.advance(Duration::from_secs(1));
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.skipped[0].1, "installing");
     h.idle().await;
@@ -184,7 +187,7 @@ async fn failed_installs_back_off_and_manual_ones_never_retry() {
 
     // Then it works; the manual one still waits for a person.
     h.set("fail-a@market", false);
-    h.d.daemon.manifests.advance(Duration::from_secs(30));
+    h.manifests.advance(Duration::from_secs(30));
     c.call(team(&[], &[])).await;
     h.idle().await;
     let a = applied(c.call(team(&[], &[])).await);
@@ -241,7 +244,7 @@ async fn an_install_claude_does_not_list_is_remembered_as_failed() {
     assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
 
     // Within the backoff: not run again.
-    h.d.daemon.manifests.advance(Duration::from_secs(10));
+    h.manifests.advance(Duration::from_secs(10));
     let a = applied(c.call(team(&[], &[])).await);
     assert_retrying(&a.skipped[0], "plugin:a@market", why, 5);
     h.idle().await;
@@ -254,7 +257,7 @@ async fn an_install_claude_does_not_list_is_remembered_as_failed() {
     assert_eq!(installs(&h), 1);
 
     // After it: tried again.
-    h.d.daemon.manifests.advance(Duration::from_secs(5));
+    h.manifests.advance(Duration::from_secs(5));
     let a = applied(c.call(team(&[], &[])).await);
     assert_eq!(a.skipped[0].1, "installing");
     h.idle().await;
@@ -346,7 +349,7 @@ async fn forgotten_failures_install_on_the_next_request() {
     let a = applied(c.call(team(&[], &[])).await);
     assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
     h.set("fail-a@market", false);
-    h.d.daemon.manifests.forget_failures();
+    h.manifests.forget_failures();
     let a = applied(c.call(team(&[], &[])).await);
     let manual = "needs manual install: claude plugin install b@market";
     assert_eq!(
@@ -478,19 +481,23 @@ async fn applied_names_the_flags_this_claude_lacks() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_refuses_a_bad_request() {
-    let d = TestDaemon::start().await;
-    let cache = d.dir.join("cache/plugins");
-    // The real daemon: no http, even on loopback.
+    let dir = TestDaemon::new_dir();
+    let cache = dir.join("cache/vocdoni");
+    // As a real daemon: no http, even on loopback.
+    let ops = VocdoniDaemon::https_only(cache.clone(), dir.join("claude"));
+    let vocdoni: Arc<dyn Addon> = Arc::new(Vocdoni::with_daemon(ops));
+    let config = TestDaemon::config(&dir);
+    let d = TestDaemon::start_with_addons(dir, config, Addons::new(vec![vocdoni]).unwrap());
     let mut c = d.client().await;
     let good = "a".repeat(64);
     let req = |name: &str, url: &str, sha: &str, secrets: Vec<String>, disabled: Vec<String>| {
-        Msg::Manifest {
+        apply_msg(&ApplyRequest {
             name: name.into(),
             url: url.into(),
             sha256: sha.into(),
             secrets,
             disabled,
-        }
+        })
     };
     let url = "https://e.org/x.toml";
     let many_secrets: Vec<String> = (0..65).map(|i| format!("K{i}")).collect();

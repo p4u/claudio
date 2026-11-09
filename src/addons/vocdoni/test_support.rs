@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::addon::Addons;
+use super::daemon::{apply_msg, retrying, Applied, ApplyRequest, Manifests, VocdoniDaemon};
+use super::Vocdoni;
+use crate::addon::{Addon, Addons};
 use crate::daemon::test_support::{private_temp_dir, within, TestDaemon};
 use crate::daemon::Config;
-use crate::proto::{self, Msg};
+use crate::proto::Msg;
 
 /// The manifest the `Manifest` tests apply: one marketplace with plugins
 /// `a` and `b`, servers `kb` (secret `KB_TOKEN`), `mine` and `jina`
@@ -117,7 +119,7 @@ echo "$spec" >> "$ctl/installed"
 echo "done $spec" >> "$ctl/log"
 echo '{"ok":true}'
 "#;
-        crate::daemon::host::write_executable(&bin, script);
+        crate::daemon::test_support::write_executable(&bin, script);
         bin
     })
 }
@@ -172,6 +174,8 @@ pub(crate) struct PluginHost {
     pub(crate) ctl: PathBuf,
     /// A daemon-side addon beside the plugins: counts `on_claude_installed`.
     pub(crate) echo: Arc<crate::addon::test_support::TestAddon>,
+    /// The Vocdoni addon's daemon state: what the installs did.
+    pub(crate) manifests: Arc<Manifests>,
 }
 
 impl PluginHost {
@@ -187,7 +191,7 @@ impl PluginHost {
     pub(crate) async fn start_with(setup: impl FnOnce(&Path) -> (PathBuf, String)) -> PluginHost {
         let dir = TestDaemon::new_dir();
         let (cache, claude, ctl) = (
-            dir.join("cache/plugins"),
+            dir.join("cache/vocdoni"),
             dir.join("claude"),
             dir.join("ctl"),
         );
@@ -207,15 +211,18 @@ impl PluginHost {
             ..TestDaemon::config(&dir)
         };
         let echo = Arc::new(crate::addon::test_support::TestAddon::new("echo").with_daemon());
-        let addons = Addons::new(vec![Arc::clone(&echo) as Arc<dyn crate::addon::Addon>]);
+        let ops = VocdoniDaemon::with_dirs(cache.clone(), claude.clone());
+        let manifests = Arc::clone(ops.manifests());
+        let vocdoni: Arc<dyn Addon> = Arc::new(Vocdoni::with_daemon(ops));
+        let addons = Addons::new(vec![vocdoni, Arc::clone(&echo) as Arc<dyn Addon>]);
         let d = TestDaemon::start_with_addons(dir, config, addons.unwrap());
-        d.daemon.manifests.set_dirs(cache.clone(), claude.clone());
         PluginHost {
             d,
             cache,
             claude,
             ctl,
             echo,
+            manifests,
         }
     }
 
@@ -251,7 +258,7 @@ impl PluginHost {
     /// Wait until no install of manifest TEAM is queued or running.
     pub(crate) async fn idle(&self) {
         within(async {
-            while self.d.daemon.manifests.busy() {
+            while self.manifests.busy() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -259,21 +266,22 @@ impl PluginHost {
     }
 }
 
-/// A `Manifest` request for TEAM (cached; its URL is never reached).
+/// A `vocdoni/apply` request for TEAM (cached; its URL is never reached).
 pub(crate) fn team(secrets: &[&str], disabled: &[&str]) -> Msg {
-    Msg::Manifest {
+    apply_msg(&ApplyRequest {
         name: "team".into(),
         url: "https://127.0.0.1:9/never.toml".into(),
         sha256: sha256_hex(TEAM.as_bytes()),
         secrets: secrets.iter().map(|s| s.to_string()).collect(),
         disabled: disabled.iter().map(|s| s.to_string()).collect(),
-    }
+    })
 }
 
-pub(crate) fn applied(reply: Msg) -> proto::Applied {
+/// The `Applied` of a reply to an apply request.
+pub(crate) fn applied(reply: Msg) -> Applied {
     match reply {
-        Msg::Applied(a) => a,
-        other => panic!("expected Applied, got {other:?}"),
+        Msg::AddonReply { body } => serde_json::from_value(body).expect("an Applied body"),
+        other => panic!("expected an AddonReply, got {other:?}"),
     }
 }
 
@@ -286,7 +294,7 @@ pub(crate) fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
 /// `item` is `id` skipped for `why`, tried again in `secs` s (or one less:
 /// the clock moved on since the failure).
 pub(crate) fn assert_retrying(item: &(String, String), id: &str, why: &str, secs: u64) {
-    let due = (secs.saturating_sub(1)..=secs).any(|s| item.1 == proto::retrying(why, s));
+    let due = (secs.saturating_sub(1)..=secs).any(|s| item.1 == retrying(why, s));
     assert!(item.0 == id && due, "{item:?}: want {id}, {why}, {secs} s");
 }
 
@@ -326,11 +334,11 @@ pub(crate) fn files_in(dir: &Path) -> Vec<String> {
 }
 
 pub(crate) fn download(url: &str, sha256: &str) -> Msg {
-    Msg::Manifest {
+    apply_msg(&ApplyRequest {
         name: "team".into(),
         url: url.into(),
         sha256: sha256.into(),
         secrets: vec![],
         disabled: vec!["plugin:a@market".into(), "plugin:b@market".into()],
-    }
+    })
 }

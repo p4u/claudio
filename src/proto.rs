@@ -230,22 +230,6 @@ pub enum Msg {
         #[serde(default)]
         limit: u32,
     },
-    /// Apply proxy plugin `name`'s manifest on this host: the TOML at `url`
-    /// (https) whose SHA-256 is `sha256`, cached once downloaded. `secrets`
-    /// are the names (never the values) of the plugin's proxy env, which
-    /// the sessions get; `disabled` the item ids the member turned off.
-    /// Answered by `Applied` as soon as the manifest is parsed (plugin
-    /// installs run after the reply), or `Error "manifest <name>: …"`. An
-    /// older daemon answers `Error "unsupported op…"`.
-    Manifest {
-        name: String,
-        url: String,
-        sha256: String,
-        #[serde(default)]
-        secrets: Vec<String>,
-        #[serde(default)]
-        disabled: Vec<String>,
-    },
     /// Run addon `addon`'s daemon op `op` (docs/daemon-protocol.md). Sent
     /// only to a daemon whose `Welcome.features` lists `addon:<addon>`; an
     /// older one answers `Error "unsupported op…"`. `op` is `name` on the
@@ -323,8 +307,6 @@ pub enum Msg {
         total: u32,
         truncated: bool,
     },
-    /// Reply to `Manifest`.
-    Applied(Applied),
     /// The reply to `AddonOp`.
     AddonReply {
         body: serde_json::Value,
@@ -447,57 +429,9 @@ pub struct ClaudeInfo {
     pub version: String,
 }
 
-/// What a host made of a proxy plugin's manifest ([`Msg::Manifest`]): what
-/// every new session there gets from it, and each item's outcome by item id
-/// (`plugin:<name>@<marketplace>`, `mcp:<name>`, `agent:<name>`…). A
-/// disabled id is in no list.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Applied {
-    pub name: String,
-    pub version: String,
-    /// `{"mcpServers": {...}}` for `--mcp-config` (≤ 64 KiB): `${NAME}`
-    /// placeholders, never a secret.
-    #[serde(default)]
-    pub mcp_config: Option<String>,
-    /// The `--agents` JSON (≤ 32 KiB).
-    #[serde(default)]
-    pub agents: Option<String>,
-    /// For the session context: sanitized, ≤ 8 KiB, empty when none.
-    #[serde(default)]
-    pub instructions: String,
-    /// The manifest's `[env]`.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    /// Plugin ids this daemon installed (under this manifest's hash).
-    #[serde(default)]
-    pub installed: Vec<String>,
-    /// Plugin ids Claude Code had installed already.
-    #[serde(default)]
-    pub present: Vec<String>,
-    /// `(id, reason)`: `installing`, `yours`, `missing secret X`, a
-    /// failure…
-    #[serde(default)]
-    pub skipped: Vec<(String, String)>,
-    /// `--mcp-config` and/or `--agents` when this host's claude lacks them.
-    #[serde(default)]
-    pub dropped: Vec<String>,
-}
-
 /// The daemon's error for a claude update or install asked while another
 /// (or a plugin install) runs on the host.
 pub const UPDATE_BUSY: &str = "a claude update or plugin install is already running on this host";
-
-/// The reason in [`Applied::skipped`] of a failed plugin install the daemon
-/// tries again in `secs` seconds.
-pub fn retrying(why: &str, secs: u64) -> String {
-    format!("{why} (retrying in {secs} s)")
-}
-
-/// The seconds of a [`retrying`] reason.
-pub fn retry_secs(reason: &str) -> Option<u64> {
-    let (_, secs) = reason.strip_suffix(" s)")?.rsplit_once(" (retrying in ")?;
-    secs.parse().ok()
-}
 
 impl Msg {
     /// `self` with the session env set, if it is a `Spawn` or `Respawn`; any
@@ -1052,21 +986,6 @@ mod tests {
     }
 
     #[test]
-    fn a_retrying_reason_carries_its_seconds() {
-        let why = retrying("marketplace m: down (503)", 15);
-        assert_eq!(why, "marketplace m: down (503) (retrying in 15 s)");
-        assert_eq!(retry_secs(&why), Some(15));
-        for other in [
-            "installing",
-            "network down",
-            "x (retrying in s)",
-            "(retrying in 5 s",
-        ] {
-            assert_eq!(retry_secs(other), None, "{other}");
-        }
-    }
-
-    #[test]
     fn welcome_from_an_old_daemon_has_no_build() {
         let old = r#"{"claudio_version":"0.2.0","proto":1,
             "host":{"hostname":"h","os":"linux","arch":"x86_64","home":"/h"}}"#;
@@ -1124,56 +1043,19 @@ mod tests {
         assert_eq!(back.msg, shell);
     }
 
+    /// compat(v0.10): the `manifest` op of the releases before addons and
+    /// its `applied` reply decode as unknown: the daemon refuses an old
+    /// client's request as an unsupported op (docs/daemon-protocol.md,
+    /// "Refused ops").
     #[test]
-    fn manifest_and_applied_roundtrip_and_are_unknown_to_older_peers() {
-        #[derive(Debug, PartialEq, Deserialize)]
-        #[serde(tag = "op", rename_all = "snake_case")]
-        enum Old {
-            Ping,
-            #[serde(other)]
-            Unknown,
+    fn manifest_and_applied_are_unknown_now() {
+        for json in [
+            r#"{"req":4,"op":"manifest","name":"t","url":"https://e.org","sha256":"x"}"#,
+            r#"{"req":4,"op":"applied","name":"team","version":"1"}"#,
+        ] {
+            let env: Envelope = serde_json::from_str(json).unwrap();
+            assert_eq!(env.msg, Msg::Unknown, "{json}");
         }
-        let request = Msg::Manifest {
-            name: "team".into(),
-            url: "https://e.org/team.toml".into(),
-            sha256: "a".repeat(64),
-            secrets: vec!["KB_TOKEN".into()],
-            disabled: vec!["mcp:jina".into()],
-        };
-        let reply = Msg::Applied(Applied {
-            name: "team".into(),
-            version: "1.0.0".into(),
-            mcp_config: Some(r#"{"mcpServers":{}}"#.into()),
-            agents: None,
-            instructions: "Rules.".into(),
-            env: vec![("REGION".into(), "eu".into())],
-            installed: vec!["plugin:a@m".into()],
-            present: vec!["plugin:b@m".into()],
-            skipped: vec![("plugin:c@m".into(), "installing".into())],
-            dropped: vec!["--agents".into()],
-        });
-        for msg in [request, reply] {
-            let json = serde_json::to_string(&Envelope::request(4, msg.clone())).unwrap();
-            assert_eq!(serde_json::from_str::<Old>(&json).unwrap(), Old::Unknown);
-            assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, msg);
-        }
-        let json = serde_json::to_value(Msg::Applied(Applied::default())).unwrap();
-        assert_eq!(json["op"], "applied");
-        // Every list may be left out; so may a request's secrets and ids.
-        let minimal = r#"{"op":"applied","name":"team","version":"1"}"#;
-        assert_eq!(
-            serde_json::from_str::<Msg>(minimal).unwrap(),
-            Msg::Applied(Applied {
-                name: "team".into(),
-                version: "1".into(),
-                ..Applied::default()
-            })
-        );
-        let minimal = r#"{"op":"manifest","name":"t","url":"https://e.org","sha256":"x"}"#;
-        assert!(matches!(
-            serde_json::from_str::<Msg>(minimal).unwrap(),
-            Msg::Manifest { secrets, disabled, .. } if secrets.is_empty() && disabled.is_empty()
-        ));
     }
 
     #[test]

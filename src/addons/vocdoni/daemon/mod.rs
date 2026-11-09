@@ -1,7 +1,9 @@
-//! `Manifest`: apply a proxy plugin's manifest on this host.
+//! The Vocdoni addon's daemon side: the `apply` op ([`VocdoniDaemon`])
+//! applies a proxy plugin's manifest on this host (docs/addons.md, "The
+//! Vocdoni addon").
 //!
 //! The manifest (`crate::addons::vocdoni::plugins::manifest`) is downloaded once per hash
-//! into `<cache>/plugins` (0700) as `<name>.toml` with its sidecar
+//! into `<cache>/vocdoni` (the addon's `cache_dir`, 0700) as `<name>.toml` with its sidecar
 //! `<name>.sha256`: https only, capped at 256 KiB and [`TOTAL_TIMEOUT`],
 //! streamed to a temp file, verified, then renamed into place; one download
 //! per plugin name at a time.
@@ -11,7 +13,7 @@
 //! gets, the instructions and the env, and each item's outcome. Plugins
 //! that are neither installed nor remembered are `installing`: their
 //! installs run after the reply, in one task per manifest hash, each
-//! `claude plugin …` subprocess under `Daemon::updating` (the lock `claude
+//! `claude plugin …` subprocess under `DaemonCtx::updating` (the lock `claude
 //! update` takes), so `~/.claude` is written by one at a time. The daemon
 //! itself never writes there: it reads Claude Code's files (capped, regular
 //! files of this uid, never logged) and runs the CLI, never with `-y`.
@@ -21,7 +23,7 @@
 //! a person has to act), or failed: tried again once its backoff is over
 //! ([`RETRY_FIRST`], doubling with each failure in a row up to
 //! [`RETRY_MAX`]; a success starts it over). Meanwhile its reason says
-//! when (`proto::retrying`).
+//! when ([`retrying`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -36,14 +38,21 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+use crate::addon::DaemonCtx;
 use crate::addons::vocdoni::plugins::manifest::{self, Manifest, Marketplace, PluginRef};
 use crate::addons::vocdoni::plugins::manifest::{key_ok, name_ok};
 use crate::addons::vocdoni::proxy::plugins::{sha256_ok, test_http_ok};
 use crate::claude::SESSION_MARKERS;
-use crate::daemon::Daemon;
 use crate::paths;
-use crate::proto::{retrying, Applied, Msg};
 use crate::text::sanitize;
+
+mod applied;
+mod ops;
+pub use applied::{applied_of, apply_msg, retry_secs, retrying, serves_apply};
+#[cfg(test)]
+pub(crate) use applied::{applied_reply, apply_request_of};
+pub use applied::{Applied, ApplyRequest, OP_APPLY};
+pub use ops::VocdoniDaemon;
 
 /// A manifest's size cap.
 const MAX_BYTES: u64 = manifest::MAX_BYTES as u64;
@@ -82,8 +91,8 @@ pub(crate) struct Manifests {
 
 #[derive(Clone)]
 struct Dirs {
-    /// `<cache>/plugins`.
-    cache: PathBuf,
+    /// `DaemonCtx::cache_dir` (`<cache>/vocdoni`) unless a test's.
+    cache: Option<PathBuf>,
     /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
     claude_config: PathBuf,
     /// Tests serve manifests over plain http on loopback.
@@ -171,7 +180,7 @@ impl Manifests {
             .unwrap_or_else(|| paths::home().join(".claude"));
         Manifests {
             dirs: Mutex::new(Dirs {
-                cache: paths::cache_dir().join("plugins"),
+                cache: None,
                 claude_config,
                 allow_http: false,
             }),
@@ -193,13 +202,14 @@ impl Manifests {
         Instant::now() + *self.skew.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Use `cache` and `claude_config` instead, and accept http URLs.
+    /// Use `cache` and `claude_config` instead, and accept http URLs when
+    /// `allow_http`.
     #[cfg(test)]
-    pub(crate) fn set_dirs(&self, cache: PathBuf, claude_config: PathBuf) {
+    pub(crate) fn set_dirs(&self, cache: PathBuf, claude_config: PathBuf, allow_http: bool) {
         *self.dirs.lock().unwrap_or_else(|e| e.into_inner()) = Dirs {
-            cache,
+            cache: Some(cache),
             claude_config,
-            allow_http: true,
+            allow_http,
         };
     }
 
@@ -310,60 +320,51 @@ impl Manifests {
     }
 }
 
-/// Answer a `Manifest` request: `Applied`, or `Error "manifest <name>: …"`.
-/// The installs it needs are queued after the reply is made.
+/// Answer a `vocdoni/apply` request: `Applied`, or `Err("manifest <name>:
+/// …")`. The installs it needs are queued after the reply is made.
 pub(crate) async fn handle(
-    daemon: &Arc<Daemon>,
-    name: String,
-    url: String,
-    sha256: String,
-    secrets: Vec<String>,
-    disabled: Vec<String>,
-) -> Msg {
-    let manifests = &daemon.manifests;
-    let dirs = manifests.dirs();
+    manifests: &Arc<Manifests>,
+    ctx: Arc<dyn DaemonCtx>,
+    req: ApplyRequest,
+) -> Result<Applied, String> {
+    let (name, sha256) = (&req.name, &req.sha256);
+    let mut dirs = manifests.dirs();
+    let url = &req.url;
     let scheme_ok = url.starts_with("https://")
         || (dirs.allow_http && url.starts_with("http://"))
-        || test_http_ok(&url);
-    let request_ok = name_ok(&name)
-        && sha256_ok(&sha256)
+        || test_http_ok(url);
+    let request_ok = name_ok(name)
+        && sha256_ok(sha256)
         && scheme_ok
-        && secrets.len() <= MAX_SECRETS
-        && secrets.iter().all(|s| key_ok(s).is_ok())
-        && disabled.len() <= MAX_DISABLED
-        && disabled.iter().all(|id| manifest::id_ok(id));
+        && req.secrets.len() <= MAX_SECRETS
+        && req.secrets.iter().all(|s| key_ok(s).is_ok())
+        && req.disabled.len() <= MAX_DISABLED
+        && req.disabled.iter().all(|id| manifest::id_ok(id));
     if !request_ok {
-        return Msg::Error {
-            message: format!("manifest {}: bad request", safe_name(&name)),
-        };
+        return Err(ops::bad_request(name));
     }
+    dirs.cache.get_or_insert_with(|| ctx.cache_dir());
     let text = {
         // One download per name at a time; whoever waited finds it cached.
-        let lock = manifests.lock(&name);
+        let lock = manifests.lock(name);
         let _held = lock.lock().await;
-        ready(&dirs, &name, &url, &sha256).await
+        ready(&dirs, name, url, sha256).await
     };
-    let parsed = text.and_then(|text| Manifest::parse_named(&text, &name));
-    let m = match parsed {
-        Ok(m) => m,
-        Err(why) => {
+    let m = text
+        .and_then(|text| Manifest::parse_named(&text, name))
+        .map_err(|why| {
             tracing::warn!(manifest = %name, error = %why, "manifest refused");
-            return Msg::Error {
-                message: format!("manifest {name}: {why}"),
-            };
-        }
-    };
+            format!("manifest {name}: {why}")
+        })?;
     let (files, flags) = {
         let config = dirs.claude_config.clone();
         let agents: Vec<String> = m.agents.iter().map(|a| a.name.clone()).collect();
-        let d = Arc::clone(daemon);
         let read = tokio::task::spawn_blocking(move || Files::read(&config, &agents));
-        let probe = tokio::task::spawn_blocking(move || d.claude_flags());
-        let (files, flags) = tokio::join!(read, probe);
-        (files.unwrap_or_default(), flags.unwrap_or_default())
+        let (files, flags) = tokio::join!(read, ctx.claude_flags());
+        (files.unwrap_or_default(), flags)
     };
-    let (mut applied, jobs) = manifests.decide(&m, &sha256, &secrets, &disabled, &files);
-    applied.dropped = crate::daemon::host::plugin_flags_dropped(&flags);
+    let (mut applied, jobs) = manifests.decide(&m, sha256, &req.secrets, &req.disabled, &files);
+    applied.dropped = ops::plugin_flags_dropped(&flags);
     tracing::info!(
         manifest = %name,
         version = %m.version,
@@ -373,22 +374,14 @@ pub(crate) async fn handle(
         queued = jobs.len(),
         "manifest applied"
     );
-    enqueue(daemon, &sha256, jobs);
-    Msg::Applied(applied)
-}
-
-/// A name for an error about a refused request: shown only when valid.
-fn safe_name(name: &str) -> &str {
-    if name_ok(name) {
-        name
-    } else {
-        "?"
-    }
+    enqueue(manifests, &ctx, sha256, jobs);
+    Ok(applied)
 }
 
 /// Remove the zips (and their sidecars) a pre-manifest build left in
-/// `dir`, the plugin cache. Run once at daemon start.
-pub(crate) fn remove_stale_zips(dir: &Path) {
+/// `dir`, the plugin cache of the releases before addons. Run once, at the
+/// first `apply`.
+pub(super) fn remove_stale_zips(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -500,26 +493,25 @@ fn read_json(path: &Path) -> Result<Option<Value>, ()> {
 // ── Installs ──────────────────────────────────────────────────────────────────
 
 /// Queue `jobs` for manifest hash `sha`, starting its task unless it runs.
-fn enqueue(daemon: &Arc<Daemon>, sha: &str, jobs: Vec<Job>) {
+fn enqueue(manifests: &Arc<Manifests>, ctx: &Arc<dyn DaemonCtx>, sha: &str, jobs: Vec<Job>) {
     if jobs.is_empty() {
         return;
     }
     let start = {
-        let mut mem = daemon.manifests.memory();
+        let mut mem = manifests.memory();
         let start = !mem.queues.contains_key(sha);
         mem.queues.entry(sha.to_owned()).or_default().extend(jobs);
         start
     };
     if start {
-        let daemon = Arc::clone(daemon);
+        let (manifests, ctx) = (Arc::clone(manifests), Arc::clone(ctx));
         let sha = sha.to_owned();
-        tokio::spawn(async move { run_queue(&daemon, &sha).await });
+        tokio::spawn(async move { run_queue(&manifests, &ctx, &sha).await });
     }
 }
 
 /// Run the installs of manifest hash `sha` one by one until none is left.
-async fn run_queue(daemon: &Daemon, sha: &str) {
-    let manifests = &daemon.manifests;
+async fn run_queue(manifests: &Manifests, ctx: &Arc<dyn DaemonCtx>, sha: &str) {
     loop {
         let job = {
             let mut mem = manifests.memory();
@@ -532,7 +524,7 @@ async fn run_queue(daemon: &Daemon, sha: &str) {
             }
         };
         let id = job.plugin.id();
-        let outcome = match install(daemon, sha, &job).await {
+        let outcome = match install(manifests, ctx, sha, &job).await {
             // Claude Code said yes but does not list it: a failure, not run
             // again on every re-ask.
             Outcome::Done
@@ -568,8 +560,7 @@ async fn run_queue(daemon: &Daemon, sha: &str) {
 
 /// Install `job`'s plugin, adding its marketplace first when Claude Code
 /// does not know it.
-async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
-    let manifests = &daemon.manifests;
+async fn install(manifests: &Manifests, ctx: &Arc<dyn DaemonCtx>, sha: &str, job: &Job) -> Outcome {
     let config = manifests.dirs().claude_config;
     let market = &job.marketplace.name;
     let market_key = format!("marketplace:{market}");
@@ -582,7 +573,7 @@ async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
     if !known_marketplaces(&config).contains(market) {
         let source = job.marketplace.cli_source();
         let added = run_claude(
-            daemon,
+            ctx.as_ref(),
             &[
                 "plugin",
                 "marketplace",
@@ -618,29 +609,30 @@ async fn install(daemon: &Daemon, sha: &str, job: &Job) -> Outcome {
         .remove(&(sha.to_owned(), market_key));
     let spec = job.plugin.spec();
     run_claude(
-        daemon,
+        ctx.as_ref(),
         &["plugin", "install", &spec, "--scope", "user", "--json"],
     )
     .await
 }
 
-/// Run `claude <args>` while holding `Daemon::updating`: the daemon's
+/// Run `claude <args>` while holding `DaemonCtx::updating`: the daemon's
 /// claude on its `PATH`, stdin `/dev/null`, the session markers scrubbed,
 /// git never prompting, in a process group of its own killed on timeout.
 /// Without a claude it fails at once, never holding the lock the install
 /// of claude takes.
-async fn run_claude(daemon: &Daemon, args: &[&str]) -> Outcome {
-    let claude = daemon.config.claude_bin();
+async fn run_claude(ctx: &dyn DaemonCtx, args: &[&str]) -> Outcome {
+    let claude = ctx.claude_bin();
     if !claude.is_file() {
         return Outcome::Failed("claude is not installed".to_owned());
     }
-    let _held = daemon.updating.lock().await;
+    let updating = ctx.updating();
+    let _held = updating.lock().await;
     let mut cmd = Command::new(claude);
     cmd.args(args);
     for marker in SESSION_MARKERS {
         cmd.env_remove(marker);
     }
-    if let Some(path) = daemon.config.path.as_deref() {
+    if let Some(path) = ctx.path() {
         cmd.env("PATH", path);
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0")
@@ -666,7 +658,7 @@ async fn run_claude(daemon: &Daemon, args: &[&str]) -> Outcome {
         Ok((Ok(status), out, err)) => outcome(status.success(), status.code(), &out, &err),
         Ok((Err(e), _, _)) => Outcome::Failed(format!("claude failed: {e}")),
         Err(_) => {
-            crate::daemon::update::kill_group(&mut child).await;
+            ops::kill_group(&mut child).await;
             Outcome::Failed(format!("timed out after {} s", RUN_TIMEOUT.as_secs()))
         }
     }
@@ -751,7 +743,7 @@ fn short(text: &str) -> String {
 
 /// The text of manifest `name` with hash `sha256`: cached, else downloaded.
 async fn ready(dirs: &Dirs, name: &str, url: &str, sha256: &str) -> Result<String, String> {
-    let dir = dirs.cache.clone();
+    let dir = dirs.cache.clone().unwrap_or_default();
     paths::ensure_private_dir(&dir).map_err(|e| format!("cache dir: {e}"))?;
     let file = dir.join(format!("{name}.toml"));
     let sidecar = dir.join(format!("{name}.sha256"));

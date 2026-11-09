@@ -14,11 +14,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::addons::vocdoni::daemon::{applied_of, retry_secs, Applied};
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::config::PluginChoices;
 use crate::envmerge::merge_env_pairs;
-use crate::proto::{retry_secs, Applied, Msg, MAX_PLUGIN_INSTRUCTIONS};
+use crate::proto::{Msg, MAX_PLUGIN_INSTRUCTIONS};
 
 /// `--agents`, `--mcp-config` (the daemon drops them for a claude without).
 const AGENTS: &str = "--agents";
@@ -74,6 +75,17 @@ pub enum ApplyState {
     TooOld,
 }
 
+impl ApplyState {
+    /// The state a host's reply to `vocdoni/apply` gives: `Ready` with its
+    /// `Applied`, else `Failed`.
+    pub fn of_reply(reply: Msg) -> ApplyState {
+        match applied_of(reply) {
+            Ok(applied) => ApplyState::Ready(Box::new(applied)),
+            Err(why) => ApplyState::Failed(why),
+        }
+    }
+}
+
 /// One host's state for one plugin's manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Apply {
@@ -94,8 +106,11 @@ pub struct Plugins {
     pub choices: BTreeMap<String, PluginChoices>,
     /// Per profile: its list (`None` once signed out) and how it was fetched.
     pub lists: BTreeMap<String, (PluginList, ListState)>,
-    /// The hosts whose daemon takes `Manifest` requests now.
+    /// The connected hosts.
     pub hosts: BTreeSet<String>,
+    /// The connected hosts whose daemon is older than addons (no
+    /// `addon:vocdoni`): never asked, every plugin `TooOld` there.
+    pub old_hosts: BTreeSet<String>,
     /// Per plugin: the manifest hash fetched, and the manifest.
     pub manifests: HashMap<String, (String, ManifestState)>,
     /// Per `(host, plugin)`: what that host answered.

@@ -9,7 +9,7 @@ use crate::addon::Addon;
 
 /// The addons this build registers, in registry order.
 pub fn all() -> Vec<Arc<dyn Addon>> {
-    vec![Arc::new(vocdoni::Vocdoni)]
+    vec![Arc::new(vocdoni::Vocdoni::new())]
 }
 
 #[cfg(test)]

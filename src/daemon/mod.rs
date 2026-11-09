@@ -23,11 +23,10 @@ mod command;
 pub mod ctl;
 mod git;
 mod git_status;
-pub(crate) mod host;
+mod host;
 mod journal;
 mod lifecycle;
 mod login_path;
-use crate::addons::vocdoni::daemon as manifest;
 mod server;
 mod session;
 mod stats;
@@ -35,7 +34,7 @@ mod stats;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
-pub(crate) mod update;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -199,14 +198,10 @@ pub fn run(addons: Arc<crate::addon::Addons>) -> std::process::ExitCode {
     };
     let (code, lock) = runtime.block_on(async move {
         match server::start(config, addons) {
-            Ok(Some(listening)) => {
-                // Zips a pre-manifest build cached: nothing uses them now.
-                manifest::remove_stale_zips(&crate::paths::cache_dir().join("plugins"));
-                (
-                    std::process::ExitCode::SUCCESS,
-                    Some(listening.serve().await),
-                )
-            }
+            Ok(Some(listening)) => (
+                std::process::ExitCode::SUCCESS,
+                Some(listening.serve().await),
+            ),
             Ok(None) => {
                 tracing::info!("another daemon is already running");
                 (std::process::ExitCode::SUCCESS, None)
@@ -231,7 +226,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// State shared by every connection and session actor.
 pub(crate) struct Daemon {
-    pub(crate) config: Config,
+    config: Config,
     registry: Mutex<Registry>,
     /// Serializes journal disk writes; **never** held while `registry` is held.
     journal_write: Mutex<()>,
@@ -254,9 +249,6 @@ pub(crate) struct Daemon {
     pub(crate) stats_rx: tokio::sync::watch::Receiver<stats::HostSnapshot>,
     /// `Search`: one at a time, and the transcripts it reads.
     pub(crate) search: server::SearchSlot,
-    /// `Manifest`: where manifests go, one download per name at a time,
-    /// and what the plugin installs did.
-    pub(crate) manifests: manifest::Manifests,
     /// The addons this binary runs, and each daemon-side one's op slots.
     addons: Arc<crate::addon::Addons>,
     addon_slots: HashMap<&'static str, Arc<tokio::sync::Semaphore>>,
@@ -305,7 +297,6 @@ impl Daemon {
             shutdown: tokio::sync::Notify::new(),
             stats_rx,
             search: server::SearchSlot::new(),
-            manifests: manifest::Manifests::new(),
             addon_slots: addon_ops::slots(&addons),
             addons,
         }

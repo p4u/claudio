@@ -202,12 +202,24 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
     })
 }
 
+/// The Vocdoni addon's `apply` op for `__remote-manifest`, as plain JSON so
+/// this diag-only path imports no addon (transitional; P3.17 moves it).
+fn apply_request(name: &str, sha256: &str, secret: &str) -> crate::proto::Msg {
+    let body = serde_json::json!({"name": name, "url": "https://127.0.0.1:9/never.toml",
+        "sha256": sha256, "secrets": [secret], "disabled": []});
+    crate::proto::Msg::AddonOp {
+        addon: "vocdoni".to_owned(),
+        op: "apply".to_owned(),
+        body,
+    }
+}
+
 /// `claudio __remote-manifest HOST CWD NAME SHA256 SECRET`
 ///
 /// Asks `HOST`'s daemon to apply plugin `NAME`'s manifest with hash
 /// `SHA256` (from a URL nothing listens on, so only a pre-seeded cache
 /// answers), with `SECRET` the name of the one secret it is given; prints
-/// the `Applied` reply as JSON, then spawns claude in `CWD` with what it
+/// the `vocdoni/apply` reply (an `Applied`) as JSON, then spawns claude in `CWD` with what it
 /// applied (its flags, its env, the secret set to `t9-secret`, its
 /// instructions), prints `pid=<pid>`, keeps the session 5 s (for the caller
 /// to look at its argv) and kills it.
@@ -236,33 +248,29 @@ pub fn remote_manifest_cmd(
                 return ExitCode::FAILURE;
             }
         };
-        let request = Msg::Manifest {
-            name: name.to_owned(),
-            url: "https://127.0.0.1:9/never.toml".to_owned(),
-            sha256: sha256.to_owned(),
-            secrets: vec![secret.to_owned()],
-            disabled: Vec::new(),
-        };
+        let request = apply_request(name, sha256, secret);
         let applied = match client.request(request).await {
-            Ok(Msg::Applied(applied)) => applied,
+            Ok(Msg::AddonReply { body }) => body,
             Ok(other) => {
-                eprintln!("unexpected Manifest reply: {other:?}");
+                eprintln!("unexpected apply reply: {other:?}");
                 return ExitCode::FAILURE;
             }
             Err(e) => {
-                eprintln!("Manifest request failed: {e}");
+                eprintln!("apply request failed: {e}");
                 return ExitCode::FAILURE;
             }
         };
-        println!("{}", serde_json::to_string(&applied).unwrap_or_default());
+        println!("{applied}");
+        let text = |key: &str| applied[key].as_str().map(str::to_owned);
         let mut args = Vec::new();
-        if let Some(agents) = &applied.agents {
-            args.extend(["--agents".to_owned(), agents.clone()]);
+        if let Some(agents) = text("agents") {
+            args.extend(["--agents".to_owned(), agents]);
         }
-        if let Some(mcp) = &applied.mcp_config {
-            args.extend(["--mcp-config".to_owned(), mcp.clone()]);
+        if let Some(mcp) = text("mcp_config") {
+            args.extend(["--mcp-config".to_owned(), mcp]);
         }
-        let mut env = applied.env.clone();
+        let mut env: Vec<(String, String)> =
+            serde_json::from_value(applied["env"].clone()).unwrap_or_default();
         env.push((secret.to_owned(), "t9-secret".to_owned()));
         let id = uuid::Uuid::new_v4();
         let spec = SpawnSpec {
@@ -274,7 +282,7 @@ pub fn remote_manifest_cmd(
             cols: 80,
             ephemeral: true,
             extensions: Some(SessionExtensions {
-                instructions: applied.instructions.clone(),
+                instructions: text("instructions").unwrap_or_default(),
                 ..Default::default()
             }),
             ..Default::default()

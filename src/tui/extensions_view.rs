@@ -297,8 +297,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::vocdoni::daemon::{applied_reply, Applied};
     use crate::app::extensions::{manifest::Program, Lens, Registry};
-    use crate::proto::Msg;
     use crate::tui::app::ReplyTo;
     use crate::tui::test_support::{alt, app_with, info, press};
 
@@ -580,7 +580,7 @@ mod tests {
                 "local: applying"
             ]
         );
-        let ready = Msg::Applied(crate::proto::Applied {
+        let ready = applied_reply(Applied {
             name: "kb".into(),
             version: "1.4.0".into(),
             ..Default::default()

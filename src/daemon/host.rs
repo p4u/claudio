@@ -115,16 +115,6 @@ pub const MCP_CONFIG: &str = "--mcp-config";
 /// without them.
 pub const LEGACY_OPTIONAL: [&str; 3] = [PLUGIN_DIR, AGENTS, MCP_CONFIG];
 
-/// The plugin flags this claude lacks (`--mcp-config`, `--agents`): what a
-/// plugin's sessions here go without.
-pub fn plugin_flags_dropped(flags: &ClaudeFlags) -> Vec<String> {
-    [MCP_CONFIG, AGENTS]
-        .into_iter()
-        .filter(|flag| !flags.knows(flag))
-        .map(str::to_owned)
-        .collect()
-}
-
 /// [`ClaudeFlags`] of `<claude> --help`, or `None` when it did not run
 /// (missing, failing or over 3 s), so a failed probe is not remembered.
 /// Blocking (≤ 3 s).
@@ -331,17 +321,12 @@ mod tests {
         let plugins = help("  --plugin-dir <paths...>");
         assert!(plugins.knows(PLUGIN_DIR) && !plugins.skip_permissions);
         assert_eq!(help(""), ClaudeFlags::default());
-        assert_eq!(
-            plugin_flags_dropped(&help("")),
-            ["--mcp-config", "--agents"]
-        );
         // Listed as options, not merely named in another one's description.
         let current = help(
             "  --agents <json-or-file>  Agents\n  --mcp-config <configs...>  MCP\n               --bare  Skips --plugin-dir, --strict-mcp-config",
         );
         assert!(current.knows(AGENTS) && current.knows(MCP_CONFIG));
         assert!(!current.knows(PLUGIN_DIR));
-        assert!(plugin_flags_dropped(&current).is_empty());
         let named = help("  --bare  Skips --mcp-config, --agents\n  --strict-mcp-config  Only");
         assert!(
             !named.knows(AGENTS) && !named.knows(MCP_CONFIG),

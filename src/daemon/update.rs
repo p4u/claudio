@@ -85,8 +85,8 @@ pub async fn run(daemon: &Arc<Daemon>, install: bool) -> Msg {
     };
     let version = daemon.refresh_host().await.claude.map(|c| c.version);
     if install && ok && version.is_some() {
-        // Plugin installs that failed for want of claude go at once.
-        daemon.manifests.forget_failures();
+        // Every daemon-side addon hears it (plugin installs that failed
+        // for want of claude go at once).
         super::addon_ops::claude_installed(daemon);
     }
     Msg::ClaudeUpdated { version, ok, tail }
@@ -182,7 +182,7 @@ async fn execute(
 
 /// Stop the update's whole process group: SIGTERM, a grace period for the
 /// leader to exit, then SIGKILL for whatever is left. Reaps the leader.
-pub(crate) async fn kill_group(child: &mut Child) {
+pub(super) async fn kill_group(child: &mut Child) {
     // The leader's pid is the group id (`process_group(0)`); `None` once
     // it has been reaped, and then its pid may already be reused.
     let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {

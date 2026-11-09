@@ -471,7 +471,7 @@ impl Client {
         let timeout = match msg {
             Msg::Spawn(_) | Msg::SpawnShell(_) => SPAWN_TIMEOUT,
             Msg::UpdateClaude { .. } => UPDATE_TIMEOUT,
-            Msg::Manifest { .. } | Msg::AddonOp { .. } => DOWNLOAD_TIMEOUT,
+            Msg::AddonOp { .. } => DOWNLOAD_TIMEOUT,
             _ => REQUEST_TIMEOUT,
         };
         let queued = self.enqueue(msg);

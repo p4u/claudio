@@ -366,6 +366,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::vocdoni::daemon::apply_request_of;
     use crate::addons::vocdoni::plugins::state::PluginsFetch;
     use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
     use crate::config::PluginChoices;
@@ -439,16 +440,14 @@ prompt = "Review."
         }
     }
 
-    /// The `Manifest` requests queued, as (host, name, disabled).
+    /// The `vocdoni/apply` requests queued, as (host, name, disabled).
     fn requests(app: &mut App) -> Vec<(String, String, Vec<String>)> {
         app.take_effects()
             .into_iter()
             .filter_map(|e| match e {
-                Effect::Request {
-                    host,
-                    msg: Msg::Manifest { name, disabled, .. },
-                    ..
-                } => Some((host, name, disabled)),
+                Effect::Request { host, msg, .. } => {
+                    apply_request_of(&msg).map(|r| (host, r.name, r.disabled))
+                }
                 _ => None,
             })
             .collect()
@@ -536,7 +535,7 @@ prompt = "Review."
         );
         let asked: Vec<&Effect> = effects
             .iter()
-            .filter(|e| matches!(e, Effect::Request { msg: Msg::Manifest { disabled, .. }, .. } if disabled == &["mcp:kb"]))
+            .filter(|e| matches!(e, Effect::Request { msg, .. } if apply_request_of(msg).is_some_and(|r| r.disabled == ["mcp:kb"])))
             .collect();
         assert_eq!(asked.len(), 1, "{effects:?}");
         assert_eq!(
