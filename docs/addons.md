@@ -29,6 +29,7 @@ pub trait Addon: Send + Sync + 'static {
     fn ui(&self) -> Option<&dyn Ui>;
     fn daemon(&self) -> Option<&dyn DaemonOps>;
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>);
+    fn as_any(&self) -> &dyn std::any::Any;                 // P3 bridge only, removed in P3.13
 }
 ```
 
@@ -48,6 +49,13 @@ addons)` runs after the core's own words, in registry order, before passthrough 
 `None` means "not mine". `help()` is appended to `claudio --help`.
 
 **Launch**, **Ui** and **DaemonOps** are described below.
+
+**`as_any` (transitional).** While the TUI's plugin setup screen and extension rows still read
+the Vocdoni addon's state directly (core-addons plan P3.8-P3.13), `as_any` lets that one bridge
+(`addons::vocdoni::bridge`) find the registered addon by downcasting. It is a P3 bridge only and
+is removed in P3.13, once checklists and extension rows go through `Ui`. It has no default body
+(a default cannot turn a `?Sized` `Self` into `Any`): each addon writes `fn as_any(&self) -> &dyn
+Any { self }`. Nothing else may downcast an addon.
 
 ## The registry
 
