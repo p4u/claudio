@@ -262,6 +262,36 @@ fn web_answers_on_its_listen_address_and_a_proxy_port() {
     assert!(reply.header("set-cookie").unwrap().contains("; Secure"));
 }
 
+// ── --set-password (AC3) ──────────────────────────────────────────────────────
+
+#[test]
+fn web_set_password_refuses_a_pipe() {
+    let h = ManagerHarness::new();
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--set-password"]);
+    apply_env(&h, &mut cmd);
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // It may exit before reading: a broken pipe here is fine.
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"a-long-enough-password\na-long-enough-password\n");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("terminal"), "{err}");
+    assert!(!err.contains("a-long-enough-password"), "never echoed");
+    assert!(!h.config_home.join("claudio/web-password").exists());
+}
+
+// ── Frames ────────────────────────────────────────────────────────────────────
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_bad_frames_close_the_socket() {
     let web = Web::start();

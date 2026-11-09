@@ -15,6 +15,7 @@ mod hub;
 mod hub_io;
 mod input;
 mod lenses;
+mod password;
 mod session_events;
 mod spawn;
 mod state;
@@ -47,7 +48,8 @@ pub(crate) fn version() -> String {
 }
 
 const USAGE: &str = "usage: claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... \
-[--no-open] [--print-url] [--rotate-token]";
+[--no-open] [--print-url] [--rotate-token]
+       claudio web --set-password";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WebArgs {
@@ -57,6 +59,8 @@ pub(crate) struct WebArgs {
     pub no_open: bool,
     pub print_url: bool,
     pub rotate_token: bool,
+    /// `--set-password`: store the `--remote` password, then exit.
+    pub set_password: bool,
 }
 
 /// Shared by every handler.
@@ -90,8 +94,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
         no_open: false,
         print_url: false,
         rotate_token: false,
+        set_password: false,
     };
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
         let (flag, inline) = match arg.split_once('=') {
             Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_owned())),
@@ -109,15 +114,25 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
             "--no-open" => out.no_open = true,
             "--print-url" => out.print_url = true,
             "--rotate-token" => out.rotate_token = true,
+            "--set-password" => out.set_password = true,
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
+    combination_ok(&out, args.len())?;
     Ok(out)
+}
+
+/// The flags that do not go together.
+fn combination_ok(a: &WebArgs, n_args: usize) -> Result<(), String> {
+    if a.set_password && n_args != 1 {
+        return Err("--set-password takes no other argument".to_owned());
+    }
+    Ok(())
 }
 
 fn value(
     inline: Option<String>,
-    it: &mut std::slice::Iter<'_, String>,
+    it: &mut std::iter::Peekable<std::slice::Iter<'_, String>>,
     flag: &str,
 ) -> Result<String, String> {
     inline
@@ -184,6 +199,9 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             return ExitCode::from(2);
         }
     };
+    if let Some(code) = one_shot(&args) {
+        return code;
+    }
     // Blocking I/O, before the runtime exists.
     let token = match auth::load_or_create_token(&auth::token_path(), args.rotate_token) {
         Ok(token) => token,
@@ -228,6 +246,23 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--set-password`: one thing, then exit.
+fn one_shot(args: &WebArgs) -> Option<ExitCode> {
+    if args.set_password {
+        return Some(match password::set_password() {
+            Ok(done) => {
+                eprintln!("claudio web: {done}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("claudio web: {e}");
+                ExitCode::from(2)
+            }
+        });
+    }
+    None
 }
 
 async fn serve(
@@ -443,5 +478,9 @@ mod tests {
         }
         assert!(parse_args(&args(&["--allow-host"])).is_err());
         assert!(parse_args(&args(&["--bogus"])).is_err());
+        assert!(!a.set_password);
+        assert!(parse_args(&args(&["--set-password"])).unwrap().set_password);
+        let err = parse_args(&args(&["--set-password", "--no-open"])).unwrap_err();
+        assert!(err.contains("no other argument"), "{err}");
     }
 }
