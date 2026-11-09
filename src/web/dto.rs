@@ -29,9 +29,6 @@ pub(crate) const SESSION_FIELDS: &[&str] = &[
     "created_at",
     "pid",
     "dormant",
-    "proxy",
-    "proxy_known",
-    "first_party",
     "launch",
     "segments",
     "ephemeral",
@@ -114,7 +111,6 @@ pub(crate) fn session(view: &SessionView) -> Value {
             })
         })
         .unwrap_or(Value::Null);
-    let (proxy, first_party) = view.meta.clone().unwrap_or((None, false));
     json!({
         "id": info.id,
         "host": view.host,
@@ -136,9 +132,6 @@ pub(crate) fn session(view: &SessionView) -> Value {
         "created_at": info.created_at,
         "pid": info.pid,
         "dormant": info.state == SessionState::Exited && info.pid.is_none(),
-        "proxy": proxy,
-        "proxy_known": view.meta.is_some(),
-        "first_party": first_party,
         "launch": super::addons::launch_dto(&view.addon),
         "segments": super::addons::segments_dto(&view.addon),
         "ephemeral": false,
@@ -244,11 +237,9 @@ mod tests {
         assert_eq!(v["attention"]["kind"], "permission_prompt");
         assert_eq!(v["attention"]["detail"], Value::Null);
         assert_eq!(v["state"], "needs_approval");
-        assert_eq!(
-            (v["proxy"].clone(), v["proxy_known"].clone()),
-            (json!("work"), json!(true))
-        );
-        assert_eq!(v["first_party"], true);
+        for v1 in ["proxy", "proxy_known", "first_party"] {
+            assert!(v.get(v1).is_none(), "{v1} is version 1's");
+        }
         assert_eq!(v["git"], Value::Null);
     }
 

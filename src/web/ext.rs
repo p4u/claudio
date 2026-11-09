@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::events::{extensions_changed, notice_event};
 use super::hub::HubHandle;
-use super::plugins::{extensions_changed, notice_event};
 use super::ws::parse;
 use crate::addon::ExtensionRow;
 use crate::app::addons::AddonRuntime;
@@ -277,10 +277,10 @@ impl Extensions {
 
 /// An Extension DTO (docs/web-protocol.md §4).
 fn extension_dto(e: &Extension) -> Value {
-    let (source, profile, refused) = match &e.source {
+    let (source, addon, refused) = match &e.source {
         Source::BuiltIn => ("builtin", None, None),
         Source::External(_) => ("external", None, None),
-        Source::Addon { refused, .. } => ("plugin", None::<String>, refused.clone()),
+        Source::Addon { addon, refused, .. } => ("addon", Some(*addon), refused.clone()),
     };
     let lenses: Vec<Value> = e
         .lenses
@@ -304,7 +304,7 @@ fn extension_dto(e: &Extension) -> Value {
         "description": s(&e.description),
         "enabled": e.enabled,
         "source": source,
-        "profile": profile.map(|p| s(&p)),
+        "addon": addon,
         "refused": refused.map(|r| s(&r)),
         "lenses": lenses,
         "actions": actions,
@@ -436,16 +436,17 @@ mod tests {
             keys,
             [
                 "actions",
+                "addon",
                 "description",
                 "enabled",
                 "lenses",
                 "name",
-                "profile",
                 "refused",
                 "source"
             ]
         );
         assert_eq!(latex["source"], "builtin");
+        assert_eq!(latex["addon"], Value::Null);
         assert_eq!(latex["lenses"][0], json!({"name": "latex", "kind": "tag"}));
         let search = extension_dto(&registry.extensions[2]);
         assert_eq!(search["actions"][0]["id"], "search");

@@ -127,7 +127,7 @@ async function respawn(s, fresh, launch) {
       saveLayout({ ...lay, panes: lay.panes.map((p) => (p === s.id ? sid : p)) });
     }
   } catch (e) {
-    if (e.message === 'launch unknown' || e.message === 'proxy unknown') { loadAddonDecls(); chooser.value = { s, fresh }; }
+    if (e.message === 'launch unknown') { loadAddonDecls(); chooser.value = { s, fresh }; }
     else toast({ text: `restart: ${e.message}`, level: 'error' });
   }
 }

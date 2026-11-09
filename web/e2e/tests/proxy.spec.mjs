@@ -28,7 +28,7 @@ test('a plugin without choices asks for its checklist before spawn and Skip spaw
 });
 
 test('proxy stats render the fixture window', async ({ page }) => {
-  const sid = await srv.spawn(srv.dirs.b, { proxy: { kind: 'default' }, skip_plugins: [PLUGIN] });
+  const sid = await srv.spawn(srv.dirs.b, { launch: { pick: 'default' }, defer: [{ addon: 'vocdoni', id: PLUGIN }] });
   await page.goto(srv.url);
   await page.locator(`[data-testid="session-card"][data-sid="${sid}"]`).click();
   await expect(page.getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');

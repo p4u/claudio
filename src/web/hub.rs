@@ -371,7 +371,6 @@ pub(crate) struct HubConfig {
     pub state_path: PathBuf,
     /// Read at start, never written.
     pub tui_state: crate::app::state::ClientState,
-    pub profiles: (Vec<String>, Option<String>),
     /// web-state.json as read at start (in `spawn_blocking`, by `serve`).
     pub web: WebState,
     /// Fed with the sessions after every change (`addon_feed`).
@@ -485,11 +484,6 @@ enum Cmd {
         host: String,
         reply: Reply<()>,
     },
-    SetProfiles {
-        names: Vec<String>,
-        default: Option<String>,
-        reply: Reply<()>,
-    },
     /// config.toml's `[claude]` was re-read.
     SetClaude {
         claude: crate::config::ClaudeSection,
@@ -550,7 +544,6 @@ pub(crate) fn start(cfg: HubConfig) -> HubHandle {
     let mut hub = Hub {
         claude: cfg.config.claude.clone(),
         tui_state: cfg.tui_state,
-        profiles: cfg.profiles,
         web,
         dirty: false,
         last_save: Instant::now(),
@@ -775,17 +768,6 @@ impl HubHandle {
         let _ = self.ask(|reply| Cmd::ClaudeSkip { host, reply }).await;
     }
 
-    /// config.toml's proxy profiles changed: a `profiles` event to every tab.
-    pub(crate) async fn set_profiles(&self, names: Vec<String>, default: Option<String>) {
-        let _ = self
-            .ask(|reply| Cmd::SetProfiles {
-                names,
-                default,
-                reply,
-            })
-            .await;
-    }
-
     /// config.toml's `[claude]` changed: the install and update policy of
     /// the hosts not offered yet.
     pub(crate) async fn set_claude_policy(&self, claude: crate::config::ClaudeSection) {
@@ -804,7 +786,6 @@ type PendingSpawn = (SessionMeta, Option<(PendingPrompt, (u16, u16))>);
 struct Hub {
     claude: crate::config::ClaudeSection,
     tui_state: crate::app::state::ClientState,
-    profiles: (Vec<String>, Option<String>),
     web: WebState,
     dirty: bool,
     last_save: Instant,
@@ -1013,19 +994,6 @@ impl Hub {
                 }
                 let _ = reply.send(());
             }
-            Cmd::SetProfiles {
-                names,
-                default,
-                reply,
-            } => {
-                self.profiles = (names, default);
-                let v = ev(
-                    "profiles",
-                    json!({"names": self.profiles.0, "default": self.profiles.1}),
-                );
-                self.send_tabs(&v);
-                let _ = reply.send(());
-            }
             Cmd::SetClaude { claude } => self.claude = claude,
             Cmd::Shutdown { reply } => self.shutdown(reply),
             Cmd::Connected {
@@ -1173,7 +1141,6 @@ impl Hub {
             "t": "snapshot",
             "hosts": self.host_list(),
             "sessions": sessions,
-            "profiles": {"names": self.profiles.0, "default": self.profiles.1},
             "layout": self.web.layout,
             "order": self.web.order,
         })
@@ -2280,7 +2247,6 @@ mod tests {
         let mut hub = Hub {
             claude: Default::default(),
             tui_state: Default::default(),
-            profiles: (Vec::new(), None),
             web: WebState::default(),
             dirty: false,
             last_save: Instant::now(),

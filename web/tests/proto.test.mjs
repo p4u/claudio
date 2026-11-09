@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   uuidToBytes, bytesToUuid, encodeInput, decodeOutput, backoffDelay, versionAction,
-  Connection, KIND_INPUT, KIND_OUTPUT, MAX_INPUT,
+  Connection, KIND_INPUT, KIND_OUTPUT, MAX_INPUT, PROTO_VERSION,
 } from '../app/proto.js';
 
 const ID = '6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b';
@@ -136,7 +136,7 @@ test('pending requests reject with "disconnected" and the client reconnects afte
   assert.ok(t.q.find((x) => x.ms === 2000), 'second attempt doubles');
   t.q.find((x) => x.ms === 2000).fn();
   FakeWS.instances[2].open();
-  FakeWS.instances[2].text({ t: 'hello', v: 1 });
+  FakeWS.instances[2].text({ t: 'hello', v: 2 });
   FakeWS.instances[2].drop();
   assert.ok(t.q.find((x) => x.ms === 1000), 'hello resets the attempt counter');
   assert.ok(log.some((e) => e[0] === 'status' && e[1] === 'closed'));
@@ -145,10 +145,15 @@ test('pending requests reject with "disconnected" and the client reconnects afte
 });
 
 test('versionAction reloads once then shows the message', () => {
-  assert.equal(versionAction(1, false), 'ok');
-  assert.equal(versionAction(1, true), 'ok');
-  assert.equal(versionAction(2, false), 'reload');
-  assert.equal(versionAction(2, true), 'message');
+  assert.equal(PROTO_VERSION, 2);
+  assert.equal(versionAction(2, false), 'ok');
+  assert.equal(versionAction(2, true), 'ok');
+  // a page and a server of different versions: the page reloads once (a version-1 tab open
+  // when the server moves to version 2 runs this same rule and comes back as a version-2 page)
+  assert.equal(versionAction(1, false), 'reload');
+  assert.equal(versionAction(1, true), 'message');
+  assert.equal(versionAction(3, false), 'reload');
+  assert.equal(versionAction(undefined, false), 'reload');
 });
 
 test('hello then snapshot reach their callbacks in order', () => {
@@ -156,7 +161,7 @@ test('hello then snapshot reach their callbacks in order', () => {
   c.start();
   const ws = FakeWS.instances[0];
   ws.open();
-  ws.text({ t: 'hello', v: 1, version: '0.8.0', features: [] });
+  ws.text({ t: 'hello', v: 2, version: '0.9.0', features: [] });
   ws.text({ t: 'snapshot', order: ['a'] });
   ws.text({ t: 'ev', ev: 'notice' });
   const f = new Uint8Array(19); f[0] = 1; f.set(uuidToBytes(ID), 1);

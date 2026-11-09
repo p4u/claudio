@@ -45,7 +45,7 @@ function session(id, o) {
     state: 'idle', state_since: now() - 120, attention: null, claude_session_id: uuid(),
     model: 'opus', context_tokens: 82000, output_tokens: 12000, turns: 7, branch: 'main',
     git: { head: 'main', detached: false, upstream: true, ahead: 0, behind: 0, staged: 0, unstaged: 0, untracked: 0, conflicts: 0 },
-    created_at: now() - 3600, pid: 4242, dormant: false, proxy: null, proxy_known: true, first_party: false,
+    created_at: now() - 3600, pid: 4242, dormant: false, launch: { known: true, choice: null }, segments: [],
     ephemeral: false, prompt_pending: false, ...o,
   };
 }
@@ -60,20 +60,34 @@ const state = {
   sessions: new Map(),
   order: [],
   layout: { grid: 1, panes: [null], focus: 0 },
-  profiles: { names: ['work', 'personal'], default: 'work' },
   extensions: [
-    { name: 'latex', description: 'Renders <latex> formulas', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [{ name: 'latex', kind: 'tag' }], actions: [] },
-    { name: 'search', description: 'Search past conversations', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [{ id: 'search', title: 'Search', input: 'query' }] },
-    { name: 'snippets', description: 'Prompt snippets', enabled: true, source: 'builtin', profile: null, refused: null, lenses: [], actions: [] },
-    { name: 'vocdoni-internal', description: 'Internal tools: docs MCP server, reviewer agent', enabled: true, source: 'plugin', profile: 'work', refused: null, lenses: [], actions: [] },
-    { name: 'broken-ext', description: 'An external extension that failed admission', enabled: false, source: 'external', profile: null, refused: 'manifest: lens name "todo" is already taken by tasks', lenses: [], actions: [] },
-    { name: 'tasks', description: 'Task notes (fixture extension)', enabled: true, source: 'external', profile: null, refused: null, lenses: [{ name: 'todo', kind: 'tag' }],
+    { name: 'latex', description: 'Renders <latex> formulas', enabled: true, source: 'builtin', addon: null, refused: null, lenses: [{ name: 'latex', kind: 'tag' }], actions: [] },
+    { name: 'search', description: 'Search past conversations', enabled: true, source: 'builtin', addon: null, refused: null, lenses: [], actions: [{ id: 'search', title: 'Search', input: 'query' }] },
+    { name: 'snippets', description: 'Prompt snippets', enabled: true, source: 'builtin', addon: null, refused: null, lenses: [], actions: [] },
+    { name: 'vocdoni-internal', description: 'Internal tools: docs MCP server, reviewer agent', enabled: true, source: 'addon', addon: 'vocdoni', refused: null, lenses: [], actions: [] },
+    { name: 'broken-ext', description: 'An external extension that failed admission', enabled: false, source: 'external', addon: null, refused: 'manifest: lens name "todo" is already taken by tasks', lenses: [], actions: [] },
+    { name: 'tasks', description: 'Task notes (fixture extension)', enabled: true, source: 'external', addon: null, refused: null, lenses: [{ name: 'todo', kind: 'tag' }],
       actions: [{ id: 'summary', title: 'Summary document', input: null }, { id: 'note', title: 'Add a note', input: 'note text' }, { id: 'pick', title: 'Pick a task', input: null }, { id: 'insert', title: 'Insert checklist', input: null }, { id: 'resume', title: 'Resume the last chat', input: null }] },
   ],
   snippets: [{ name: 'review', text: 'Review the diff for bugs.' }, { name: 'explain', text: 'Explain this code as if I were new to the project.\nName the files you read.' }],
-  plugins: [{ name: 'vocdoni-internal', version: '1.2.0', profile: 'work', enabled: true, refused: null, choices_saved: false, manifest: 'ready', manifest_error: null, description: 'Internal tools' }],
+  plugins: [{ name: 'vocdoni-internal', version: '1.2.0', profile: 'work', revision: 'r1', choices_saved: false, off: ['agent:reviewer'] }],
   seq: new Map(),
 };
+
+// ---- the vocdoni addon, as the server's addons.* ops answer for it (docs/web-protocol.md v2) ----
+let credState = { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
+const proxied = (option, firstParty = false) => ({ known: true, choice: { addon: 'vocdoni', option, flags: firstParty ? ['first-party'] : [] } });
+const seg = (id, text, tone, priority) => ({ addon: 'vocdoni', id, text, tone, priority });
+function proxySegments(profile) {
+  const t = (p) => (p >= 85 ? 'hot' : p >= 60 ? 'warn' : 'ok');
+  return [seg('proxy', `⇄ proxy:${profile}`, 'accent', 10), seg('credential', `${credState.name} (${credState.plan})`, 'accent', 20),
+    seg('five-hour', `5h ${credState.five}%`, t(credState.five), 110), seg('seven-day', `7d ${credState.seven}%`, t(credState.seven), 150)];
+}
+const ADDONS = () => [{
+  name: 'vocdoni', panels: [{ id: 'proxy', title: 'Proxy stats', windows: ['24h', '7d', '30d'], key: 'alt+s' }],
+  launch_options: [{ id: 'work', label: 'work', group: 'Proxy', default: true, detail: null }, { id: 'personal', label: 'personal', group: 'Proxy', default: false, detail: 'first-party' }],
+  launch_flags: [{ name: 'first-party', label: 'First-party session' }],
+}];
 
 function seed() {
   const add = (s) => { state.sessions.set(s.id, s); state.order.push(s.id); };
@@ -83,9 +97,9 @@ function seed() {
   add(session(ids.elicit, { label: 'docs-site', cwd: '/home/dev/docs', branch: 'main', state: 'needs_approval', state_since: now() - 15, model: 'sonnet',
     attention: { seq: 1, kind: 'elicitation_dialog', message: 'Which package manager should I use?', tool: null, detail: null } }));
   add(session(ids.input, { label: 'claudio', state: 'needs_input', state_since: now() - 300, attention: { seq: 2, kind: 'idle_prompt', message: 'Claude is waiting for your input', tool: null, detail: null } }));
-  add(session(ids.working, { label: 'parser', cwd: '/home/dev/parser', branch: 'refactor/lexer', proxy: 'work', state: 'working', state_since: now() - 8, context_tokens: 151000,
+  add(session(ids.working, { label: 'parser', cwd: '/home/dev/parser', branch: 'refactor/lexer', launch: proxied('work'), segments: proxySegments('work'), state: 'working', state_since: now() - 8, context_tokens: 151000,
     git: { head: 'refactor/lexer', detached: false, upstream: false, ahead: 0, behind: 0, staged: 0, unstaged: 6, untracked: 2, conflicts: 0 } }));
-  add(session(ids.idle, { label: 'infra', host: 'z6', cwd: '/srv/infra', branch: 'main', state: 'idle', state_since: now() - 1800, model: 'sonnet', proxy: 'work', first_party: false }));
+  add(session(ids.idle, { label: 'infra', host: 'z6', cwd: '/srv/infra', branch: 'main', state: 'idle', state_since: now() - 1800, model: 'sonnet', launch: proxied('work', true), segments: proxySegments('work') }));
   add(session(ids.shell, { kind: 'shell', label: 'term', cwd: '/home/dev/claudio', state: 'idle', model: null, branch: null, git: null, claude_session_id: null, context_tokens: null, turns: null, output_tokens: null }));
 }
 // MOCK_MANY=1: a crowded list (14 more sessions: repo pairs, singles, a fresh idle one, one that
@@ -116,7 +130,7 @@ if (process.env.MOCK_MANY === '1') seedMany();
 
 const snapshot = () => ({
   t: 'snapshot', hosts: Object.values(state.hosts), sessions: [...state.sessions.values()],
-  profiles: state.profiles, layout: state.layout, order: state.order,
+  layout: state.layout, order: state.order,
 });
 
 
@@ -253,13 +267,20 @@ const needHostFeature = (h, f) => {
   if (!h.features.includes(f)) throw new OpError("unsupported by this host's daemon");
 };
 
+// A LaunchSelect as the session's launch and segments: default is work.
+function launchOf(sel) {
+  if (!sel || sel.pick === 'direct') return { launch: { known: true, choice: null }, segments: [] };
+  const option = sel.pick === 'option' ? sel.option : 'work';
+  return { launch: proxied(option, (sel.flags ?? []).includes('first-party')), segments: proxySegments(option) };
+}
+
 function newSession(h, kind, a) {
   const id = uuid();
   const s = session(id, {
     host: h.name, kind, cwd: a.cwd, name: a.name ?? null,
     label: a.name ?? (kind === 'shell' ? 'term' : a.cwd.split('/').filter(Boolean).pop() ?? a.cwd),
     state: 'starting', state_since: now(), created_at: now(), model: null, context_tokens: null, turns: null, output_tokens: null,
-    branch: null, git: null, claude_session_id: null, prompt_pending: !!a.prompt, proxy: a.proxy?.kind === 'profile' ? a.proxy.name : null,
+    branch: null, git: null, claude_session_id: null, prompt_pending: !!a.prompt, ...launchOf(a.launch),
   });
   state.sessions.set(id, s);
   state.order.push(id);
@@ -392,13 +413,8 @@ const STATS = {
   '7d': { requests: 2890, errors: 21, input: 8400000, output: 2150000, cr: 61000000, cc: 2800000, f: 7 },
   '30d': { requests: 11800, errors: 80, input: 33000000, output: 8900000, cr: 240000000, cc: 11000000, f: 30 },
 };
+const vocdoni = (a) => { if (a.addon !== 'vocdoni') throw new OpError('bad request: addon: no such addon'); };
 const MODELS = [['claude-opus-4', 0.58], ['claude-sonnet-4', 0.31], ['claude-haiku-4', 0.09], ['claude-3-7-sonnet', 0.02]];
-let credState = { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
-let retryAt = Date.now() + 45000;
-const PLUGIN_STATUS = () => ([
-  { host: 'local', name: 'vocdoni-internal', state: 'ready', installed: ['plugin:vocdoni-internal@market'], present: ['mcp:docs'], skipped: [{ id: 'agent:reviewer', reason: 'failed: marketplace unreachable', retry_secs: Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) }], dropped: [], error: null },
-  { host: 'z6', name: 'vocdoni-internal', state: 'pending', installed: [], present: [], skipped: [{ id: 'mcp:docs', reason: 'missing secret DOCS_TOKEN', retry_secs: null }], dropped: ['--agents'], error: null },
-]);
 // ---- claude offers (replayed on connect, as the protocol says) ----
 const claudeOffers = new Map([
   ['z6', { host: 'z6', phase: 'offer_update', have: '2.0.9', want: '2.1.0', version: null, tail: null }],
@@ -447,16 +463,21 @@ const OPS = {
   'session.spawn': (a) => {
     const h = host(a);
     need(a, 'cwd'); need(a, 'rows', 'number'); need(a, 'cols', 'number');
-    if (!a.proxy || !['default', 'direct', 'profile'].includes(a.proxy.kind)) throw bad('proxy');
-    if (a.first_party && a.proxy.kind === 'direct') throw new OpError('first-party needs a proxy profile');
+    const sel = a.launch ?? { pick: 'default', flags: [] };
+    if (!['default', 'direct', 'option'].includes(sel.pick)) throw bad('launch: pick: default, direct or option');
+    if (sel.pick === 'direct' && (sel.flags ?? []).length) throw new OpError("bad request: launch: flags need an addon's option");
     if (typeof a.prompt === 'string' && a.prompt.length > 65536) throw new OpError('too large');
+    const p = state.plugins[0];
+    const deferred = (a.defer ?? []).some((d) => d.addon === 'vocdoni' && d.id === p.name);
+    if (sel.pick !== 'direct' && !p.choices_saved && !deferred) return { review: { addon: 'vocdoni', id: p.name, revision: p.revision } };
     return { sid: newSession(h, 'claude', a) };
   },
   'session.shell': (a) => { const h = host(a); need(a, 'cwd'); need(a, 'rows', 'number'); need(a, 'cols', 'number'); return { sid: newSession(h, 'shell', a) }; },
   'session.respawn': (a) => {
     const s = sess(a);
     need(a, 'fresh', 'boolean'); need(a, 'rows', 'number'); need(a, 'cols', 'number');
-    if (s.kind === 'claude' && !a.proxy && !s.proxy_known) throw new OpError('proxy unknown');
+    if (s.kind === 'claude' && !a.launch && !s.launch.known) throw new OpError('launch unknown');
+    if (a.launch) Object.assign(s, launchOf(a.launch));
     s.state = 'starting'; s.state_since = now(); s.attention = null; s.dormant = false; s.pid = 5000;
     emitSession(s);
     setTimeout(() => { if (!state.sessions.has(s.id)) return; s.state = 'idle'; emitSession(s); }, 700);
@@ -568,34 +589,6 @@ const OPS = {
     if (!Number.isInteger(a.file) || a.file < 0 || a.file >= COMMIT_FILES.length) throw new OpError('no such file');
     return { id: oid, path: COMMIT_FILES[a.file].path, patch: COMMIT_PATCH(a.file), truncated: false };
   },
-  'proxy.stats': (a) => {
-    const w = STATS[need(a, 'window')];
-    if (!w) throw bad('window');
-    const f = (v, share) => Math.round(v * share);
-    const by_model = MODELS.map(([model, share]) => ({ model, requests: f(w.requests, share), errors: f(w.errors, share), input_tokens: f(w.input, share), output_tokens: f(w.output, share), cache_read: f(w.cr, share), cache_creation: f(w.cc, share) }));
-    const limit = 1000000 * w.f;
-    return {
-      profile: need(a, 'profile'), window: a.window, user_name: 'dev',
-      totals: { requests: w.requests, errors: w.errors, input_tokens: w.input, output_tokens: w.output, cache_read: w.cr, cache_creation: w.cc },
-      by_model,
-      limit: { output_tokens: limit, window_seconds: 18000, used_output_tokens: w.output, used_pct: Math.round((100 * w.output) / limit), blocked: false, blocked_until: null },
-      pool: [{ name: 'acct-1', status: 'ok' }, { name: 'acct-2', status: 'ok' }, { name: 'acct-3', status: 'cooling down' }],
-    };
-  },
-  'proxy.credential': (a) => {
-    const s = sess(a);
-    if (!s.proxy) throw new OpError('no proxy for this session');
-    if (!s.claude_session_id) throw new OpError('no conversation yet');
-    return { credential: { name: credState.name, plan: credState.plan, provider: 'anthropic', five_hour_pct: credState.five, seven_day_pct: credState.seven, switched_secs_ago: null } };
-  },
-  'proxy.switch': (a) => {
-    const s = sess(a);
-    if (!s.proxy) throw new OpError('no proxy for this session');
-    if (!s.claude_session_id) throw new OpError('no conversation yet');
-    const from = credState.name;
-    credState = from === 'acct-1' ? { name: 'acct-2', plan: 'max', five: 88, seven: 63 } : { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
-    return { from, to: credState.name, state: 'switched' };
-  },
   'snippets.list': () => ({ snippets: state.snippets }),
   'snippets.save': (a) => { const text = need(a, 'text'); const name = `snippet-${state.snippets.length + 1}`; state.snippets.push({ name, text }); return { name }; },
   'extensions.list': () => ({ extensions: state.extensions }),
@@ -622,24 +615,84 @@ const OPS = {
     }
   },
   'extensions.render': (a) => { const lens = need(a, 'lens'); need(a, 'kind'); const src = need(a, 'source'); return lens === 'todo' ? { inline: null, block: ['[ ] ' + src, '    (from the conversation)'] } : { inline: null, block: null }; },
-  'plugins.list': () => ({ plugins: state.plugins }),
-  'plugins.items': (a) => {
-    const p = state.plugins.find((x) => x.name === need(a, 'name'));
-    if (!p) throw new OpError('no such plugin');
-    return { name: p.name, version: p.version, items: [
-      { id: `plugin:${p.name}@market`, section: 'Plugins', title: p.name, checked: true },
-      { id: 'mcp:docs', section: 'MCP servers', title: 'docs', checked: true },
-      { id: 'agent:reviewer', section: 'Agents', title: 'reviewer', checked: false },
-    ] };
+  'addons.list': () => ({ addons: ADDONS() }),
+  'addons.panel': (a) => {
+    vocdoni(a);
+    if (a.panel !== 'proxy') throw bad('panel: no such panel');
+    const win = a.window ?? '24h';
+    const w = STATS[win];
+    if (!w) throw bad("window: not one of the panel's");
+    const s = a.sid ? sess(a) : null;
+    const profile = s?.launch?.choice?.option ?? 'work';
+    const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+    const f = (v, share) => Math.round(v * share);
+    const limit = 1000000 * w.f;
+    const rows = MODELS.map(([model, share]) => [model.replace(/^claude-/, ''), String(f(w.requests, share)), String(f(w.errors, share)), k(f(w.input, share)), k(f(w.output, share)), `${Math.round(share * 100)}%`]);
+    const per = (key) => Object.entries(STATS).map(([name, x]) => [name, Math.round(x[key] / ({ '24h': 1, '7d': 7, '30d': 30 }[name]))]);
+    return {
+      title: `Proxy stats: ${profile}`, updated: now() - 4,
+      pages: [
+        { title: 'Overview', blocks: [
+          { kind: 'key_values', items: [['Account', `dev · profile ${profile}`], ['Pool', '● ok   acct-1 ok · acct-2 ok · acct-3 cooling down']] },
+          { kind: 'key_values', items: [['Requests', `${w.requests} requests in the last ${win} · ${w.errors} errors`], ['Tokens', `in ${k(w.input)} · out ${k(w.output)}`]] },
+          { kind: 'gauge', label: 'Limit: output tokens per 5h', used: w.output, limit, resets: null },
+          { kind: 'text', text: 'Top models by output tokens' },
+          { kind: 'table', header: ['Model', 'Req', 'Err', 'In', 'Out', 'Share'], rows },
+        ] },
+        { title: 'Models', blocks: [{ kind: 'table', header: ['Model', 'Req', 'Err', 'In', 'Out', 'Share'], rows }] },
+        { title: 'Trends', blocks: [{ kind: 'text', text: 'Daily averages per window.', tone: 'muted' }, { kind: 'bars', label: 'Requests / day', series: per('requests') }, { kind: 'bars', label: 'Output tokens / day', series: per('output') }] },
+        { title: 'Pool & limits', blocks: [{ kind: 'table', header: ['Credential', 'Status'], rows: [['acct-1', 'ok'], ['acct-2', 'ok'], ['acct-3', 'cooling down']] }] },
+        { title: 'Sessions', blocks: [{ kind: 'table', header: ['Session', 'Host', 'Credential'], rows: [...state.sessions.values()].filter((x) => x.launch?.choice).map((x) => [x.label, x.host, `${credState.name} (${credState.plan})`]) }] },
+      ],
+      actions: s?.launch?.choice ? [{ id: 'switch', label: 'Move to the next subscription', key: 'n', confirm: `${s.label} keeps its conversation and continues on the next subscription.` }] : [],
+    };
   },
-  'plugins.save': (a) => {
-    const p = state.plugins.find((x) => x.name === need(a, 'name'));
-    if (!p) throw new OpError('no such plugin');
-    if (!Array.isArray(a.disabled)) throw bad('disabled');
-    p.choices_saved = true;
+  'addons.action': (a) => {
+    vocdoni(a);
+    const s = sess(a);
+    if (a.action !== 'switch') throw bad('action: no such action');
+    if (!s.launch?.choice) throw new OpError('vocdoni: this session runs direct');
+    const from = credState.name;
+    credState = from === 'acct-1' ? { name: 'acct-2', plan: 'max', five: 88, seven: 63 } : { name: 'acct-1', plan: 'max', five: 41, seven: 12 };
+    for (const x of state.sessions.values()) if (x.launch?.choice) { x.segments = proxySegments(x.launch.choice.option); emitSession(x); }
+    broadcast(ev('addons.changed', { addon: 'vocdoni' }));
+    return { text: `moved from ${from} to ${credState.name}`, level: 'info' };
+  },
+  'addons.checklist': (a) => {
+    vocdoni(a);
+    const p = state.plugins.find((x) => x.name === need(a, 'checklist'));
+    if (!p) throw new OpError('no such checklist');
+    const items = [
+      { id: `plugin:${p.name}@market`, section: 'Plugins', label: p.name, detail: null },
+      { id: 'mcp:docs', section: 'MCP servers', label: 'docs (http https://docs.example.org/mcp)', detail: null },
+      { id: 'agent:reviewer', section: 'Agents', label: 'reviewer: Reviews the change', detail: null },
+      { id: 'instructions', section: 'Instructions', label: 'instructions', detail: null },
+    ];
+    return { id: p.name, revision: p.revision, title: `Set up ${p.name} ${p.version}`, intro: 'Internal tools: docs MCP server, reviewer agent.', items: items.map((i) => ({ ...i, on: !p.off.includes(i.id) })) };
+  },
+  'addons.checklist.save': (a) => {
+    vocdoni(a);
+    const p = state.plugins.find((x) => x.name === need(a, 'checklist'));
+    if (!p) throw new OpError('no such checklist');
+    if (a.revision !== p.revision) throw new OpError('stale');
+    if (a.answer !== 'defer') { if (!Array.isArray(a.answer?.off)) throw bad('answer'); p.off = [...a.answer.off]; p.choices_saved = true; }
     return {};
   },
-  'plugins.status': () => ({ status: PLUGIN_STATUS().map(({ ...x }) => x) }),
+  'addons.rows': () => ({ rows: state.plugins.map((p) => ({
+    addon: 'vocdoni', name: p.name, description: `${p.version} · ${p.profile}`,
+    on: state.extensions.find((e) => e.name === p.name)?.enabled ?? true, refused: null, setup: p.name,
+    details: ['turning it on or off applies to new sessions', p.choices_saved ? 'set up' : 'not set up yet: Enter to choose what it may install',
+      'local: ready · 1 installed, 1 present, 0 installing, 1 skipped', '  agent:reviewer: failed: marketplace unreachable (retrying in 45 s)', 'z6: applying'],
+  })) }),
+  'addons.row_action': (a) => {
+    vocdoni(a);
+    const e = state.extensions.find((x) => x.name === need(a, 'name'));
+    if (!e) throw new OpError('no such extension');
+    if (a.action === 'toggle') e.enabled = need(a, 'on', 'boolean');
+    else if (a.action !== 'refresh') throw bad('action');
+    broadcast(ev('extensions_changed', {}));
+    return {};
+  },
   'claude.update': (a) => {
     const h = host(a); const install = need(a, 'install', 'boolean');
     const phase = install ? 'installing' : 'updating';
@@ -759,7 +812,7 @@ server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws) => {
   const c = { ws, attached: new Set(), inflight: 0 };
   clients.add(c);
-  send(ws, { t: 'hello', v: 1, version: VERSION, features: [] });
+  send(ws, { t: 'hello', v: 2, version: VERSION, features: [] });
   send(ws, snapshot());
   for (const sid of [ids.working, ids.idle]) {
     send(ws, ev('lens', { sid, seq: 1, items: LENS }));
@@ -767,7 +820,6 @@ wss.on('connection', (ws) => {
   }
   for (const h of Object.values(state.hosts)) send(ws, ev('host_stats', { host: h.name, cpu: 12, mem_used: 6e9, mem_total: 16e9 }));
   for (const o of claudeOffers.values()) send(ws, ev('claude', o));
-  for (const st of PLUGIN_STATUS()) send(ws, ev('plugin_status', st));
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
       const b = Buffer.from(data);
@@ -806,14 +858,6 @@ const statsTimer = setInterval(() => {
   }
 }, 2000);
 statsTimer.unref();
-
-// The plugin retry comes due, then the daemon asks again and a new countdown starts.
-const retryTimer = setInterval(() => {
-  if (Date.now() < retryAt) return;
-  retryAt = Date.now() + 45000;
-  for (const st of PLUGIN_STATUS()) broadcast(ev('plugin_status', st));
-}, 1000);
-retryTimer.unref();
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`mock: http://127.0.0.1:${PORT}/#t=${TOKEN}`);

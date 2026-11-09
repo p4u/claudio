@@ -17,7 +17,7 @@ export function installExtensions() {
   register({ id: 'extensions', group: 'App', title: 'Extensions', run: () => { overlay.value = 'extensions'; } });
 }
 
-const SOURCE = { builtin: 'built-in', external: 'external', addon: 'addon', plugin: 'addon' };
+const SOURCE = { builtin: 'built-in', external: 'external', addon: 'addon' };
 
 function ExtRow({ e, row, onToggle, onReload }) {
   return html`<li class="ext-row" data-testid="extension-row" data-name=${e.name} data-source=${row ? 'addon' : e.source} data-enabled=${e.enabled}>

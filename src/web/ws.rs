@@ -22,7 +22,7 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{addons, ext, git_ops, plugins};
+use super::{addons, ext, git_ops};
 use crate::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
@@ -125,7 +125,7 @@ async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
     let (tx, mut rx) = TabTx::new();
     let hello = json!({
         "t": "hello",
-        "v": 1,
+        "v": 2,
         "version": super::version(),
         "features": [],
     });
@@ -633,9 +633,6 @@ pub(crate) async fn dispatch(
             state.ctx.ext.render(&a.lens, &a.kind, &a.source).await
         }
         op if op.starts_with("addons.") => addons::dispatch(state, op, args).await,
-        op if op.starts_with("proxy.") || op.starts_with("plugins.") => {
-            plugins::dispatch_v1(state, op, args).await
-        }
         _ => Err("unknown op".to_owned()),
     }
 }

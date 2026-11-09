@@ -32,10 +32,6 @@ impl Ui for Vocdoni {
     }
 
     fn panel<'a>(&'a self, req: PanelRequest, ctx: Arc<dyn AddonCtx>) -> BoxFuture<'a, Panel> {
-        if req.id == super::v1::PANEL {
-            let v1 = super::v1::panel(&self.runner.state());
-            return Box::pin(async move { v1 });
-        }
         Box::pin(panel::panel(Arc::clone(&self.runner), req, ctx))
     }
 

@@ -506,7 +506,7 @@ async fn web_auth_gates_api_and_ws() {
     );
     // From the page's origin: hello, then the snapshot.
     let mut tab = Tab::open(&web, &cookie).await;
-    assert_eq!(tab.hello["v"], 1);
+    assert_eq!(tab.hello["v"], 2);
     assert_eq!(tab.hello["version"], env!("CARGO_PKG_VERSION"));
     assert!(tab.snapshot["sessions"].is_array() && tab.snapshot["hosts"].is_array());
     assert_eq!(
@@ -826,7 +826,7 @@ impl Tab {
         let reply = self
             .req(
                 "session.spawn",
-                json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}}),
+                json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "launch": {"pick": "direct"}}),
             )
             .await
             .expect("spawn");
@@ -1093,7 +1093,7 @@ async fn web_refuses_unknown_ids_and_bad_args() {
         .req(
             "session.spawn",
             json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
-                "proxy": {"kind": "direct"}, "bogus": 1}),
+                "launch": {"pick": "direct"}, "bogus": 1}),
         )
         .await
         .unwrap_err();
@@ -1130,7 +1130,7 @@ async fn web_opening_prompt_is_pasted_after_bracketed_paste_mode() {
         .req(
             "session.spawn",
             json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
-                "proxy": {"kind": "direct"}, "prompt": "first task"}),
+                "launch": {"pick": "direct"}, "prompt": "first task"}),
         )
         .await
         .expect("spawn");
@@ -1524,19 +1524,15 @@ async fn web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser() {
     });
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
-    assert_eq!(tab.snapshot["profiles"]["default"], "env");
+    assert!(tab.snapshot.get("profiles").is_none(), "version 1's");
     tab.connected("local").await;
-    until_req(&mut tab, "plugins.status", json!({}), |d| {
-        d["status"].as_array().is_some_and(|s| {
-            s.iter()
-                .any(|p| p["host"] == "local" && p["name"] == PLUGIN && p["state"] == "ready")
-        })
-    })
-    .await;
+    let list = tab.req("addons.list", json!({})).await.unwrap();
+    assert_eq!(vocdoni_of(&list)["launch_options"][0]["id"], "env");
+    host_ready(&mut tab).await;
     let reply = tab
         .req(
             "session.spawn",
-            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "default"}}),
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "launch": {"pick": "default"}}),
         )
         .await
         .expect("spawn");
@@ -1568,17 +1564,26 @@ async fn web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser() {
     tab.output_until(&sid, "FAKE_CLAUDE_BANNER").await;
     for (op, args) in [
         ("hosts.list", json!({})),
-        ("plugins.list", json!({})),
-        ("plugins.items", json!({"name": PLUGIN})),
-        ("plugins.status", json!({})),
+        ("addons.list", json!({})),
+        ("addons.rows", json!({})),
+        (
+            "addons.checklist",
+            json!({"addon": "vocdoni", "checklist": PLUGIN}),
+        ),
         ("extensions.list", json!({})),
-        ("proxy.stats", json!({"profile": "env", "window": "24h"})),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "proxy", "window": "24h"}),
+        ),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "proxy", "sid": sid, "page": 4}),
+        ),
     ] {
         tab.req(op, args)
             .await
             .unwrap_or_else(|e| panic!("{op}: {e}"));
     }
-    let _ = tab.req("proxy.credential", json!({"sid": sid})).await; // no conversation yet: an error
     let second = Tab::open(&web, &cookie).await; // a snapshot with the session in it
     for frame in tab.seen.iter().chain(second.seen.iter()) {
         let text = String::from_utf8_lossy(frame);
@@ -1634,9 +1639,9 @@ async fn web_respawn_without_a_known_proxy_asks() {
             other => break other,
         }
     };
-    assert_eq!(err, Err("proxy unknown".to_owned()));
+    assert_eq!(err, Err("launch unknown".to_owned()));
     let mut direct = ask.clone();
-    direct["proxy"] = json!({"kind": "direct"});
+    direct["launch"] = json!({"pick": "direct"});
     let reply = tab.req("session.respawn", direct).await.expect("respawn");
     assert_eq!(reply["sid"], sid.as_str());
     tab.event("session", |v| v["session"]["id"] == sid.as_str())
@@ -1677,7 +1682,7 @@ async fn web_direct_launches_keep_the_inherited_api_key() {
     let reply = tab
         .req(
             "session.spawn",
-            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}}),
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "launch": {"pick": "direct"}}),
         )
         .await
         .expect("spawn");
@@ -1687,7 +1692,7 @@ async fn web_direct_launches_keep_the_inherited_api_key() {
     assert!(!env.contains("CLAUDECODE="), "a parent claude's marker");
     fs::remove_file(&env_file).unwrap();
     let ask =
-        json!({"sid": sid, "fresh": true, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}});
+        json!({"sid": sid, "fresh": true, "rows": 24, "cols": 80, "launch": {"pick": "direct"}});
     let reply = tab.req("session.respawn", ask).await.expect("respawn");
     assert_eq!(reply["sid"], sid.as_str());
     let env = read_env_file(&env_file).await;
@@ -1710,7 +1715,10 @@ async fn web_spawn_uses_the_composer_env_remove() {
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
     tab.connected("local").await;
-    let spawn = |dir: &std::path::PathBuf, kind: &str| json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": kind}});
+    let spawn = |dir: &std::path::PathBuf, pick: &str| {
+        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+        "launch": {"pick": pick}, "defer": [{"addon": "vocdoni", "id": PLUGIN}]})
+    };
     tab.req("session.spawn", spawn(&dirs[0], "default"))
         .await
         .expect("spawn through the proxy");
@@ -1733,9 +1741,9 @@ async fn web_spawn_uses_the_composer_env_remove() {
     assert!(!env.contains("ANTHROPIC_AUTH_TOKEN="));
     // First-party without a proxy is refused, never started.
     let mut bad = spawn(&dirs[1], "direct");
-    bad["first_party"] = json!(true);
+    bad["launch"]["flags"] = json!(["first-party"]);
     let err = tab.req("session.spawn", bad).await.unwrap_err();
-    assert_eq!(err, "first-party needs a proxy profile");
+    assert_eq!(err, "bad request: launch: flags need an addon's option");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1749,50 +1757,34 @@ async fn web_plugin_without_choices_is_left_out_until_saved() {
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
     tab.connected("local").await;
-    let list = until_req(&mut tab, "plugins.list", json!({}), |d| {
-        d["plugins"][0]["manifest"] == "ready"
-    })
-    .await;
-    assert_eq!(list["plugins"][0]["name"], PLUGIN);
-    assert_eq!(list["plugins"][0]["choices_saved"], false);
-    let spawn = |dir: &std::path::PathBuf, skip: Option<&str>| {
-        let mut args = json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
-            "proxy": {"kind": "default"}});
-        if let Some(skip) = skip {
-            args["skip_plugins"] = json!([skip]);
-        }
-        args
-    };
-    tab.req("session.spawn", spawn(&dirs[0], None))
+    let checklist = plugin_checklist(&mut tab).await;
+    assert_eq!(checklist["id"], PLUGIN);
+    // No choices saved: the launch asks for the review and starts nothing.
+    let reply = tab
+        .req("session.spawn", v2_spawn(&dirs[0], &[]))
         .await
         .expect("spawn");
+    assert_eq!(reply["review"]["id"], PLUGIN, "{reply}");
+    assert!(!env_file.exists(), "nothing started before the review");
+    // Deferred (the page's Skip): it starts, without the plugin.
+    tab.req("session.spawn", v2_spawn(&dirs[0], &[PLUGIN]))
+        .await
+        .expect("spawn deferring the plugin");
     let env = launched_env(&env_file).await;
     assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
     assert!(!env.contains(PLUGIN_SECRET), "no choices: left out");
 
-    tab.req(
-        "plugins.save",
-        json!({"name": PLUGIN, "disabled": ["agent:reviewer"]}),
-    )
-    .await
-    .expect("save");
+    let save = json!({"addon": "vocdoni", "checklist": PLUGIN,
+        "revision": checklist["revision"], "answer": {"off": ["agent:reviewer"]}});
+    tab.req("addons.checklist.save", save).await.expect("save");
     let config = fs::read_to_string(web.h().config_home.join("claudio/config.toml")).unwrap();
     assert!(config.contains(&format!("[plugins.{PLUGIN}]")), "{config}");
     assert!(
         config.contains("disabled = [\"agent:reviewer\"]"),
         "{config}"
     );
-    until_req(&mut tab, "plugins.status", json!({}), |d| {
-        d["status"].as_array().is_some_and(|s| {
-            s.iter()
-                .any(|p| p["host"] == "local" && p["name"] == PLUGIN && p["state"] == "ready")
-        })
-    })
-    .await;
-    let items = tab
-        .req("plugins.items", json!({"name": PLUGIN}))
-        .await
-        .unwrap();
+    host_ready(&mut tab).await;
+    let items = plugin_checklist(&mut tab).await;
     let reviewer = items["items"]
         .as_array()
         .unwrap()
@@ -1800,10 +1792,10 @@ async fn web_plugin_without_choices_is_left_out_until_saved() {
         .find(|i| i["id"] == "agent:reviewer")
         .cloned()
         .unwrap();
-    assert_eq!(reviewer["checked"], false);
+    assert_eq!(reviewer["on"], false);
 
     fs::remove_file(&env_file).unwrap();
-    tab.req("session.spawn", spawn(&dirs[1], None))
+    tab.req("session.spawn", v2_spawn(&dirs[1], &[]))
         .await
         .expect("spawn with the plugin");
     let env = launched_env(&env_file).await;
@@ -1813,12 +1805,28 @@ async fn web_plugin_without_choices_is_left_out_until_saved() {
     );
 
     fs::remove_file(&env_file).unwrap();
-    tab.req("session.spawn", spawn(&dirs[0], Some(PLUGIN)))
+    tab.req("session.spawn", v2_spawn(&dirs[0], &[PLUGIN]))
         .await
-        .expect("spawn skipping the plugin");
+        .expect("spawn deferring the plugin");
     let env = launched_env(&env_file).await;
     assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
-    assert!(!env.contains(PLUGIN_SECRET), "skip_plugins leaves it out");
+    assert!(!env.contains(PLUGIN_SECRET), "defer leaves it out");
+}
+
+/// The plugin's extension row once the local host answered it ready.
+async fn host_ready(tab: &mut Tab) {
+    until_req(tab, "addons.rows", json!({}), |d| {
+        d["rows"].as_array().is_some_and(|rows| {
+            rows.iter().any(|r| {
+                r["name"] == PLUGIN
+                    && r["details"].as_array().is_some_and(|ds| {
+                        ds.iter()
+                            .any(|l| l.as_str().is_some_and(|l| l.starts_with("local: ready")))
+                    })
+            })
+        })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2153,12 +2161,12 @@ async fn web_session_dto_has_launch_and_segments() {
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
     tab.connected("local").await;
-    let spawn = |dir: &std::path::PathBuf, proxy: Value| {
-        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": proxy,
-            "skip_plugins": [PLUGIN]})
+    let spawn = |dir: &std::path::PathBuf, pick: &str| {
+        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "launch": {"pick": pick},
+            "defer": [{"addon": "vocdoni", "id": PLUGIN}]})
     };
     let proxied = tab
-        .req("session.spawn", spawn(&dirs[0], json!({"kind": "default"})))
+        .req("session.spawn", spawn(&dirs[0], "default"))
         .await
         .expect("spawn");
     let sid = proxied["sid"].as_str().unwrap().to_owned();
@@ -2177,7 +2185,7 @@ async fn web_session_dto_has_launch_and_segments() {
         json!({"addon": "vocdoni", "id": "proxy", "text": "⇄ proxy:env", "tone": "accent", "priority": 10})
     );
     let direct = tab
-        .req("session.spawn", spawn(&dirs[1], json!({"kind": "direct"})))
+        .req("session.spawn", spawn(&dirs[1], "direct"))
         .await
         .expect("spawn direct");
     let sid = direct["sid"].as_str().unwrap().to_owned();
@@ -2188,6 +2196,9 @@ async fn web_session_dto_has_launch_and_segments() {
         .await;
     assert_eq!(ev["session"]["launch"]["choice"], Value::Null);
     assert_eq!(ev["session"]["segments"], json!([]));
+    for v1 in ["proxy", "proxy_known", "first_party"] {
+        assert!(ev["session"].get(v1).is_none(), "{v1} is version 1's");
+    }
 }
 
 /// A v2 spawn in `dir` (the addons' default route), with `defer`.
@@ -2232,13 +2243,7 @@ async fn web_spawn_with_launch_needs_review_then_defer_spawns_without_the_plugin
     let env = launched_env(&env_file).await;
     assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
     assert!(!env.contains(PLUGIN_SECRET), "deferred: left out");
-    // v1 and v2 args together, and flags without an option in effect.
-    let mut both = v2_spawn(&dir, &[]);
-    both["proxy"] = json!({"kind": "default"});
-    assert_eq!(
-        tab.req("session.spawn", both).await,
-        Err("bad request: launch: not with proxy, first_party or skip_plugins".to_owned())
-    );
+    // Flags without an option in effect.
     let mut alone = v2_spawn(&dir, &[]);
     alone["launch"] = json!({"pick": "direct", "flags": ["first-party"]});
     assert_eq!(
@@ -2456,18 +2461,64 @@ async fn web_proxy_stats_render_the_fixture() {
     let web = web_with_proxy(ManagerHarness::new(), &proxy);
     let cookie = web.login();
     let mut tab = Tab::open(&web, &cookie).await;
-    let stats = tab
-        .req("proxy.stats", json!({"profile": "env", "window": "7d"}))
-        .await
-        .expect("stats");
-    assert_eq!(stats["user_name"], "tester");
-    assert_eq!(stats["window"], "7d");
-    assert_eq!(stats["totals"]["output_tokens"], 5600);
-    assert_eq!(stats["by_model"][0]["model"], "claude-opus-5-5");
-    assert_eq!(stats["pool"][0]["status"], "ok");
-    assert_eq!(
-        tab.req("proxy.stats", json!({"profile": "env", "window": "1h"}))
-            .await,
-        Err("bad request: window".to_owned())
+    let args = json!({"addon": "vocdoni", "panel": "proxy", "window": "7d"});
+    let panel = until_req(&mut tab, "addons.panel", args, |p| {
+        p.to_string().contains("tester · profile env")
+    })
+    .await;
+    let text = panel.to_string();
+    assert!(text.contains("in the last 7d"), "{text}");
+    assert!(
+        text.contains("out 6k") && text.contains("opus-5-5"),
+        "{text}"
     );
+    assert!(text.contains("anthropic ok"), "the pool: {text}");
+    let bad = json!({"addon": "vocdoni", "panel": "proxy", "window": "1h"});
+    let err = tab.req("addons.panel", bad).await.unwrap_err();
+    assert!(err.starts_with("bad request: window"), "{err}");
+}
+
+/// The version-1 ops are gone (docs/web-protocol.md v2): unknown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_v1_proxy_and_plugin_ops_are_unknown() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    assert!(tab.snapshot.get("profiles").is_none());
+    for (op, args) in [
+        ("proxy.stats", json!({"profile": "env", "window": "24h"})),
+        ("proxy.credential", json!({"sid": uuid::Uuid::nil()})),
+        ("proxy.switch", json!({"sid": uuid::Uuid::nil()})),
+        ("plugins.list", json!({})),
+        ("plugins.items", json!({"name": PLUGIN})),
+        ("plugins.save", json!({"name": PLUGIN, "disabled": []})),
+        ("plugins.status", json!({})),
+    ] {
+        assert_eq!(
+            tab.req(op, args).await,
+            Err("unknown op".to_owned()),
+            "{op}"
+        );
+    }
+    let dir = web.h().dirs[0].clone();
+    for (key, v1) in [
+        ("proxy", json!({"kind": "direct"})),
+        ("first_party", json!(true)),
+        ("skip_plugins", json!([PLUGIN])),
+    ] {
+        let mut args = json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80});
+        args[key] = v1;
+        let err = tab.req("session.spawn", args).await.unwrap_err();
+        assert!(err.starts_with("bad request"), "{key}: {err}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hello_is_v2() {
+    let web = Web::start();
+    let cookie = web.login();
+    let tab = Tab::open(&web, &cookie).await;
+    assert_eq!(tab.hello["t"], "hello");
+    assert_eq!(tab.hello["v"], 2);
+    assert_eq!(tab.hello["features"], json!([]));
 }

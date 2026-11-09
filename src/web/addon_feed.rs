@@ -5,16 +5,18 @@
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use super::events::ev;
+use std::sync::Arc;
+
+use super::events::{ev, extensions_changed};
+use super::ext::Extensions;
 use super::hub::{HubEvent, HubHandle, SessionView};
-use super::plugins::Feed;
 use crate::addon::{Addons, SessionSnap};
 use crate::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
 
 /// Follow the hub's host events into `runtime` (from a resync of the hosts
 /// connected already), send the runtime's notices to every tab, an addon's
-/// change through `feed` (its rows, and the v1 plugin events until P3.16),
-/// and a re-read config.toml to the extensions.
+/// change through `feed` (its extension rows), and a re-read config.toml
+/// to the extensions.
 pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, mut feed: Feed) {
     // Subscribed before the hosts are read: no HostUp is missed.
     let events = hub.subscribe();
@@ -37,6 +39,33 @@ pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, m
             }
         }
     });
+}
+
+/// What an addon's change and a re-read config.toml mean for the
+/// extension registry.
+pub(crate) struct Feed {
+    hub: HubHandle,
+    ext: Arc<Extensions>,
+    runtime: AddonRuntime,
+}
+
+impl Feed {
+    pub(crate) fn new(hub: HubHandle, ext: Arc<Extensions>, runtime: AddonRuntime) -> Feed {
+        Feed { hub, ext, runtime }
+    }
+
+    /// An addon's data changed: the registry's addon rows, then
+    /// `extensions_changed` when they differ.
+    async fn changed(&mut self) {
+        if self.ext.set_rows(&self.runtime.extension_rows()) {
+            self.hub.broadcast(extensions_changed());
+        }
+    }
+
+    /// config.toml was re-read: the registry follows it.
+    async fn config_changed(&self) {
+        self.ext.reread(&self.hub).await;
+    }
 }
 
 async fn follow_hosts(

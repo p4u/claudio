@@ -455,12 +455,11 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
   controls stripped, 64 KiB).
 - `state.rs` — `web-state.json` (layout, order, per-session proxy name, remote hosts); reads
   the TUI's `state.json`, never writes it.
-- `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — every claude spawn and respawn through
-  the launch composer (`app::launch`, as the TUI's), proxy stats/credential/switch, the v1
-  adapter of the Vocdoni addon (`plugins.rs`: `proxy.*`/`plugins.*` ops in `dispatch_v1`,
-  `ProxyArg` → `LaunchSelect`, the `plugin_status`/`profiles`/`extensions_changed` events
-  from the addon's `Changed`; no plugin state or proxy cache of its own; gone with v1 in
-  P3.16), and the extension registry, external host, snippets and config.toml toggles.
+- `spawn.rs`, `addons.rs`, `addon_feed.rs`, `ext.rs` — every claude spawn and respawn through
+  the launch composer (`app::launch`, as the TUI's: `launch`/`defer` args, a `review` reply),
+  the `addons.*` ops and the Session's `launch`/`segments` (`addons.rs`), the runtime's
+  notices, changes and host feed (`addon_feed.rs`; no plugin state or proxy cache of its own),
+  and the extension registry, external host, snippets and config.toml toggles.
 - `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.
 
 **`web/`** (no build step; ES modules through the import map):
@@ -468,8 +467,9 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 - `app/` — `boot.js` (login, CSP violation log `window.__claudioCsp`), `store.js` (model +
   WebSocket), `proto.js`, `term.js` (xterm.js), pure logic with node tests (`queue.js`,
   `keymap.js`, `layout.js`, `panes.js`, `wizard.js`, `model.js`, `notify.js`, ...);
-  `app/ui/` Preact components (`htm`, signals); `app/render/` markdown, KaTeX, mermaid,
-  highlight, all behind DOMPurify.
+  `app/ui/` Preact components (`htm`, signals), the addon ones generic (`panel.js`,
+  `checklist.js`, `segments.js`; pure parts in `launch.js`, `addon-view.js`); `app/render/`
+  markdown, KaTeX, mermaid, highlight, all behind DOMPurify.
 - `styles/`, `fonts/` — tokens and themes (arcade and plain, dark and light); vendored fonts.
 - `vendor/` — pinned upstream files, byte-identical, listed in `MANIFEST.txt` with version,
   URL and SHA-256; licenses in `LICENSES.md`.

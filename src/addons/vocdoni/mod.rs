@@ -12,7 +12,6 @@ pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
-pub mod v1;
 
 use std::sync::Arc;
 

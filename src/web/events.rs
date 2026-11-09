@@ -33,3 +33,18 @@ pub(crate) fn claude_event(
             "version": version, "tail": tail}),
     )
 }
+
+/// A `notice` event for every tab: `text` sanitized, at most 1000
+/// characters.
+pub(crate) fn notice_event(text: &str, level: &str) -> Value {
+    let text: String = crate::text::sanitize(text).chars().take(1000).collect();
+    ev(
+        "notice",
+        json!({"text": text, "level": level, "host": null, "sid": null}),
+    )
+}
+
+/// The `extensions_changed` event.
+pub(crate) fn extensions_changed() -> Value {
+    ev("extensions_changed", json!({}))
+}

@@ -14,8 +14,6 @@ mod hub;
 mod hub_io;
 mod input;
 mod lenses;
-mod plugins;
-mod proxy;
 mod session_events;
 mod spawn;
 mod state;
@@ -282,8 +280,8 @@ async fn serve(
         .map_err(|e| format!("server error: {e}"))
 }
 
-/// The server's state: the hub (from config.toml, both state files and the
-/// proxy profiles, read off the executor), the extensions and the spawn
+/// The server's state: the hub (from config.toml and both state files,
+/// read off the executor), the extensions and the spawn
 /// context, and the addon runtime they feed. The runtime watches
 /// config.toml (D15) and says when it re-read it.
 async fn build_state(
@@ -304,18 +302,17 @@ async fn build_state(
             config: crate::config::load(),
             tui_state: crate::app::state::ClientState::load(&crate::paths::client_state()),
             web: state::load(&state_path),
-            profiles: plugins::profiles(&runtime),
             state_path,
             runtime,
         })
         .await
         .map_err(|e| format!("cannot read the configuration: {e}"))?
     };
-    let (config, profiles) = (hub_cfg.config.clone(), hub_cfg.profiles.clone());
+    let config = hub_cfg.config.clone();
     let hub = hub::start(hub_cfg);
     let ext = ext::Extensions::load(&config, &hub).await;
     runtime.set_core_extensions(ext.own_names());
-    let feed = plugins::Feed::new(hub.clone(), Arc::clone(&ext), runtime.clone(), profiles);
+    let feed = addon_feed::Feed::new(hub.clone(), Arc::clone(&ext), runtime.clone());
     addon_feed::follow(hub.clone(), runtime.clone(), rt_rx, feed);
     let ctx = Arc::new(spawn::SpawnCtx {
         hub: hub.clone(),

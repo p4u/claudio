@@ -1,9 +1,8 @@
 //! Starting sessions from the browser: `session.spawn`, `session.shell`,
 //! `session.respawn`. A claude session goes through the launch composer
-//! (`app::launch`), as the TUI's: its select is the v2 `launch` (with
-//! `defer`), or the v1 `proxy`/`first_party` (`plugins::select_of`, with
-//! `skip_plugins`); the addons add their share there. A v2 spawn whose
-//! addon needs a checklist reviewed answers `review` and starts nothing.
+//! (`app::launch`), as the TUI's: its select is the `launch` arg (with
+//! `defer`); the addons add their share there. A spawn whose addon needs
+//! a checklist reviewed answers `review` and starts nothing.
 //! The env never reaches this file: it lives in the composer until the
 //! `Msg::Spawn`/`Msg::Respawn` goes over the daemon socket.
 
@@ -14,23 +13,15 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::addons::{deferred_of, select_of as launch_select, DeferArg, LaunchArg};
+use super::events::notice_event;
 use super::ext::Extensions;
 use super::hub::{HubHandle, SessionRef};
-use super::plugins::{deferred, notice_event, select_of};
 use super::state::SessionMeta;
 use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice};
 use crate::app::addons::AddonRuntime;
 use crate::app::launch::{self, LaunchSpec, ReviewAnswer, Step};
 use crate::client::Client;
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum ProxyArg {
-    Default,
-    Direct,
-    Profile { name: String },
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,10 +30,6 @@ pub(crate) struct SpawnReq {
     pub cwd: String,
     pub rows: u16,
     pub cols: u16,
-    #[serde(default)]
-    pub proxy: Option<ProxyArg>,
-    #[serde(default)]
-    pub first_party: bool,
     #[serde(default)]
     pub launch: Option<LaunchArg>,
     #[serde(default)]
@@ -53,8 +40,6 @@ pub(crate) struct SpawnReq {
     pub name: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
-    #[serde(default)]
-    pub skip_plugins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,10 +49,6 @@ pub(crate) struct RespawnReq {
     pub fresh: bool,
     pub rows: u16,
     pub cols: u16,
-    #[serde(default)]
-    pub proxy: Option<ProxyArg>,
-    #[serde(default)]
-    pub first_party: bool,
     #[serde(default)]
     pub launch: Option<LaunchArg>,
 }
@@ -133,9 +114,6 @@ pub(crate) fn check_spawn(req: &SpawnReq) -> Result<(), String> {
     Ok(())
 }
 
-const FIRST_PARTY: &str = "first-party needs a proxy profile";
-/// v1 and v2 launch args together.
-const BOTH: &str = "bad request: launch: not with proxy, first_party or skip_plugins";
 /// Launch flags with no addon's option in effect.
 const FLAGS_ALONE: &str = "bad request: launch: flags need an addon's option";
 
@@ -155,26 +133,13 @@ fn reply_id(reply: std::io::Result<Msg>) -> Result<SessionId, String> {
     }
 }
 
-/// `select`'s routing, checked: first-party needs an addon's option.
-fn check_first_party(
-    ctx: &SpawnCtx,
-    select: &LaunchSelect,
-    first_party: bool,
-) -> Result<(), String> {
-    let (choice, _) = launch::resolve(&ctx.runtime, select)?;
-    match choice {
-        None if first_party => Err(FIRST_PARTY.to_owned()),
-        _ => Ok(()),
-    }
-}
-
 /// `base` (a claude `Spawn` or `Respawn` without env or extensions)
 /// launched through the launch composer (`app::launch`) as `select` asks,
 /// with `deferred` skipped: the core's lenses, the addons' share and
 /// `env_remove` are added there, off this function's view; the notices go
-/// to the tabs. With `review` (a v2 spawn), a checklist to review stops it
-/// (nothing is kept, nothing started); else (v1) it is left out with a
-/// notice.
+/// to the tabs. With `review` (a spawn), a checklist to review stops it
+/// (nothing is kept, nothing started); else (a respawn, which never waits
+/// for a review) it is left out with a notice.
 async fn launch(
     ctx: &SpawnCtx,
     (op, select, deferred, review): (LaunchOp, LaunchSelect, Vec<(String, String)>, bool),
@@ -215,8 +180,8 @@ async fn launch(
             revision,
         });
     }
-    // Web protocol v1 has no checklists: a plugin still to review is left
-    // out of this launch, and said.
+    // A respawn never waits for a review: a checklist still to review is
+    // left out of this launch, and said.
     while let Step::Review {
         checklist, parked, ..
     } = step
@@ -246,7 +211,7 @@ enum Launched {
     /// Started: the session and its launch's choice.
     Sent(SessionId, Option<LaunchChoice>),
     /// Not started: `addon` wants checklist `checklist` (at `revision`)
-    /// reviewed first (v2).
+    /// reviewed first.
     Review {
         addon: &'static str,
         checklist: String,
@@ -254,31 +219,16 @@ enum Launched {
     },
 }
 
-/// A launch's select, the checklists it skips, and whether it is a v2
-/// one (a review is answered, not skipped).
-type How = (LaunchSelect, Vec<(String, String)>, bool);
-
-/// How a spawn asks to be launched.
-fn how_of(ctx: &SpawnCtx, req: &SpawnReq) -> Result<How, String> {
-    let v1 = req.proxy.is_some() || req.first_party || !req.skip_plugins.is_empty();
-    let v2 = req.launch.is_some() || !req.defer.is_empty();
-    if v1 && v2 {
-        return Err(BOTH.to_owned());
-    }
-    if v1 {
-        let proxy = req.proxy.clone().unwrap_or(ProxyArg::Default);
-        let select = select_of(&proxy, req.first_party);
-        check_first_party(ctx, &select, req.first_party)?;
-        return Ok((select, deferred(&req.skip_plugins), false));
-    }
-    let select = v2_select(ctx, req.launch.as_ref())?;
+/// A spawn's select and the checklists it defers.
+fn how_of(ctx: &SpawnCtx, req: &SpawnReq) -> Result<(LaunchSelect, Vec<(String, String)>), String> {
+    let select = select_of(ctx, req.launch.as_ref())?;
     let deferred = deferred_of(ctx.runtime.addons(), &req.defer)?;
-    Ok((select, deferred, true))
+    Ok((select, deferred))
 }
 
-/// A v2 `launch` (default: the addons' default) as a select, checked:
-/// flags need an addon's option in effect.
-fn v2_select(ctx: &SpawnCtx, arg: Option<&LaunchArg>) -> Result<LaunchSelect, String> {
+/// A `launch` (default: the addons' default) as a select, checked: flags
+/// need an addon's option in effect.
+fn select_of(ctx: &SpawnCtx, arg: Option<&LaunchArg>) -> Result<LaunchSelect, String> {
     let select = match arg {
         Some(arg) => launch_select(ctx.runtime.addons(), arg)?,
         None => LaunchSelect::default(),
@@ -303,12 +253,12 @@ fn meta_of(ctx: &SpawnCtx, host: &str, choice: Option<&LaunchChoice>) -> Session
     }
 }
 
-/// `session.spawn`: `{"sid"}`, or (v2) `{"review"}`.
+/// `session.spawn`: `{"sid"}`, or `{"review"}`.
 pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<Value, String> {
     check_spawn(&req)?;
     let hub = &ctx.hub;
     let (client, _) = hub.host_client(&req.host).await?;
-    let (select, deferred, review) = how_of(ctx, &req)?;
+    let (select, deferred) = how_of(ctx, &req)?;
     let args = req
         .resume
         .as_ref()
@@ -327,7 +277,7 @@ pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<Value,
         Some(_) => LaunchOp::Resume,
         None => LaunchOp::New,
     };
-    let how = (op, select, deferred, review);
+    let how = (op, select, deferred, true);
     let place = (req.host.as_str(), req.cwd.as_str());
     let (sid, choice) = match launch(ctx, how, place, Msg::Spawn(spec), client).await? {
         Launched::Sent(sid, choice) => (sid, choice),
@@ -377,27 +327,19 @@ pub(crate) async fn spawn_shell(
     Ok(sid)
 }
 
-/// How a claude session is launched again: as the request says (v2
-/// `launch` or v1 `proxy`), else as it was (its recorded routing; one no
-/// addon adopts fails, never direct), else "proxy unknown" (R19).
+/// How a claude session is launched again: as the request's `launch`
+/// says, else as it was (its recorded routing; one no addon adopts fails,
+/// never direct), else "launch unknown" (R19).
 fn respawn_select(
     ctx: &SpawnCtx,
     req: &RespawnReq,
     session: &SessionRef,
 ) -> Result<LaunchSelect, String> {
-    if req.launch.is_some() && (req.proxy.is_some() || req.first_party) {
-        return Err(BOTH.to_owned());
-    }
     if let Some(arg) = &req.launch {
-        return v2_select(ctx, Some(arg));
-    }
-    if let Some(arg) = &req.proxy {
-        let select = select_of(arg, req.first_party);
-        check_first_party(ctx, &select, req.first_party)?;
-        return Ok(select);
+        return select_of(ctx, Some(arg));
     }
     if !session.proxy_known {
-        return Err("proxy unknown".to_owned());
+        return Err("launch unknown".to_owned());
     }
     let legacy = LegacyChoice {
         proxy: session.proxy.clone(),
@@ -443,7 +385,7 @@ mod tests {
 
     fn req() -> SpawnReq {
         serde_json::from_value(serde_json::json!({
-            "host": "local", "cwd": "/w", "rows": 24, "cols": 80, "proxy": {"kind": "direct"}
+            "host": "local", "cwd": "/w", "rows": 24, "cols": 80, "launch": {"pick": "direct"}
         }))
         .unwrap()
     }
@@ -456,7 +398,7 @@ mod tests {
             "defer": [{"addon": "vocdoni", "id": "kb"}]
         });
         let r: SpawnReq = serde_json::from_value(ok).unwrap();
-        assert!(r.proxy.is_none() && r.launch.is_some() && r.defer.len() == 1);
+        assert!(r.launch.is_some() && r.defer.len() == 1);
         for bad in [
             serde_json::json!({"pick": "default", "profile": "work"}),
             serde_json::json!({"pick": "option", "addon": "vocdoni", "option": "w", "token": "x"}),
@@ -502,14 +444,30 @@ mod tests {
     }
 
     #[test]
-    fn spawn_requests_refuse_unknown_keys() {
+    fn spawn_requests_refuse_unknown_keys_and_the_version_1_args() {
         let bad = serde_json::json!({
-            "host": "local", "cwd": "/w", "rows": 24, "cols": 80,
-            "proxy": {"kind": "direct"}, "bogus": 1
+            "host": "local", "cwd": "/w", "rows": 24, "cols": 80, "bogus": 1
         });
         assert!(serde_json::from_value::<SpawnReq>(bad).is_err());
-        let p: ProxyArg =
-            serde_json::from_value(serde_json::json!({"kind": "profile", "name": "w"})).unwrap();
-        assert!(matches!(p, ProxyArg::Profile { name } if name == "w"));
+        for (key, v1) in [
+            ("proxy", serde_json::json!({"kind": "direct"})),
+            ("first_party", serde_json::json!(true)),
+            ("skip_plugins", serde_json::json!(["p"])),
+        ] {
+            let mut req = serde_json::json!({"host": "local", "cwd": "/w", "rows": 24, "cols": 80});
+            req[key] = v1;
+            assert!(
+                serde_json::from_value::<SpawnReq>(req.clone()).is_err(),
+                "{key}"
+            );
+            req["sid"] = serde_json::json!(uuid::Uuid::nil());
+            req["fresh"] = serde_json::json!(false);
+            for gone in ["host", "cwd", "skip_plugins"] {
+                req.as_object_mut().unwrap().remove(gone);
+            }
+            if key != "skip_plugins" {
+                assert!(serde_json::from_value::<RespawnReq>(req).is_err(), "{key}");
+            }
+        }
     }
 }

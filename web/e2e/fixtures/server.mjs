@@ -194,7 +194,7 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
     api: (op, args) => api.req(op, args),
     /** Spawn a claude session through the API; its sid. */
     async spawn(cwd, extraArgs = {}) {
-      const r = await api.req('session.spawn', { host: 'local', cwd, rows: 30, cols: 100, proxy: { kind: 'direct' }, ...extraArgs });
+      const r = await api.req('session.spawn', { host: 'local', cwd, rows: 30, cols: 100, launch: { pick: 'direct' }, ...extraArgs });
       return r.sid;
     },
     /** Kill every session and forget what the fake claudes wrote, so a test starts clean. */

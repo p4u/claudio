@@ -542,7 +542,7 @@ async fn row_action(state: &AppState, a: RowArgs) -> Result<Value, String> {
                 let text = n.text;
                 state
                     .hub
-                    .broadcast(super::plugins::notice_event(&text, "info"));
+                    .broadcast(super::events::notice_event(&text, "info"));
             }
         }
         ("refresh", Some(_)) => return Err("bad request: on: a toggle's only".to_owned()),
