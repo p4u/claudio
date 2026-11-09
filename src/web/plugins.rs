@@ -820,7 +820,7 @@ impl Plugins {
             ));
         }
         let earlier = lock(&self.state).choices.get(name).cloned();
-        let choices = crate::tui::plugin_setup::choices_for(&m, &disabled, earlier.as_ref());
+        let choices = crate::plugins::choices::choices_for(&m, &disabled, earlier.as_ref());
         let (owned, saved) = (name.to_owned(), choices.clone());
         tokio::task::spawn_blocking(move || {
             crate::config::save_plugin_choices(&crate::paths::config_file(), &owned, &saved)

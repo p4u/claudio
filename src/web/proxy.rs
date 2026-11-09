@@ -14,7 +14,7 @@ use crate::proxy::api::{
     SwitchError, SwitchOutcome,
 };
 use crate::proxy::profile::Profile;
-use crate::tui::stats_view::Window;
+use crate::proxy::stats::Window;
 
 /// How long a profile's `/v1/claudio/config` is kept.
 const CONFIG_TTL: Duration = Duration::from_secs(300);
@@ -72,7 +72,7 @@ fn clean(name: &str) -> String {
     crate::text::sanitize(name).chars().take(80).collect()
 }
 
-/// "24h"|"7d"|"30d" via stats_view::Window::param, else "bad request: window".
+/// "24h"|"7d"|"30d" via crate::proxy::stats::Window::param, else "bad request: window".
 pub(crate) fn window_param(window: &str) -> Result<&'static str, String> {
     Window::ALL
         .iter()

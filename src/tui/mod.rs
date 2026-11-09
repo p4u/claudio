@@ -93,7 +93,7 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// cannot smuggle escape sequences into the outer terminal.
 fn emit_notification(label: &str) {
     use std::io::Write;
-    let safe = sessions::sanitize_label(label, 200);
+    let safe = crate::app::label::sanitize_label(label, 200);
     let msg = format!("\x1b]9;claudio: {safe} needs you\x07");
     let _ = std::io::stdout().write_all(msg.as_bytes());
     let _ = std::io::stdout().flush();
@@ -861,7 +861,7 @@ async fn event_loop(
                 // feed the status bar, which `--plain` does not have).
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
                 if let Some(name) = proxy_name.filter(|_| manager) {
-                    app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
+                    app.schedule_proxy_stats(&name, vec![crate::proxy::stats::Window::H24]);
                 }
             }
             _ = plugins_tick.tick() => app.fetch_plugin_lists(),
@@ -1279,7 +1279,7 @@ async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::Con
 /// well inside the proxy's per-user rate limit (1 req/s, burst 10).
 async fn fetch_proxy_stats(
     profile_name: &str,
-    windows: &[stats_view::Window],
+    windows: &[crate::proxy::stats::Window],
     models: bool,
 ) -> proxy_state::ProxyFetch {
     use crate::proxy::api;

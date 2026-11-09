@@ -281,13 +281,13 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
     let mut out = io::stdout();
     let _ = writeln!(out, "claudio web: {url}");
     let _ = out.flush();
-    let wanted = crate::proxy::login::browser_wanted(
+    let wanted = crate::app::browser::browser_wanted(
         std::env::consts::OS,
         |k| std::env::var(k).ok(),
         io::stdout().is_terminal(),
     );
     if !args.no_open && wanted {
-        crate::proxy::login::open_browser(&url);
+        crate::app::browser::open_browser(&url);
     }
     tracing::info!(listen = %args.listen, "web: serving");
 

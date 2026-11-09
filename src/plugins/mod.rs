@@ -3,4 +3,5 @@
 //! (which shows the items and keeps the member's choices) and the daemon
 //! (which applies them on its host).
 
+pub mod choices;
 pub mod manifest;

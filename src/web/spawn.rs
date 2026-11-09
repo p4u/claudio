@@ -89,7 +89,7 @@ pub(crate) fn check_name(name: Option<&str>) -> Result<Option<String>, String> {
     let Some(name) = name else {
         return Ok(None);
     };
-    let clean = crate::tui::sessions::sanitize_label(name, NAME_MAX + 1);
+    let clean = crate::app::label::sanitize_label(name, NAME_MAX + 1);
     if clean.chars().count() > NAME_MAX {
         return Err(format!("bad request: name: at most {NAME_MAX} characters"));
     }

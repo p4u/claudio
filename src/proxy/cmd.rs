@@ -250,8 +250,14 @@ async fn browser_login(url: &str) -> Result<Option<Granted>, login::LoginError> 
     println!("Your code: {}", printable(&start.user_code));
     let web = page.starts_with("https://") || page.starts_with("http://");
     let env = |k: &str| std::env::var(k).ok();
-    if web && login::browser_wanted(std::env::consts::OS, env, io::stdout().is_terminal()) {
-        login::open_browser(&page);
+    if web
+        && crate::app::browser::browser_wanted(
+            std::env::consts::OS,
+            env,
+            io::stdout().is_terminal(),
+        )
+    {
+        crate::app::browser::open_browser(&page);
     }
     println!("Waiting… (Ctrl+C to cancel)");
     let _ = io::stdout().flush();

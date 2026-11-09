@@ -33,8 +33,9 @@ use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
 };
 use super::selection::{Clicks, Selection};
-use super::stats_view::{StatsOutcome, StatsView, Window};
+use super::stats_view::{StatsOutcome, StatsView};
 use crate::app::state::{ClientState, KillTombstone};
+use crate::proxy::stats::Window;
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
 pub use super::interaction::Modal;

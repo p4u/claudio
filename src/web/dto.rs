@@ -190,7 +190,7 @@ pub(crate) fn label(
                 .to_owned(),
             SessionKind::Shell => "term".to_owned(),
         });
-    crate::tui::sessions::sanitize_label(&raw, 200)
+    crate::app::label::sanitize_label(&raw, 200)
 }
 
 #[cfg(test)]
