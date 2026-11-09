@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +16,8 @@ import { startFakeProxy, PROXY_TOKEN } from './fake-proxy.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '../../../../..');
 const BIN = process.env.CLAUDIO_BIN ?? path.join(repo, 'target/debug/claudio');
+/** The password of the committed fixture hash `web-password` (a test value, never a real one). */
+export const TEST_PASSWORD = 'claudio-e2e-password';
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer();
@@ -56,23 +59,30 @@ function git(cwd, ...args) {
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
 }
 
-function postLogin(port, token) {
+/** POST /api/login with `body`; over TLS (the self-signed certificate accepted) when `remote`. */
+function postLogin(port, body, remote) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ token });
-    const req = http.request({ host: '127.0.0.1', port, path: '/api/login', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Origin: `http://127.0.0.1:${port}` } },
-    (res) => { res.resume(); res.on('end', () => resolve(res)); });
+    const data = JSON.stringify(body);
+    const scheme = remote ? 'https' : 'http';
+    const req = (remote ? https : http).request({
+      host: '127.0.0.1', port, path: '/api/login', method: 'POST',
+      ...(remote ? { rejectUnauthorized: false } : {}),
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), Origin: `${scheme}://127.0.0.1:${port}` },
+    }, (res) => { res.resume(); res.on('end', () => resolve(res)); });
     req.on('error', reject);
-    req.end(body);
+    req.end(data);
   });
 }
 
 /** A node WebSocket client, logged in like a browser, for setup and assertions. */
-async function connectApi(port, token) {
-  const res = await postLogin(port, token);
+async function connectApi(port, body, remote) {
+  const res = await postLogin(port, body, remote);
   if (res.statusCode !== 204) throw new Error(`login: ${res.statusCode}`);
   const cookie = res.headers['set-cookie'][0].split(';')[0];
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Origin: `http://127.0.0.1:${port}`, Cookie: cookie } });
+  const ws = new WebSocket(`${remote ? 'wss' : 'ws'}://127.0.0.1:${port}/ws`, {
+    ...(remote ? { rejectUnauthorized: false } : {}),
+    headers: { Origin: `${remote ? 'https' : 'http'}://127.0.0.1:${port}`, Cookie: cookie },
+  });
   const pending = new Map();
   let next = 1;
   const events = [];
@@ -104,7 +114,11 @@ async function connectApi(port, token) {
   };
 }
 
-export async function startServer({ proxy = false, hosts = [] } = {}) {
+/**
+ * `remote`: `claudio web --remote` (TLS, the fixture password in the isolated config) instead of
+ * `--listen`; `allowHosts` are its `--allow-host` names.
+ */
+export async function startServer({ proxy = false, hosts = [], remote = false, allowHosts = [] } = {}) {
   const home = os.homedir();
   const base = path.join(home, '.cache/claudio/web-e2e');
   const root = path.join(base, crypto.randomBytes(4).toString('hex'));
@@ -119,6 +133,10 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
     '[claude]\nupdate_check = "off"\nremote_check = "off"\ninstall = "off"\n');
   // Remembered remote hosts: they show in the Hosts menu (offline; the ssh to them just fails).
   if (hosts.length) fs.writeFileSync(path.join(root, 'cfg/claudio/web-state.json'), JSON.stringify({ hosts }));
+  if (remote) {
+    fs.copyFileSync(path.join(here, 'web-password'), path.join(root, 'cfg/claudio/web-password'));
+    fs.chmodSync(path.join(root, 'cfg/claudio/web-password'), 0o600);
+  }
   fs.copyFileSync(path.join(here, 'fake-claude.sh'), path.join(root, 'fake-claude'));
   fs.chmodSync(path.join(root, 'fake-claude'), 0o755);
   const dirs = {
@@ -140,7 +158,10 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
 
   const port = await freePort();
   const log = fs.openSync(path.join(root, 'web.log'), 'a');
-  const child = spawn(BIN, ['web', '--listen', `127.0.0.1:${port}`, '--no-open'], { env, stdio: ['ignore', 'pipe', log] });
+  const args = remote
+    ? ['web', '--remote', `127.0.0.1:${port}`, '--no-open', ...allowHosts.flatMap((h) => ['--allow-host', h])]
+    : ['web', '--listen', `127.0.0.1:${port}`, '--no-open'];
+  const child = spawn(BIN, args, { env, stdio: ['ignore', 'pipe', log] });
   const url = await new Promise((resolve, reject) => {
     let buf = '';
     const t = setTimeout(() => reject(new Error(`claudio web printed no URL: ${buf}`)), 30_000);
@@ -152,8 +173,11 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
     child.on('exit', (c) => reject(new Error(`claudio web exited ${c}`)));
   });
   child.stdout.resume();
-  const token = /#t=(.+)$/.exec(url)[1];
-  const api = await connectApi(port, token);
+  // With --remote the URL carries no token (stdout is for other machines): read the file.
+  const token = remote
+    ? fs.readFileSync(path.join(root, 'cfg/claudio/web-token'), 'utf8').trim()
+    : /#t=(.+)$/.exec(url)[1];
+  const api = await connectApi(port, remote ? { password: TEST_PASSWORD } : { token }, remote);
   // The local daemon starts with the server: ops on `local` need it connected.
   for (const end = Date.now() + 30_000; ; await sleep(100)) {
     const { hosts } = await api.req('hosts.list');
@@ -172,7 +196,7 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
   }
 
   return {
-    url, token, port, root, dirs, claudeConfig: path.join(root, 'claude-config'),
+    url, token, port, root, dirs, remote, origin: `${remote ? 'https' : 'http'}://127.0.0.1:${port}`, claudeConfig: path.join(root, 'claude-config'),
     configToml: path.join(root, 'cfg/claudio/config.toml'),
     /** Run the saved hook command of the session started in `cwd`, JSON on stdin, as claude does. */
     async fireHook(cwd, event, payload = {}) {
