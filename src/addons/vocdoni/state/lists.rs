@@ -11,6 +11,8 @@ pub struct Row<'a> {
     pub profile: &'a str,
     pub plugin: &'a Plugin,
     /// Why it is refused (its list's checks, or a name already taken).
+    // Read by the tests until the addon's extension rows show it (P3.13).
+    #[allow(dead_code)]
     pub refused: Option<String>,
     /// Admitted and not turned off.
     pub on: bool,

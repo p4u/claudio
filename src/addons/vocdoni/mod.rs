@@ -1,15 +1,20 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
+// P3.8b: the bridge lands before the TUI reads it (P3.8c), which removes
+// this allow.
+#[allow(dead_code)]
+pub mod bridge;
 pub mod daemon;
 pub mod plugins;
 pub mod proxy;
-// P3.8a: the state lands before its runner (P3.8b), which removes this.
-#[allow(dead_code)]
+pub mod runner;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::addon::{Addon, DaemonOps};
+use std::sync::Arc;
+
+use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps};
 
 /// The addon's name: its config sections' owner and its daemon ops' prefix.
 pub const NAME: &str = "vocdoni";
@@ -17,6 +22,8 @@ pub const NAME: &str = "vocdoni";
 /// The Vocdoni addon.
 pub struct Vocdoni {
     daemon: daemon::VocdoniDaemon,
+    /// The client side: the plugin state and the proxy config cache.
+    runner: Arc<runner::Runner>,
 }
 
 impl Vocdoni {
@@ -27,7 +34,10 @@ impl Vocdoni {
 
     /// The addon with `daemon` as its daemon side (tests give it their dirs).
     pub fn with_daemon(daemon: daemon::VocdoniDaemon) -> Vocdoni {
-        Vocdoni { daemon }
+        Vocdoni {
+            daemon,
+            runner: Arc::default(),
+        }
     }
 }
 
@@ -42,5 +52,13 @@ impl Addon for Vocdoni {
 
     fn daemon(&self) -> Option<&dyn DaemonOps> {
         Some(&self.daemon)
+    }
+
+    fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
+        self.runner.on_event(event, ctx);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

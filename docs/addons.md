@@ -270,6 +270,13 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 `<cache>/plugins/` is downloaded again once. Installs run after the reply, under the
 `updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
 
+**Client side.** `state/` is the addon's pure plugin state machine and proxy config cache (A5,
+A6): each profile's list (`plugins.json`, then the proxy every 15 min), each plugin's manifest,
+what each host answered, and the member's `[plugins.<name>]` choices. `runner.rs` drives it from
+the runtime's events and does its tasks through the `AddonCtx` (fetches, `vocdoni/apply` asks,
+`edit_config("plugins", …)`). Until the TUI's setup screen and extension rows become a checklist
+and rows (P3.11, P3.13), the TUI reads it through `bridge.rs`.
+
 ## Config sections and reserved words
 
 An addon reads and writes only the top-level `config.toml` tables it declares in
