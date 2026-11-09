@@ -234,7 +234,7 @@ pub(crate) struct Daemon {
     /// permissions`, `--plugin-dir`, `--agents`, `--mcp-config`; it runs
     /// `claude --help`). Probed on first use, and again after a claude
     /// update or install, like `host`.
-    claude_flags: Mutex<Option<host::ClaudeFlags>>,
+    claude_flags: Mutex<Option<crate::addon::ClaudeFlags>>,
     /// Notified when the daemon should shut down cleanly.
     pub(crate) shutdown: tokio::sync::Notify,
     /// Latest host resource snapshot, updated every ~2 s by the stats sampler.
@@ -340,13 +340,13 @@ impl Daemon {
 
     /// The optional flags this claude knows: probed once (`claude --help`),
     /// until the next claude update. Blocking the first time.
-    pub(crate) fn claude_flags(&self) -> host::ClaudeFlags {
+    pub(crate) fn claude_flags(&self) -> crate::addon::ClaudeFlags {
         // Held while probing, so concurrent spawns wait for one probe.
         let mut flags = self.claude_flags.lock().unwrap_or_else(|e| e.into_inner());
         if flags.is_none() {
             *flags = host::claude_flags(&self.config.claude_bin(), self.config.path.as_deref());
         }
-        flags.unwrap_or_default()
+        flags.clone().unwrap_or_default()
     }
 
     /// Send a session event to every connected client.

@@ -3101,7 +3101,7 @@ async fn plugin_dirs_are_dropped_for_an_old_claude_but_journaled() {
     spec.args = vec!["--plugin-dir".into(), "/c/plugins/kb.zip".into()];
     c.spawn(spec).await;
     c.attach_until(id, BANNER).await;
-    assert!(!d.daemon.claude_flags().plugin_dir);
+    assert!(!d.daemon.claude_flags().knows("--plugin-dir"));
     let entry = &d.journal()["sessions"][0];
     assert_eq!(
         entry["args"],

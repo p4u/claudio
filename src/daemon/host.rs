@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::addon::ClaudeFlags;
 use crate::proto::{ClaudeInfo, DirEntry, HostInfo};
 
 /// How long `claude --version` may take before we report claude as missing.
@@ -108,49 +109,18 @@ pub const AGENTS: &str = "--agents";
 /// Loads MCP servers for one session (JSON files or strings; variadic).
 pub const MCP_CONFIG: &str = "--mcp-config";
 
-/// The optional flags this claude knows, from one `--help` run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ClaudeFlags {
-    /// [`ALLOW_SKIP_PERMISSIONS`].
-    pub skip_permissions: bool,
-    /// [`PLUGIN_DIR`].
-    pub plugin_dir: bool,
-    /// [`AGENTS`].
-    pub agents: bool,
-    /// [`MCP_CONFIG`].
-    pub mcp_config: bool,
-}
+/// The plugin flags a session's args may carry although this claude lacks
+/// them: the daemon drops such a flag and its value (P3.3 makes this generic).
+pub const LEGACY_OPTIONAL: [&str; 3] = [PLUGIN_DIR, AGENTS, MCP_CONFIG];
 
-impl ClaudeFlags {
-    /// The flags that take one value and that a session's args may carry
-    /// although this claude lacks them, each with whether it knows it.
-    pub fn optional(&self) -> [(&'static str, bool); 3] {
-        [
-            (PLUGIN_DIR, self.plugin_dir),
-            (AGENTS, self.agents),
-            (MCP_CONFIG, self.mcp_config),
-        ]
-    }
-
-    /// The plugin flags this claude lacks (`--mcp-config`, `--agents`):
-    /// what a plugin's sessions here go without.
-    pub fn dropped(&self) -> Vec<String> {
-        [(MCP_CONFIG, self.mcp_config), (AGENTS, self.agents)]
-            .into_iter()
-            .filter(|(_, known)| !known)
-            .map(|(flag, _)| flag.to_owned())
-            .collect()
-    }
-}
-
-/// Whether `help` lists `flag` as an option: a line that starts with it
-/// (another option's description may name it too).
-fn lists(help: &str, flag: &str) -> bool {
-    help.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(flag)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '=', ',']))
-    })
+/// The plugin flags this claude lacks (`--mcp-config`, `--agents`): what a
+/// plugin's sessions here go without.
+pub fn plugin_flags_dropped(flags: &ClaudeFlags) -> Vec<String> {
+    [MCP_CONFIG, AGENTS]
+        .into_iter()
+        .filter(|flag| !flags.knows(flag))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// [`ClaudeFlags`] of `<claude> --help`, or `None` when it did not run
@@ -158,12 +128,7 @@ fn lists(help: &str, flag: &str) -> bool {
 /// Blocking (≤ 3 s).
 pub fn claude_flags(claude: &Path, path: Option<&OsStr>) -> Option<ClaudeFlags> {
     let help = run_capture(claude, "--help", path)?;
-    Some(ClaudeFlags {
-        skip_permissions: help.contains(ALLOW_SKIP_PERMISSIONS),
-        plugin_dir: lists(&help, PLUGIN_DIR),
-        agents: lists(&help, AGENTS),
-        mcp_config: lists(&help, MCP_CONFIG),
-    })
+    Some(ClaudeFlags::from_help(&help))
 }
 
 /// Spawn `cmd`, retrying briefly on `ETXTBSY` ("Text file busy"). Linux
@@ -341,7 +306,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let flags = claude_flags(&bin, None).unwrap();
         assert!(flags.skip_permissions);
-        assert!(!flags.plugin_dir);
+        assert!(!flags.knows(PLUGIN_DIR));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -359,26 +324,27 @@ mod tests {
             claude_flags(&bin, None).unwrap()
         };
         let both = help("  --plugin-dir <paths...>  --allow-dangerously-skip-permissions");
-        assert_eq!(
-            both,
-            ClaudeFlags {
-                skip_permissions: true,
-                plugin_dir: true,
-                ..ClaudeFlags::default()
-            }
-        );
+        assert!(both.skip_permissions && both.knows(PLUGIN_DIR));
+        assert!(!both.knows(AGENTS) && !both.knows(MCP_CONFIG));
         let plugins = help("  --plugin-dir <paths...>");
-        assert!(plugins.plugin_dir && !plugins.skip_permissions);
+        assert!(plugins.knows(PLUGIN_DIR) && !plugins.skip_permissions);
         assert_eq!(help(""), ClaudeFlags::default());
-        assert_eq!(help("").dropped(), ["--mcp-config", "--agents"]);
+        assert_eq!(
+            plugin_flags_dropped(&help("")),
+            ["--mcp-config", "--agents"]
+        );
         // Listed as options, not merely named in another one's description.
         let current = help(
             "  --agents <json-or-file>  Agents\n  --mcp-config <configs...>  MCP\n               --bare  Skips --plugin-dir, --strict-mcp-config",
         );
-        assert!(current.agents && current.mcp_config && !current.plugin_dir);
-        assert!(current.dropped().is_empty());
+        assert!(current.knows(AGENTS) && current.knows(MCP_CONFIG));
+        assert!(!current.knows(PLUGIN_DIR));
+        assert!(plugin_flags_dropped(&current).is_empty());
         let named = help("  --bare  Skips --mcp-config, --agents\n  --strict-mcp-config  Only");
-        assert!(!named.agents && !named.mcp_config, "{named:?}");
+        assert!(
+            !named.knows(AGENTS) && !named.knows(MCP_CONFIG),
+            "{named:?}"
+        );
         assert_eq!(claude_flags(Path::new("/nonexistent/claude"), None), None);
         let _ = std::fs::remove_dir_all(&dir);
     }

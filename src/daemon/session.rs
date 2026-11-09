@@ -29,6 +29,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{host, Daemon};
+use crate::addon::ClaudeFlags;
 use crate::claude::hooks;
 use crate::claude::state::Tracker;
 use crate::proto::{
@@ -183,7 +184,7 @@ pub fn spawn(
                 &cwd,
                 &token,
                 daemon.skip_permissions(),
-                daemon.claude_flags(),
+                &daemon.claude_flags(),
                 context.as_deref(),
             );
             let program = PathBuf::from(cmd.get_argv()[0].clone());
@@ -340,7 +341,7 @@ fn command(
     cwd: &Path,
     token: &str,
     skip_permissions: bool,
-    flags: host::ClaudeFlags,
+    flags: &ClaudeFlags,
     context: Option<&Path>,
 ) -> CommandBuilder {
     let settings = hooks::settings(&cfg.claudio, &cfg.socket, token, context);
@@ -355,12 +356,7 @@ fn command(
     {
         cmd.arg(host::ALLOW_SKIP_PERMISSIONS);
     }
-    let unknown = |flag: &str| {
-        flags
-            .optional()
-            .iter()
-            .any(|(name, known)| !known && *name == flag)
-    };
+    let unknown = |flag: &str| host::LEGACY_OPTIONAL.contains(&flag) && !flags.knows(flag);
     let mut args = spec.args.iter();
     while let Some(a) = args.next() {
         if unknown(a) {
@@ -1148,6 +1144,16 @@ mod tests {
 
     use super::*;
 
+    /// Flags as a claude whose `--help` lists those marked true.
+    fn knowing(flags: &[(&str, bool)]) -> ClaudeFlags {
+        let help: Vec<&str> = flags
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(f, _)| *f)
+            .collect();
+        ClaudeFlags::from_help(&help.join("\n"))
+    }
+
     #[test]
     fn full_queue_lags_then_resyncs_with_pending_req() {
         let id = uuid::Uuid::new_v4();
@@ -1322,8 +1328,8 @@ mod tests {
             ephemeral: false,
             extensions: None,
         };
-        let flags = host::ClaudeFlags::default();
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, flags, None);
+        let flags = ClaudeFlags::default();
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, &flags, None);
         let argv = argv_of(&cmd);
         assert_eq!(argv[0], "/bin/claude");
         assert_eq!(argv[1], "--settings");
@@ -1336,7 +1342,7 @@ mod tests {
 
         // With skip-permissions on, the flag follows --settings, ahead of
         // the spec args (which are what the journal stores).
-        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, flags, None);
+        let cmd = command(&cfg, &spec, Path::new("/"), "tok123", true, &flags, None);
         assert_eq!(
             &argv_of(&cmd)[3..],
             [ALLOW, "--resume", "abc", "-n", "work"]
@@ -1351,7 +1357,7 @@ mod tests {
                 Path::new("/"),
                 "t",
                 false,
-                flags,
+                &flags,
                 context,
             ));
             let settings: Value = serde_json::from_str(&argv[2]).unwrap();
@@ -1523,14 +1529,14 @@ mod tests {
                 ephemeral: false,
                 extensions: None,
             };
-            let flags = host::ClaudeFlags::default();
+            let flags = ClaudeFlags::default();
             let argv = argv_of(&command(
                 &cfg,
                 &spec,
                 Path::new("/"),
                 "t",
                 true,
-                flags,
+                &flags,
                 None,
             ));
             assert_eq!(&argv[3..], [given]);
@@ -1568,18 +1574,15 @@ mod tests {
             ephemeral: false,
             extensions: None,
         };
-        let argv = |plugin_dir| {
-            let flags = host::ClaudeFlags {
-                plugin_dir,
-                ..Default::default()
-            };
+        let argv = |plugin_dir: bool| {
+            let flags = knowing(&[("--plugin-dir", plugin_dir)]);
             argv_of(&command(
                 &cfg,
                 &spec,
                 Path::new("/"),
                 "t",
                 false,
-                flags,
+                &flags,
                 None,
             ))
         };
@@ -1627,19 +1630,15 @@ mod tests {
             ephemeral: false,
             extensions: None,
         };
-        let argv = |agents, mcp_config| {
-            let flags = host::ClaudeFlags {
-                agents,
-                mcp_config,
-                ..Default::default()
-            };
+        let argv = |agents: bool, mcp_config: bool| {
+            let flags = knowing(&[("--agents", agents), ("--mcp-config", mcp_config)]);
             argv_of(&command(
                 &cfg,
                 &spec,
                 Path::new("/"),
                 "t",
                 false,
-                flags,
+                &flags,
                 None,
             ))
         };

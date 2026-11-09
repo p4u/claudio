@@ -363,7 +363,7 @@ pub(crate) async fn handle(
         (files.unwrap_or_default(), flags.unwrap_or_default())
     };
     let (mut applied, jobs) = manifests.decide(&m, &sha256, &secrets, &disabled, &files);
-    applied.dropped = flags.dropped();
+    applied.dropped = super::host::plugin_flags_dropped(&flags);
     tracing::info!(
         manifest = %name,
         version = %m.version,
