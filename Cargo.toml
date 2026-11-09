@@ -18,9 +18,14 @@ name = "screenshots"
 path = "tests/screenshots.rs"
 
 [features]
+default = ["api", "web", "vocdoni"]
+# The addons this binary links (docs/addons.md). Without any, the core alone (ACCEPTANCE A4).
+api = []
+web = []
+vocdoni = []
 # Enables diagnostic / test-harness CLI subcommands (`__bootstrap`,
-# `__connect-check`, `__remote-session`, `__ssh-hosts`).  Not included in
-# production release builds.
+# `__connect-check`, `__remote-session`, `__ssh-hosts`, `__remote-manifest`).
+# Not included in production release builds.
 diag = []
 
 [dependencies]
