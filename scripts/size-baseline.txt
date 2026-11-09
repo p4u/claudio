@@ -7,7 +7,7 @@ file src/daemon/mod.rs 993
 file src/daemon/server.rs 918
 file src/daemon/session.rs 1138
 file src/plugins/manifest.rs 828
-file src/proto.rs 1328
+file src/proto.rs 1108
 file src/tui/app.rs 911
 file src/tui/interaction.rs 1032
 file src/tui/mod.rs 1453
@@ -29,7 +29,7 @@ fn src/daemon/mod.rs::spawn_reserved 114
 fn src/daemon/server.rs::request 171
 fn src/daemon/session.rs::run 86
 fn src/daemon/session.rs::spawn 105
-fn src/main.rs::main 271
+fn src/main.rs::main 258
 fn src/plugins/manifest.rs::check 130
 fn src/plugins/manifest.rs::check#2 99
 fn src/print/driver.rs::start 184
