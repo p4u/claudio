@@ -1,6 +1,6 @@
 //! The `--remote` listener: an `axum::serve::Listener` that accepts TCP,
 //! runs each TLS handshake in its own task (10 s deadline, at most 64 at
-//! once) and hands finished streams to `accept` through a bounded channel,
+//! once, 8 per peer but loopback) and hands finished streams to `accept` through a bounded channel,
 //! so one slow client never stalls the others. Open connections are capped
 //! (256 overall, 32 per peer but loopback); a connection that has not sent
 //! the end of its first request's headers within 30 s is closed (axum's
@@ -31,6 +31,7 @@ use crate::peer::{Peer, PeerKey};
 pub(crate) struct Limits {
     pub handshake: Duration,
     pub handshakes: usize,
+    pub handshakes_per_peer: usize,
     pub connections: usize,
     pub per_peer: usize,
     pub headers: Duration,
@@ -40,14 +41,58 @@ impl Limits {
     pub(crate) const DEFAULT: Limits = Limits {
         handshake: Duration::from_secs(10),
         handshakes: 64,
+        handshakes_per_peer: 8,
         connections: 256,
         per_peer: 32,
         headers: Duration::from_secs(30),
     };
 }
 
-/// Open connections per peer key (loopback is not counted).
+/// Open connections (or handshakes) per peer key (loopback is not counted).
 type PeerCounts = Arc<Mutex<HashMap<PeerKey, usize>>>;
+
+/// Admission to the listener: the per-peer shares first, so a peer at its
+/// cap never takes a global permit, then the global pools.
+struct Gate {
+    limits: Limits,
+    handshakes: Arc<Semaphore>,
+    connections: Arc<Semaphore>,
+    per_peer: PeerCounts,
+    handshaking: PeerCounts,
+}
+
+/// What an admitted connection holds: `handshake` until its handshake ends,
+/// `open` and `slot` while it is open.
+struct Admitted {
+    handshake: (OwnedSemaphorePermit, PeerSlot),
+    open: OwnedSemaphorePermit,
+    slot: PeerSlot,
+}
+
+impl Gate {
+    fn new(limits: Limits) -> Gate {
+        Gate {
+            limits,
+            handshakes: Arc::new(Semaphore::new(limits.handshakes)),
+            connections: Arc::new(Semaphore::new(limits.connections)),
+            per_peer: PeerCounts::default(),
+            handshaking: PeerCounts::default(),
+        }
+    }
+
+    /// `None` refuses the connection; whatever was taken is given back.
+    fn admit(&self, peer: Peer) -> Option<Admitted> {
+        let slot = PeerSlot::take(&self.per_peer, peer, self.limits.per_peer)?;
+        let shake = PeerSlot::take(&self.handshaking, peer, self.limits.handshakes_per_peer)?;
+        let handshake = Arc::clone(&self.handshakes).try_acquire_owned().ok()?;
+        let open = Arc::clone(&self.connections).try_acquire_owned().ok()?;
+        Some(Admitted {
+            handshake: (handshake, shake),
+            open,
+            slot,
+        })
+    }
+}
 
 pub(crate) struct TlsListener {
     rx: mpsc::Receiver<(TlsIo, Peer)>,
@@ -84,9 +129,7 @@ async fn accept_loop(
     tx: mpsc::Sender<(TlsIo, Peer)>,
     limits: Limits,
 ) {
-    let handshakes = Arc::new(Semaphore::new(limits.handshakes));
-    let connections = Arc::new(Semaphore::new(limits.connections));
-    let per_peer: PeerCounts = Arc::default();
+    let gate = Gate::new(limits);
     loop {
         let (stream, addr) = match tcp.accept().await {
             Ok(pair) => pair,
@@ -99,13 +142,12 @@ async fn accept_loop(
         };
         let peer = Peer(addr);
         // Every refusal drops the stream: the client sees a reset.
-        let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
-            continue;
-        };
-        let Ok(open) = Arc::clone(&connections).try_acquire_owned() else {
-            continue;
-        };
-        let Some(slot) = PeerSlot::take(&per_peer, peer, limits.per_peer) else {
+        let Some(Admitted {
+            handshake,
+            open,
+            slot,
+        }) = gate.admit(peer)
+        else {
             continue;
         };
         let (acceptor, tx) = (acceptor.clone(), tx.clone());
@@ -158,7 +200,8 @@ impl Connected<IncomingStream<'_, TlsListener>> for Peer {
     }
 }
 
-/// A peer's share of `Limits::per_peer`, given back on drop.
+/// A peer's share of `Limits::per_peer` or `Limits::handshakes_per_peer`,
+/// given back on drop.
 struct PeerSlot {
     counts: PeerCounts,
     key: Option<PeerKey>,
@@ -500,5 +543,35 @@ mod tests {
         assert!(lo.is_some(), "loopback is never refused");
         drop((b, c, other, lo));
         assert!(counts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn handshakes_are_shared_per_peer() {
+        // The default shares, with a global pool two peers could fill alone.
+        let gate = Gate::new(Limits {
+            handshakes: 16,
+            ..Limits::DEFAULT
+        });
+        let peer = |ip: &str| Peer(format!("{ip}:1").parse().unwrap());
+        let mut a: Vec<_> = (0..8).map_while(|_| gate.admit(peer("10.0.0.1"))).collect();
+        assert_eq!(a.len(), 8, "8 handshakes per address");
+        assert!(gate.admit(peer("10.0.0.1")).is_none(), "the 9th is refused");
+        let v6 = gate.admit(peer("[2001:db8::1]")).expect("another address");
+        assert!(
+            gate.admit(peer("[2001:db8::2]")).is_some(),
+            "the same /64 shares one count up to 8"
+        );
+        let lo = gate
+            .admit(peer("127.0.0.1"))
+            .expect("loopback is not counted");
+        assert_eq!(gate.handshakes.available_permits(), 16 - 10, "8 + v6 + lo");
+        // A finished handshake gives its share back; the connection stays.
+        let done = a.remove(0);
+        drop(done.handshake);
+        let again = gate.admit(peer("10.0.0.1")).expect("share given back");
+        assert_eq!(gate.per_peer.lock().unwrap()[&peer("10.0.0.1").key()], 9);
+        drop((done.open, done.slot, again, a, v6, lo));
+        assert!(gate.handshaking.lock().unwrap().is_empty());
+        assert!(gate.per_peer.lock().unwrap().is_empty());
     }
 }

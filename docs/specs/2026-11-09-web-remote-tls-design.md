@@ -142,6 +142,7 @@ claudio web --print-cert
   exception path stays the zero-setup default.
 - TLS via `tokio-rustls`: an `axum::serve::Listener` adapter owning the `TcpListener`. It
   accepts TCP, spawns one handshake task per connection (10 s deadline; at most 64 in flight,
+  8 at once per address, loopback exempt, so two addresses cannot take every handshake slot;
   further connections are closed at once) and yields completed `TlsStream<TcpStream>` with
   the peer address through a bounded channel to `accept`. The peer address reaches handlers as
   `ConnectInfo<Peer>` where `Peer(SocketAddr)` is claudio-web's newtype implementing

@@ -128,8 +128,8 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   as one) per minute, and 30 a minute for all password attempts and non-local token attempts
   together; past a limit the answer is `429`. Password checks run 4 at once; one that waits 2 s
   for a slot answers `503` and does not count. With `--remote`: a TLS handshake gets 10 s and
-  64 run at once; 256 connections in all, 32 per address; a request's headers must arrive
-  within 30 s.
+  64 run at once, 8 at once per address; 256 connections in all, 32 per address; a request's
+  headers must arrive within 30 s.
 - **Accepted risks.** The first fingerprint check is yours: a browser remembers the exception
   per host and certificate, and a changed certificate warns again; clicking through a changed
   one without checking can be attacked. An attacker who keeps the global window full locks
