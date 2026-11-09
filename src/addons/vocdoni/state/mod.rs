@@ -17,10 +17,10 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::addons::vocdoni::daemon::ApplyRequest;
+use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, Plugins, REFRESH_SECS};
 use crate::addons::vocdoni::proxy::api::ConfigResponse;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
-use crate::config::PluginChoices;
 
 /// How long a profile's proxy config is kept (seconds).
 pub const CONFIG_TTL: u64 = 5 * 60;

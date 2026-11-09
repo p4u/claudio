@@ -284,7 +284,9 @@ impl Extensions {
         for (name, on) in flips {
             self.host.set_enabled(&name, on).await;
         }
-        plugins.set_config(config.extensions.clone(), config.plugins.clone());
+        let choices =
+            crate::addons::vocdoni::plugins::choices::from_table(&config.others.section("plugins"));
+        plugins.set_config(config.extensions.clone(), choices);
         hub.set_claude_policy(config.claude.clone()).await;
         let changed = {
             let mut last = lock(&self.profiles);

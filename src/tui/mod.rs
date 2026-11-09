@@ -287,7 +287,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     app.load_plugins(
         cached_plugins,
         config.extensions.clone(),
-        config.plugins.clone(),
+        crate::addons::vocdoni::plugins::choices::from_table(&config.others.section("plugins")),
     );
     let runner = addon_runner::start(addons);
     app.on_daemon_host("local", &local_client.welcome().features);
@@ -931,10 +931,7 @@ fn run_effect(
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
         Effect::SavePluginChoices { name, choices } => {
-            match crate::config::save_plugin_choices(&paths::config_file(), &name, &choices) {
-                Ok(()) => app.notify(format!("plugin {name} set up (saved)")),
-                Err(e) => app.notify(format!("could not save: {e}")),
-            }
+            addon_runner::save_plugin_choices(name, choices, ev_tx)
         }
         Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {

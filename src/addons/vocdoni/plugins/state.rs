@@ -15,9 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::addons::vocdoni::daemon::{applied_of, retry_secs, Applied};
+use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
-use crate::config::PluginChoices;
 use crate::envmerge::merge_env_pairs;
 use crate::proto::{Msg, MAX_PLUGIN_INSTRUCTIONS};
 

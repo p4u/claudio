@@ -2,9 +2,9 @@
 //! what arrived, and what the member saved or put off.
 
 use super::{State, Task};
+use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, PluginsFetch};
 use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
-use crate::config::PluginChoices;
 
 /// One plugin of a list as the extensions screen lists it.
 pub struct Row<'a> {

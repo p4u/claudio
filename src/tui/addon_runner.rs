@@ -197,6 +197,32 @@ pub(super) fn save_extension(name: String, on: bool, tx: &mpsc::Sender<HostEvent
     });
 }
 
+/// Set `[plugins.<name>]` to `choices` in config.toml through the config
+/// editor, off the UI thread; the outcome comes back as a notice.
+pub(super) fn save_plugin_choices(
+    name: String,
+    choices: crate::addons::vocdoni::plugins::choices::PluginChoices,
+    tx: &mpsc::Sender<HostEvent>,
+) {
+    use crate::addons::vocdoni::plugins::choices;
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let own = name.clone();
+        let set = move |t: &mut toml::Table| choices::set(t, &own, &choices);
+        let path = paths::config_file();
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::app::config_edit::edit_section(&path, "plugins", set)
+        })
+        .await;
+        let text = match saved {
+            Ok(Ok(_)) => format!("plugin {name} set up (saved)"),
+            Ok(Err(e)) => format!("could not save: {e}"),
+            Err(_) => "could not save: the save stopped".to_owned(),
+        };
+        let _ = tx.send(HostEvent::Notice(text)).await;
+    });
+}
+
 /// Run a [`Effect::SpawnWithProxy`]: fetch the profile's config unless it
 /// is cached (5 s), wait for the pending manifests, compose the plugins'
 /// share and the proxy env, then send the request; the reply goes to

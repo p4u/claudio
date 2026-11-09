@@ -356,7 +356,7 @@ fn append(text: &str, block: &str) -> String {
 }
 
 /// `line` as its content and its line ending (`\r\n`, `\n` or none).
-pub(crate) fn split_eol(line: &str) -> (&str, &str) {
+fn split_eol(line: &str) -> (&str, &str) {
     if let Some(content) = line.strip_suffix("\r\n") {
         (content, "\r\n")
     } else if let Some(content) = line.strip_suffix('\n') {
@@ -368,7 +368,7 @@ pub(crate) fn split_eol(line: &str) -> (&str, &str) {
 
 /// The table a header line opens (`[ name ]` → `name`, unquoted), `[[`
 /// for an array of tables, or `None` when `content` is not a header.
-pub(crate) fn header(content: &str) -> Option<String> {
+fn header(content: &str) -> Option<String> {
     let t = content.trim_start();
     if t.starts_with("[[") {
         return Some("[[".to_owned());
@@ -440,7 +440,7 @@ fn value_end(text: &str) -> Option<usize> {
 }
 
 /// Toggle the multi-line string `content` opens or closes (`"""`, `'''`).
-pub(crate) fn track_multiline(content: &str, open: &mut Option<&'static str>) {
+fn track_multiline(content: &str, open: &mut Option<&'static str>) {
     match *open {
         Some(delim) => {
             if content.matches(delim).count() % 2 == 1 {

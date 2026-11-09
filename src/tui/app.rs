@@ -197,7 +197,7 @@ pub enum Effect {
     /// Write `[plugins.<name>]` to config.toml; a failure is a notice.
     SavePluginChoices {
         name: String,
-        choices: crate::config::PluginChoices,
+        choices: crate::addons::vocdoni::plugins::choices::PluginChoices,
     },
 }
 

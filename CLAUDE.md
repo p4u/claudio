@@ -285,8 +285,8 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
 - `plugin_setup.rs` — a proxy plugin's setup screen, pure (the saved choices
   are `plugins::choices::choices_for`): every item of
   its manifest with a checkbox (Space, `a`, `n`, Enter saves to
-  `[plugins.<name>]` through `Effect::SavePluginChoices` and
-  `config::save_plugin_choices`, Esc). It opens on first sight (no table
+  `[plugins.<name>]` through `Effect::SavePluginChoices` and the config
+  editor, off the UI thread, Esc). It opens on first sight (no table
   yet; Esc then defers for the run: nothing written or sent) and from the
   extensions screen; it waits its turn in the confirm queue (`Queued`) and
   swallows every key. `--plain` holds its spawn (`App::plain_pending`)

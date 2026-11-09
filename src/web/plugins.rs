@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use super::hub::{daemon_error, HubEvent, HubHandle};
 use crate::addons::vocdoni::daemon::{self as apply, Applied};
-use crate::addons::vocdoni::plugins::choices::choices_for;
+use crate::addons::vocdoni::plugins::choices::{self, choices_for, PluginChoices};
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::plugins::state::{
     reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
@@ -28,7 +28,6 @@ use crate::addons::vocdoni::proxy::api::ApiError;
 use crate::addons::vocdoni::proxy::plugins::{self as cache, Plugin, PluginList};
 use crate::addons::vocdoni::proxy::resolve::load_proxy_profiles;
 use crate::app::extensions::{Registry, Source};
-use crate::config::PluginChoices;
 use crate::proto::Msg;
 
 /// How long a spawn waits for a host to answer its plugin manifests.
@@ -806,7 +805,7 @@ impl Plugins {
         Ok(items_dto(&m, st.choices.get(name)))
     }
 
-    /// choices_for + save_plugin_choices (spawn_blocking), then ask every host again.
+    /// choices_for + the config editor (spawn_blocking), then ask every host again.
     pub(crate) async fn save(&self, name: &str, disabled: Vec<String>) -> Result<(), String> {
         let m = self.manifest(name)?;
         if disabled.len() > MAX_DISABLED {
@@ -823,7 +822,8 @@ impl Plugins {
         let choices = choices_for(&m, &disabled, earlier.as_ref());
         let (owned, saved) = (name.to_owned(), choices.clone());
         tokio::task::spawn_blocking(move || {
-            crate::config::save_plugin_choices(&crate::paths::config_file(), &owned, &saved)
+            let set = |t: &mut toml::Table| choices::set(t, &owned, &saved);
+            crate::app::config_edit::edit_section(&crate::paths::config_file(), "plugins", set)
         })
         .await
         .map_err(|_| "cannot write config.toml".to_owned())?

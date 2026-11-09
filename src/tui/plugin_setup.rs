@@ -367,9 +367,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::addons::vocdoni::daemon::apply_request_of;
+    use crate::addons::vocdoni::plugins::choices::PluginChoices;
     use crate::addons::vocdoni::plugins::state::PluginsFetch;
     use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
-    use crate::config::PluginChoices;
     use crate::proto::Msg;
     use crate::tui::confirm::{Choice, ConfirmPrompt};
     use crate::tui::test_support::{alt, app_with, press};

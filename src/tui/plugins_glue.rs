@@ -5,10 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::addons::vocdoni::daemon::{apply_msg, serves_apply, Applied, ApplyRequest};
+use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
 use crate::app::extensions::Source;
-use crate::config::PluginChoices;
 use crate::proto::Msg;
 
 use super::app::{App, Effect, PendingManifest, ReplyTo};

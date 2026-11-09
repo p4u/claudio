@@ -319,7 +319,7 @@ async fn build_state(
         ext.registry(),
         cached_plugins,
         config.extensions.clone(),
-        config.plugins.clone(),
+        crate::addons::vocdoni::plugins::choices::from_table(&config.others.section("plugins")),
     );
     ext.watch_config(plugins.clone(), hub.clone(), runtime.clone());
     let ctx = Arc::new(spawn::SpawnCtx {
