@@ -111,8 +111,8 @@ impl App {
     }
 
     /// Show `conversation`: switch to the tab on `host` that has it, else
-    /// start one there resuming it, in `cwd`, with the proxy the wizard
-    /// would preselect.
+    /// start one there resuming it, in `cwd`, routed as the wizard would
+    /// preselect.
     pub(super) fn resume_conversation(&mut self, host: String, cwd: String, conversation: String) {
         if cwd.is_empty() {
             return self.notify("that conversation has no working directory to resume in");
@@ -123,8 +123,8 @@ impl App {
         match open {
             Some(i) => self.activate(i),
             None => {
-                let proxy = self.preselected_proxy();
-                self.spawn(host, cwd, Some(conversation), proxy);
+                let select = self.preselected();
+                self.spawn(host, cwd, Some(conversation), select);
             }
         }
     }

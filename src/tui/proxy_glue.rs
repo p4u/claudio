@@ -1,17 +1,12 @@
-//! The TUI's proxy glue: what `App` does with the proxy's answers, and how
-//! a session with a proxy profile is sent. The Vocdoni addon takes it over
-//! (core-addons plan, P3.5b-P3.12).
+//! The TUI's proxy glue: what `App` does with the proxy's answers. The
+//! Vocdoni addon takes it over (core-addons plan, P3.5b-P3.12).
 
-use super::app::{App, Effect, Modal, ReplyTo};
+use super::app::{App, Effect, Modal};
 use super::proxy_state::{ProxyFetch, SessionCred};
 use super::sessions::SessionView;
 use super::HostEvent;
-use crate::addons::vocdoni::bridge::Pending;
-use crate::addons::vocdoni::plugins::state::{compose, with_plugins, PluginPart};
-use crate::addons::vocdoni::proxy::api::{
-    ConfigResponse, SessionCredential, SwitchError, SwitchOutcome,
-};
-use crate::proto::{Msg, SessionId};
+use crate::addons::vocdoni::proxy::api::{SessionCredential, SwitchError, SwitchOutcome};
+use crate::proto::SessionId;
 
 impl App {
     /// A proxy answer from a background fetch: stats, a session's
@@ -55,7 +50,8 @@ impl App {
     /// otherwise a lookup newer than `min_age` seconds is reused.
     pub(super) fn refresh_session_cred(&mut self, min_age: u64) {
         let Some(v) = self.active_view() else { return };
-        let (Some(profile), Some(csid)) = (v.proxy.clone(), v.claude_session_id.clone()) else {
+        let profile = v.profile().map(str::to_owned);
+        let (Some(profile), Some(csid)) = (profile, v.claude_session_id.clone()) else {
             return;
         };
         if v.kind != crate::proto::SessionKind::Claude || csid.is_empty() {
@@ -134,11 +130,6 @@ impl App {
         entry.cred.as_ref()
     }
 
-    /// Proxy config for a profile, if the Vocdoni addon has it fresh (5 min).
-    pub fn proxy_config_cached(&self, name: &str) -> Option<ConfigResponse> {
-        self.bridge()?.config_cached(name)
-    }
-
     /// Called when a `SwitchSubscription` effect completes: say what the
     /// proxy answered, and look the credential up again so the status bar
     /// follows once the switch happens.
@@ -165,67 +156,5 @@ impl App {
             Err(SwitchError::Api(e)) => self.notify(format!("switch failed: {e}")),
             Err(e) => self.notify(e.to_string()),
         }
-    }
-
-    /// Build the `SpawnSpec.env` for a proxy profile name. Fails when a
-    /// profile is selected but cannot be resolved.
-    pub(super) fn proxy_env_for(
-        &self,
-        proxy_name: Option<&str>,
-        first_party: bool,
-    ) -> Result<Vec<(String, String)>, String> {
-        crate::addons::vocdoni::proxy::resolve::proxy_env_for(
-            proxy_name,
-            proxy_name
-                .and_then(|n| self.proxy_config_cached(n))
-                .as_ref(),
-            first_party,
-        )
-    }
-
-    /// Send `msg` (a `Spawn` or `Respawn` without the plugins' share or any
-    /// env) to `host` with the share of `plugins` ([`compose`]) and the env
-    /// of `proxy` added. A cold proxy-config cache, or `pending` manifests
-    /// still to come, go through the effect runner, which fetches the
-    /// config and waits for them first and answers with
-    /// [`ReplyTo::deferred`]. Fails when the profile cannot be resolved.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn send_with_proxy(
-        &mut self,
-        host: &str,
-        msg: Msg,
-        proxy: Option<&str>,
-        first_party: bool,
-        to: ReplyTo,
-        plugins: Vec<PluginPart>,
-        pending: Vec<Pending>,
-    ) -> Result<(), String> {
-        match proxy {
-            Some(name) if self.proxy_config_cached(name).is_none() || !pending.is_empty() => {
-                if !pending.is_empty() {
-                    let names: Vec<&str> = pending.iter().map(|b| b.name.as_str()).collect();
-                    self.notify(format!("applying plugin {}…", names.join(", ")));
-                }
-                self.emit(Effect::SpawnWithProxy {
-                    host: host.to_owned(),
-                    msg,
-                    proxy_name: name.to_owned(),
-                    first_party,
-                    to: to.deferred(),
-                    plugins,
-                    pending,
-                });
-            }
-            _ => {
-                let profile_env = self.proxy_env_for(proxy, first_party)?;
-                let composed = compose(&plugins);
-                for notice in &composed.notices {
-                    self.notify(notice.clone());
-                }
-                let msg = with_plugins(msg, composed).merge_env(profile_env);
-                self.request(host, msg, to);
-            }
-        }
-        Ok(())
     }
 }

@@ -191,12 +191,12 @@ fn main() -> std::process::ExitCode {
     // `claudio [--proxy <name>|--no-proxy] [--first-party]` — open the session
     // manager with a proxy override and/or first-party mode for every new session.
     if argv.len() == 1 {
-        return tui::run(addons);
+        return tui::run(addons, Default::default());
     }
     if matches!(argv[1].as_str(), "--proxy" | "--no-proxy" | "--first-party") {
         return match addons::vocdoni::proxy::resolve::split_launch_flags(&argv[1..]) {
             Ok(flags) if flags.rest.is_empty() => {
-                tui::run_with_proxy(addons, flags.choice, flags.first_party)
+                tui::run(addons, flags.choice.launch_select(flags.first_party))
             }
             Ok(_) => {
                 eprintln!(

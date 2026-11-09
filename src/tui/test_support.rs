@@ -26,16 +26,33 @@ pub fn config() -> AppConfig {
         keymap: Keymap::default(),
         notify: true,
         copy_on_select: true,
-        proxy_override: Default::default(),
-        first_party: false,
-        proxy_profiles: Vec::new(),
-        proxy_default: None,
+        launch_default: Default::default(),
         claude: Default::default(),
         local_claude: None,
         recent_dirs: HashMap::new(),
         claude_skipped: HashMap::new(),
         ssh_hosts: Vec::new(),
         addons: std::sync::Arc::new(crate::addon::Addons::new(crate::addons::all()).unwrap()),
+    }
+}
+
+/// The launch choice of proxy profile `profile` (the Vocdoni addon's).
+pub fn via(profile: &str) -> Option<crate::addon::LaunchChoice> {
+    Some(crate::addon::LaunchChoice {
+        addon: "vocdoni".into(),
+        option: profile.into(),
+        flags: Vec::new(),
+    })
+}
+
+/// Launch option `name` (a proxy profile), not the default.
+pub fn option(name: &str) -> crate::addon::LaunchOption {
+    crate::addon::LaunchOption {
+        id: name.into(),
+        label: name.into(),
+        group: "Proxy".into(),
+        default: false,
+        detail: None,
     }
 }
 
@@ -95,14 +112,23 @@ pub fn launches(effects: &[Effect]) -> Vec<&LaunchCall> {
 }
 
 /// Answer every launch of `effects` as a daemon would (`Spawned`, or a
-/// `Respawn`'s ack) and return what that queues (the held-back Attach).
+/// `Respawn`'s ack; a chosen option is its choice) and return what that
+/// queues (the held-back Attach).
 pub fn finish_launches(app: &mut App, effects: &[Effect]) -> Vec<Effect> {
     for call in launches(effects) {
         let done = super::app::Launched {
             id: call.id,
             op: call.op,
             sid: call.sid,
-            choice: None,
+            // A chosen option is the effective choice; a default one direct.
+            choice: match &call.select.pick {
+                crate::addon::Pick::Option { addon, option } => Some(crate::addon::LaunchChoice {
+                    addon: addon.clone(),
+                    option: option.clone(),
+                    flags: call.select.flags.clone(),
+                }),
+                _ => None,
+            },
             notices: Vec::new(),
             result: Ok(Msg::Spawned {
                 id: call.sid,

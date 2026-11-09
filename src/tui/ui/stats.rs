@@ -359,10 +359,7 @@ fn overview_lines(
         lines.push(Line::raw(""));
     }
 
-    if let Some(v) = app
-        .active_view()
-        .filter(|v| v.proxy.as_deref() == Some(profile))
-    {
+    if let Some(v) = app.active_view().filter(|v| v.profile() == Some(profile)) {
         lines.push(kv("This session", session_summary(v, app.now)));
         if let Some(cred) = app.session_credential(v) {
             lines.push(kv("Credential", credential_spans(cred, app.now)));
@@ -776,7 +773,7 @@ fn sessions_lines(app: &App, profile: &str, lines: &mut Vec<Line<'static>>) {
         .sessions
         .iter()
         .enumerate()
-        .filter(|(_, v)| v.proxy.as_deref() == Some(profile))
+        .filter(|(_, v)| v.profile() == Some(profile))
         .collect();
     lines.push(Line::from(vec![
         Span::styled(format!(" {}", using.len()), bold()),
@@ -1131,7 +1128,7 @@ mod tests {
             state: SessionState::Working,
             created_at: 1,
             attached: true,
-            proxy: proxy.map(str::to_owned),
+            launch: proxy.and_then(crate::tui::test_support::via),
             model: model.map(str::to_owned),
             context_tokens: Some(123_000),
             ..SessionView::new(Uuid::new_v4(), "local", "/home/u/proj", kind, (28, 100))
@@ -1150,8 +1147,9 @@ mod tests {
     fn app_with_stats() -> App {
         let mut app = stats_app();
         app.now = 7_201;
-        app.proxy_profiles = vec!["myproxy".into()];
-        app.proxy_default = Some("myproxy".into());
+        let mut option = crate::tui::test_support::option("myproxy");
+        option.default = true;
+        app.launch_options = vec![("vocdoni", option)];
         app.sessions.push(session(
             "claudio",
             Some("myproxy"),

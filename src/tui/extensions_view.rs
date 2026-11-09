@@ -293,7 +293,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addons::vocdoni::daemon::{applied_reply, Applied};
+    use crate::addon::AddonError;
+    use crate::addons::vocdoni::daemon::Applied;
     use crate::app::extensions::{manifest::Program, Lens, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
@@ -576,19 +577,19 @@ mod tests {
                 "local: applying"
             ]
         );
-        let ready = applied_reply(Applied {
+        let ready = Applied {
             name: "kb".into(),
             version: "1.4.0".into(),
             ..Default::default()
-        });
-        b.on_applied_reply("local", "kb", &sha, Ok(ready));
+        };
+        b.state().on_applied("local", "kb", &sha, Ok(ready));
         changed(&mut app);
         assert_eq!(
             details(&app, 5)[4],
             "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
         );
-        let failed = std::io::Error::other("manifest kb: download failed: HTTP 404");
-        b.on_applied_reply("local", "kb", &sha, Err(failed));
+        let failed = AddonError::Daemon("manifest kb: download failed: HTTP 404".into());
+        b.state().on_applied("local", "kb", &sha, Err(failed));
         changed(&mut app);
         assert_eq!(
             details(&app, 5)[4],
@@ -629,7 +630,8 @@ mod tests {
             on: false,
         }));
         run_bridge(&mut app);
-        assert!(app.plugin_parts("local", "work").0.is_empty());
+        let parts = bridge(&app).state().plugin_parts("local", "work", &[]).0;
+        assert!(parts.is_empty());
         assert_eq!(bridge(&app).enabled().get("kb"), Some(&false));
         // Kept for a list that comes later.
         serve(&mut app, "work", &["kb", "latex"]);

@@ -641,10 +641,6 @@ fn first_sight_lists_ready_unsaved_plugins_until_saved_or_deferred() {
         assert!(asks(&tasks).is_empty(), "nothing before the setup closes");
     }
     assert_eq!(s.first_sight(), ["kb", "two"]);
-    assert_eq!(
-        s.unsaved("work"),
-        [("kb".to_owned(), true), ("two".to_owned(), true)]
-    );
     let choices = PluginChoices {
         disabled: vec!["mcp:kb".into()],
         ..PluginChoices::default()

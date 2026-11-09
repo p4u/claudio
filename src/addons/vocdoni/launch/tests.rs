@@ -417,6 +417,25 @@ async fn an_old_daemon_gets_the_proxy_env_without_plugins_and_a_notice() {
     );
 }
 
+/// A new session at a front-end's start waits for the addon to read its
+/// lists and choices, then gets the plugins.
+#[tokio::test]
+async fn a_new_session_waits_for_the_addons_start() {
+    let runner = runner(profiles_file());
+    kb_ready(&runner);
+    runner.state().loaded = false;
+    runner.activate();
+    let later = Arc::clone(&runner);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        later.state().loaded = true;
+    });
+    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+    let req = request(LaunchOp::New, choice("work".into(), false));
+    let part = prepare(runner, req, ctx).await.unwrap();
+    assert_eq!(part.args.len(), 2, "{part:?}");
+}
+
 #[tokio::test]
 async fn respawn_waits_for_no_manifest() {
     let runner = runner(profiles_file());

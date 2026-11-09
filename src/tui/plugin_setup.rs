@@ -22,14 +22,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::addons::vocdoni::plugins::choices::choices_for;
 use crate::addons::vocdoni::plugins::manifest::{Manifest, Section};
 
-use std::collections::BTreeSet;
-
-use super::app::{AddonResult, App, BridgeCall, Effect, Mode};
+use super::app::{AddonResult, App, BridgeCall, Effect};
 use super::confirm::Queued;
 use super::extensions_view::ExtensionsView;
 use super::interaction::Modal;
-use crate::addons::vocdoni::bridge::{Bridge, Pending};
-use crate::addons::vocdoni::plugins::state::{ManifestState, PluginPart};
+use crate::addons::vocdoni::bridge::Bridge;
+use crate::addons::vocdoni::plugins::state::ManifestState;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::app::extensions::Source;
 
@@ -159,10 +157,11 @@ impl App {
         Bridge::of(&self.addons)
     }
 
-    /// What the addon runtime says: an addon's data changed.
+    /// What the addon runtime says: an addon's data or launch options changed.
     pub fn on_addon(&mut self, result: AddonResult) {
         match result {
             AddonResult::Changed { .. } => self.on_plugins_changed(),
+            AddonResult::Options(options) => self.on_launch_options(options),
         }
     }
 
@@ -296,11 +295,6 @@ impl App {
             self.modal = Some(Modal::ExtensionsMenu(back));
         }
         self.show_next_confirm();
-        // A save reaches the addon with the effects: `--plain`'s session
-        // starts at the next tick, with the choices.
-        if outcome != Outcome::Save {
-            self.plain_try_start();
-        }
     }
 
     /// Whether plugin `name`'s manifest is being fetched again.
@@ -322,18 +316,6 @@ impl App {
         self.emit(Effect::Bridge(BridgeCall::SaveChoices { name, choices }));
     }
 
-    /// What `profile`'s enabled plugins bring to a spawn on `host`, and the
-    /// requests of those `host` has not answered (the spawn waits for them).
-    pub(super) fn plugin_parts(
-        &self,
-        host: &str,
-        profile: &str,
-    ) -> (Vec<PluginPart>, Vec<Pending>) {
-        self.bridge()
-            .map(|b| b.plugin_parts(host, profile))
-            .unwrap_or_default()
-    }
-
     /// What the extensions screen says about plugin `name` of `profile`.
     pub(super) fn plugin_details(
         &self,
@@ -352,67 +334,6 @@ impl App {
         self.emit(Effect::Bridge(BridgeCall::Refresh));
         self.notify("refreshing plugins…");
     }
-
-    /// The profiles sessions use: the one new sessions get, and every open
-    /// session's.
-    pub fn plugin_profiles(&self) -> BTreeSet<String> {
-        let mut profiles: BTreeSet<String> = self
-            .sessions
-            .iter()
-            .filter_map(|v| v.proxy.clone())
-            .collect();
-        if let Some(p) = self.proxy_override.pick(self.proxy_default.as_deref()) {
-            profiles.insert(p.to_owned());
-        }
-        profiles
-    }
-
-    // ── --plain ───────────────────────────────────────────────────────────────
-
-    /// Whether `--plain`'s session must wait for plugin setup: the addon has
-    /// not read its lists yet, or its profile has an enabled plugin without
-    /// saved choices whose manifest has not arrived (both before
-    /// `deadline`) or whose setup screen is open or queued.
-    fn plain_waits(&mut self, profile: &str, deadline: u64) -> bool {
-        let now = self.now;
-        let Some(bridge) = self.bridge() else {
-            return false;
-        };
-        // The cached lists and the choices are read at start, off this thread.
-        if !bridge.loaded() {
-            return now < deadline;
-        }
-        let unsaved = bridge.unsaved(profile);
-        unsaved
-            .iter()
-            .any(|(name, ended)| (!ended && now < deadline) || self.setup_shown(name))
-    }
-
-    /// Start `--plain`'s deferred session once nothing holds it.
-    pub(super) fn plain_try_start(&mut self) {
-        let Some((profile, deadline)) = self
-            .plain_pending
-            .as_ref()
-            .map(|(_, proxy, deadline)| (proxy.clone(), *deadline))
-        else {
-            return;
-        };
-        if self.mode != Mode::Plain {
-            return;
-        }
-        // No claude here: its install (or the question) comes first.
-        if self.claude_install_pending("local") {
-            return;
-        }
-        if let Some(profile) = profile {
-            if self.plain_waits(&profile, deadline) {
-                return;
-            }
-        }
-        if let Some((start, proxy, _)) = self.plain_pending.take() {
-            self.start_plain_now(start, proxy);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -420,7 +341,6 @@ mod tests {
     use super::*;
     use crate::addons::vocdoni::plugins::choices::PluginChoices;
     use crate::addons::vocdoni::plugins::state::ApplyState;
-    use crate::proto::Msg;
     use crate::tui::confirm::{Choice, ConfirmPrompt};
     use crate::tui::test_support::{
         alt, app_with, bridge, changed, manifest_arrives, plugin_host, press, run_bridge, serve,
@@ -491,12 +411,8 @@ prompt = "Review."
     /// The disabled ids of the apply request a spawn on `local` with
     /// profile `work` would wait for.
     fn disabled_asked(app: &App) -> Vec<Vec<String>> {
-        let (_, pending) = bridge(app).plugin_parts("local", "work");
-        pending
-            .iter()
-            .filter_map(|p| crate::addons::vocdoni::daemon::apply_request_of(&p.msg))
-            .map(|r| r.disabled)
-            .collect()
+        let (_, pending) = bridge(app).state().plugin_parts("local", "work", &[]);
+        pending.into_iter().map(|(_, r)| r.disabled).collect()
     }
 
     /// The bridge calls among `effects`.
@@ -791,106 +707,25 @@ prompt = "Review."
         assert!(app.modal.is_none());
     }
 
-    /// A `--plain` app with profile `work` (serving `team`, cached).
-    fn plain_app() -> App {
-        use crate::addons::vocdoni::proxy::plugins::{sample, PluginList};
+    /// `--plain` no longer holds its start for plugin setup: it launches at
+    /// once, and the Vocdoni launch waits for the addon's lists and the
+    /// host's answers itself (`vocdoni::launch`); a plugin not set up is
+    /// left out until its setup is saved.
+    #[test]
+    fn plain_launches_at_once_and_leaves_the_wait_to_the_addon() {
         use crate::tui::app::{AppConfig, Mode};
         let mut app = App::new(AppConfig {
             mode: Mode::Plain,
-            proxy_default: Some("work".into()),
-            proxy_profiles: vec!["work".into()],
             ..crate::tui::test_support::config()
         });
-        app.now = 1000;
-        let list = PluginList {
-            profile: "work".into(),
-            fetched_at: 1,
-            plugins: vec![sample("team")],
-        };
-        let profiles = (vec!["work".to_owned()], Some("work".to_owned()));
-        let b = bridge(&app);
-        b.state()
-            .load(profiles, Default::default(), Default::default(), vec![list]);
-        b.state().host_up("local", true);
-        changed(&mut app);
-        app.take_effects();
-        app
-    }
-
-    fn start(app: &mut App) {
         app.start_plain(crate::tui::plain::PlainStart {
             id: uuid::Uuid::new_v4(),
             args: vec![],
             cwd: "/w".into(),
         });
-    }
-
-    fn spawned(app: &mut App) -> Option<Vec<String>> {
-        app.take_effects().into_iter().find_map(|e| match e {
-            Effect::SpawnWithProxy { pending, .. } => {
-                Some(pending.into_iter().map(|p| p.name).collect())
-            }
-            Effect::Request {
-                msg: Msg::Spawn(_), ..
-            } => Some(Vec::new()),
-            _ => None,
-        })
-    }
-
-    #[test]
-    fn plain_waits_for_a_new_manifest_and_its_setup_then_spawns() {
-        let mut app = plain_app();
-        start(&mut app);
-        assert_eq!(spawned(&mut app), None, "the manifest is on its way");
-        manifest_arrives(&mut app, "team", team());
-        assert_eq!(spawned(&mut app), None, "the setup is open");
-        arm(&mut app);
-        app.on_terminal(press(KeyCode::Enter));
-        // The choices reach the addon with the effects; the tick starts it.
-        assert!(run_bridge(&mut app).is_empty());
-        app.plain_try_start();
-        assert_eq!(
-            spawned(&mut app),
-            Some(vec!["team".to_owned()]),
-            "waits for local's answer"
-        );
-    }
-
-    #[test]
-    fn plain_spawns_at_once_when_set_up_and_after_20_s_without_a_manifest() {
-        let mut app = plain_app();
-        bridge(&app)
-            .state()
-            .plugins
-            .choices
-            .insert("team".into(), PluginChoices::default());
-        start(&mut app);
-        assert!(spawned(&mut app).is_some());
-
-        let mut app = plain_app();
-        start(&mut app);
-        app.now = 1019;
-        app.plain_try_start();
-        assert_eq!(spawned(&mut app), None);
-        app.now = 1020;
-        app.plain_try_start();
-        assert_eq!(spawned(&mut app), Some(Vec::new()), "without the plugin");
-    }
-
-    /// Until the addon has read its lists, `--plain` waits (20 s at most).
-    #[test]
-    fn plain_waits_for_the_addon_to_read_its_lists() {
-        use crate::tui::app::{AppConfig, Mode};
-        let mut app = App::new(AppConfig {
-            mode: Mode::Plain,
-            proxy_default: Some("work".into()),
-            ..crate::tui::test_support::config()
-        });
-        app.now = 1000;
-        start(&mut app);
-        assert_eq!(spawned(&mut app), None);
-        app.now = 1020;
-        app.plain_try_start();
-        assert!(spawned(&mut app).is_some());
+        let effects = app.take_effects();
+        let calls = crate::tui::test_support::launches(&effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].select, crate::addon::LaunchSelect::default());
     }
 }

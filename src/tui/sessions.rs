@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use crate::addon::LaunchOp;
+use crate::addon::{Addons, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice, Pick};
 use crate::proto::{
     GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
     SpawnSpec,
@@ -35,11 +35,12 @@ pub struct SessionView {
     /// Mirror of the daemon's screen; fed only while attached.
     pub mirror: Screen,
     pub attached: bool,
-    /// Proxy profile name (None = no proxy). Only the name, never the token.
-    pub proxy: Option<String>,
-    /// Launched with `--first-party` (a respawn keeps it, even in a run
-    /// without the flag). The profile's own `first_party` is read live.
-    pub first_party: bool,
+    /// What it was launched with (`None`: direct): an addon's option and
+    /// switches, never a secret. A restart keeps it.
+    pub launch: Option<LaunchChoice>,
+    /// A saved pre-addon routing no addon adopts: kept as saved, and its
+    /// launches fail, never direct (F4).
+    pub unadopted: Option<LegacyChoice>,
     /// Git branch of the session's cwd, if any.
     pub branch: Option<String>,
     /// Short human-readable model name from the last assistant turn.
@@ -81,8 +82,8 @@ impl SessionView {
             created_at: 0,
             mirror: Screen::new(size.0, size.1),
             attached: false,
-            proxy: None,
-            first_party: false,
+            launch: None,
+            unadopted: None,
             branch: None,
             model: None,
             context_tokens: None,
@@ -108,16 +109,31 @@ impl SessionView {
         }
     }
 
-    /// The view of a session as state.json remembers it.
-    pub fn from_saved(saved: SavedSession, size: (u16, u16)) -> SessionView {
+    /// The view of a session as state.json remembers it: its routing as
+    /// the addon that adopts it has it.
+    pub fn from_saved(saved: SavedSession, size: (u16, u16), addons: &Addons) -> SessionView {
+        let legacy = LegacyChoice {
+            proxy: saved.proxy,
+            first_party: saved.first_party,
+        };
+        let (launch, unadopted) = match crate::app::launch::adopt_legacy(addons, &legacy) {
+            Ok(choice) => (choice, None),
+            Err(_) => (None, Some(legacy)),
+        };
         SessionView {
             name: saved.name,
             claude_session_id: saved.claude_session_id,
             created_at: saved.created_at,
-            proxy: saved.proxy,
-            first_party: saved.first_party,
+            launch,
+            unadopted,
             ..SessionView::new(saved.id, saved.host, saved.cwd, saved.kind, size)
         }
+    }
+
+    /// The option it was launched with (the proxy profile, while only the
+    /// Vocdoni addon routes launches; P3.12 makes the status generic).
+    pub fn profile(&self) -> Option<&str> {
+        self.launch.as_ref().map(|c| c.option.as_str())
     }
 
     /// The tab label: the user's name, else a meaningful claude title (not
@@ -150,7 +166,12 @@ impl SessionView {
         sanitize_label(&raw, 200)
     }
 
-    pub fn saved(&self) -> SavedSession {
+    /// The record for state.json; the routing in its pre-addon fields.
+    pub fn saved(&self, addons: &Addons) -> SavedSession {
+        let legacy = match &self.unadopted {
+            Some(legacy) => legacy.clone(),
+            None => crate::app::launch::legacy(addons, self.launch.as_ref()),
+        };
         SavedSession {
             id: self.id,
             name: self.name.clone(),
@@ -158,8 +179,8 @@ impl SessionView {
             host: self.host.clone(),
             claude_session_id: self.claude_session_id.clone(),
             created_at: self.created_at,
-            proxy: self.proxy.clone(),
-            first_party: self.first_party,
+            proxy: legacy.proxy,
+            first_party: legacy.first_party,
             kind: self.kind,
         }
     }
@@ -292,7 +313,7 @@ impl App {
         host: String,
         cwd: String,
         resume: Option<String>,
-        proxy: Option<String>,
+        select: LaunchSelect,
     ) {
         let args = resume
             .map(|r| vec!["--resume".to_owned(), r])
@@ -305,10 +326,9 @@ impl App {
             cwd,
             SessionKind::Claude,
             args,
-            proxy,
+            select,
             at,
-        )
-        .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
+        );
     }
 
     /// Open a terminal on the active session's host, in its launch directory
@@ -325,15 +345,15 @@ impl App {
             cwd,
             SessionKind::Shell,
             Vec::new(),
-            None,
+            LaunchSelect::of(None),
             at,
-        )
-        .unwrap_or_else(|e| self.notify(format!("cannot spawn: {e}")));
+        );
     }
 
     /// Send the spawn of session `id`, add its tab at `at` (never before the
-    /// active tab) and switch to it. Fails when the spawn cannot be built
-    /// (an unresolvable proxy profile); nothing is added then.
+    /// active tab) and switch to it. A claude session is launched through
+    /// the composer as `select` asks; a chosen option is recorded at once
+    /// (its effective choice once launched), so a restart keeps it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
         &mut self,
@@ -342,55 +362,45 @@ impl App {
         cwd: String,
         kind: SessionKind,
         args: Vec<String>,
-        proxy: Option<String>,
+        select: LaunchSelect,
         at: usize,
-    ) -> Result<(), String> {
-        let resumes = args.iter().any(|a| a == "--resume");
+    ) {
+        let op = match args.iter().any(|a| a == "--resume") {
+            true => LaunchOp::Resume,
+            false => LaunchOp::New,
+        };
+        let (name, cwd2) = (None, cwd.clone());
         let req = SpawnRequest {
             id,
             kind,
-            op: if resumes {
-                LaunchOp::Resume
-            } else {
-                LaunchOp::New
-            },
-            cwd: cwd.clone(),
-            name: None,
+            op,
+            cwd: cwd2,
+            name,
             args,
         };
-        // Only a proxied claude session has a first-party choice to keep.
-        let first_party = self.first_party && kind == SessionKind::Claude && proxy.is_some();
-        self.send_spawn(&host, req, proxy.as_deref(), first_party)?;
+        let launch = match (&select.pick, kind) {
+            (Pick::Option { addon, option }, SessionKind::Claude) => Some(LaunchChoice {
+                addon: addon.clone(),
+                option: option.clone(),
+                flags: select.flags.clone(),
+            }),
+            _ => None,
+        };
+        self.send_spawn(&host, req, select);
         let view = SessionView {
             created_at: self.now,
-            proxy,
-            first_party,
+            launch,
             ..SessionView::new(id, host, cwd, kind, self.pane_size())
         };
         self.sessions.insert(at, view);
         self.activate(at);
-        Ok(())
     }
 
     /// Queue the spawn request for `req` on `host`. The one place that knows
-    /// how a spawn is built:
-    ///
-    /// - a terminal is a `SpawnShell` with no `--resume` and no proxy env;
-    /// - claude without a proxy goes through the launch composer
-    ///   ([`App::launch`]);
-    /// - claude with a proxy builds its env at once when the profile's config
-    ///   is cached. When the cache is cold (first spawn), the effect runner
-    ///   fetches it (5 s timeout) first, so the proxy's model/rate-limit
-    ///   overrides are applied even on the first session.
-    ///
-    /// Fails when the proxy profile cannot be resolved.
-    pub(super) fn send_spawn(
-        &mut self,
-        host: &str,
-        req: SpawnRequest,
-        proxy: Option<&str>,
-        first_party: bool,
-    ) -> Result<(), String> {
+    /// how a spawn is built: a terminal is a `SpawnShell` (no `--resume`, no
+    /// addon's share); claude goes through the launch composer
+    /// ([`App::launch`]) as `select` asks.
+    pub(super) fn send_spawn(&mut self, host: &str, req: SpawnRequest, select: LaunchSelect) {
         let (rows, cols) = self.pane_size();
         let SpawnRequest {
             id,
@@ -409,7 +419,7 @@ impl App {
                 cols,
             };
             self.request(host, Msg::SpawnShell(shell), ReplyTo::Spawned(id));
-            return Ok(());
+            return;
         }
         let spec = SpawnSpec {
             id,
@@ -423,23 +433,26 @@ impl App {
             extensions: Some(self.extensions.session_extensions()),
             ..Default::default()
         };
-        let Some(profile) = proxy else {
-            self.launch(op, id, host, cwd, Msg::Spawn(spec));
-            return Ok(());
-        };
-        // The profile's plugins: their share now when this host answered
-        // for each, else once it has (the spawn waits for it).
-        let (plugins, pending) = self.plugin_parts(host, profile);
-        let to = ReplyTo::Spawned(id);
-        self.send_with_proxy(
-            host,
-            Msg::Spawn(spec),
-            proxy,
-            first_party,
-            to,
-            plugins,
-            pending,
-        )
+        self.launch(op, id, host, cwd, Msg::Spawn(spec), select);
+    }
+
+    /// How session `v` is launched again (a restart, a recovery): as it was
+    /// (a run's switches added), or `Err` for a saved routing no addon
+    /// adopts, which never becomes direct (F4).
+    pub(super) fn relaunch_select(&self, v: &SessionView) -> Result<LaunchSelect, String> {
+        if let Some(legacy) = &v.unadopted {
+            let why = crate::app::launch::adopt_legacy(&self.addons, legacy).err();
+            return Err(why.unwrap_or_else(|| "its saved routing is unknown".to_owned()));
+        }
+        let mut select = LaunchSelect::of(v.launch.as_ref());
+        if v.launch.is_some() {
+            for flag in &self.launch_default.flags {
+                if !select.flags.contains(flag) {
+                    select.flags.push(flag.clone());
+                }
+            }
+        }
+        Ok(select)
     }
 
     // ── Close (Alt+x) ─────────────────────────────────────────────────────────
@@ -509,21 +522,11 @@ impl App {
     /// the same session again (see [`Msg::Respawn`]); the tab stays.
     pub(super) fn reset_session(&mut self, id: SessionId, fresh: bool) {
         let Some(i) = self.index_of(id) else { return };
-        let (host, kind, proxy, stored) = {
+        let (host, kind, cwd) = {
             let v = &self.sessions[i];
-            (v.host.clone(), v.kind, v.proxy.clone(), v.first_party)
+            (v.host.clone(), v.kind, v.cwd.clone())
         };
-        // A terminal never carries the proxy env.
-        let proxy = proxy.filter(|_| kind == SessionKind::Claude);
-        // A run's `--first-party` applies to the sessions it restarts too.
-        let first_party = (stored || self.first_party) && proxy.is_some();
         let (rows, cols) = self.pane_size();
-        // The plugins' env and instructions now (the journaled args keep
-        // their flags); a reset waits for no manifest.
-        let plugins = match proxy.as_deref() {
-            Some(profile) => self.plugin_parts(&host, profile).0,
-            None => Vec::new(),
-        };
         let msg = Msg::Respawn(RespawnSpec {
             id,
             fresh,
@@ -532,23 +535,12 @@ impl App {
             extensions: Some(self.extensions.session_extensions()),
             ..Default::default()
         });
-        let sent = if kind == SessionKind::Claude && proxy.is_none() {
-            let cwd = self.sessions[i].cwd.clone();
-            self.launch(LaunchOp::Respawn, id, &host, cwd, msg);
-            Ok(())
-        } else {
-            let to = ReplyTo::Respawned(id);
-            let profile = proxy.as_deref();
-            self.send_with_proxy(&host, msg, profile, first_party, to, plugins, Vec::new())
-        };
-        match sent {
-            Ok(()) => {
-                // Keep the effective choice, so a later restart keeps the env.
-                if first_party != stored {
-                    self.sessions[i].first_party = first_party;
-                    self.save();
-                }
-            }
+        // A terminal skips the addons.
+        if kind == SessionKind::Shell {
+            return self.request(&host, msg, ReplyTo::Respawned(id));
+        }
+        match self.relaunch_select(&self.sessions[i]) {
+            Ok(select) => self.launch(LaunchOp::Respawn, id, &host, cwd, msg, select),
             Err(e) => self.notify(format!("cannot restart: {e}")),
         }
     }
@@ -571,14 +563,27 @@ impl App {
         }
     }
 
-    /// The proxy the wizard preselects: the active session's, else the
-    /// startup override, else the config default.
-    pub(super) fn preselected_proxy(&self) -> Option<String> {
-        let active_proxy = self.active_view().and_then(|v| v.proxy.clone());
-        active_proxy.or_else(|| {
-            let picked = self.proxy_override.pick(self.proxy_default.as_deref());
-            picked.map(str::to_owned)
-        })
+    /// The route the wizard preselects: the active session's, else the
+    /// run's (flags), else the addons' default option; the run's switches.
+    pub(super) fn preselected(&self) -> LaunchSelect {
+        let flags = self.launch_default.flags.clone();
+        if let Some(choice) = self.active_view().and_then(|v| v.launch.as_ref()) {
+            return LaunchSelect {
+                flags,
+                ..LaunchSelect::of(Some(choice))
+            };
+        }
+        let pick = match &self.launch_default.pick {
+            Pick::Default => match self.launch_options.iter().find(|(_, o)| o.default) {
+                Some((addon, o)) => Pick::Option {
+                    addon: addon.to_string(),
+                    option: o.id.clone(),
+                },
+                None => Pick::Direct,
+            },
+            pick => pick.clone(),
+        };
+        LaunchSelect { pick, flags }
     }
 
     pub(super) fn open_wizard(&mut self) {
@@ -586,8 +591,7 @@ impl App {
         // The wizard starts on the active host; picking another host seeds
         // it again (see `on_host_connected`).
         let seeds = wizard::assemble(None, &self.wizard_seeds(&active_host), &self.projects);
-        let proxy_default = self.preselected_proxy();
-        let proxy_default = proxy_default.as_deref();
+        let preselect = self.preselected();
         self.modal_gen += 1;
         let wizard = Wizard::new(
             seeds,
@@ -595,8 +599,7 @@ impl App {
             self.home.clone(),
             &active_host,
             &self.ssh_hosts,
-            &self.proxy_profiles,
-            proxy_default,
+            (&self.launch_options, &preselect),
         );
         self.modal = Some(Modal::Wizard(Box::new(wizard)));
         // `~/.ssh/config` may have changed since the list was read.
@@ -643,7 +646,7 @@ impl App {
             .filter(|s| !saved.is_killed(s.id))
             .map(|s| SessionView {
                 state: SessionState::Unknown,
-                ..SessionView::from_saved(s.clone(), size)
+                ..SessionView::from_saved(s.clone(), size, &self.addons)
             })
             .collect();
         self.active = None;
@@ -675,7 +678,7 @@ impl App {
                 .sessions
                 .iter()
                 .filter(|v| v.host == host)
-                .map(SessionView::saved)
+                .map(|v| v.saved(&self.addons))
                 .collect(),
             active: self.active_view().filter(|v| v.host == host).map(|v| v.id),
             recent_dirs: self.recent_dirs.clone(),
@@ -708,33 +711,28 @@ impl App {
         }
 
         let mut recovered = Vec::new();
-        for mut r in merged {
-            if let Some(args) = r.respawn {
-                // A run's `--first-party` applies to the proxied claude
-                // sessions it respawns; the restored record keeps the choice.
-                if r.saved.kind == SessionKind::Claude && r.saved.proxy.is_some() {
-                    r.saved.first_party |= self.first_party;
-                }
-                let req = SpawnRequest {
-                    id: r.saved.id,
-                    kind: r.saved.kind,
-                    op: LaunchOp::Recover,
-                    cwd: r.saved.cwd.clone(),
-                    name: r.saved.name.clone(),
-                    args,
-                };
-                let first_party = r.saved.first_party;
-                if let Err(e) =
-                    self.send_spawn(&r.saved.host, req, r.saved.proxy.as_deref(), first_party)
-                {
-                    self.notify(format!("cannot respawn '{}': {e}", r.saved.cwd));
-                }
-            }
-            recovered.push(SessionView {
+        for r in merged {
+            let respawn = r.respawn;
+            let view = SessionView {
                 state: r.state,
                 title: r.title,
-                ..SessionView::from_saved(r.saved, size)
-            });
+                ..SessionView::from_saved(r.saved, size, &self.addons)
+            };
+            if let Some(args) = respawn {
+                let req = SpawnRequest {
+                    id: view.id,
+                    kind: view.kind,
+                    op: LaunchOp::Recover,
+                    cwd: view.cwd.clone(),
+                    name: view.name.clone(),
+                    args,
+                };
+                match self.relaunch_select(&view) {
+                    Ok(select) => self.send_spawn(&view.host, req, select),
+                    Err(e) => self.notify(format!("cannot respawn '{}': {e}", view.cwd)),
+                }
+            }
+            recovered.push(view);
         }
 
         let active_id = self.active_view().map(|v| v.id);

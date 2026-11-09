@@ -47,6 +47,7 @@ fn existing_local_dirs(
 mod test_support;
 mod ui;
 mod wizard;
+mod wizard_route;
 
 use std::io::{self, Stdout};
 use std::process::ExitCode;
@@ -72,8 +73,7 @@ use crate::client::{Client, Incoming};
 use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
-use crate::addon::Addons;
-use crate::addons::vocdoni::daemon::applied_of;
+use crate::addon::{Addons, LaunchSelect};
 use crate::addons::vocdoni::proxy;
 use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
@@ -118,19 +118,12 @@ fn copy_to_clipboard(text: &str) {
     let _ = out.flush();
 }
 
-/// What the UI is started as.
+/// What the UI is started as, routed as the run's launch flags ask.
 enum Entry {
-    /// The session manager, with a startup proxy override for new sessions.
-    Manager {
-        proxy: proxy::ProxyChoice,
-        first_party: bool,
-    },
+    /// The session manager.
+    Manager(LaunchSelect),
     /// `claudio --plain`: one bare session; `args` go to claude.
-    Plain {
-        proxy: proxy::ProxyChoice,
-        first_party: bool,
-        args: Vec<String>,
-    },
+    Plain(LaunchSelect, Vec<String>),
 }
 
 /// What the app does first, once made.
@@ -144,45 +137,17 @@ enum Start {
     Plain(PlainStart),
 }
 
-/// Run the manager until the user quits.
-pub fn run(addons: Arc<Addons>) -> ExitCode {
-    run_with_proxy(addons, proxy::ProxyChoice::Default, false)
+/// Run the manager until the user quits; `select` (the run's launch flags,
+/// `claudio --proxy NAME`…) preselects new sessions' route.
+pub fn run(addons: Arc<Addons>, select: LaunchSelect) -> ExitCode {
+    run_launch(Entry::Manager(select), addons)
 }
 
-/// Like [`run`] but applies a startup proxy override to every new session.
-///
-/// - `Direct`  → new sessions never use a proxy (--no-proxy).
-/// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
-/// - `Default` → wizard pre-selects the config.toml default, if any.
-///
-/// `first_party` (--first-party) makes every session of this run first-party.
-pub fn run_with_proxy(
-    addons: Arc<Addons>,
-    proxy_override: proxy::ProxyChoice,
-    first_party: bool,
-) -> ExitCode {
-    let entry = Entry::Manager {
-        proxy: proxy_override,
-        first_party,
-    };
-    run_launch(entry, addons)
-}
-
-/// `claudio --plain`: run claude alone, full screen, with the proxy `proxy`
-/// picks, and exit with its status. The manager's help, proxy stats, history
+/// `claudio --plain`: run claude alone, full screen, routed as `select`
+/// asks, and exit with its status. The manager's help, proxy stats, history
 /// and reset keys work; the rest of the keyboard is claude's.
-pub fn run_plain(
-    addons: Arc<Addons>,
-    proxy: proxy::ProxyChoice,
-    first_party: bool,
-    args: Vec<String>,
-) -> ExitCode {
-    let entry = Entry::Plain {
-        proxy,
-        first_party,
-        args,
-    };
-    run_launch(entry, addons)
+pub fn run_plain(addons: Arc<Addons>, select: LaunchSelect, args: Vec<String>) -> ExitCode {
+    run_launch(Entry::Plain(select, args), addons)
 }
 
 fn run_launch(entry: Entry, addons: Arc<Addons>) -> ExitCode {
@@ -205,13 +170,9 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let config = crate::config::load();
     let mut key_notices = Vec::new();
-    let (proxy_override, first_party, plain) = match entry {
-        Entry::Manager { proxy, first_party } => (proxy, first_party, None),
-        Entry::Plain {
-            proxy,
-            first_party,
-            args,
-        } => {
+    let (launch_default, plain) = match entry {
+        Entry::Manager(select) => (select, None),
+        Entry::Plain(select, args) => {
             let cwd = std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_owned());
@@ -220,7 +181,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
                 args,
                 cwd,
             };
-            (proxy, first_party, Some(start))
+            (select, Some(start))
         }
     };
     let keymap = match plain {
@@ -249,12 +210,12 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (proxy_profiles, proxy_default) = proxy::resolve::load_proxy_profiles();
-    // The plugin lists cached for the profiles there are; fetched again
-    // once the loop runs.
+    // The plugin lists cached for the profiles there are (read now, for
+    // the launches' routing too); fetched again once the loop runs.
+    let profiles = addon_runner::read_profiles(&addons);
     let cached_plugins: Vec<_> = proxy::plugins::load_all()
         .into_iter()
-        .filter(|l| proxy_profiles.contains(&l.profile))
+        .filter(|l| profiles.contains(&l.profile))
         .collect();
     let registry = extension_registry(&config, &cached_plugins, &mut key_notices);
     let mut app = App::new(AppConfig {
@@ -268,10 +229,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
         keymap,
         notify: config.ui.notify && plain.is_none(),
         copy_on_select: config.ui.copy_on_select,
-        proxy_override,
-        first_party,
-        proxy_profiles,
-        proxy_default,
+        launch_default,
         claude: config.claude,
         local_claude: client_claude(&local_client),
         recent_dirs: existing_local_dirs(saved.recent_dirs.clone()),
@@ -284,7 +242,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
         addons: Arc::clone(&addons),
     });
     app.extensions = registry;
-    let runner = addon_runner::start(addons, &app);
+    let runner = addon_runner::start(addons, &mut app);
     runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
     let start = match plain {
@@ -780,12 +738,12 @@ async fn event_loop(
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
-            Some(out) = rx.recv() => addon_runner::on_out(&mut app, out),
+            Some(out) = rx.recv() => addon_runner::on_out(&mut app, &runtime, out),
             _ = tick.tick() => app.on_tick(),
             _ = proxy_tick.tick() => {
                 // Refresh proxy stats for the active session's profile (they
                 // feed the status bar, which `--plain` does not have).
-                let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
+                let proxy_name = app.active_view().and_then(|v| v.profile().map(str::to_owned));
                 if let Some(name) = proxy_name.filter(|_| manager) {
                     app.schedule_proxy_stats(&name, vec![proxy::stats::Window::H24]);
                 }
@@ -963,64 +921,7 @@ fn run_effect(
             });
         }
         Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
-        effect @ Effect::SpawnWithProxy { .. } => {
-            addon_runner::spawn_with_proxy(effect, app, conns, reply_tx, ev_tx)
-        }
     }
-}
-
-/// How long a spawn waits for a host to answer its plugin manifests.
-pub(super) const MANIFEST_WAIT: Duration = Duration::from_secs(20);
-
-/// Ask `client` (`host`'s) for each of `pending` and wait up to
-/// [`MANIFEST_WAIT`]: the answers that came back (`Applied`, by plugin
-/// name), and the names of those that did not (late, failed, or no
-/// client). Every answer, even a late one, also goes to the addon through
-/// `bridge`.
-async fn wait_manifests(
-    client: Option<&Client>,
-    host: &str,
-    pending: Vec<crate::addons::vocdoni::bridge::Pending>,
-    bridge: Option<crate::addons::vocdoni::bridge::Bridge>,
-) -> (
-    std::collections::HashMap<String, crate::addons::vocdoni::daemon::Applied>,
-    Vec<String>,
-) {
-    let mut ready = std::collections::HashMap::new();
-    let mut left_out = Vec::new();
-    let deadline = tokio::time::Instant::now() + MANIFEST_WAIT;
-    let mut waiting = Vec::new();
-    for m in pending {
-        let Some(client) = client else {
-            left_out.push(m.name);
-            continue;
-        };
-        let reply = client.request(m.msg);
-        let (done, answer) = tokio::sync::oneshot::channel();
-        let (bridge, host, name) = (bridge.clone(), host.to_owned(), m.name.clone());
-        tokio::spawn(async move {
-            let reply = reply.await;
-            let applied = reply
-                .as_ref()
-                .ok()
-                .cloned()
-                .and_then(|r| applied_of(r).ok());
-            let _ = done.send(applied);
-            if let Some(bridge) = bridge {
-                bridge.on_applied_reply(&host, &name, &m.sha256, reply);
-            }
-        });
-        waiting.push((m.name, answer));
-    }
-    for (name, answer) in waiting {
-        match tokio::time::timeout_at(deadline, answer).await {
-            Ok(Ok(Some(applied))) => {
-                ready.insert(name, applied);
-            }
-            _ => left_out.push(name),
-        }
-    }
-    (ready, left_out)
 }
 
 /// Fetch proxy stats for `windows`, pool health, and (when `models`) the

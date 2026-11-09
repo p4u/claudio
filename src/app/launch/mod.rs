@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 use crate::addon::{
     line, Addons, FlagArg, Frontend, LaunchChoice, LaunchError, LaunchOp, LaunchPart,
-    LaunchRequest, LaunchSelect, Pick, Routing, TEXT_BYTES,
+    LaunchRequest, LaunchSelect, LegacyChoice, Pick, Routing, TEXT_BYTES,
 };
 use crate::app::addons::AddonRuntime;
 use crate::client::Client;
@@ -139,6 +139,36 @@ pub fn split_flags<'a>(
         select.flags.extend(theirs.flags);
     }
     Ok((select, rest))
+}
+
+/// A session's pre-addon routing (state.json's `proxy`, `first_party`) as
+/// a launch choice: `Ok(None)` for a direct one; `Err` when no addon of
+/// this build adopts it, and then its launches fail, never direct (F4).
+pub fn adopt_legacy(
+    addons: &Addons,
+    legacy: &LegacyChoice,
+) -> Result<Option<LaunchChoice>, String> {
+    let Some(proxy) = &legacy.proxy else {
+        return Ok(None);
+    };
+    let adopted = addons
+        .iter()
+        .find_map(|a| a.launch().and_then(|l| l.adopt_legacy(legacy)));
+    match adopted {
+        Some(choice) => Ok(Some(choice)),
+        None => Err(format!(
+            "saved proxy {}: no addon of this build routes it",
+            line(proxy, NAME_BYTES)
+        )),
+    }
+}
+
+/// The pre-addon fields still written for `choice` (B3: a rolled-back
+/// build keeps the session's routing); empty for a direct one.
+pub fn legacy(addons: &Addons, choice: Option<&LaunchChoice>) -> LegacyChoice {
+    choice
+        .and_then(|c| addons.get(&c.addon)?.launch()?.legacy(c))
+        .unwrap_or_default()
 }
 
 /// Every Launch addon's routing, in registry order, and the launch's

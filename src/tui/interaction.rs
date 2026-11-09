@@ -685,9 +685,13 @@ impl App {
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
-            Outcome::Spawn { cwd, resume, proxy } => {
+            Outcome::Spawn {
+                cwd,
+                resume,
+                select,
+            } => {
                 self.modal = None;
-                self.spawn(wizard_host, cwd, resume, proxy);
+                self.spawn(wizard_host, cwd, resume, select);
             }
         }
         self.redraw = true;

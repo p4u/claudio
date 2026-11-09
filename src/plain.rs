@@ -16,7 +16,7 @@ use crate::tui;
 pub fn run(args: &[String], addons: Arc<Addons>) -> ExitCode {
     match split_args(args) {
         Ok((choice, first_party, user_args)) => {
-            tui::run_plain(addons, choice, first_party, user_args)
+            tui::run_plain(addons, choice.launch_select(first_party), user_args)
         }
         Err(msg) => {
             eprintln!("claudio: {msg}");

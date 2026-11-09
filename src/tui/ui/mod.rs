@@ -540,7 +540,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
     // Step 2: resume picker.
     if let Some(step) = &w.resume {
         // Proxy toggle row takes 1 line when profiles are available.
-        let has_proxy = w.proxy_options.len() > 1;
+        let has_proxy = w.route.cycles();
         let inner = popup(
             frame,
             rect,
@@ -560,12 +560,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
             .style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(cwd, areas[0]);
         let (filter_idx, list_idx) = if has_proxy {
-            let sel = w
-                .proxy_options
-                .get(w.proxy_selected)
-                .map(String::as_str)
-                .unwrap_or("none");
-            let proxy_line = format!("Proxy: ◀ {} ▶", sel);
+            let proxy_line = format!("{}: ◀ {} ▶", w.route.group, w.route.label());
             frame.render_widget(
                 Paragraph::new(proxy_line).style(Style::default().fg(Color::Cyan)),
                 areas[1],
@@ -773,7 +768,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
                 format!("{}:{}", v.host, cwd)
             };
             let age = fmt_age(app.now.saturating_sub(v.created_at));
-            let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
+            let proxy_badge = if v.launch.is_some() { PROXY_BADGE } else { " " };
             let state = match v.kind {
                 SessionKind::Claude => v.state.name(),
                 SessionKind::Shell => "terminal",

@@ -49,8 +49,6 @@ use crate::text::sanitize;
 mod applied;
 mod ops;
 pub use applied::{applied_of, apply_msg, retry_secs, retrying, serves_apply};
-#[cfg(test)]
-pub(crate) use applied::{applied_reply, apply_request_of};
 pub use applied::{Applied, ApplyRequest, OP_APPLY};
 pub use ops::VocdoniDaemon;
 

@@ -256,9 +256,13 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   state transitions and returns `Effect` values. No I/O here; all I/O is in
   `mod.rs`. `Mode::Manager` or `Mode::Plain`.
 - `sessions.rs` — `SessionView` (labels go through `app::label::sanitize_label`)
-  and spawning (`send_spawn`/`send_with_proxy`,
-  the one path that builds spawns, respawns and their proxy env), recovery,
-  the wizard's opening.
+  and spawning (`send_spawn`, the one path that builds spawns and
+  respawns: a claude session is an `Effect::Launch` with a `LaunchSelect`,
+  composed by `app::launch` in `addon_runner.rs`; `SessionView.launch` is
+  its `LaunchChoice`, state.json's legacy `proxy`/`first_party` adopted
+  through the addons, an unadopted one failing its launches), recovery,
+  the wizard's opening (its route row: `wizard_route.rs`, from
+  `App.launch_options`).
 - `interaction.rs` — keys, mouse, modals (`Modal`), daemon events and replies.
 - `wizard.rs` — the new-session wizard (start screen → directory browser →
   resume?), a pure state machine.
@@ -292,10 +296,10 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   the runtime's `Changed` (`App::on_addon`). It opens on first sight (no
   table yet; Esc then defers for the run: nothing written or sent) and
   from the extensions screen; it waits its turn in the confirm queue
-  (`Queued`) and swallows every key. `--plain` holds its spawn
-  (`App::plain_pending`) until the addon has read its lists and the
-  profile's new manifests arrived (≤ 20 s) and their screens closed.
-  Drawn by `ui/plugin_setup.rs`.
+  (`Queued`) and swallows every key. `--plain` launches at once (only a
+  claude install holds it, `App::plain_pending`); the Vocdoni launch waits
+  for the addon's lists and the host's answers itself. Drawn by
+  `ui/plugin_setup.rs`.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -352,8 +356,8 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
 **`proxy/`** — claude-proxy HTTP client and profile management:
 - `profile.rs` — load/save profiles from `config.toml` (`[proxy]` section,
   mode 0600); `from_env()` parses `CLAUDIO_PROXY_URL=<token>@host`.
-- `resolve.rs` — `ProxyChoice` and profile resolution, shared by the TUI and
-  `--plain`.
+- `resolve.rs` — profile names and lookup (`load_proxy_profiles`,
+  `find_profile`), and `proxy_env_for` (the web's, until P3.10).
 - `env.rs` — `session_env(profile, config)`: builds the env for a
   proxy-backed session (falls back to built-in model defaults when the
   proxy's `/v1/claudio/config` is unreachable); `env_diff` is the one rule
@@ -388,9 +392,8 @@ Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok
   after every other arg; env layers `[env]`, then the secrets, then the
   profile env; the instructions in `SessionExtensions.instructions`, cut at
   just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
-  A spawn whose host has not answered is deferred
-  (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
-  ≤ 20 s). Shared by the addon's state machine (`addons/vocdoni/state/`,
+  A new session whose host has not answered waits ≤ 20 s for it in the
+  Vocdoni launch's `prepare` (`addons/vocdoni/launch.rs`). Shared by the addon's state machine (`addons/vocdoni/state/`,
   driven by `runner.rs`, which the TUI reads through `bridge.rs`) and the
   web (`web/plugins.rs`, until P3.10).
 - `choices.rs` — `PluginChoices` (`[plugins.<name>]`, the addon's section:

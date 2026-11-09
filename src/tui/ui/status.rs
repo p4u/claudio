@@ -143,7 +143,7 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
         segments.push(vec![dim(fmt_age(app.now.saturating_sub(v.created_at)))]);
     }
     // The session's proxy choice, not whether stats have been fetched.
-    segments.push(vec![match &v.proxy {
+    segments.push(vec![match v.profile() {
         Some(name) => colored(format!("⇄ proxy:{name}"), GREEN),
         None => dim("direct"),
     }]);
@@ -679,7 +679,7 @@ mod tests {
             state: SessionState::Idle,
             claude_session_id: Some("c1".into()),
             attached: true,
-            proxy: Some("work".into()),
+            launch: crate::tui::test_support::via("work"),
             branch: Some("main".into()),
             model: Some("claude-opus-5-5[1m]".into()),
             context_tokens: Some(620_000),

@@ -21,12 +21,22 @@ pub enum ProxyChoice {
 }
 
 impl ProxyChoice {
-    /// The profile name this choice selects, given the configured `default`.
-    pub fn pick<'a>(&'a self, default: Option<&'a str>) -> Option<&'a str> {
-        match self {
-            ProxyChoice::Default => default,
-            ProxyChoice::Direct => None,
-            ProxyChoice::Profile(name) => Some(name),
+    /// The launch select of this choice and `first_party` (until the core
+    /// parses the addons' launch flags).
+    pub fn launch_select(&self, first_party: bool) -> crate::addon::LaunchSelect {
+        use crate::addon::Pick;
+        let pick = match self {
+            ProxyChoice::Default => Pick::Default,
+            ProxyChoice::Direct => Pick::Direct,
+            ProxyChoice::Profile(name) => Pick::Option {
+                addon: crate::addons::vocdoni::NAME.to_owned(),
+                option: name.clone(),
+            },
+        };
+        let flags = first_party.then(|| "first-party".to_owned());
+        crate::addon::LaunchSelect {
+            pick,
+            flags: flags.into_iter().collect(),
         }
     }
 }
@@ -133,17 +143,6 @@ pub fn proxy_env_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn choice_picks_default_none_or_named() {
-        assert_eq!(ProxyChoice::Default.pick(Some("work")), Some("work"));
-        assert_eq!(ProxyChoice::Default.pick(None), None);
-        assert_eq!(ProxyChoice::Direct.pick(Some("work")), None);
-        assert_eq!(
-            ProxyChoice::Profile("lab".into()).pick(Some("work")),
-            Some("lab")
-        );
-    }
 
     #[test]
     fn no_proxy_name_means_empty_env() {

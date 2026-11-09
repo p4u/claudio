@@ -2175,6 +2175,55 @@ fn test_plain_first_party_flag() {
     drop(tui);
 }
 
+/// The configured default proxy profile routes a new session even when its
+/// proxy config cannot be fetched (nothing listens on its port): the
+/// session starts through that proxy with the built-in model defaults,
+/// never direct (AC8; Routing::Required).
+#[test]
+fn test_default_profile_with_unreachable_config_starts_through_the_proxy() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("default.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_BASE_URL"],
+        &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+    );
+    let config = harness.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\n\
+         url = \"http://127.0.0.1:1\"\ntoken = \"work-test-token\"\n",
+    );
+    fs::write(&config, text).unwrap();
+    let mut tui = harness.start_tui();
+    tui.wait_for("New session", Region::Screen, WAIT);
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env.lines().any(|l| l.starts_with("ANTHROPIC_BASE_URL=")) {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "no session started: {env}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        env.lines()
+            .any(|l| l == "ANTHROPIC_BASE_URL=http://127.0.0.1:1"),
+        "{env}"
+    );
+    assert!(
+        env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=<set>"),
+        "{env}"
+    );
+    assert!(
+        !env.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        "the API key reached a proxied session: {env}"
+    );
+    tui.wait_for("proxy:work", Region::StatusBar, WAIT);
+    tui.quit(WAIT);
+}
+
 /// When claude ends (Ctrl+D), the UI exits with status 0 and no session
 /// remains in the daemon or its journal, and no state.json was written.
 #[test]
@@ -3382,6 +3431,73 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
         "{argv:?}"
     );
     assert!(!env.contains(PLUGIN_KEY), "{env}");
+    tui.quit(WAIT);
+}
+
+/// A daemon of the previous release (no `addon:vocdoni`): a new client
+/// starts the session through the proxy without the plugins, and says why
+/// (spec "Mixed versions", row 2; AC8). The old daemon's own scrub drops
+/// the inherited API key; no plugin secret reaches the session.
+#[test]
+fn test_new_client_old_daemon_gets_proxy_env_without_plugins() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("old-daemon.env");
+    h.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_AUTH_TOKEN"],
+        &[PLUGIN_KEY, "ANTHROPIC_API_KEY"],
+    );
+    // The plugin is set up already: no setup screen.
+    let config = h.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[plugins.{PLUGIN}]\ndisabled = []\nreviewed = \"1.0.0\"\n"
+    ));
+    fs::write(&config, text).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+        cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+        cmd.env("CLAUDIO_TEST_OLD_DAEMON", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("No sessions", Region::Screen, WAIT);
+    // The plugin is listed (its row) before the session starts.
+    tui.send_keys(ALT_I);
+    tui.wait_for(&format!("[x] {PLUGIN}"), Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env.lines().any(|l| l.starts_with("ANTHROPIC_AUTH_TOKEN=")) {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "no session started: {env}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=tok"),
+        "{env}"
+    );
+    assert!(
+        !env.lines()
+            .any(|l| l.starts_with(&format!("{PLUGIN_KEY}="))),
+        "a plugin secret reached the session: {env}"
+    );
+    assert!(
+        !env.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        "the old scrub kept the API key: {env}"
+    );
+    tui.wait_for(
+        "plugins after `claudio daemon restart`",
+        Region::Screen,
+        WAIT,
+    );
     tui.quit(WAIT);
 }
 

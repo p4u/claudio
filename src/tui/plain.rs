@@ -43,40 +43,34 @@ impl Exit {
 }
 
 impl App {
-    /// Start the plain UI's session on the local daemon, with the proxy
-    /// profile the startup choice picks (like the wizard's default). The app
-    /// is one made in [`Mode::Plain`].
-    ///
-    /// With a proxy profile whose enabled plugins include one never set up
-    /// (no `[plugins.<name>]`), the start waits until each such manifest
-    /// has arrived or failed (at most 20 s) and every setup screen they
-    /// open has closed (`plugin_setup.rs`).
+    /// Start the plain UI's session on the local daemon, routed as the
+    /// run's launch flags ask (the addons' default without any). The app
+    /// is one made in [`Mode::Plain`]. Without claude on this machine the
+    /// start waits for its install (or the question).
     pub fn start_plain(&mut self, start: PlainStart) {
         debug_assert_eq!(self.mode, Mode::Plain);
-        let proxy = self
-            .proxy_override
-            .pick(self.proxy_default.as_deref())
-            .map(str::to_owned);
-        let deadline = self.now + super::MANIFEST_WAIT.as_secs();
-        self.plain_pending = Some((start, proxy, deadline));
+        self.plain_pending = Some(start);
         self.plain_try_start();
     }
 
-    /// Start the plain UI's session now, with `proxy`.
-    pub(super) fn start_plain_now(&mut self, start: PlainStart, proxy: Option<String>) {
-        let PlainStart { id, args, cwd } = start;
-        let started = self.start(
+    /// Start `--plain`'s held session once claude's install no longer holds it.
+    pub(super) fn plain_try_start(&mut self) {
+        if self.mode != Mode::Plain || self.claude_install_pending("local") {
+            return;
+        }
+        let Some(PlainStart { id, args, cwd }) = self.plain_pending.take() else {
+            return;
+        };
+        let select = self.launch_default.clone();
+        self.start(
             id,
             "local".to_owned(),
             cwd,
             SessionKind::Claude,
             args,
-            proxy,
+            select,
             0,
         );
-        if let Err(e) = started {
-            self.plain_failed(format!("cannot start claude: {e}"));
-        }
     }
 
     /// The plain UI cannot go on: leave with a failure and say why.
@@ -129,7 +123,6 @@ impl App {
 mod tests {
     use super::*;
     use crate::addon::{LaunchOp, LaunchSelect};
-    use crate::addons::vocdoni::proxy::ProxyChoice;
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
     use crate::tui::app::{AppConfig, Effect, ReplyTo};
@@ -147,7 +140,7 @@ mod tests {
             mode: Mode::Plain,
             keymap: Keymap::build_plain(&Default::default(), &mut notices),
             notify: false,
-            proxy_override: ProxyChoice::Direct,
+            launch_default: LaunchSelect::of(None),
             ..test_support::config()
         });
         let id = Uuid::new_v4();
@@ -217,7 +210,7 @@ mod tests {
                 mode: Mode::Plain,
                 keymap: Keymap::build_plain(&Default::default(), &mut notices),
                 notify: false,
-                proxy_override: ProxyChoice::Direct,
+                launch_default: LaunchSelect::of(None),
                 ..test_support::config()
             });
             app.claude_policy.install = install;

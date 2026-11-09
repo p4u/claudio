@@ -194,22 +194,6 @@ impl State {
             .collect()
     }
 
-    /// The enabled plugins of `profile` without saved choices, and whether
-    /// each one's manifest fetch has ended (here or failed).
-    pub fn unsaved(&self, profile: &str) -> Vec<(String, bool)> {
-        self.enabled_plugins(profile)
-            .into_iter()
-            .filter(|p| !self.plugins.choices.contains_key(&p.name))
-            .map(|p| {
-                let ended = matches!(
-                    self.plugins.manifests.get(&p.name),
-                    Some((_, ManifestState::Ready(_) | ManifestState::Failed(_)))
-                );
-                (p.name.clone(), ended)
-            })
-            .collect()
-    }
-
     /// The member saved `choices` for plugin `name`: written, and every
     /// host asked again.
     pub fn save_choices(&mut self, name: &str, choices: PluginChoices) -> Vec<Task> {

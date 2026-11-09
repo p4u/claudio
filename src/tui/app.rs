@@ -22,8 +22,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::addon::{LaunchChoice, LaunchOp, LaunchSelect};
-use crate::addons::vocdoni::proxy::ProxyChoice;
+use crate::addon::{LaunchChoice, LaunchOp, LaunchOption, LaunchSelect};
 use crate::proto::{Msg, SessionId, SessionState};
 
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
@@ -125,26 +124,6 @@ pub enum Effect {
         session: SessionId,
         claude_session_id: String,
     },
-    /// Spawn (or respawn) a session with proxy config: the effect runner
-    /// fetches the proxy config (with a 5 s timeout) unless it is cached,
-    /// waits up to 20 s for `pending` (asking `host` for each), adds the
-    /// plugins' share ([`crate::addons::vocdoni::plugins::state::compose`]) and the proxy env, then
-    /// sends the request. This avoids silently using fallback model
-    /// defaults when the proxy-config cache is cold, and starting a session
-    /// without a plugin whose manifest a host has not answered for yet.
-    SpawnWithProxy {
-        host: String,
-        /// A `Spawn` or `Respawn` without the plugins' share or proxy env.
-        msg: Msg,
-        proxy_name: String,
-        /// `--first-party` for this session (see `SessionView::first_party`).
-        first_party: bool,
-        to: ReplyTo,
-        /// The profile's enabled plugins, in registry order.
-        plugins: Vec<crate::addons::vocdoni::plugins::state::PluginPart>,
-        /// The `vocdoni/apply` requests of the plugins `host` has not answered.
-        pending: Vec<crate::addons::vocdoni::bridge::Pending>,
-    },
     /// Launch a claude session through the launch composer
     /// ([`crate::app::launch`]); the outcome goes to [`App::on_launched`].
     Launch(LaunchCall),
@@ -205,6 +184,8 @@ pub enum BridgeCall {
 pub enum AddonResult {
     /// The addon's data changed: re-read what is shown of it.
     Changed { addon: &'static str },
+    /// Every Launch addon's options, cleaned, in registry order (F11).
+    Options(Vec<(&'static str, LaunchOption)>),
 }
 
 /// A launch for the event loop's runner (`addon_runner::launch`). It holds
@@ -231,8 +212,8 @@ pub struct Launched {
     pub id: u64,
     pub op: LaunchOp,
     pub sid: SessionId,
-    // Recorded with the session from P3.9 on (a direct launch has none).
-    #[allow(dead_code)]
+    /// The launch's effective choice (`None`: direct), recorded with the
+    /// session.
     pub choice: Option<LaunchChoice>,
     /// The addons' notices, cleaned.
     pub notices: Vec<String>,
@@ -297,16 +278,6 @@ pub enum ReplyTo {
     },
 }
 
-impl ReplyTo {
-    /// The reply target for a request sent after an async proxy-config fetch.
-    pub(super) fn deferred(self) -> ReplyTo {
-        match self {
-            ReplyTo::Spawned(id) => ReplyTo::SpawnedDeferred(id),
-            other => other,
-        }
-    }
-}
-
 /// The manager's state.
 pub struct App {
     pub mode: Mode,
@@ -350,15 +321,11 @@ pub struct App {
     /// The upstream credential each proxied session last used, as reported by
     /// the proxy. Only the active session is polled; the rest is a cache.
     pub session_creds: HashMap<SessionId, SessionCred>,
-    /// Ordered list of available proxy profile names (empty = no proxy configured).
-    pub proxy_profiles: Vec<String>,
-    /// The default proxy profile from config.
-    pub proxy_default: Option<String>,
-    /// Startup proxy override: Direct suppresses the default; Profile forces
-    /// a specific profile regardless of per-session selection in the wizard.
-    pub proxy_override: ProxyChoice,
-    /// `--first-party`: sessions this run starts are first-party.
-    pub first_party: bool,
+    /// The run's launch flags (`claudio --proxy NAME`…): the wizard's
+    /// preselection, and switches every launch of the run keeps.
+    pub launch_default: LaunchSelect,
+    /// Every Launch addon's options, cleaned ([`AddonResult::Options`]).
+    pub launch_options: Vec<(&'static str, LaunchOption)>,
     /// Last state for which a desktop notification was sent per session.
     /// Used to debounce: only one notification per session per state change.
     pub notified: HashMap<SessionId, SessionState>,
@@ -416,9 +383,8 @@ pub struct App {
     /// The addons this run has: `App` only queries them (the Vocdoni
     /// bridge's plugin state).
     pub addons: std::sync::Arc<crate::addon::Addons>,
-    /// `--plain`'s session while plugin setup holds it: what to start, its
-    /// proxy profile, and until when (Unix seconds) manifests are awaited.
-    pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
+    /// `--plain`'s session while claude's install holds it.
+    pub(super) plain_pending: Option<super::plain::PlainStart>,
 }
 
 /// What the app starts from. The event loop gathers it (reading config.toml,
@@ -435,13 +401,8 @@ pub struct AppConfig {
     pub notify: bool,
     /// Drag to select and copy in a pane (`[ui] copy_on_select`).
     pub copy_on_select: bool,
-    /// The startup proxy choice (`--proxy` / `--no-proxy`).
-    pub proxy_override: ProxyChoice,
-    /// `--first-party`: sessions this run starts are first-party.
-    pub first_party: bool,
-    /// The configured proxy profile names, and the default one.
-    pub proxy_profiles: Vec<String>,
-    pub proxy_default: Option<String>,
+    /// The run's launch flags, as a select.
+    pub launch_default: LaunchSelect,
     /// `[claude]` from config.toml: the update policies.
     pub claude: crate::config::ClaudeSection,
     /// This machine's `claude --version`.
@@ -484,10 +445,8 @@ impl App {
             proxy_status: HashMap::new(),
             models_requested: HashSet::new(),
             session_creds: HashMap::new(),
-            proxy_profiles: cfg.proxy_profiles,
-            proxy_default: cfg.proxy_default,
-            proxy_override: cfg.proxy_override,
-            first_party: cfg.first_party,
+            launch_default: cfg.launch_default,
+            launch_options: Vec::new(),
             notified: HashMap::new(),
             notify_enabled: cfg.notify,
             pending_notifs: Vec::new(),
@@ -548,8 +507,8 @@ impl App {
         });
     }
 
-    /// Launch session `sid` on `host` through the composer: `base` is its
-    /// `Spawn` or `Respawn` without env.
+    /// Launch session `sid` on `host` through the composer, as `select`
+    /// asks: `base` is its `Spawn` or `Respawn` without env.
     pub(super) fn launch(
         &mut self,
         op: LaunchOp,
@@ -557,6 +516,7 @@ impl App {
         host: &str,
         cwd: String,
         base: Msg,
+        select: LaunchSelect,
     ) {
         self.launch_seq += 1;
         self.launching.insert(sid);
@@ -566,25 +526,41 @@ impl App {
             sid,
             host: host.to_owned(),
             cwd,
-            // Sessions with a proxy profile take the old path until P3.9.
-            select: LaunchSelect::of(None),
+            select,
             base,
         }));
     }
 
-    /// A launch ended: its notices are shown, and its result is the reply
-    /// to its `Respawn`, or to its `Spawn` as [`ReplyTo::SpawnedDeferred`]
-    /// (which attaches the active tab, held back while it launched).
+    /// A launch ended: its notices are shown, a sent one's choice is
+    /// recorded with the session, and its result is the reply to its
+    /// `Respawn`, or to its `Spawn` as [`ReplyTo::SpawnedDeferred`] (which
+    /// attaches the active tab, held back while it launched).
     pub fn on_launched(&mut self, done: Launched) {
         self.launching.remove(&done.sid);
         for notice in done.notices {
             self.notify(notice);
+        }
+        let i = self.index_of(done.sid).filter(|_| done.result.is_ok());
+        if let Some(i) = i.filter(|i| self.sessions[*i].launch != done.choice) {
+            self.sessions[i].launch = done.choice;
+            self.save();
         }
         let to = match done.op {
             LaunchOp::Respawn => ReplyTo::Respawned(done.sid),
             _ => ReplyTo::SpawnedDeferred(done.sid),
         };
         self.on_reply(to, done.result.map_err(std::io::Error::other));
+    }
+
+    /// The Launch addons' options changed: kept for the wizard, whose open
+    /// route row is rebuilt (its selection kept).
+    pub(super) fn on_launch_options(&mut self, options: Vec<(&'static str, LaunchOption)>) {
+        self.launch_options = options.clone();
+        if let Some(w) = self.wizard_mut() {
+            let pick = w.route.select().pick;
+            w.route.set(&options, &pick);
+        }
+        self.redraw = true;
     }
 
     /// Queue a write of state.json; back-to-back saves are one write.
@@ -614,11 +590,13 @@ impl App {
     /// the default profile (so a direct session can still look at the
     /// account), else a hint on how to configure a proxy.
     pub fn open_proxy_stats(&mut self) {
-        let session_profile = self.active_view().and_then(|v| v.proxy.clone());
+        let session_profile = self
+            .active_view()
+            .and_then(|v| v.profile().map(str::to_owned));
         let borrowed = session_profile.is_none();
-        let profile = session_profile
-            .or_else(|| self.proxy_default.clone())
-            .or_else(|| self.proxy_profiles.first().cloned());
+        let options = &self.launch_options;
+        let default = options.iter().find(|(_, o)| o.default).or(options.first());
+        let profile = session_profile.or_else(|| default.map(|(_, o)| o.id.clone()));
         let (mut view, outcome) = StatsView::open(profile, borrowed);
         view.can_switch = !borrowed
             && self
@@ -673,7 +651,7 @@ impl App {
         if v.kind != crate::proto::SessionKind::Claude {
             return None;
         }
-        Some((v.id, v.proxy.clone()?, csid))
+        Some((v.id, v.profile()?.to_owned(), csid))
     }
 
     /// Ask before moving the active session to another subscription.
@@ -733,7 +711,11 @@ impl App {
     /// What state.json should contain now.
     pub fn to_state(&self) -> ClientState {
         ClientState {
-            sessions: self.sessions.iter().map(SessionView::saved).collect(),
+            sessions: self
+                .sessions
+                .iter()
+                .map(|v| v.saved(&self.addons))
+                .collect(),
             active: self.active_view().map(|v| v.id),
             recent_dirs: self.recent_dirs.clone(),
             killed: self.killed.clone(),
@@ -1215,15 +1197,15 @@ mod tests {
             first_party: false,
             kind: SessionKind::Claude,
         };
+        let mut app = test_support::app();
         let saved = ClientState {
             sessions: vec![
                 remote.clone(),
-                SessionView::from_info("local", &local, (1, 1)).saved(),
+                SessionView::from_info("local", &local, (1, 1)).saved(&app.addons),
             ],
             active: Some(remote.id),
             ..Default::default()
         };
-        let mut app = test_support::app();
         app.recover(&saved, std::slice::from_ref(&local));
         let effects = app.take_effects();
         assert!(
@@ -1249,10 +1231,13 @@ mod tests {
         };
         app.recover_host("devbox", &[dormant]);
         let effects = app.take_effects();
+        let choice = test_support::via("work");
         assert!(
-            effects.iter().any(|e| matches!(e,
-                Effect::SpawnWithProxy { host, msg: Msg::Spawn(s), proxy_name, .. }
-                    if host == "devbox" && proxy_name == "work" && s.args == ["--resume", "c9"])),
+            test_support::launches(&effects)
+                .iter()
+                .any(|c| c.host == "devbox"
+                    && c.select == LaunchSelect::of(choice.as_ref())
+                    && matches!(&c.base, Msg::Spawn(s) if s.args == ["--resume", "c9"])),
             "respawned with its proxy: {effects:?}"
         );
         let attach = Msg::Attach {
@@ -1260,9 +1245,11 @@ mod tests {
             rows: 27,
             cols: 100,
         };
-        assert!(requests(&effects).contains(&&attach));
+        // Attached once launched (its Attach is held back until then).
+        let later = test_support::finish_launches(&mut app, &effects);
+        assert!(requests(&later).contains(&&attach));
         assert_eq!(app.sessions[0].id, remote.id, "in its place");
-        assert_eq!(app.sessions[0].proxy.as_deref(), Some("work"));
+        assert_eq!(app.sessions[0].profile(), Some("work"));
         assert_eq!((app.active, app.sessions[0].attached), (Some(0), true));
     }
 
@@ -1535,7 +1522,7 @@ mod tests {
     #[test]
     fn a_manager_spawn_is_not_ephemeral() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
-        app.spawn("local".into(), "/w".into(), None, None);
+        app.spawn("local".into(), "/w".into(), None, LaunchSelect::of(None));
         let effects = app.take_effects();
         let spawn = requests(&effects).into_iter().find_map(|m| match m {
             Msg::Spawn(spec) => Some(spec.clone()),
@@ -1547,7 +1534,12 @@ mod tests {
     #[test]
     fn a_direct_spawn_is_a_launch_whose_base_has_no_env() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
-        app.spawn("local".into(), "/w".into(), Some("c9".into()), None);
+        app.spawn(
+            "local".into(),
+            "/w".into(),
+            Some("c9".into()),
+            LaunchSelect::of(None),
+        );
         let id = app.sessions[1].id;
         let effects = app.take_effects();
         assert!(
@@ -1574,7 +1566,7 @@ mod tests {
         assert_eq!(spec.args, ["--resume", "c9"]);
         assert!(spec.extensions.is_some(), "the core's lenses ride along");
         // A second launch gets its own id.
-        app.spawn("local".into(), "/v".into(), None, None);
+        app.spawn("local".into(), "/v".into(), None, LaunchSelect::of(None));
         let effects = app.take_effects();
         assert_eq!(test_support::launches(&effects)[0].id, call.id + 1);
     }
@@ -1582,7 +1574,7 @@ mod tests {
     #[test]
     fn launched_routes_the_reply_like_a_spawn() {
         let mut app = app_with(&[info(Some(1), None)]);
-        app.spawn("local".into(), "/w".into(), None, None);
+        app.spawn("local".into(), "/w".into(), None, LaunchSelect::of(None));
         let id = app.sessions[1].id;
         app.take_effects();
         let done = |notices: &[&str], result| Launched {
@@ -1861,13 +1853,11 @@ mod tests {
     #[test]
     fn terminal_ignores_the_active_sessions_proxy() {
         let mut app = app_with(&[info(Some(1), None)]);
-        app.sessions[0].proxy = Some("work".into());
+        app.sessions[0].launch = test_support::via("work");
         app.on_terminal(alt('c'));
         let effects = app.take_effects();
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
-        assert_eq!(app.sessions[1].proxy, None);
+        assert!(test_support::launches(&effects).is_empty());
+        assert_eq!(app.sessions[1].launch, None);
     }
 
     #[test]
@@ -2035,22 +2025,82 @@ mod tests {
         assert!(respawn_of(&effects).is_some_and(|spec| !spec.fresh));
     }
 
+    /// A saved proxy no addon of this build adopts (F4): the dormant
+    /// session is not launched, never direct, and says why; a restart too;
+    /// state.json keeps the saved routing.
     #[test]
-    fn a_proxied_reset_waits_for_the_proxy_config() {
+    fn an_unadopted_legacy_choice_fails_the_launch_never_direct() {
+        let dormant = info(None, Some("c1"));
+        let saved = SavedSession {
+            id: dormant.id,
+            name: None,
+            cwd: "/srv/app".into(),
+            host: "local".into(),
+            claude_session_id: Some("c1".into()),
+            created_at: 1,
+            proxy: Some("work".into()),
+            first_party: true,
+            kind: SessionKind::Claude,
+        };
+        let state = ClientState {
+            sessions: vec![saved.clone()],
+            ..Default::default()
+        };
+        let mut app = App::new(AppConfig {
+            addons: std::sync::Arc::new(crate::addon::Addons::empty()),
+            ..test_support::config()
+        });
+        app.recover(&state, &[dormant]);
+        let effects = app.take_effects();
+        assert!(test_support::launches(&effects).is_empty(), "{effects:?}");
+        assert!(!requests(&effects)
+            .iter()
+            .any(|m| matches!(m, Msg::Spawn(_) | Msg::Respawn(_))));
+        let notice = app
+            .notice
+            .as_ref()
+            .map(|n| n.text.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.starts_with("cannot respawn '/srv/app': saved proxy work"),
+            "{notice}"
+        );
+        assert_eq!(app.sessions[0].launch, None);
+        assert_eq!(app.to_state().sessions[0], saved, "kept as saved");
+        let id = app.sessions[0].id;
+        app.reset_session(id, false);
+        let effects = app.take_effects();
+        assert!(test_support::launches(&effects).is_empty());
+        let notice = app.notice.as_ref().map(|n| n.text.as_str()).unwrap_or("");
+        assert!(
+            notice.starts_with("cannot restart: saved proxy work"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_proxied_reset_is_a_launch_of_its_choice() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
-        app.sessions[0].proxy = Some("work".into());
+        app.sessions[0].launch = test_support::via("work");
         let id = app.sessions[0].id;
         app.reset_session(id, false);
         let effects = app.take_effects();
         assert!(
-            respawn_of(&effects).is_none(),
-            "not sent before the env exists"
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::Request {
+                    msg: Msg::Respawn(_),
+                    ..
+                }
+            )),
+            "not sent before the composer adds the env"
         );
-        assert!(effects.iter().any(|e| matches!(
-            e,
-            Effect::SpawnWithProxy { msg: Msg::Respawn(spec), proxy_name, to, .. }
-                if spec.id == id && proxy_name == "work" && *to == ReplyTo::Respawned(id)
-        )));
+        let calls = test_support::launches(&effects);
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].op, calls[0].sid), (LaunchOp::Respawn, id));
+        let choice = test_support::via("work");
+        assert_eq!(calls[0].select, LaunchSelect::of(choice.as_ref()));
+        assert!(matches!(&calls[0].base, Msg::Respawn(spec) if spec.env.is_empty()));
     }
 
     /// `--first-party` reaches a restart in its run, and the session keeps it
@@ -2058,27 +2108,24 @@ mod tests {
     #[test]
     fn first_party_flag_reaches_a_restart_and_is_kept() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
-        app.sessions[0].proxy = Some("work".into());
-        app.first_party = true;
+        app.sessions[0].launch = test_support::via("work");
+        app.launch_default.flags = vec!["first-party".into()];
         let id = app.sessions[0].id;
         app.reset_session(id, false);
         let effects = app.take_effects();
-        assert!(effects.iter().any(|e| matches!(
-            e,
-            Effect::SpawnWithProxy { proxy_name, first_party: true, .. } if proxy_name == "work"
-        )));
-        assert!(app.sessions[0].first_party);
+        let calls = test_support::launches(&effects);
+        assert_eq!(calls[0].select.flags, ["first-party"]);
+        test_support::finish_launches(&mut app, &effects);
+        let kept = app.sessions[0].launch.as_ref().map(|c| c.flags.clone());
+        assert_eq!(kept, Some(vec!["first-party".to_owned()]));
 
-        app.first_party = false;
+        app.launch_default.flags.clear();
         app.reset_session(id, false);
         let effects = app.take_effects();
-        assert!(effects.iter().any(|e| matches!(
-            e,
-            Effect::SpawnWithProxy {
-                first_party: true,
-                ..
-            }
-        )));
+        assert_eq!(
+            test_support::launches(&effects)[0].select.flags,
+            ["first-party"]
+        );
     }
 
     /// Only a proxied claude session keeps `--first-party`: a plain session
@@ -2086,14 +2133,16 @@ mod tests {
     #[test]
     fn first_party_flag_is_not_kept_without_a_proxy() {
         let mut app = app_with(&[info(Some(1), Some("c1"))]);
-        app.first_party = true;
+        app.launch_default.flags = vec!["first-party".into()];
         let id = app.sessions[0].id;
         app.reset_session(id, false);
-        assert!(!app.sessions[0].first_party);
         let effects = app.take_effects();
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, Effect::SpawnWithProxy { .. })));
+        assert_eq!(
+            test_support::launches(&effects)[0].select,
+            LaunchSelect::of(None)
+        );
+        test_support::finish_launches(&mut app, &effects);
+        assert_eq!(app.sessions[0].launch, None);
     }
 
     #[test]
@@ -2179,7 +2228,7 @@ mod tests {
         let live = [info(Some(1), Some("c1")), info(Some(2), Some("c2"))];
         let mut app = app_with(&live);
         for v in &mut app.sessions {
-            v.proxy = Some("p".into());
+            v.launch = test_support::via("p");
         }
         assert_eq!(app.active, Some(0));
         (app, live)
@@ -2317,8 +2366,10 @@ mod tests {
 
         // A direct session, looking at the default profile's stats.
         let (mut app, _) = proxied_app();
-        app.sessions[0].proxy = None;
-        app.proxy_default = Some("p".into());
+        app.sessions[0].launch = None;
+        let mut option = test_support::option("p");
+        option.default = true;
+        app.launch_options = vec![("vocdoni", option)];
         app.open_proxy_stats();
         assert!(matches!(&app.modal, Some(Modal::ProxyStats(v)) if !v.can_switch));
     }
@@ -2413,14 +2464,14 @@ mod tests {
         // Proxied but no claude session id yet.
         let live = [info(Some(1), None)];
         let mut app = app_with(&live);
-        app.sessions[0].proxy = Some("p".into());
+        app.sessions[0].launch = test_support::via("p");
         app.refresh_session_cred(0);
         app.on_tick();
         assert!(cred_fetches(&app.take_effects()).is_empty());
         // A terminal tab.
         let live = [shell_info(Some(1))];
         let mut app = app_with(&live);
-        app.sessions[0].proxy = Some("p".into());
+        app.sessions[0].launch = test_support::via("p");
         app.sessions[0].claude_session_id = Some("c1".into());
         app.refresh_session_cred(0);
         app.on_tick();

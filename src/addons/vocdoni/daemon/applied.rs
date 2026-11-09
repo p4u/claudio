@@ -102,25 +102,6 @@ pub fn applied_of(reply: Msg) -> Result<Applied, String> {
     }
 }
 
-/// A host's reply carrying `applied` (tests).
-#[cfg(test)]
-pub(crate) fn applied_reply(applied: Applied) -> Msg {
-    Msg::AddonReply {
-        body: serde_json::to_value(applied).unwrap_or(Value::Null),
-    }
-}
-
-/// The request of a `vocdoni/apply` op (tests): `None` for any other message.
-#[cfg(test)]
-pub(crate) fn apply_request_of(msg: &Msg) -> Option<ApplyRequest> {
-    match msg {
-        Msg::AddonOp { addon, op, body } if addon == super::super::NAME && op == OP_APPLY => {
-            serde_json::from_value(body.clone()).ok()
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

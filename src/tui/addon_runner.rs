@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mode, ReplyTo};
-use super::{wait_manifests, HostEvent};
-use crate::addon::{Addons, Frontend, SessionSnap};
+use super::app::{AddonResult, App, BridgeCall, LaunchCall, Launched, Mode, ReplyTo};
+use super::HostEvent;
+use crate::addon::{option as clean_option, Addons, Frontend, LaunchOption, Pick, SessionSnap};
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
@@ -25,10 +25,17 @@ pub(super) struct Runner {
     pub(super) rx: RuntimeRx,
 }
 
+/// The proxy profiles' names, read now (blocking, at the start): the
+/// launches' routing has them from the first launch on.
+pub(super) fn read_profiles(addons: &Addons) -> Vec<String> {
+    Bridge::of(addons).map_or_else(Vec::new, |b| b.read_profiles())
+}
+
 /// The runtime for `addons`, reading the TUI's config.toml. The TUI does
 /// not watch the file (D15). The Vocdoni addon runs the TUI's plugins:
-/// it learns the names `app`'s own extensions hold first.
-pub(super) fn start(addons: Arc<Addons>, app: &App) -> Runner {
+/// it learns the names `app`'s own extensions hold first. `app` gets the
+/// launch options.
+pub(super) fn start(addons: Arc<Addons>, app: &mut App) -> Runner {
     if let Some(bridge) = Bridge::of(&addons) {
         let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
         bridge.set_taken(own.map(|e| e.name.clone()).collect());
@@ -39,7 +46,22 @@ pub(super) fn start(addons: Arc<Addons>, app: &App) -> Runner {
         watch_config: false,
     };
     let (runtime, rx) = AddonRuntime::start(addons, opts);
+    app.on_addon(AddonResult::Options(options(&runtime)));
     Runner { runtime, rx }
+}
+
+/// Every Launch addon's options, cleaned (C2), in registry order.
+fn options(runtime: &AddonRuntime) -> Vec<(&'static str, LaunchOption)> {
+    let mut all = Vec::new();
+    for addon in runtime.addons().iter() {
+        let Some(launch) = addon.launch() else {
+            continue;
+        };
+        let ctx = runtime.ctx(addon.name());
+        let own = launch.options(ctx.as_ref()).into_iter();
+        all.extend(own.map(|o| (addon.name(), clean_option(o))));
+    }
+    all
 }
 
 /// `host`'s daemon answers (through its client in `conns`).
@@ -80,10 +102,19 @@ pub(super) fn on_reply(app: &mut App, runtime: &AddonRuntime, to: ReplyTo, reply
 
 /// The sessions as `App` has them now, its active one focused. The runtime
 /// sends events only for what changed; the Vocdoni addon learns the
-/// profiles they use.
+/// options they (and the run's flags) use.
 pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
     if let Some(bridge) = Bridge::of(runtime.addons()) {
-        bridge.use_profiles(app.plugin_profiles());
+        let mut used: Vec<(String, String)> = app
+            .sessions
+            .iter()
+            .filter_map(|v| v.launch.as_ref())
+            .map(|c| (c.addon.clone(), c.option.clone()))
+            .collect();
+        if let Pick::Option { addon, option } = &app.launch_default.pick {
+            used.push((addon.clone(), option.clone()));
+        }
+        bridge.use_launches(&used);
     }
     let active = app.active_view().map(|v| v.id);
     let snaps = app
@@ -100,7 +131,7 @@ pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
                 .or_else(|| v.title.clone())
                 .unwrap_or_else(|| v.cwd.clone()),
             conversation: v.claude_session_id.clone(),
-            launch: None,
+            launch: v.launch.clone(),
             focused: Some(v.id) == active,
         })
         .collect();
@@ -108,11 +139,18 @@ pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
 }
 
 /// What the runtime tells the UI: notices are shown, a change re-reads
-/// what `App` shows of the addon; offers have no reader yet (P3.11).
-pub(super) fn on_out(app: &mut App, out: RuntimeOut) {
+/// what `App` shows of the addon and the launch options; offers have no
+/// reader yet (P3.11).
+pub(super) fn on_out(app: &mut App, runtime: &AddonRuntime, out: RuntimeOut) {
     match out {
         RuntimeOut::Notice { addon, notice } => app.notify(format!("{addon}: {}", notice.text)),
-        RuntimeOut::Changed { addon } => app.on_addon(AddonResult::Changed { addon }),
+        RuntimeOut::Changed { addon } => {
+            app.on_addon(AddonResult::Changed { addon });
+            let options = options(runtime);
+            if options != app.launch_options {
+                app.on_addon(AddonResult::Options(options));
+            }
+        }
         RuntimeOut::Offer { .. } => {}
     }
 }
@@ -220,91 +258,6 @@ pub(super) fn save_extension(name: String, on: bool, tx: &mpsc::Sender<HostEvent
             Err(e) => format!("could not save: {e}"),
         };
         let _ = tx.send(HostEvent::Notice(text)).await;
-    });
-}
-
-/// Run a [`Effect::SpawnWithProxy`]: fetch the profile's config unless it
-/// is cached (5 s), wait for the pending manifests, compose the plugins'
-/// share and the proxy env, then send the request; the reply goes to
-/// `reply_tx`, notices to `ev_tx`.
-pub(super) fn spawn_with_proxy(
-    effect: Effect,
-    app: &App,
-    conns: &Connections,
-    reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
-    ev_tx: &mpsc::Sender<HostEvent>,
-) {
-    let Effect::SpawnWithProxy {
-        host,
-        msg,
-        proxy_name,
-        first_party,
-        to,
-        plugins: mut parts,
-        pending,
-    } = effect
-    else {
-        return;
-    };
-    // Resolve the client now (synchronous, cheap) so we can move it
-    // into the async task. Client is Clone + Send + 'static.
-    let client = conns.client(&host).cloned();
-    let bridge = app.bridge();
-    let tx = reply_tx.clone();
-    let notices = ev_tx.clone();
-    tokio::spawn(async move {
-        // Meanwhile, wait for the plugin manifests.
-        let config = async {
-            match &bridge {
-                Some(b) => b.config(&proxy_name).await,
-                None => None,
-            }
-        };
-        let waits = wait_manifests(client.as_ref(), &host, pending, bridge.clone());
-        let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
-        if !left_out.is_empty() {
-            let names = left_out.join(", ");
-            let text = format!("plugin {names} left out: not ready on {host}");
-            let _ = notices.send(HostEvent::Notice(text)).await;
-        }
-        for part in &mut parts {
-            if part.applied.is_none() {
-                part.applied = ready.remove(&part.name);
-            }
-        }
-        let composed = crate::addons::vocdoni::plugins::state::compose(&parts);
-        for text in composed.notices.clone() {
-            let _ = notices.send(HostEvent::Notice(text)).await;
-        }
-
-        // Build env from profile + (possibly fresh) config.
-        let env = crate::addons::vocdoni::proxy::resolve::proxy_env_for(
-            Some(&proxy_name),
-            cfg.as_ref(),
-            first_party,
-        );
-        match env {
-            Err(e) => {
-                let _ = tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
-            }
-            Ok(env) => match client {
-                Some(c) => {
-                    let msg = crate::addons::vocdoni::plugins::state::with_plugins(msg, composed)
-                        .merge_env(env);
-                    let reply = c.request(msg);
-                    let _ = tx.send((to, reply.await));
-                }
-                None => {
-                    let _ = tx.send((
-                        to,
-                        Err(io::Error::new(
-                            io::ErrorKind::NotConnected,
-                            format!("{host}: not connected"),
-                        )),
-                    ));
-                }
-            },
-        }
     });
 }
 

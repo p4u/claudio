@@ -5,30 +5,14 @@
 //! the runner does.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 use std::sync::Arc;
 
-use super::daemon::{applied_of, apply_msg};
 use super::plugins::choices::PluginChoices;
-use super::plugins::state::{ManifestState, PluginPart};
-use super::proxy::api::ConfigResponse;
+use super::plugins::state::ManifestState;
 use super::proxy::plugins::PluginList;
 use super::runner::Runner;
 use super::{Vocdoni, NAME};
-use crate::addon::{AddonError, Addons};
-use crate::proto::Msg;
-
-/// A `vocdoni/apply` request a spawn waits for; its answer goes to
-/// [`Bridge::on_applied_reply`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pending {
-    /// The plugin.
-    pub name: String,
-    /// The manifest hash asked for.
-    pub sha256: String,
-    /// The request (secret names, never values).
-    pub msg: Msg,
-}
+use crate::addon::Addons;
 
 /// A handle on the registered Vocdoni addon's runner.
 #[derive(Clone)]
@@ -83,21 +67,9 @@ impl Bridge {
         state.plugin_details(name, profile, refused)
     }
 
-    /// Whether the start's lists and choices are in (a spawn at start
-    /// waits for them).
-    pub fn loaded(&self) -> bool {
-        self.0.state().loaded
-    }
-
     /// The plugins whose first-sight setup is due.
     pub fn first_sight(&self) -> Vec<String> {
         self.0.state().first_sight()
-    }
-
-    /// The enabled plugins of `profile` without saved choices, and whether
-    /// each one's manifest fetch has ended.
-    pub fn unsaved(&self, profile: &str) -> Vec<(String, bool)> {
-        self.0.state().unsaved(profile)
     }
 
     /// The member saved `choices` for plugin `name`.
@@ -128,47 +100,21 @@ impl Bridge {
         self.0.state().taken = names;
     }
 
-    /// The profiles sessions use now.
-    pub fn use_profiles(&self, profiles: BTreeSet<String>) {
+    /// The launch options sessions use now, as `(addon, option)`: this
+    /// addon's are its profiles, whose lists are fetched.
+    pub fn use_launches(&self, used: &[(String, String)]) {
+        let profiles = used
+            .iter()
+            .filter(|(addon, _)| addon == NAME)
+            .map(|(_, profile)| profile.clone())
+            .collect();
         self.0.transition(|s| s.use_profiles(profiles));
     }
 
-    /// What `profile`'s enabled plugins bring to a spawn on `host`, and the
-    /// `vocdoni/apply` requests of those `host` has not answered.
-    pub fn plugin_parts(&self, host: &str, profile: &str) -> (Vec<PluginPart>, Vec<Pending>) {
-        let (parts, pending) = self.0.state().plugin_parts(host, profile, &[]);
-        let pending = pending
-            .into_iter()
-            .map(|(name, body)| Pending {
-                name,
-                sha256: body.sha256.clone(),
-                msg: apply_msg(&body),
-            })
-            .collect();
-        (parts, pending)
-    }
-
-    /// `profile`'s proxy config, if fetched in the last 5 minutes.
-    pub fn config_cached(&self, profile: &str) -> Option<ConfigResponse> {
-        let mut state = self.0.state();
-        state.now = crate::paths::unix_now();
-        state.config_cached(profile).cloned()
-    }
-
-    /// `profile`'s proxy config: cached, else fetched within 5 s and kept.
-    pub async fn config(&self, profile: &str) -> Option<ConfigResponse> {
-        self.0.config(profile).await
-    }
-
-    /// `host`'s reply to a [`Bridge::plugin_parts`] request for plugin
-    /// `name` at `sha256`.
-    pub fn on_applied_reply(&self, host: &str, name: &str, sha256: &str, reply: io::Result<Msg>) {
-        let result = match reply {
-            Ok(msg) => applied_of(msg).map_err(AddonError::Daemon),
-            Err(e) => Err(AddonError::Daemon(e.to_string())),
-        };
-        self.0
-            .transition(|s| s.on_applied(host, name, sha256, result));
+    /// Read the proxy profiles now (blocking: at a front-end's start), so
+    /// launches route by them from the first one on; their names.
+    pub fn read_profiles(&self) -> Vec<String> {
+        self.0.read_profiles().names
     }
 
     /// The state itself (tests set it up).
