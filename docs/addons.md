@@ -237,6 +237,31 @@ older daemon answers an unknown op with `unsupported op`. A core-only daemon lis
 features. The daemon protocol, its features and the mixed-version table are in
 `docs/daemon-protocol.md`.
 
+## The Vocdoni addon
+
+`src/addons/vocdoni/`: the claude-proxy client and the team plugins. It owns the `[proxy]` and
+`[plugins]` sections and lists `addon:vocdoni` in a daemon's features.
+
+**Daemon op `apply`.** Apply one plugin manifest on the host: what was the `Manifest` op of the
+releases before addons, unchanged in behaviour.
+
+```json
+{"op": "addon_op", "addon": "vocdoni", "name": "apply",
+ "body": {"name": "kb", "url": "https://…/kb.toml", "sha256": "<64 hex>",
+          "secrets": ["KB_TOKEN"], "disabled": ["mcp:jina"]}}
+```
+
+`name` is a plugin name (`[a-z0-9-]{1,40}`), `url` https, `sha256` 64 hex, `secrets` at most 64
+env names (names only, never values), `disabled` at most 256 item ids; an unknown field refuses
+the request. The reply body is an `Applied`: `mcp_config`, `agents`, `instructions`, `env`,
+`installed`, `present`, `skipped` (`{id, reason}`; a reason ending `(retrying in N s)` says when
+an install is tried again) and `dropped`. A refusal is `Error "manifest <name>: …"`.
+
+The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `cache_dir`,
+0700) as `<name>.toml` with its `<name>.sha256`; a manifest kept by an older release under
+`<cache>/plugins/` is downloaded again once. Installs run after the reply, under the
+`updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
+
 ## Config sections and reserved words
 
 An addon reads and writes only the top-level `config.toml` tables it declares in

@@ -13,6 +13,7 @@ handling in `src/daemon/server.rs`.
 - [Spawn env: `env_remove`](#spawn-env-env_remove)
 - [Optional args: `optional`](#optional-args-optional)
 - [Mixed versions](#mixed-versions)
+- [Refused ops](#refused-ops)
 
 ## Framing
 
@@ -56,7 +57,7 @@ op newer than the daemon); a client turns that into "daemon too old: run `claudi
 restart`" and goes on without the feature.
 
 Fast requests are answered in order on the connection's loop. Slow ones (reading transcripts,
-`UpdateClaude`, `Manifest`, `AddonOp`) run on their own task and reply when done, so the
+`UpdateClaude`, `AddonOp`) run on their own task and reply when done, so the
 connection keeps answering in the meantime: a `Ping` sent after a slow request may be answered
 first. Replies are matched by `req`, never by order.
 
@@ -166,3 +167,16 @@ daemon then plays the previous release. It lists no `addon:` feature, answers `A
 without `env_remove`, the legacy optional-flag list, the refused-`Manifest` test, and the legacy
 fields clients keep writing) go in the first release after the one that ships addons (planned
 v0.10.0), not before 2027-01-31. Each is marked `// compat(v0.10)` in the source.
+
+## Refused ops
+
+An op that a release before addons answered and this one no longer knows decodes to
+`Msg::Unknown` and is answered `Error "unsupported op: unknown"`, which an older client already
+turns into "daemon too old".
+
+| Op | Since | Instead |
+|---|---|---|
+| `manifest` (and its reply `applied`) | addons (P3) | `AddonOp { addon: "vocdoni", op: "apply" }`, docs/addons.md, "The Vocdoni addon". An older client's session starts without its plugins. |
+
+The test that pins the refusal (`a_manifest_op_from_an_old_client_is_refused_as_unsupported`) is
+a compatibility path: it goes with the others at the removal date above (`// compat(v0.10)`).
