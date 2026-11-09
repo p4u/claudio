@@ -21,11 +21,13 @@ use crate::text::sanitize;
 
 /// A query's length after trimming and [`sanitize`], in bytes.
 pub const MIN_QUERY: usize = 2;
+/// The longest a query may be, measured as [`MIN_QUERY`].
 pub const MAX_QUERY: usize = 200;
 /// The most words a query may have; a message must contain all of them.
 pub const MAX_TERMS: usize = 8;
-/// Hits when the request asks for 0, and the most it may ask for.
+/// Hits when the request asks for 0.
 pub const DEFAULT_LIMIT: usize = 50;
+/// The most hits a request may ask for.
 pub const MAX_LIMIT: usize = 100;
 /// A hit's title and snippet, in characters.
 const TITLE_CHARS: usize = 80;

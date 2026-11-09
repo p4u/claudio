@@ -20,10 +20,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 mod git;
+mod handshake;
 mod spawn;
 
 pub use crate::version::PROTO;
 pub use git::*;
+pub use handshake::*;
 pub use spawn::*;
 
 /// Hard cap on a single frame (tag + payload).
@@ -55,6 +57,7 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// A request: the daemon's reply echoes `req`.
     pub fn request(req: u64, msg: Msg) -> Self {
         Self {
             req: Some(req),
@@ -62,11 +65,15 @@ impl Envelope {
         }
     }
 
+    /// A pushed event or unprompted message: no request id.
     pub fn event(msg: Msg) -> Self {
         Self { req: None, msg }
     }
 }
 
+/// Every control message of the daemon protocol (frame tag `J`), told apart
+/// by `op`. A peer reads an `op` it does not know as `Unknown` and ignores it,
+/// so either side may be the newer one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Msg {
@@ -338,36 +345,6 @@ pub enum Msg {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Hello {
-    pub claudio_version: String,
-    pub proto: u32,
-    /// The client's real terminal colors, so the daemon can answer the
-    /// child's OSC 10/11 queries truthfully.
-    #[serde(default)]
-    pub colors: Option<Colors>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Welcome {
-    pub claudio_version: String,
-    pub proto: u32,
-    pub host: HostInfo,
-    /// SHA-256 of the binary the daemon was started from (what `__probe`
-    /// reports as `build`). Old daemons omit it: they predate the freshness
-    /// check, so they are outdated by definition ([`crate::freshness`]).
-    #[serde(default)]
-    pub build: Option<String>,
-    /// That binary's modification time (Unix seconds), which orders two
-    /// builds of one version.
-    #[serde(default)]
-    pub build_time: Option<u64>,
-    /// What this daemon can do beyond the base protocol ([`DAEMON_FEATURES`]).
-    /// Old daemons omit it: they have none of them.
-    #[serde(default)]
-    pub features: Vec<String>,
-}
-
 /// The most an `AddonOp` or `AddonReply` body may take, JSON-encoded.
 pub const ADDON_BODY_MAX: usize = 512 * 1024;
 
@@ -398,41 +375,12 @@ pub fn addon_body_len(body: &serde_json::Value) -> usize {
     }
 }
 
-/// The features a daemon of this build reports in [`Welcome::features`]:
-/// `lens` — it takes [`SpawnSpec::extensions`] and sends
-/// [`SessionEvent::Lens`]; `search` — it answers [`Msg::Search`];
-/// `last_prompt` — it answers [`Msg::LastPrompt`]; `attention` — it sends
-/// [`SessionEvent::Attention`] and fills [`SessionInfo::attention`];
-/// `worktree` — it answers [`Msg::GitWorktree`] and [`Msg::GitWorktreeDiff`].
-pub const DAEMON_FEATURES: &[&str] = &["lens", "search", "last_prompt", "attention", "worktree"];
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Colors {
-    pub fg: [u8; 3],
-    pub bg: [u8; 3],
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HostInfo {
-    pub hostname: String,
-    pub os: String,
-    pub arch: String,
-    pub home: String,
-    /// `None` when `claude` is not installed on this host.
-    #[serde(default)]
-    pub claude: Option<ClaudeInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClaudeInfo {
-    pub path: String,
-    pub version: String,
-}
-
 /// The daemon's error for a claude update or install asked while another
 /// (or a plugin install) runs on the host.
 pub const UPDATE_BUSY: &str = "a claude update or plugin install is already running on this host";
 
+/// One session as the daemon lists it ([`Msg::Sessions`],
+/// [`SessionEvent::Created`]): what a client needs to draw its tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
@@ -704,6 +652,8 @@ impl GitStatus {
     }
 }
 
+/// One entry of a [`Msg::DirEntries`] listing (the wizard's directory
+/// browser), with the daemon's git and claude-activity enrichment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,

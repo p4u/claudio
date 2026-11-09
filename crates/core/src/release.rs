@@ -41,7 +41,8 @@ impl SemVer {
         })
     }
 
-    pub fn zero() -> Self {
+    /// `0.0.0`, the stand-in for a version that does not parse.
+    pub(crate) fn zero() -> Self {
         SemVer {
             major: 0,
             minor: 0,

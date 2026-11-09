@@ -86,6 +86,8 @@ pub enum Source {
     },
 }
 
+/// One row of the extension registry: its name, whether it is on, the
+/// lenses and actions it declares, and where its code is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Extension {
     pub name: String,
@@ -97,10 +99,12 @@ pub struct Extension {
 }
 
 impl Extension {
+    /// Whether a program run by the extension host implements it.
     pub fn is_external(&self) -> bool {
         matches!(self.source, Source::External(_))
     }
 
+    /// Whether it is an addon's row (no lenses or actions of its own).
     pub fn is_addon(&self) -> bool {
         matches!(self.source, Source::Addon { .. })
     }

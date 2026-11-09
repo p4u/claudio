@@ -69,7 +69,9 @@ fn claude_line(claude: Option<&proto::ClaudeInfo>) -> String {
 
 // ── subcommands ───────────────────────────────────────────────────────────────
 
-pub fn daemon_status() -> std::process::ExitCode {
+/// `claudio daemon status`: whether the daemon runs, its pid and version, the
+/// claude it launches and how many sessions it holds.
+fn daemon_status() -> std::process::ExitCode {
     let pid = read_daemon_pid();
     let live = daemon_socket_live();
 
@@ -111,7 +113,10 @@ pub fn daemon_status() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-pub fn daemon_stop() -> std::process::ExitCode {
+/// `claudio daemon stop`: ask the daemon to shut down over its socket, else
+/// SIGTERM the pid in its lock file once it is verified to be our binary;
+/// then wait up to 10 s for it to exit.
+fn daemon_stop() -> std::process::ExitCode {
     // Strategy 1: authenticated IPC Shutdown.
     if daemon_socket_live() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -189,7 +194,9 @@ pub fn daemon_stop() -> std::process::ExitCode {
     }
 }
 
-pub fn daemon_restart() -> std::process::ExitCode {
+/// `claudio daemon restart`: stop the daemon if it runs, start a new one from
+/// this binary, then print its status.
+fn daemon_restart() -> std::process::ExitCode {
     // Stop the existing daemon (if any).
     if daemon_socket_live() {
         let code = daemon_stop();

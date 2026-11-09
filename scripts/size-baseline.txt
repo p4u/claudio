@@ -7,7 +7,7 @@ file crates/core/src/client.rs 857
 file crates/core/src/daemon/git.rs 978
 file crates/core/src/daemon/server.rs 900
 file crates/core/src/daemon/session.rs 1036
-file crates/core/src/proto.rs 929
+file crates/core/src/proto.rs 879
 file crates/tui/src/interaction.rs 1024
 file crates/tui/src/lib.rs 814
 file crates/tui/src/ui/mod.rs 881

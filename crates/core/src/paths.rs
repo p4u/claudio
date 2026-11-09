@@ -29,6 +29,8 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// This process's real uid: the owner every peer of the daemon socket and
+/// every file claudio trusts must match.
 pub fn uid() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }

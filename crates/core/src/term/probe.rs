@@ -41,6 +41,7 @@ struct Inner {
 }
 
 impl ProbeResponder {
+    /// A responder for a terminal of `rows`×`cols`.
     pub fn new(rows: u16, cols: u16) -> Self {
         Self {
             parser: Parser::new(),
@@ -52,6 +53,7 @@ impl ProbeResponder {
         }
     }
 
+    /// Parse PTY output, queueing an answer for every probe it contains.
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.parser.advance(&mut self.inner, b);
@@ -64,6 +66,7 @@ impl ProbeResponder {
         self.inner.cols = cols;
     }
 
+    /// The answers queued since the last call, to write back to the PTY.
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.inner.out)
     }

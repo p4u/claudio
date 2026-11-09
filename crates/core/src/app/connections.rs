@@ -85,6 +85,7 @@ impl Connections {
         self.map.get(host).map(|c| c.generation).unwrap_or(0)
     }
 
+    /// The live client for `host`, while it is connected.
     pub fn client(&self, host: &str) -> Option<&Client> {
         self.map.get(host).and_then(|c| c.client.as_ref())
     }

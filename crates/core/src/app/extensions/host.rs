@@ -45,6 +45,7 @@ pub const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_IN_FLIGHT: usize = 16;
 /// Failures within [`FAILURE_WINDOW`] that disable an extension.
 pub const FAILURES: usize = 3;
+/// How far back [`FAILURES`] are counted.
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(300);
 /// How long a failed render is remembered (shown raw, not asked again).
 const FAILED_RENDER_TTL: Duration = Duration::from_secs(60);

@@ -262,7 +262,7 @@ impl TranscriptCursor {
         &self.session_id
     }
 
-    pub fn totals(&self) -> &TranscriptTotals {
+    pub(crate) fn totals(&self) -> &TranscriptTotals {
         &self.totals
     }
 

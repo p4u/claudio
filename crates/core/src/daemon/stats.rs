@@ -8,14 +8,16 @@
 use std::time::Duration;
 use tokio::time;
 
+/// One sample of the host's CPU use (percent) and memory (bytes).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct HostSnapshot {
+pub(crate) struct HostSnapshot {
     pub cpu_pct: f32,
     pub mem_used: u64,
     pub mem_total: u64,
 }
 
-pub async fn sample_loop(tx: tokio::sync::watch::Sender<HostSnapshot>) {
+/// Sample the host every 2 s into `tx`, for the daemon's whole life.
+pub(crate) async fn sample_loop(tx: tokio::sync::watch::Sender<HostSnapshot>) {
     let mut prev = read_cpu_raw();
     loop {
         time::sleep(Duration::from_secs(2)).await;
