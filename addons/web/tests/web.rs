@@ -143,6 +143,32 @@ fn web_login_is_rate_limited() {
 }
 
 #[test]
+fn web_login_bodies_and_me_name_the_methods() {
+    let web = Web::start();
+    let me = web.get("/api/me", &[]);
+    assert_eq!(me.status, 401);
+    let body: Value = serde_json::from_str(&me.body).unwrap();
+    assert_eq!(body["login"], json!(["token"]));
+    let origin = web.origin();
+    let post = |body: Value| {
+        web.post("/api/login", Some(&origin), &body.to_string(), &[])
+            .status
+    };
+    assert_eq!(
+        post(json!({"password": "twelve bytes!"})),
+        400,
+        "no password without --remote"
+    );
+    assert_eq!(post(json!({"token": web.token, "password": "x"})), 400);
+    assert_eq!(post(json!({})), 400);
+    assert_eq!(
+        post(json!({"token": web.token, "extra": 1})),
+        204,
+        "unknown fields ignored"
+    );
+}
+
+#[test]
 fn web_token_is_private_reused_and_rotated() {
     let web = Web::start();
     let path = web.h().config_home.join("claudio/web-token");

@@ -15,7 +15,10 @@ mod hub;
 mod hub_io;
 mod input;
 mod lenses;
+mod limit;
+mod login;
 mod password;
+mod peer;
 mod session_events;
 mod spawn;
 mod state;
@@ -312,7 +315,8 @@ async fn serve(
         ext.shutdown().await;
         addon_rt.shutdown();
     };
-    axum::serve(listener, router(state))
+    let app = router(state).into_make_service_with_connect_info::<peer::Peer>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(stop)
         .await
         .map_err(|e| format!("server error: {e}"))
@@ -390,7 +394,7 @@ async fn shutdown() {
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
-        .route("/api/login", post(auth::login))
+        .route("/api/login", post(login::login))
         .route("/api/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
         .route("/ws", get(ws::upgrade))

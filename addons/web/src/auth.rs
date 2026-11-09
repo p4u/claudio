@@ -11,7 +11,6 @@
 //! and the other security headers. Holding the cookie is holding a shell on
 //! every connected host.
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
@@ -23,16 +22,16 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
 
 use claudio_core::paths;
+
+use crate::limit::Limiter;
+use crate::peer::{Peer, PeerKey};
 
 pub(crate) const COOKIE: &str = "claudio_web";
 pub(crate) const TOKEN_BYTES: usize = 32;
 pub(crate) const SESSION_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const MAX_SESSIONS: usize = 64;
-pub(crate) const MAX_FAILURES: usize = 5;
-pub(crate) const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const LOGIN_BODY_MAX: usize = 4096;
 
 /// `<config>/web-token`.
@@ -97,8 +96,28 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 pub(crate) struct Allowed {
     /// Every accepted `host[:port]`, lowercase.
     hosts: Vec<String>,
+    /// The loopback forms at the listen port: a loopback peer that used one
+    /// of these sent a local request.
+    local_hosts: Vec<String>,
     /// Any `--allow-host` given: cookies then get `Secure`.
     proxied: bool,
+}
+
+/// `name:port`, and `name` alone when `port` is the scheme's default.
+fn at_port(name: &str, port: u16, default: u16) -> Vec<String> {
+    let mut v = vec![format!("{name}:{port}")];
+    if port == default {
+        v.push(name.to_owned());
+    }
+    v
+}
+
+/// An IP as a `Host` names it: IPv6 in brackets.
+fn host_ip(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    }
 }
 
 impl Allowed {
@@ -108,20 +127,11 @@ impl Allowed {
     /// `:port`, and is then accepted at that port only.
     pub(crate) fn new(listen: SocketAddr, allow_hosts: &[String]) -> Allowed {
         let port = listen.port();
-        // `Display` brackets an IPv6 address: `[::1]:7337`.
-        let mut hosts = vec![listen.to_string()];
-        if port == 80 {
-            hosts.push(match listen.ip() {
-                IpAddr::V4(ip) => ip.to_string(),
-                IpAddr::V6(ip) => format!("[{ip}]"),
-            });
-        }
+        let mut local_hosts = at_port(&host_ip(listen.ip()), port, 80);
         for name in ["127.0.0.1", "localhost", "[::1]"] {
-            hosts.push(format!("{name}:{port}"));
-            if port == 80 {
-                hosts.push(name.to_owned());
-            }
+            local_hosts.extend(at_port(name, port, 80));
         }
+        let mut hosts = local_hosts.clone();
         for name in allow_hosts {
             let name = name.trim().to_ascii_lowercase();
             if !name.contains(':') {
@@ -129,12 +139,20 @@ impl Allowed {
             }
             hosts.push(name);
         }
-        hosts.sort();
-        hosts.dedup();
+        for list in [&mut hosts, &mut local_hosts] {
+            list.sort();
+            list.dedup();
+        }
         Allowed {
             hosts,
+            local_hosts,
             proxied: !allow_hosts.is_empty(),
         }
+    }
+
+    /// Whether `host` is one of the loopback forms at the listen port.
+    pub(crate) fn is_local_host(&self, host: &str) -> bool {
+        self.local_hosts.contains(&host.trim().to_ascii_lowercase())
     }
 
     pub(crate) fn host_ok(&self, host: &str) -> bool {
@@ -178,13 +196,36 @@ pub(crate) fn csp(importmap_sha256: Option<&str>) -> String {
 struct Inner {
     /// Cookie values and their last use.
     sessions: Vec<(String, Instant)>,
-    /// When the recent failed logins happened, oldest first.
-    failures: VecDeque<Instant>,
+}
+
+/// A request's sender as the login rules see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Caller {
+    pub local: bool,
+    pub key: PeerKey,
+}
+
+/// The request's `Host` (or its URI authority), `""` when none.
+pub(crate) fn host_of(req: &Request) -> &str {
+    req.headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()))
+        .unwrap_or("")
+}
+
+/// The TCP peer, from the connection (`ConnectInfo`), never a header.
+pub(crate) fn peer_of(req: &Request) -> Option<Peer> {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<Peer>>()
+        .map(|c| c.0)
 }
 
 pub(crate) struct Auth {
     token: String,
-    allowed: Allowed,
+    pub(crate) allowed: Allowed,
+    /// Login attempts, reserved before any check (`limit.rs`).
+    pub(crate) limiter: Limiter,
     csp: HeaderValue,
     inner: Mutex<Inner>,
     /// `/dev/urandom`, opened once at start: a login opens no file on the
@@ -198,6 +239,7 @@ impl Auth {
         Ok(Auth {
             token,
             allowed,
+            limiter: Limiter::default(),
             csp: HeaderValue::from_str(&csp).expect("an ASCII CSP"),
             inner: Mutex::new(Inner::default()),
             urandom: Mutex::new(File::open("/dev/urandom")?),
@@ -214,27 +256,24 @@ impl Auth {
         read_hex(&mut *urandom, n)
     }
 
-    /// Check a login: `Ok` for the right token; `429` while
-    /// [`MAX_FAILURES`] failures are under [`FAILURE_WINDOW`] old (the
-    /// token is not even compared then); else `401`, which counts.
-    pub(crate) fn login(&self, token: &str, now: Instant) -> Result<(), StatusCode> {
-        let mut inner = self.lock();
-        while inner
-            .failures
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= FAILURE_WINDOW)
-        {
-            inner.failures.pop_front();
+    /// Who sent a request: its key for the limits, and whether it is local
+    /// (a loopback peer that used a loopback `Host`). No peer: not local.
+    pub(crate) fn caller(&self, peer: Option<Peer>, host: &str) -> Caller {
+        let Some(peer) = peer else {
+            return Caller {
+                local: false,
+                key: PeerKey::Unknown,
+            };
+        };
+        Caller {
+            local: peer.ip().is_loopback() && self.allowed.is_local_host(host),
+            key: peer.key(),
         }
-        if inner.failures.len() >= MAX_FAILURES {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-        if ct_eq(token.as_bytes(), self.token.as_bytes()) {
-            Ok(())
-        } else {
-            inner.failures.push_back(now);
-            Err(StatusCode::UNAUTHORIZED)
-        }
+    }
+
+    /// Whether `token` is the token, in constant time.
+    pub(crate) fn token_ok(&self, token: &str) -> bool {
+        ct_eq(token.as_bytes(), self.token.as_bytes())
     }
 
     /// A new session's cookie value. Idle ones are dropped first; past
@@ -301,7 +340,7 @@ pub(crate) fn cookie_value(headers: &HeaderMap) -> Option<String> {
         .map(|(_, value)| value.trim().to_owned())
 }
 
-fn set_cookie(value: &str, secure: bool) -> HeaderValue {
+pub(crate) fn set_cookie(value: &str, secure: bool) -> HeaderValue {
     let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
         "{COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/{secure}"
@@ -326,12 +365,7 @@ fn is_api(path: &str) -> bool {
 /// login (401).
 fn check(auth: &Auth, req: &Request) -> Result<(), StatusCode> {
     let headers = req.headers();
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .or_else(|| req.uri().authority().map(|a| a.as_str()))
-        .unwrap_or("");
-    if !auth.allowed.host_ok(host) {
+    if !auth.allowed.host_ok(host_of(req)) {
         return Err(StatusCode::MISDIRECTED_REQUEST);
     }
     let upgrade = headers
@@ -363,6 +397,10 @@ pub(crate) async fn guard(State(auth): State<Arc<Auth>>, req: Request, next: Nex
     let path = req.uri().path().to_owned();
     let mut res = match check(&auth, &req) {
         Ok(()) => next.run(req).await,
+        Err(StatusCode::UNAUTHORIZED) if path == "/api/me" => {
+            let body = serde_json::json!({ "login": ["token"] });
+            (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()
+        }
         Err(status) => status.into_response(),
     };
     let h = res.headers_mut();
@@ -379,39 +417,6 @@ pub(crate) async fn guard(State(auth): State<Arc<Auth>>, req: Request, next: Nex
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     res
-}
-
-#[derive(Deserialize)]
-struct LoginBody {
-    token: String,
-}
-
-/// `POST /api/login {"token": …}`: the guard already checked Host and
-/// Origin, so only same-origin attempts reach the rate limit.
-pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Response {
-    let body = match axum::body::to_bytes(req.into_body(), LOGIN_BODY_MAX).await {
-        Ok(body) => body,
-        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-    };
-    let Ok(LoginBody { token }) = serde_json::from_slice(&body) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    if let Err(status) = auth.login(&token, Instant::now()) {
-        tracing::info!(status = status.as_u16(), "web: login refused");
-        return status.into_response();
-    }
-    match auth.create_session(Instant::now()) {
-        Ok(value) => {
-            let mut res = StatusCode::NO_CONTENT.into_response();
-            let cookie = set_cookie(&value, auth.allowed.secure_cookie());
-            res.headers_mut().insert(header::SET_COOKIE, cookie);
-            res
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "web: no random bytes for a session");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
 }
 
 /// `GET /api/me`: 204, the guard having checked the cookie (the page asks
@@ -565,22 +570,44 @@ mod tests {
         assert!(a.secure_cookie());
     }
 
+    fn peer(s: &str) -> Option<Peer> {
+        Some(Peer(s.parse().unwrap()))
+    }
+
     #[test]
-    fn login_locks_after_five_failures_for_a_minute() {
-        let a = auth();
-        let t0 = Instant::now();
-        for _ in 0..MAX_FAILURES {
-            assert_eq!(a.login("wrong", t0), Err(StatusCode::UNAUTHORIZED));
+    fn local_means_a_loopback_peer_and_a_loopback_host() {
+        let a = Auth::new(
+            "ab".repeat(32),
+            Allowed::new(lo(7337), &names(&["proxy.example"])),
+            csp(None),
+        )
+        .unwrap();
+        for (p, host) in [
+            ("127.0.0.1:5000", "127.0.0.1:7337"),
+            ("[::ffff:127.0.0.1]:5000", "localhost:7337"),
+            ("[::1]:5000", "[::1]:7337"),
+            ("127.0.0.1:5000", "LOCALHOST:7337"),
+        ] {
+            assert!(a.caller(peer(p), host).local, "{p} {host}");
         }
-        assert_eq!(a.login("wrong", t0), Err(StatusCode::TOO_MANY_REQUESTS));
+        for (p, host) in [
+            (peer("127.0.0.1:5000"), "proxy.example"),
+            (peer("127.0.0.1:5000"), "proxy.example:7337"),
+            (peer("127.0.0.1:5000"), "127.0.0.1:7338"),
+            (peer("192.168.1.5:5000"), "127.0.0.1:7337"),
+            (None, "127.0.0.1:7337"),
+        ] {
+            assert!(!a.caller(p, host).local, "{p:?} {host}");
+        }
+        assert_eq!(a.caller(peer("127.0.0.9:1"), "x").key, PeerKey::Loopback);
+        assert_eq!(a.caller(None, "127.0.0.1:7337").key, PeerKey::Unknown);
         assert_eq!(
-            a.login(&"ab".repeat(32), t0 + Duration::from_secs(59)),
-            Err(StatusCode::TOO_MANY_REQUESTS)
+            a.caller(peer("192.168.1.5:1"), "x").key,
+            PeerKey::V4(0xc0a8_0105)
         );
-        assert_eq!(
-            a.login(&"ab".repeat(32), t0 + Duration::from_secs(61)),
-            Ok(())
-        );
+        let a = Allowed::new("127.0.0.2:80".parse().unwrap(), &[]);
+        assert!(a.is_local_host("127.0.0.2") && a.is_local_host("127.0.0.2:80"));
+        assert!(a.is_local_host("localhost") && !a.is_local_host("127.0.0.3:80"));
     }
 
     #[test]
