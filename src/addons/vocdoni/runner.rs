@@ -33,7 +33,7 @@ pub struct Runner {
     /// Where the proxy profiles are read.
     source: ProfileSource,
     /// Whether a front-end's runtime runs this addon: set by its first
-    /// event (a launch without one waits for no start).
+    /// event or its first launch (a launch may come before the event).
     active: AtomicBool,
 }
 
@@ -104,7 +104,7 @@ impl Runner {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// A runtime runs this addon (its first event; tests).
+    /// A runtime runs this addon (its first event or launch; tests).
     pub fn activate(&self) {
         self.active.store(true, Ordering::SeqCst);
     }

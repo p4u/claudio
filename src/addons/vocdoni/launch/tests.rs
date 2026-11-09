@@ -85,6 +85,12 @@ fn env_get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
 
 /// `kb` is listed for `work`, its manifest is here and its choices saved.
 fn kb_ready(runner: &Runner) {
+    kb_loaded(runner, true);
+}
+
+/// The addon's start as `load` leaves it: `kb` listed for `work`, its
+/// manifest here, its choices saved or not, all under one lock.
+fn kb_loaded(runner: &Runner, saved: bool) {
     let list = PluginList {
         profile: "work".into(),
         fetched_at: 1,
@@ -95,10 +101,12 @@ fn kb_ready(runner: &Runner) {
     state.loaded = true;
     state.on_list("work", PluginsFetch::Listed(list));
     state.on_manifest("kb", &"a".repeat(64), Ok(manifest));
-    state
-        .plugins
-        .choices
-        .insert("kb".into(), PluginChoices::default());
+    if saved {
+        state
+            .plugins
+            .choices
+            .insert("kb".into(), PluginChoices::default());
+    }
     // Connected: asked (that task is the runner's; no context runs it here).
     state.host_up("local", true);
 }
@@ -533,6 +541,42 @@ async fn a_new_session_waits_for_the_addons_start() {
     let req = request(LaunchOp::New, choice("work".into(), false));
     let part = prepare(runner, req, ctx).await.unwrap();
     assert_eq!(part.args.len(), 2, "{part:?}");
+}
+
+/// F2: a launch whose `prepare` runs before the runtime's `Started` (a
+/// `--plain` start, the web's first spawn) still waits for the addon's
+/// start, so it asks for the plugin's review instead of starting without
+/// it; a set-up plugin then comes with the session.
+#[tokio::test]
+async fn a_launch_before_the_runtimes_start_waits_for_it() {
+    let path = profiles_file();
+    for saved in [false, true] {
+        let runner = runner(path.clone());
+        assert!(!runner.is_active(), "no event delivered yet");
+        let later = Arc::clone(&runner);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            later.activate();
+            kb_loaded(&later, saved);
+        });
+        let vocdoni = Vocdoni::with_runner(runner);
+        let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+        let req = request(LaunchOp::New, choice("work".into(), false));
+        let out = Launch::prepare(&vocdoni, req, ctx).await;
+        if saved {
+            let part = out.unwrap();
+            assert_eq!(part.args.len(), 2, "{part:?}");
+        } else {
+            assert_eq!(
+                out,
+                Err(LaunchError::NeedsReview {
+                    checklist: "kb".into(),
+                    revision: "a".repeat(64),
+                })
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
 #[tokio::test]

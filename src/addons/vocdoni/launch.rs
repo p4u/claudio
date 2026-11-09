@@ -94,6 +94,9 @@ impl Launch for Vocdoni {
         req: LaunchRequest,
         ctx: Arc<dyn AddonCtx>,
     ) -> BoxFuture<'a, Result<LaunchPart, LaunchError>> {
+        // Only a live runtime prepares: one that has not delivered its
+        // first event yet still loads, and a new session waits for it.
+        self.runner.activate();
         Box::pin(prepare(Arc::clone(&self.runner), req, ctx))
     }
 
