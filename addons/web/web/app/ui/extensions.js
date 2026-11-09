@@ -2,11 +2,12 @@
 // addon's row shows the details its addon gives (addons.rows) and opens its setup checklist.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { req, reqQuiet, onServerEvent } from '../store.js';
 import { overlay, register } from '../palette.js';
 import { Dialog } from './modal.js';
 import { openChecklist } from './checklist.js';
+import { makeReads } from '../reads.js';
 
 const reload = signal(0); // bumped by extensions_changed and addons.changed
 
@@ -41,23 +42,33 @@ export function ExtensionsScreen() {
   const [state, setState] = useState({ loading: true, exts: [], rows: [], error: null });
   const rev = reload.value;
   const [nonce, setNonce] = useState(0);
+  // A toggle shows at once; a list read that may predate it (an event's reload in flight) is
+  // dropped, never shown over it, and the toggle's end reads the lists again.
+  const reads = useRef(null);
+  reads.current ??= makeReads();
 
   const load = async () => {
+    const ticket = reads.current.begin();
+    let next;
     try {
       const [x, r] = await Promise.all([reqQuiet('extensions.list'), reqQuiet('addons.rows').catch(() => ({ rows: [] }))]);
-      setState({ loading: false, exts: x.extensions ?? [], rows: r.rows ?? [], error: null });
+      next = { loading: false, exts: x.extensions ?? [], rows: r.rows ?? [], error: null };
     } catch (e) {
-      setState({ loading: false, exts: [], rows: [], error: e.message });
+      next = { loading: false, exts: [], rows: [], error: e.message };
     }
+    if (reads.current.fresh(ticket)) setState(next);
   };
   useEffect(() => { load(); }, [rev, nonce]);
 
   async function toggle(e, row, on) {
+    reads.current.write();
     setState((s) => ({ ...s, exts: s.exts.map((x) => (x.name === e.name ? { ...x, enabled: on } : x)) }));
     try {
       if (row) await req('addons.row_action', { addon: row.addon, name: row.name, action: 'toggle', on });
       else await req('extensions.toggle', { name: e.name, on });
-    } catch { setNonce((n) => n + 1); }
+    } catch { /* the lists read below put the server's state back */ }
+    reads.current.done();
+    setNonce((n) => n + 1);
   }
   // Refresh: every addon with rows fetches their data again, then the lists are read again.
   async function refresh() {
