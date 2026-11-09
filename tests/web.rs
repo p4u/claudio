@@ -1999,6 +1999,197 @@ id = "greet"
     );
 }
 
+// ── Protocol v2: the addons.* ops (beside v1 until P3.16) ───────────────────
+
+/// The Vocdoni addon of `list` (`addons.list`).
+fn vocdoni_of(list: &Value) -> Value {
+    list["addons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "vocdoni")
+        .cloned()
+        .expect("the vocdoni addon")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_addons_list_has_vocdoni_panels_and_launch_options() {
+    let proxy = fake_proxy();
+    let web = web_with_proxy(ManagerHarness::new(), &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let list = tab.req("addons.list", json!({})).await.expect("list");
+    let vocdoni = vocdoni_of(&list);
+    assert_eq!(
+        vocdoni["panels"],
+        json!([{"id": "proxy", "title": "Proxy stats", "windows": ["24h", "7d", "30d"], "key": "alt+s"}])
+    );
+    assert_eq!(
+        vocdoni["launch_options"],
+        json!([{"id": "env", "label": "env", "group": "Proxy", "default": true, "detail": null}])
+    );
+    assert_eq!(
+        vocdoni["launch_flags"],
+        json!([{"name": "first-party", "label": "First-party session"}])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_addons_panel_renders_the_fixture_and_never_leaks_the_token() {
+    let proxy = fake_proxy();
+    let web = web_with_proxy(ManagerHarness::new(), &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let args = json!({"addon": "vocdoni", "panel": "proxy", "window": "7d"});
+    let panel = until_req(&mut tab, "addons.panel", args, |p| {
+        p.to_string().contains("tester · profile env")
+    })
+    .await;
+    assert_eq!(panel["title"], "Proxy stats: env");
+    let titles: Vec<&str> = panel["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["title"].as_str())
+        .collect();
+    assert_eq!(titles[0], "Overview");
+    let text = panel.to_string();
+    assert!(
+        text.contains("out 6k") && text.contains("opus-5-5"),
+        "{text}"
+    );
+    for frame in &tab.seen {
+        let frame = String::from_utf8_lossy(frame);
+        assert!(!frame.contains(PROXY_TOKEN), "the proxy token in a frame");
+        assert!(
+            !frame.contains(PLUGIN_SECRET),
+            "the plugin secret in a frame"
+        );
+    }
+    let log = fs::read_to_string(web.h().root.join("web.log")).unwrap();
+    assert!(!log.contains(PROXY_TOKEN), "the proxy token in the log");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_addons_ops_refuse_unknown_addons_and_bad_args() {
+    let web = Web::start();
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    let sid = "6f1c0000-0000-4000-8000-000000000000";
+    for (op, args, want) in [
+        (
+            "addons.panel",
+            json!({"addon": "nope", "panel": "proxy"}),
+            "bad request: addon: no such addon",
+        ),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "Proxy!"}),
+            "bad request: panel: not an id",
+        ),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "nope"}),
+            "bad request: panel: no such panel",
+        ),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "proxy", "window": "1h"}),
+            "bad request: window: not one of the panel's",
+        ),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "proxy", "sid": sid}),
+            "no such session",
+        ),
+        (
+            "addons.checklist",
+            json!({"addon": "vocdoni", "checklist": "nope"}),
+            "no such checklist",
+        ),
+        (
+            "addons.checklist",
+            json!({"addon": "web", "checklist": "x"}),
+            "bad request: addon: no such addon",
+        ),
+        ("addons.nope", json!({}), "unknown op"),
+    ] {
+        assert_eq!(
+            tab.req(op, args.clone()).await,
+            Err(want.to_owned()),
+            "{op} {args}"
+        );
+    }
+    for (op, args) in [
+        ("addons.list", json!({"x": 1})),
+        ("addons.rows", json!({"x": 1})),
+        (
+            "addons.panel",
+            json!({"addon": "vocdoni", "panel": "proxy", "profile": "work"}),
+        ),
+        ("addons.panel", json!({"addon": "vocdoni"})),
+        (
+            "addons.checklist",
+            json!({"addon": "vocdoni", "checklist": "kb", "extra": true}),
+        ),
+    ] {
+        let err = tab.req(op, args.clone()).await.unwrap_err();
+        assert!(err.starts_with("bad request"), "{op} {args}: {err}");
+    }
+    assert_eq!(
+        tab.req("addons.rows", json!({})).await,
+        Ok(json!({"rows": []}))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_session_dto_has_launch_and_segments() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dirs = h.dirs.clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let spawn = |dir: &std::path::PathBuf, proxy: Value| {
+        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": proxy,
+            "skip_plugins": [PLUGIN]})
+    };
+    let proxied = tab
+        .req("session.spawn", spawn(&dirs[0], json!({"kind": "default"})))
+        .await
+        .expect("spawn");
+    let sid = proxied["sid"].as_str().unwrap().to_owned();
+    let ev = tab
+        .event("session", |v| {
+            v["session"]["id"] == sid.as_str() && v["session"]["segments"] != json!([])
+        })
+        .await;
+    let session = &ev["session"];
+    assert_eq!(
+        session["launch"],
+        json!({"known": true, "choice": {"addon": "vocdoni", "option": "env", "flags": []}})
+    );
+    assert_eq!(
+        session["segments"][0],
+        json!({"addon": "vocdoni", "id": "proxy", "text": "⇄ proxy:env", "tone": "accent", "priority": 10})
+    );
+    let direct = tab
+        .req("session.spawn", spawn(&dirs[1], json!({"kind": "direct"})))
+        .await
+        .expect("spawn direct");
+    let sid = direct["sid"].as_str().unwrap().to_owned();
+    let ev = tab
+        .event("session", |v| {
+            v["session"]["id"] == sid.as_str() && v["session"]["launch"]["known"] == true
+        })
+        .await;
+    assert_eq!(ev["session"]["launch"]["choice"], Value::Null);
+    assert_eq!(ev["session"]["segments"], json!([]));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_proxy_stats_render_the_fixture() {
     let proxy = fake_proxy();

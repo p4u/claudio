@@ -32,6 +32,8 @@ pub(crate) const SESSION_FIELDS: &[&str] = &[
     "proxy",
     "proxy_known",
     "first_party",
+    "launch",
+    "segments",
     "ephemeral",
     "prompt_pending",
 ];
@@ -137,6 +139,8 @@ pub(crate) fn session(view: &SessionView) -> Value {
         "proxy": proxy,
         "proxy_known": view.meta.is_some(),
         "first_party": first_party,
+        "launch": super::addons::launch_dto(&view.addon),
+        "segments": super::addons::segments_dto(&view.addon),
         "ephemeral": false,
         "prompt_pending": view.prompt.is_some(),
     })

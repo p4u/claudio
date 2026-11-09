@@ -22,7 +22,7 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{ext, git_ops, plugins};
+use super::{addons, ext, git_ops, plugins};
 use crate::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
@@ -636,6 +636,7 @@ pub(crate) async fn dispatch(
             let a: RenderArgs = parse(args)?;
             state.ctx.ext.render(&a.lens, &a.kind, &a.source).await
         }
+        op if op.starts_with("addons.") => addons::dispatch(state, op, args).await,
         op if op.starts_with("proxy.") || op.starts_with("plugins.") => {
             plugins::dispatch_v1(state, op, args).await
         }

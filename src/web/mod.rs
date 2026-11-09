@@ -3,6 +3,7 @@
 //! See docs/specs/2026-11-08-web-ui-design.md and docs/web-protocol.md.
 
 mod addon_feed;
+mod addons;
 pub(crate) mod assets;
 pub(crate) mod auth;
 mod dto;

@@ -333,6 +333,8 @@ pub(crate) struct SessionView {
     pub prompt: Option<PendingPrompt>,
     /// Known proxy/first_party.
     pub meta: Option<(Option<String>, bool)>,
+    /// Its launch and its addons' segments (`addons::refresh`).
+    pub addon: super::addons::SessionAddons,
 }
 
 impl SessionView {
@@ -350,6 +352,7 @@ impl SessionView {
             size: None,
             prompt: None,
             meta: None,
+            addon: Default::default(),
         }
     }
 }
@@ -826,6 +829,7 @@ async fn run(mut hub: Hub, mut rx: mpsc::Receiver<Cmd>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let start = tokio::time::Instant::now() + OUTDATED_RETRY;
     let mut outdated = tokio::time::interval_at(start, OUTDATED_RETRY);
+    let mut segments = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             cmd = rx.recv() => match cmd {
@@ -837,14 +841,14 @@ async fn run(mut hub: Hub, mut rx: mpsc::Receiver<Cmd>) {
                     let data = matches!(&cmd, Cmd::Input { .. } | Cmd::Incoming { inc: Incoming::Data { .. }, .. });
                     hub.handle(cmd);
                     if !data {
-                        let views = hub.sessions.values().map(|v| (v, !v.subs.is_empty()));
-                        hub.runtime.sessions_reset(addon_feed::snaps(views));
+                        hub.sync_addons();
                     }
                 }
                 None => break,
             },
             _ = tick.tick() => hub.on_tick(),
             _ = outdated.tick() => hub.check_outdated(),
+            _ = segments.tick() => hub.sync_addons(),
         }
     }
 }
@@ -1239,6 +1243,17 @@ impl Hub {
         if let Some(view) = self.sessions.get(&sid) {
             let v = ev("session", json!({ "session": dto::session(view) }));
             self.send_tabs(&v);
+        }
+    }
+
+    /// The sessions (attached ones focused) to the addon runtime, then
+    /// their launch and segments: a `session` event for each that changed.
+    fn sync_addons(&mut self) {
+        let views = self.sessions.values().map(|v| (v, !v.subs.is_empty()));
+        let snaps = addon_feed::snaps(self.runtime.addons(), views);
+        self.runtime.sessions_reset(snaps.clone());
+        for sid in super::addons::refresh(&mut self.sessions, &snaps, &self.runtime) {
+            self.send_session(sid);
         }
     }
 

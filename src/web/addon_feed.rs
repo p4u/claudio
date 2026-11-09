@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use super::events::ev;
 use super::hub::{HubEvent, HubHandle, SessionView};
 use super::plugins::Feed;
-use crate::addon::SessionSnap;
+use crate::addon::{Addons, SessionSnap};
 use crate::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
 
 /// Follow the hub's host events into `runtime` (from a resync of the hosts
@@ -28,7 +28,10 @@ pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, m
                         "host": null, "sid": null});
                     hub.broadcast(ev("notice", fields));
                 }
-                RuntimeOut::Changed { .. } => feed.changed().await,
+                RuntimeOut::Changed { addon } => {
+                    hub.broadcast(ev("addons.changed", json!({ "addon": addon })));
+                    feed.changed().await;
+                }
                 RuntimeOut::ConfigChanged => feed.config_changed().await,
                 RuntimeOut::Offer { .. } => {}
             }
@@ -73,8 +76,12 @@ async fn host_up(hub: &HubHandle, runtime: &AddonRuntime, host: &str) {
     }
 }
 
-/// The hub's sessions as addons see them, `focused` where a tab attached.
-pub(crate) fn snaps<'a>(views: impl Iterator<Item = (&'a SessionView, bool)>) -> Vec<SessionSnap> {
+/// The hub's sessions as addons see them, `focused` where a tab attached,
+/// each with its recorded launch (the server's state, never the page's).
+pub(crate) fn snaps<'a>(
+    addons: &Addons,
+    views: impl Iterator<Item = (&'a SessionView, bool)>,
+) -> Vec<SessionSnap> {
     views
         .map(|(v, focused)| SessionSnap {
             sid: v.info.id,
@@ -88,7 +95,7 @@ pub(crate) fn snaps<'a>(views: impl Iterator<Item = (&'a SessionView, bool)>) ->
                 .or_else(|| v.info.title.clone())
                 .unwrap_or_else(|| v.info.cwd.clone()),
             conversation: v.info.claude_session_id.clone(),
-            launch: None,
+            launch: super::addons::launch_of(addons, v.meta.as_ref()).1,
             focused,
         })
         .collect()
