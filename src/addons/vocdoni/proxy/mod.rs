@@ -4,7 +4,6 @@
 //! is a pure library that neither reads from stdin nor writes to stdout.
 
 pub mod api;
-pub mod cmd;
 pub mod env;
 pub mod login;
 pub mod plugins;

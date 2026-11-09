@@ -6,10 +6,10 @@
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use super::api;
-use super::login::{self, Granted};
-use super::plugins;
-use super::profile::{self, Profile};
+use super::proxy::api;
+use super::proxy::login::{self, Granted};
+use super::proxy::plugins;
+use super::proxy::profile::{self, Profile};
 use crate::text::fmt_tokens;
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────

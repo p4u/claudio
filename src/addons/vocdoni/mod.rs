@@ -1,5 +1,6 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
+mod cmd;
 pub mod daemon;
 #[cfg(feature = "diag")]
 mod diag;
@@ -90,6 +91,6 @@ impl Commands for Vocdoni {
         if let Some(code) = diag::dispatch(argv) {
             return Some(code);
         }
-        proxy::cmd::dispatch(argv.get(1..).unwrap_or_default())
+        cmd::dispatch(argv.get(1..).unwrap_or_default())
     }
 }
