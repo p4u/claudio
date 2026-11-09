@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Deserialize;
@@ -40,6 +41,10 @@ pub(crate) struct Extensions {
     /// `[extensions]` as config.toml had it at start, with the toggles
     /// since: the addon rows' on/off.
     choices: Mutex<BTreeMap<String, bool>>,
+    /// Bumped by every toggle, under the registry lock: a `reread` whose
+    /// config was read before one is stale and applies nothing (the
+    /// toggle's own write brings the next re-read).
+    toggles: AtomicU64,
 }
 
 impl Extensions {
@@ -73,6 +78,7 @@ impl Extensions {
             host: Arc::new(host),
             config_path,
             choices: Mutex::new(config.extensions.clone()),
+            toggles: AtomicU64::new(0),
         })
     }
 
@@ -118,24 +124,7 @@ impl Extensions {
         name: &str,
         on: bool,
     ) -> Result<(), String> {
-        let source = {
-            let mut registry = lock(&self.registry);
-            let ext = registry
-                .extensions
-                .iter()
-                .find(|e| e.name == name)
-                .ok_or_else(|| "no such extension".to_owned())?;
-            if let Source::Addon {
-                refused: Some(why), ..
-            } = &ext.source
-            {
-                return Err(format!("refused: {}", claudio_core::text::sanitize(why)));
-            }
-            let source = ext.source.clone();
-            registry.set_enabled(name, on);
-            source
-        };
-        lock(&self.choices).insert(name.to_owned(), on);
+        let source = self.switch(name, on)?;
         let saved = match source {
             Source::Addon { addon, .. } => {
                 let told = addons.toggle_row(addon, name.to_owned(), on).await;
@@ -160,6 +149,31 @@ impl Extensions {
         };
         hub.broadcast(extensions_changed());
         saved
+    }
+
+    /// The registry half of `toggle`: `name` on or off in the registry and
+    /// the choices, the toggle generation bumped; its source.
+    fn switch(&self, name: &str, on: bool) -> Result<Source, String> {
+        let source = {
+            let mut registry = lock(&self.registry);
+            let ext = registry
+                .extensions
+                .iter()
+                .find(|e| e.name == name)
+                .ok_or_else(|| "no such extension".to_owned())?;
+            if let Source::Addon {
+                refused: Some(why), ..
+            } = &ext.source
+            {
+                return Err(format!("refused: {}", claudio_core::text::sanitize(why)));
+            }
+            let source = ext.source.clone();
+            self.toggles.fetch_add(1, Ordering::AcqRel);
+            registry.set_enabled(name, on);
+            source
+        };
+        lock(&self.choices).insert(name.to_owned(), on);
+        Ok(source)
     }
 
     pub(crate) async fn action(
@@ -234,7 +248,9 @@ impl Extensions {
     /// (spawn_blocking), `[extensions]` applied to the built-ins and
     /// external extensions and, with `rows` (the addons' rows as the
     /// runtime has them now), to the addons' rows; then `extensions_changed`.
+    /// A toggle that lands while the file is read wins: see `apply`.
     pub(crate) async fn reread(&self, hub: &HubHandle, rows: &[(&'static str, ExtensionRow)]) {
+        let toggles = self.toggles.load(Ordering::Acquire);
         let path = self.config_path.clone();
         let Ok(config) =
             tokio::task::spawn_blocking(move || claudio_core::config::load_from(&path)).await
@@ -242,10 +258,33 @@ impl Extensions {
             return;
         };
         tracing::debug!("web: config.toml re-read");
-        let before = lock(&self.registry).clone();
+        let Some(changed) = self.apply(toggles, &config, rows).await else {
+            return;
+        };
+        hub.set_claude_policy(config.claude.clone()).await;
+        if changed {
+            hub.broadcast(extensions_changed());
+        }
+    }
+
+    /// Apply a re-read `config` read when the toggle generation was
+    /// `toggles`: whether the registry changed, or `None` (nothing applied)
+    /// when a toggle landed since, as the config predates it.
+    async fn apply(
+        &self,
+        toggles: u64,
+        config: &Config,
+        rows: &[(&'static str, ExtensionRow)],
+    ) -> Option<bool> {
         // Built-ins and external extensions: on unless listed off.
-        let flips: Vec<(String, bool)> = {
+        let (before, flips) = {
             let mut registry = lock(&self.registry);
+            if self.toggles.load(Ordering::Acquire) != toggles {
+                tracing::debug!("web: config.toml re-read predates a toggle; skipped");
+                return None;
+            }
+            let before = registry.clone();
+            *lock(&self.choices) = config.extensions.clone();
             let mut flips = Vec::new();
             for ext in registry.extensions.iter_mut().filter(|e| !e.is_addon()) {
                 let on = config.extensions.get(&ext.name).copied().unwrap_or(true);
@@ -256,17 +295,13 @@ impl Extensions {
                     }
                 }
             }
-            flips
+            registry.set_addon_rows(rows, &config.extensions);
+            (before, flips)
         };
         for (name, on) in flips {
             self.host.set_enabled(&name, on).await;
         }
-        *lock(&self.choices) = config.extensions.clone();
-        self.set_rows(rows);
-        hub.set_claude_policy(config.claude.clone()).await;
-        if *lock(&self.registry) != before {
-            hub.broadcast(extensions_changed());
-        }
+        Some(*lock(&self.registry) != before)
     }
 
     /// ExtensionHost::shutdown
@@ -478,5 +513,40 @@ mod tests {
             v["items"][0]["result"],
             json!({"kind": "notice", "text": "hi"})
         );
+    }
+
+    fn enabled(ext: &Extensions, name: &str) -> bool {
+        let registry = lock(&ext.registry);
+        registry
+            .extensions
+            .iter()
+            .any(|e| e.name == name && e.enabled)
+    }
+
+    /// A toggle that lands while a re-read is reading config.toml wins: the
+    /// re-read's older config is not applied (it would turn it back).
+    #[tokio::test]
+    async fn a_toggle_during_a_reread_is_not_undone() {
+        let registry = Registry::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ext = Extensions {
+            host: Arc::new(ExtensionHost::new(&registry, tx)),
+            registry: Arc::new(Mutex::new(registry)),
+            config_path: PathBuf::new(),
+            choices: Mutex::default(),
+            toggles: AtomicU64::new(0),
+        };
+        // The re-read starts and reads config.toml as it was: search on.
+        let read_at = ext.toggles.load(Ordering::Acquire);
+        let config = Config::default();
+        // The toggle lands before the re-read applies what it read.
+        ext.switch("search", false).unwrap();
+        assert_eq!(ext.apply(read_at, &config, &[]).await, None);
+        assert!(!enabled(&ext, "search"));
+        assert_eq!(lock(&ext.choices).get("search"), Some(&false));
+        // A re-read that starts after the toggle applies what it reads.
+        let read_at = ext.toggles.load(Ordering::Acquire);
+        assert_eq!(ext.apply(read_at, &config, &[]).await, Some(true));
+        assert!(enabled(&ext, "search"));
     }
 }
