@@ -10,18 +10,11 @@ the decision is marked **(decided here)**.
 Version 2 replaces the proxy and plugin ops of version 1 by generic addon ops (`addons.*`, §5):
 the server knows no proxy or plugin, it renders what the addons (docs/addons.md) hand it.
 
-**Compatibility (transitional).** While the page moves to version 2 (core-addons plan
-P3.14-P3.15), the server serves both op sets under `"v": 1`: the `addons.*` ops, the
-`launch`/`defer` args, `review` replies, `segments` and `launch` in the Session and the
-`addons.changed` event are added beside the version-1 `proxy.*`/`plugins.*` ops, args, fields
-and events (`profiles` in the snapshot, `proxy`/`proxy_known`/`first_party` in the Session,
-`plugin_status`, `profiles`; version 1's text is in git history). A request giving both a
-version-1 arg (`proxy`, `first_party`, `skip_plugins`) and `launch`/`defer` answers
-`"bad request: launch: not with proxy, first_party or skip_plugins"`; a spawn giving neither is
-launched as `{"pick":"default"}`, a `review` reply comes only to a spawn that gave `launch` or
-`defer` (one without them still leaves a plugin to review out, with a notice), and a respawn
-giving neither of an unknown session answers version 1's `"proxy unknown"`. P3.16 removes the
-version-1 set and the hello says `"v": 2`.
+A version-1 page reloads once on the version-2 hello (§3.1) and then speaks version 2. The
+version-1 ops and args (`proxy.*`, `plugins.*`; `proxy`, `first_party`, `skip_plugins`) answer
+`"unknown op"` and `"bad request: …"`; its Session fields (`proxy`, `proxy_known`,
+`first_party`), snapshot field and events (`profiles`, `plugin_status`) are gone. Version 1's text
+is in git history.
 
 ## 1. HTTP surface
 
@@ -308,18 +301,7 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | `git.commit` | `sid`, `oid` (full hash) | GitCommitInfo | |
 | `git.diff` | `sid`, `oid`, `file?` (index into the commit's `files`) | GitPatch | whole commit without `file` |
 
-### Proxy (version 1 only; removed in version 2)
-
-| Op | Args | → |
-|---|---|---|
-| `proxy.stats` | `profile`, `window` (`"24h"`\|`"7d"`\|`"30d"`) | `{"profile","window","user_name","totals":{"requests","errors","input_tokens","output_tokens","cache_read","cache_creation"},"by_model":[{"model","requests","errors","input_tokens","output_tokens","cache_read","cache_creation"}],"limit":{"output_tokens","window_seconds","used_output_tokens","used_pct","blocked","blocked_until"}\|null,"pool":[{"name","status"}]\|null}` |
-| `proxy.credential` | `sid` | `{"credential":{"name": string\|null,"plan": string\|null,"provider","five_hour_pct": n\|null,"seven_day_pct": n\|null,"switched_secs_ago": n\|null}\|null}` (null: the proxy does not know the conversation yet) |
-| `proxy.switch` | `sid` | `{"from": string\|null,"to": string\|null,"state": string}` |
-
-`proxy.credential`/`proxy.switch` need a session with a proxy profile and a
-`claude_session_id`; else `"no proxy for this session"` / `"no conversation yet"`.
-
-### Snippets, extensions, plugins (the `plugins.*` ops: version 1 only)
+### Snippets, extensions
 
 | Op | Args | → | Notes |
 |---|---|---|---|
@@ -330,10 +312,6 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | `extensions.toggle` | `name`, `on` | `{}` | writes `[extensions] name = on` in config.toml; applies to new sessions. An addon's row goes the way of `addons.row_action` `toggle` |
 | `extensions.action` | `ext`, `action`, `input?`, `sid?` | `{"result":ActionResult}` | external extensions only; a built-in answers `"not an external extension"` (search and snippets are UI features) |
 | `extensions.render` **(decided here)** | `lens`, `kind` (`"tag"`\|`"fence"`), `source` | `{"inline": string\|null,"block":[string]\|null}` | an external lens item rendered by its program, as the TUI's reader does; both null when it has no rendering |
-| `plugins.list` | — | `{"plugins":[{"name","version","profile","enabled","refused": string\|null,"choices_saved": bool,"manifest": "fetching"\|"ready"\|"failed","manifest_error": string\|null,"description": string}]}` | |
-| `plugins.items` | `name` | `{"name","version","items":[{"id","section","title","checked"}]}` | `section` is the manifest section's heading; `checked` = not in the saved `disabled` (all checked on first sight) |
-| `plugins.save` | `name`, `disabled` ([item id]) | `{}` | saves `[plugins.<name>]` and asks every connected host again |
-| `plugins.status` | — | `{"status":[PluginStatus]}` | one per (host, plugin) asked; same shape as the `plugin_status` event minus `ev` |
 
 ### Addons **(version 2)**
 
@@ -376,11 +354,9 @@ the page sends (an extra arg answers `"bad request: …"`).
 | `latex` | `sid`, `seq`, `formulas`: [string] | sent with every `lens`, the `latex` items' texts, same `seq` |
 | `notice` | `text`, `level` (`"info"`\|`"warn"`\|`"error"`), `host`: string\|null, `sid`: uuid\|null | |
 | `addons.changed` **(version 2)** | `addon` | the addon's segments, rows, launch options or an open panel changed: re-read what is shown of it (`addons.list`, `addons.rows`, an open panel). A session whose segments changed also gets a `session` event |
-| `plugin_status` (version 1 only) | `host`, `name`, `state` (`"pending"`\|`"ready"`\|`"failed"`\|`"too_old"`), `installed` [id], `present` [id], `skipped` [{`id`,`reason`,`retry_secs`: n\|null}], `dropped` [string], `error`: string\|null | an `Applied` answer changed |
 | `claude` | `host`, `phase` (`"offer_install"`\|`"offer_update"`\|`"installing"`\|`"updating"`\|`"done"`\|`"failed"`), `have`: string\|null, `want`: string\|null, `version`: string\|null, `tail`: string\|null (≤ 2 KiB) | install/update offers and progress |
 | `order` | `sids` | another tab reordered |
 | `layout` | `layout` | another tab saved a layout |
-| `profiles` (version 1 only) | `names`, `default` | config.toml's proxy profiles changed |
 | `extensions_changed` | — | the registry changed (a toggle, or config.toml re-read): call `extensions.list` |
 
 Seq rules for `lens`/`latex`: keep the list with the higher `seq`; a lower one is dropped;
