@@ -58,6 +58,7 @@ fn src/addons/web/hub.rs::handle 194
 fn src/addons/web/session_events.rs::apply_event 125
 fn src/addons/web/ws.rs::dispatch 251
 fn src/addons/web/ws.rs::tab 103
+unwrap addons/web/build.rs 1
 
 # -- claudio-vocdoni (src/addons/vocdoni until P4.6)
 file src/addons/vocdoni/daemon/mod.rs 862
