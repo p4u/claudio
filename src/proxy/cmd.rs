@@ -94,7 +94,7 @@ fn cmd_login(args: &[String]) -> ExitCode {
         i += 1;
     }
 
-    let mut sec = match profile::load() {
+    let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("claudio proxy login: could not read config.toml: {e}");
@@ -210,17 +210,13 @@ fn cmd_login(args: &[String]) -> ExitCode {
         }
     }
 
-    // Save.
-    let is_first = sec.profiles.is_empty();
-    store_login(&mut sec, &name, url.clone(), token, email.clone());
-    let as_default = is_first || sec.default.is_none();
-    if as_default {
-        sec.default = Some(name.clone());
-    }
-    if let Err(e) = profile::save(&sec) {
-        eprintln!("claudio proxy login: could not save config.toml: {e}");
-        return ExitCode::FAILURE;
-    }
+    let (as_default, sec) = match save_login(&name, url.clone(), token, email.clone()) {
+        Ok(saved) => saved,
+        Err(e) => {
+            eprintln!("claudio proxy login: could not save config.toml: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let saved = if as_default {
         format!("Profile \"{name}\" saved as default.")
     } else {
@@ -290,6 +286,26 @@ fn printable(text: &str) -> String {
 /// Store a logged-in profile, replacing any profile of that name. A re-login
 /// keeps the profile's `first_party` mode: only the URL, token and e-mail
 /// change (a pasted token has no e-mail).
+/// Save the login onto `[proxy]` as it is now (another process may have
+/// edited it meanwhile), as the default when it is the first profile or
+/// none is set; whether it became the default, and the saved section.
+fn save_login(
+    name: &str,
+    url: String,
+    token: String,
+    email: Option<String>,
+) -> io::Result<(bool, profile::ProxySection)> {
+    profile::update(|sec| {
+        let is_first = sec.profiles.is_empty();
+        store_login(sec, name, url, token, email);
+        let as_default = is_first || sec.default.is_none();
+        if as_default {
+            sec.default = Some(name.to_owned());
+        }
+        as_default
+    })
+}
+
 fn store_login(
     sec: &mut profile::ProxySection,
     name: &str,
@@ -575,7 +591,7 @@ async fn print_live_status(p: &Profile) {
 // ── logout ────────────────────────────────────────────────────────────────────
 
 fn cmd_logout(args: &[String]) -> ExitCode {
-    let mut sec = match profile::load() {
+    let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("claudio proxy: could not read config.toml: {e}");
@@ -594,7 +610,7 @@ fn cmd_logout(args: &[String]) -> ExitCode {
         },
     };
 
-    if sec.profiles.remove(&name).is_none() {
+    if !sec.profiles.contains_key(&name) {
         eprintln!("claudio proxy logout: profile '{name}' not found");
         return ExitCode::FAILURE;
     }
@@ -604,12 +620,14 @@ fn cmd_logout(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // If we removed the default, clear it (or pick another one).
-    if sec.default.as_deref() == Some(&name) {
-        sec.default = sec.profiles.keys().next().cloned();
-    }
-
-    if let Err(e) = profile::save(&sec) {
+    let saved = profile::update(|sec| {
+        sec.profiles.remove(&name);
+        // If we removed the default, clear it (or pick another one).
+        if sec.default.as_deref() == Some(&name) {
+            sec.default = sec.profiles.keys().next().cloned();
+        }
+    });
+    if let Err(e) = saved {
         eprintln!("claudio proxy logout: could not save config.toml: {e}");
         return ExitCode::FAILURE;
     }
@@ -628,7 +646,7 @@ fn cmd_use(args: &[String]) -> ExitCode {
         }
     };
 
-    let mut sec = match profile::load() {
+    let sec = match profile::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("claudio proxy: could not read config.toml: {e}");
@@ -636,21 +654,19 @@ fn cmd_use(args: &[String]) -> ExitCode {
         }
     };
 
-    if name == "none" {
-        sec.default = None;
-        println!("Default proxy cleared (sessions start without a proxy).");
-    } else {
-        if !sec.profiles.contains_key(&name) {
-            eprintln!("claudio proxy use: profile '{name}' not found");
-            return ExitCode::FAILURE;
-        }
-        sec.default = Some(name.clone());
-        println!("Default proxy set to '{name}'.");
+    if name != "none" && !sec.profiles.contains_key(&name) {
+        eprintln!("claudio proxy use: profile '{name}' not found");
+        return ExitCode::FAILURE;
     }
-
-    if let Err(e) = profile::save(&sec) {
+    let default = (name != "none").then(|| name.clone());
+    if let Err(e) = profile::update(|sec| sec.default = default) {
         eprintln!("claudio proxy use: could not save config.toml: {e}");
         return ExitCode::FAILURE;
+    }
+    if name == "none" {
+        println!("Default proxy cleared (sessions start without a proxy).");
+    } else {
+        println!("Default proxy set to '{name}'.");
     }
     ExitCode::SUCCESS
 }

@@ -446,7 +446,7 @@ pub fn save_plugin_choices(
     if !crate::plugins::manifest::name_ok(name) {
         return Err(SaveError::BadName);
     }
-    let _edit = config_edit::lock();
+    let _edit = config_edit::lock(path)?;
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (text, mode) = match std::fs::read(&path) {
         Ok(bytes) => {

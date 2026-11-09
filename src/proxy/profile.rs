@@ -141,14 +141,38 @@ pub fn load_from(path: &Path) -> io::Result<ProxySection> {
     Ok(cfg.proxy.unwrap_or_default())
 }
 
-/// Save an updated `[proxy]` section back to the default `config.toml`,
-/// preserving any other keys that may already be present.
-pub fn save(proxy: &ProxySection) -> io::Result<()> {
-    save_to(&paths::config_file(), proxy)
+/// Read `[proxy]` of the default `config.toml`, apply `change` and save it
+/// back, preserving the other keys; see [`update_at`].
+pub fn update<T>(change: impl FnOnce(&mut ProxySection) -> T) -> io::Result<(T, ProxySection)> {
+    update_at(&paths::config_file(), change)
 }
 
-/// Save an updated `[proxy]` section to an explicit path (used in tests).
+/// Read `[proxy]` of the config at `path`, apply `change` and save it back,
+/// preserving the other keys, all under the cross-process config lock
+/// ([`paths::FileLock`]) every claudio writer of `config.toml` holds, so a
+/// concurrent edit by another process is never lost (B3). Returns what
+/// `change` returned and the section as saved.
+pub fn update_at<T>(
+    path: &Path,
+    change: impl FnOnce(&mut ProxySection) -> T,
+) -> io::Result<(T, ProxySection)> {
+    let _lock = paths::FileLock::beside(path, paths::LOCK_WAIT)?;
+    let mut proxy = load_from(path)?;
+    let out = change(&mut proxy);
+    write_section(path, &proxy)?;
+    Ok((out, proxy))
+}
+
+/// Save `[proxy]` to an explicit path (tests), under the config lock.
+#[cfg(test)]
 pub fn save_to(path: &Path, proxy: &ProxySection) -> io::Result<()> {
+    let _lock = paths::FileLock::beside(path, paths::LOCK_WAIT)?;
+    write_section(path, proxy)
+}
+
+/// Replace `[proxy]` in the config at `path`, keeping the other sections.
+/// The caller holds the config lock.
+fn write_section(path: &Path, proxy: &ProxySection) -> io::Result<()> {
     // Load the current file (or start with an empty one) so we keep other sections.
     let bytes = std::fs::read(path).unwrap_or_default();
     let mut cfg: ConfigFile = if bytes.is_empty() {

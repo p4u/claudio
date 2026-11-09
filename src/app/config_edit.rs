@@ -1,7 +1,8 @@
 //! The one writer of `config.toml`'s tables (B3): a minimal line edit of one
-//! top-level table, serialised by a process-wide lock, atomic, and checked
-//! by parsing before anything is written. The core's `[extensions]` toggles
-//! and the addons' own sections (`AddonCtx::edit_config`) go through it.
+//! top-level table, serialised within the process and across processes
+//! ([`lock`]), atomic, and checked by parsing before anything is written.
+//! The core's `[extensions]` toggles and the addons' own sections
+//! (`AddonCtx::edit_config`) go through it.
 
 use std::io;
 use std::path::Path;
@@ -15,10 +16,25 @@ use crate::paths;
 /// Held for every read-modify-write of `config.toml` in this process (F5).
 static EDIT: Mutex<()> = Mutex::new(());
 
-/// The config edit lock; held across a whole read-modify-write. A poisoned
-/// lock guards no data and is taken anyway.
-pub(crate) fn lock() -> MutexGuard<'static, ()> {
-    EDIT.lock().unwrap_or_else(|e| e.into_inner())
+/// The config edit lock of the file at `path`, held across a whole
+/// read-modify-write: this process's mutex, then the cross-process
+/// [`paths::FileLock`] on the sidecar `.<name>.lock` beside `path` (a TUI,
+/// `claudio web` and `claudio proxy …` edit the same file). Released on
+/// drop. A poisoned mutex guards no data and is taken anyway.
+pub(crate) fn lock(path: &Path) -> Result<EditLock, SaveError> {
+    let mutex = EDIT.lock().unwrap_or_else(|e| e.into_inner());
+    let file = paths::FileLock::beside(path, paths::LOCK_WAIT)?;
+    Ok(EditLock {
+        _file: file,
+        _mutex: mutex,
+    })
+}
+
+/// A held config edit lock (see [`lock`]); the file lock is released
+/// before the mutex.
+pub(crate) struct EditLock {
+    _file: paths::FileLock,
+    _mutex: MutexGuard<'static, ()>,
 }
 
 /// Apply `edit` to top-level table `section` of the config file at `path`
@@ -37,7 +53,7 @@ pub fn edit_section(
     section: &str,
     edit: impl FnOnce(&mut Table),
 ) -> Result<bool, SaveError> {
-    let _edit = lock();
+    let _edit = lock(path)?;
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (text, mode) = read(&path)?;
     let before: Table = text.parse().map_err(|_| SaveError::InvalidToml)?;
@@ -452,6 +468,63 @@ mod tests {
         t.insert("reviewed".into(), Value::String(reviewed.into()));
         t.insert("seen".into(), strings(seen));
         t
+    }
+
+    /// The env var that turns [`edit_section_child`] on: the config path.
+    const CHILD: &str = "CLAUDIO_TEST_CONFIG_EDIT_CHILD";
+
+    /// Add `[extensions] <prefix>0..<prefix>39 = true`, one edit each.
+    fn add_keys(path: &Path, prefix: &str) {
+        for i in 0..40 {
+            edit_section(path, "extensions", |t| {
+                t.insert(format!("{prefix}{i}"), Value::Boolean(true));
+            })
+            .unwrap();
+        }
+    }
+
+    /// The second process of
+    /// `two_processes_editing_distinct_keys_both_survive`; a no-op unless
+    /// that test runs this binary with [`CHILD`] set.
+    #[test]
+    fn edit_section_child() {
+        if let Some(path) = std::env::var_os(CHILD) {
+            add_keys(Path::new(&path), "child");
+        }
+    }
+
+    /// Two processes (this test and a second run of this test binary)
+    /// edit distinct keys of one config at once: the cross-process lock
+    /// serialises the read-modify-writes, so no edit is lost (B3, R15).
+    #[test]
+    fn two_processes_editing_distinct_keys_both_survive() {
+        let (dir, path) = scratch(Some("# mine\n[extensions]\n"));
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::config_edit::tests::edit_section_child",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .env(CHILD, &path)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        add_keys(&path, "parent");
+        let mut child = child;
+        assert!(child.wait().unwrap().success(), "the child's edits failed");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let table: Table = text.parse().unwrap();
+        let ext = table["extensions"].as_table().unwrap();
+        for prefix in ["parent", "child"] {
+            for i in 0..40 {
+                let key = format!("{prefix}{i}");
+                assert_eq!(ext.get(&key), Some(&Value::Boolean(true)), "{key} lost");
+            }
+        }
+        assert!(text.starts_with("# mine\n"));
+        assert!(dir.join(".config.toml.lock").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
