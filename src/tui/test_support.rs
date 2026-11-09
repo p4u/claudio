@@ -11,11 +11,11 @@ use crate::proto::{Msg, SessionInfo};
 
 pub use crate::app::test_support::{info, shell_info};
 
-/// The test addon's name: a routing addon like the Vocdoni one, without
-/// its code (the TUI's tests run on the addon API only).
+/// The test addon's name: a routing addon with profiles and a stats
+/// panel, built on the addon API only (the TUI's tests run on no real addon).
 pub const TEAM: &str = "team";
 
-/// Its launch flags, as the Vocdoni addon declares them.
+/// Its launch flags, as a routing addon declares them.
 const TEAM_FLAGS: &[crate::addon::FlagDecl] = &[
     crate::addon::FlagDecl {
         name: "--proxy",

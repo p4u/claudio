@@ -692,7 +692,7 @@ mod launch_tests {
     }
 
     #[test]
-    fn a_build_without_vocdoni_keeps_the_choice_it_cannot_adopt() {
+    fn a_build_without_the_routing_addon_keeps_the_choice_it_cannot_adopt() {
         let none = Addons::empty();
         let state = ClientState::load(&fixture());
         assert_eq!(launch(&state, &none, 1), Ok(None));

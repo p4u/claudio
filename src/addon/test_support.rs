@@ -100,8 +100,8 @@ impl TestAddon {
         self
     }
 
-    /// Has `Launch`, and adopts a pre-addon routing as the Vocdoni addon
-    /// does: `proxy` is the option, `first_party` the `--first-party` flag
+    /// Has `Launch`, and adopts a pre-addon routing as a routing addon
+    /// would: `proxy` is the option, `first_party` the `--first-party` flag
     /// (and `legacy` the reverse, for its own choices).
     pub fn adopts_legacy(mut self) -> Self {
         self.adopts = true;

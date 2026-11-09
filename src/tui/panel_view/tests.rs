@@ -1,6 +1,6 @@
 //! The panel view's tests: its keys (the stats popup's, generic), stale
-//! answers, and its glue in `App` (Alt+s opens the Vocdoni panel about
-//! the active session; an action asks first).
+//! answers, and its glue in `App` (Alt+s opens the test addon's panel
+//! about the active session; an action asks first).
 
 use super::*;
 use crate::addon::{Block, Level, Page};
@@ -109,7 +109,7 @@ fn calls(app: &mut App) -> Vec<AddonCall> {
 }
 
 #[test]
-fn alt_s_opens_the_vocdoni_panel_about_the_active_session() {
+fn alt_s_opens_the_addon_panel_about_the_active_session() {
     let mut app = app_with(&[info(Some(7), None)]);
     let sid = app.sessions[0].id;
     app.on_terminal(alt('s'));
@@ -197,9 +197,9 @@ fn an_action_asks_its_confirm_then_runs_and_its_notice_shows() {
         app.notice.as_ref().unwrap().text,
         "switch scheduled: a → b (on the next message)"
     );
-    app.on_action_done(Err("vocdoni: switch failed: 429".into()));
+    app.on_action_done(Err("team: switch failed: 429".into()));
     assert_eq!(
         app.notice.as_ref().unwrap().text,
-        "vocdoni: switch failed: 429"
+        "team: switch failed: 429"
     );
 }

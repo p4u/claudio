@@ -1032,7 +1032,7 @@ mod tests {
 
     // ── Plain keymap ──────────────────────────────────────────────────────────
 
-    /// The Vocdoni addon's panel key, as `PanelDecl.key` declares it.
+    /// A routing addon's panel key, as `PanelDecl.key` declares it.
     const PROXY: &[PanelBinding] = &[PanelBinding {
         action: "proxy_stats",
         default: "alt+s",
