@@ -14,8 +14,8 @@ mod git_app;
 mod git_view;
 mod hosts;
 use hosts::{
-    client_claude, connect_local, on_connected, retry_outdated, spawn_connect, spawn_connect_after,
-    spawn_reader, spawn_reconnect_local,
+    client_claude, connect_local, on_connected, on_local_reconnected, retry_outdated_hosts,
+    spawn_connect, spawn_connect_after, spawn_reader, spawn_reconnect_local,
 };
 mod interaction;
 mod keymap;
@@ -297,9 +297,18 @@ async fn main(entry: Entry) -> ExitCode {
     .catch_unwind()
     .await;
     restore_terminal();
-    // However the UI ended, a plain session dies with it: nothing lingers in
-    // the daemon, and a later manager has nothing to recover. (Killing an
-    // already closed session is a harmless "no such session".)
+    finish(result, plain_id, &conns).await
+}
+
+/// After the UI: kill a plain session (it dies with the UI: nothing lingers
+/// in the daemon, and a later manager has nothing to recover), re-raise a
+/// panic, report why the UI ended, and give `--plain` claude's status.
+async fn finish(
+    result: std::thread::Result<io::Result<plain::Exit>>,
+    plain_id: Option<crate::proto::SessionId>,
+    conns: &Connections,
+) -> ExitCode {
+    // (Killing an already closed session is a harmless "no such session".)
     if let Some(id) = plain_id {
         if let Some(client) = conns.client("local") {
             let kill = client.request(Msg::Kill { id });
@@ -719,21 +728,7 @@ async fn event_loop(
                     spawn_connect_after(host, gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
-                    // A newer attempt is already in flight.
-                    if generation < conns.current_generation("local") {
-                        continue;
-                    }
-                    conns.reset_delay("local");
-                    let home = client.welcome().host.home.clone();
-                    let cur_gen = conns.current_generation("local");
-                    if let Some(rx) = client.take_incoming() {
-                        spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
-                    }
-                    app.set_local_claude(client_claude(&client));
-                    conns.connected("local", client);
-                    app.on_plugin_host("local");
-                    app.check_local_install();
-                    app.on_reconnected_local(&sessions, home);
+                    on_local_reconnected(&mut app, conns, &ev_tx, client, sessions, generation);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
                     if generation < conns.current_generation("local") {
@@ -802,19 +797,7 @@ async fn event_loop(
                 }
             }
             _ = plugins_tick.tick() => app.fetch_plugin_lists(),
-            _ = outdated_tick.tick() => {
-                for (host, conn) in &conns.map {
-                    if let Some(client) = conn.client.as_ref().filter(|c| c.daemon_outdated()) {
-                        let retry = retry_outdated(
-                            host.clone(),
-                            conn.generation,
-                            client.clone(),
-                            ev_tx.clone(),
-                        );
-                        tokio::spawn(retry);
-                    }
-                }
-            }
+            _ = outdated_tick.tick() => retry_outdated_hosts(conns, &ev_tx),
             _ = tokio::time::sleep(wait), if app.redraw => {}
         }
     }

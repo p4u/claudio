@@ -5,6 +5,7 @@
 pub(crate) mod assets;
 pub(crate) mod auth;
 mod dto;
+mod events;
 mod ext;
 mod hub;
 mod input;

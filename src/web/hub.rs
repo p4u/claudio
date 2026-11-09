@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::dto;
+use super::events::{claude_event, ev, host_stats};
 use super::input::{self, Decision};
 use super::lenses;
 use super::state::{self, Layout, SessionMeta, WebState};
@@ -1020,12 +1021,6 @@ fn tail(text: &str) -> String {
         at += 1;
     }
     text[at..].to_owned()
-}
-
-pub(crate) fn ev(name: &str, mut fields: Value) -> Value {
-    fields["t"] = "ev".into();
-    fields["ev"] = name.into();
-    fields
 }
 
 impl Hub {
@@ -2208,28 +2203,6 @@ impl Hub {
             let _ = reply.send(());
         })));
     }
-}
-
-fn host_stats(host: &str, (cpu, mem_used, mem_total): (f32, u64, u64)) -> Value {
-    ev(
-        "host_stats",
-        json!({"host": host, "cpu": cpu, "mem_used": mem_used, "mem_total": mem_total}),
-    )
-}
-
-fn claude_event(
-    host: &str,
-    phase: &str,
-    have: Option<&str>,
-    want: Option<&str>,
-    version: Option<&str>,
-    tail: Option<&str>,
-) -> Value {
-    ev(
-        "claude",
-        json!({"host": host, "phase": phase, "have": have, "want": want,
-            "version": version, "tail": tail}),
-    )
 }
 
 /// Connect `host` and list its sessions. The error says whether the

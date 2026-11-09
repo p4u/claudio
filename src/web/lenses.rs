@@ -5,7 +5,8 @@
 
 use serde_json::{json, Value};
 
-use super::hub::{ev, SessionView};
+use super::events::ev;
+use super::hub::SessionView;
 use crate::proto::{LensItem, SessionEvent, SessionId};
 
 /// A `Latex` or `Lens` event applied to `view`: the list to send, if it is

@@ -51,6 +51,45 @@ pub(super) fn on_connected(
     app.redraw = true;
 }
 
+/// The local daemon answered again after a lost connection: start its
+/// reader and recover its sessions; a stale attempt is ignored.
+pub(super) fn on_local_reconnected(
+    app: &mut App,
+    conns: &mut Connections,
+    ev_tx: &mpsc::Sender<HostEvent>,
+    client: Client,
+    sessions: Vec<SessionInfo>,
+    generation: u64,
+) {
+    // A newer attempt is already in flight.
+    if generation < conns.current_generation("local") {
+        return;
+    }
+    conns.reset_delay("local");
+    let home = client.welcome().host.home.clone();
+    let cur_gen = conns.current_generation("local");
+    if let Some(rx) = client.take_incoming() {
+        spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
+    }
+    app.set_local_claude(client_claude(&client));
+    conns.connected("local", client);
+    app.on_plugin_host("local");
+    app.check_local_install();
+    app.on_reconnected_local(&sessions, home);
+}
+
+/// Ask every host whose daemon is outdated whether it is idle now, so it
+/// can be replaced ([`retry_outdated`]).
+pub(super) fn retry_outdated_hosts(conns: &Connections, ev_tx: &mpsc::Sender<HostEvent>) {
+    for (host, conn) in &conns.map {
+        if let Some(client) = conn.client.as_ref().filter(|c| c.daemon_outdated()) {
+            let retry =
+                retry_outdated(host.clone(), conn.generation, client.clone(), ev_tx.clone());
+            tokio::spawn(retry);
+        }
+    }
+}
+
 /// Start the local daemon if needed (replacing an outdated one), connect and
 /// list its sessions.
 pub(super) async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
