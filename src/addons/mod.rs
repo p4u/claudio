@@ -7,8 +7,8 @@
 pub mod api;
 
 #[cfg(feature = "vocdoni")]
-// P4.6 slot: becomes `pub use claudio_vocdoni as vocdoni;`
-pub mod vocdoni;
+// P4.6 vocdoni: the addon is its own crate
+pub use claudio_vocdoni as vocdoni;
 
 #[cfg(feature = "web")]
 // P4.5 slot: becomes `pub use claudio_web as web;`
