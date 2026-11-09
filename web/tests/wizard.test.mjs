@@ -1,40 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initialWizard, proxyOptions, proxyArg, firstPartyAllowed, spawnRequest, filterDirs } from '../app/wizard.js';
+import { initialWizard, spawnRequest, filterDirs } from '../app/wizard.js';
 
-const profiles = { names: ['work', 'personal'], default: 'work' };
+const decls = [{ name: 'vocdoni', panels: [], launch_flags: [{ name: 'first-party', label: 'First-party session' }],
+  launch_options: [{ id: 'work', label: 'work', group: 'Proxy', default: true, detail: null }, { id: 'personal', label: 'personal', group: 'Proxy', default: false, detail: null }] }];
 
-test('proxy options pre-select and label the [proxy] default', () => {
-  const o = proxyOptions(profiles);
-  assert.deepEqual(o.map((x) => x.value), ['default', 'direct', 'profile:work', 'profile:personal']);
-  assert.equal(o[0].label, 'default (work)');
-  assert.equal(proxyOptions({ names: [], default: null })[0].label, 'default (direct)');
-  assert.equal(initialWizard({ hosts: ['local'], profiles, recent: [], focusedHost: 'local' }).proxy, 'default');
-  assert.deepEqual(proxyArg('default'), { kind: 'default' });
-  assert.deepEqual(proxyArg('direct'), { kind: 'direct' });
-  assert.deepEqual(proxyArg('profile:work'), { kind: 'profile', name: 'work' });
+test('the wizard starts on the default launch, no flags', () => {
+  const w = initialWizard({ hosts: ['local'], decls, recent: [], focusedHost: 'local' });
+  assert.equal(w.launch, 'default');
+  assert.deepEqual(w.flags, []);
+  assert.deepEqual(spawnRequest({ ...w, cwd: '/a' }, { rows: 24, cols: 80 }).args.launch, { pick: 'default', flags: [] });
 });
 
-test('first-party only with a proxy', () => {
-  assert.equal(firstPartyAllowed('direct', profiles), false);
-  assert.equal(firstPartyAllowed('profile:work', profiles), true);
-  assert.equal(firstPartyAllowed('default', profiles), true);
-  assert.equal(firstPartyAllowed('default', { names: [], default: null }), false);
-});
-
-test('spawn request for claude carries resume, prompt, name and size', () => {
-  const w = { ...initialWizard({ hosts: ['local', 'z6'], profiles, recent: [], focusedHost: 'z6' }), cwd: '/srv/app', resume: 'conv-1', name: ' api ', prompt: 'hello', proxy: 'profile:work', firstParty: true, skip: ['p1'] };
-  const r = spawnRequest(w, { rows: 30, cols: 100 });
+test('spawn request for claude carries launch, defer, resume, prompt, name and size', () => {
+  const w = { ...initialWizard({ hosts: ['local', 'z6'], decls, recent: [], focusedHost: 'z6' }), cwd: '/srv/app', resume: 'conv-1', name: ' api ', prompt: 'hello', launch: 'option:vocdoni:work', flags: ['first-party'] };
+  const r = spawnRequest(w, { rows: 30, cols: 100 }, [{ addon: 'vocdoni', id: 'p1', revision: 'x' }]);
   assert.equal(r.op, 'session.spawn');
-  assert.deepEqual(r.args, { host: 'z6', cwd: '/srv/app', rows: 30, cols: 100, proxy: { kind: 'profile', name: 'work' }, first_party: true, resume: 'conv-1', name: 'api', prompt: 'hello', skip_plugins: ['p1'] });
-  const bare = spawnRequest({ ...w, resume: null, name: '', prompt: '', firstParty: false, skip: [] }, { rows: 24, cols: 80 });
-  assert.deepEqual(Object.keys(bare.args).sort(), ['cols', 'cwd', 'host', 'proxy', 'rows']);
-  const direct = spawnRequest({ ...w, proxy: 'direct' }, { rows: 24, cols: 80 });
-  assert.equal(direct.args.first_party, undefined, 'first-party never goes out without a proxy');
+  assert.deepEqual(r.args, { host: 'z6', cwd: '/srv/app', rows: 30, cols: 100, launch: { pick: 'option', addon: 'vocdoni', option: 'work', flags: ['first-party'] }, defer: [{ addon: 'vocdoni', id: 'p1' }], resume: 'conv-1', name: 'api', prompt: 'hello' });
+  const bare = spawnRequest({ ...w, resume: null, name: '', prompt: '', flags: [] }, { rows: 24, cols: 80 });
+  assert.deepEqual(Object.keys(bare.args).sort(), ['cols', 'cwd', 'host', 'launch', 'rows']);
+  const direct = spawnRequest({ ...w, launch: 'direct' }, { rows: 24, cols: 80 });
+  assert.deepEqual(direct.args.launch, { pick: 'direct', flags: [] }, 'flags never go out without an option in effect');
+  const noDefault = spawnRequest({ ...w, decls: [], launch: 'default' }, { rows: 24, cols: 80 });
+  assert.deepEqual(noDefault.args.launch.flags, []);
 });
 
-test('a terminal spawns a shell without proxy, resume or prompt', () => {
-  const w = { ...initialWizard({ hosts: ['local'], profiles, recent: [], focusedHost: 'local' }), kind: 'shell', cwd: '/tmp/x', resume: 'c', prompt: 'p', proxy: 'direct', name: 'sh' };
+test('a terminal spawns a shell without launch, resume or prompt', () => {
+  const w = { ...initialWizard({ hosts: ['local'], decls, recent: [], focusedHost: 'local' }), kind: 'shell', cwd: '/tmp/x', resume: 'c', prompt: 'p', launch: 'direct', name: 'sh' };
   const r = spawnRequest(w, { rows: 24, cols: 80 });
   assert.equal(r.op, 'session.shell');
   assert.deepEqual(r.args, { host: 'local', cwd: '/tmp/x', rows: 24, cols: 80, name: 'sh' });

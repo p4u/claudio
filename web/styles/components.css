@@ -590,6 +590,7 @@ input[type="radio"] { accent-color: var(--accent); }
 .ext-desc { margin: 6px 0 0; color: var(--text); font-size: var(--fs-md); line-height: 1.5; }
 .ext-refused { margin: 4px 0 0; color: var(--state-error); font-size: var(--fs-sm); }
 .ext-note { margin: 4px 0 0; color: var(--state-waiting); font-size: var(--fs-sm); }
+.ext-details { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-muted); }
 .ext-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
 .plugin-hosts { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: 6px; }
 .plugin-host { padding: 6px 10px; background: var(--bg); border: var(--hair) solid var(--border); border-left-color: var(--border-strong); border-radius: var(--radius); }
@@ -618,6 +619,8 @@ input[type="radio"] { accent-color: var(--accent); }
 
 /* ---- addon segments (chips), panels and their blocks: tones from the tokens, text nodes only ---- */
 .segments { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; overflow: hidden; }
+.strip .segments { margin-left: auto; }
+.kv dd .segments { flex-wrap: wrap; }
 .segment { --seg-tone: var(--text-2); --seg-ring: var(--ring-neutral); color: var(--seg-tone); box-shadow: var(--ring) var(--seg-ring); flex: none; }
 .segment[data-tone="ok"] { --seg-tone: var(--tone-ok); --seg-ring: var(--ring-working); }
 .segment[data-tone="warn"] { --seg-tone: var(--tone-warn); --seg-ring: var(--ring-waiting); }

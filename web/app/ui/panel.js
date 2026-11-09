@@ -4,8 +4,9 @@
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect, useState } from 'preact/hooks';
-import { model, reqQuiet, onServerEvent } from '../store.js';
-import { barRows, gaugeOf, short, tone } from '../addon-view.js';
+import { model, focused, reqQuiet, onServerEvent } from '../store.js';
+import { defineAction } from '../palette.js';
+import { barRows, gaugeOf, short, tone, panelFor } from '../addon-view.js';
 import { Dialog, confirm } from './modal.js';
 import { toast } from './toasts.js';
 import { ago } from './glyph.js';
@@ -23,9 +24,15 @@ export async function loadAddonDecls() {
   return addonDecls.value;
 }
 
+// Alt+s (`stats`): the panel whose TUI key is alt+s, else the first, about `sid` or the focused
+// session.
 export function installAddons() {
   onServerEvent((ev) => {
     if (ev.ev === 'snapshot' || ev.ev === 'addons.changed') loadAddonDecls();
+  });
+  defineAction('stats', (sid) => {
+    const p = panelFor(addonDecls.value, 'alt+s');
+    if (p) openPanel({ addon: p.addon, panel: p.panel.id, sid: typeof sid === 'string' ? sid : focused.value });
   });
 }
 

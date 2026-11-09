@@ -12,7 +12,7 @@ test('the wizard starts a session in a chosen dir', async ({ page }) => {
   await page.keyboard.press('n');
   await expect(page.getByTestId('wizard')).toBeVisible();
   await page.getByTestId('wizard-dir-input').fill(srv.dirs.b);
-  await page.getByTestId('wizard-proxy').selectOption('direct');
+  await page.getByTestId('wizard-launch').selectOption('direct');
   await page.getByTestId('wizard-start').click();
   const card = page.getByTestId('session-card');
   await expect(card).toHaveCount(1);

@@ -1,17 +1,19 @@
-// The new-session wizard: one dialog, top to bottom (host, kind, folder, conversation, proxy, name, prompt).
+// The new-session wizard: one dialog, top to bottom (host, kind, folder, conversation, launch
+// options, name, prompt). A launch an addon wants reviewed first shows that checklist next.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { model, focused, reqQuiet } from '../store.js';
 import { overlay, defineAction } from '../palette.js';
 import { termSize } from '../term.js';
-import { initialWizard, proxyOptions, firstPartyAllowed, resolvedProfile, spawnRequest, filterDirs } from '../wizard.js';
-import { beforeSpawn } from '../spawn-hooks.js';
+import { initialWizard, spawnRequest, filterDirs } from '../wizard.js';
+import { optionsByGroup, groupChoices, groupValue, launchFlags, flagsAllowed, reviewLoop } from '../launch.js';
 import { Dialog } from './modal.js';
 import { toast } from './toasts.js';
 import { ago } from './glyph.js';
 import { openSession } from './session-actions.js';
-import { setup as pluginSetup } from './plugin-setup.js';
+import { addonDecls, loadAddonDecls } from './panel.js';
+import { openChecklist, checklist as checklistShown } from './checklist.js';
 
 export const wizardArgs = signal({});
 
@@ -146,38 +148,60 @@ function ResumeField({ w, set }) {
   </div>`;
 }
 
+// One select per launch option group (the addons' options, docs/web-protocol.md §4), or one
+// default/direct select when no addon offers any; then a checkbox per labelled flag.
+function LaunchFields({ w, set }) {
+  const decls = w.decls;
+  const groups = optionsByGroup(decls);
+  const flags = launchFlags(decls);
+  const fOk = flagsAllowed(w.launch, decls);
+  const pick = (v) => set({ launch: v, flags: flagsAllowed(v, decls) ? w.flags : [] });
+  const testid = (g) => (g === 'Proxy' ? 'wizard-proxy' : `wizard-launch-${g.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`);
+  const select = (id, label, tid, choices, value) => html`<div class="wz-field" key=${tid}>
+    <label for=${id}>${label}</label>
+    <select id=${id} class="select" data-testid=${tid} value=${value} onChange=${(e) => pick(e.target.value)}>
+      ${choices.map((o) => html`<option value=${o.value} selected=${o.value === value} title=${o.detail ?? ''}>${o.detail ? `${o.label} · ${o.detail}` : o.label}</option>`)}
+    </select>
+  </div>`;
+  return html`${groups.length ? groups.map((g, i) => select(`wz-launch-${i}`, g.group, testid(g.group), groupChoices(g, decls), groupValue(g, w.launch)))
+    : select('wz-launch', 'Launch', 'wizard-launch', groupChoices({ options: [] }, decls), w.launch === 'direct' ? 'direct' : 'default')}
+    ${flags.length ? html`<div class="wz-field wz-flags">${flags.map((f) => html`<label class="wz-check" key=${f.name}>
+      <input type="checkbox" data-testid=${`wizard-${f.name}`} data-flag=${f.name} checked=${fOk && w.flags.includes(f.name)} disabled=${!fOk}
+        onChange=${(e) => set({ flags: e.target.checked ? [...w.flags, f.name] : w.flags.filter((x) => x !== f.name) })} />
+      ${f.label}${fOk ? '' : ' (needs a launch option)'}</label>`)}</div>` : null}`;
+}
+
 export function Wizard() {
   const args = wizardArgs.value;
   const m = model.value;
   const [w, setW] = useState(() => initialWizard({
     hosts: Object.values(m.hosts).filter((h) => h.connected).map((h) => h.name),
-    profiles: m.profiles, recent: [], focusedHost: args.host ?? (focused.value ? m.sessions[focused.value]?.host : 'local'),
+    decls: addonDecls.value, recent: [], focusedHost: args.host ?? (focused.value ? m.sessions[focused.value]?.host : 'local'),
     kind: args.kind ?? 'claude', cwd: args.cwd ?? '', resume: args.resume ?? null,
   }));
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const set = (patch) => setW((cur) => ({ ...cur, ...patch }));
-  const profiles = m.profiles;
+  useEffect(() => { loadAddonDecls().then((decls) => set({ decls })); }, []);
   const shell = w.kind === 'shell';
   const ready = abs(w.cwd) && !busy;
-  const fpOk = firstPartyAllowed(w.proxy, profiles);
 
   async function start() {
     if (!ready || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     try {
-      let skip = [];
-      if (!shell) {
-        const r = await beforeSpawn(resolvedProfile(w.proxy, profiles), w.name.trim() || w.cwd.replace(/\/+$/, '').split('/').pop() || 'the session');
-        if (r === null) return;
-        skip = r.skip;
-      }
       const size = termSize(focused.value) ?? { rows: 24, cols: 80 };
-      const { op, args: a } = spawnRequest({ ...w, profiles, skip }, size);
-      const { sid } = await reqQuiet(op, a);
+      const starting = w.name.trim() || w.cwd.replace(/\/+$/, '').split('/').pop() || 'the session';
+      const spawn = (defer) => {
+        const { op, args: a } = spawnRequest(w, size, defer);
+        return reqQuiet(op, a);
+      };
+      const r = await reviewLoop(spawn, (rv) => openChecklist({ addon: rv.addon, id: rv.id, review: true, starting }));
+      if (!r) return; // cancelled at a review: the wizard stays, its entries kept
+      const { sid } = r;
       overlay.value = null;
-      for (let i = 0; i < 20 && !model.value.sessions[sid]; i++) await new Promise((r) => setTimeout(r, 100));
+      for (let i = 0; i < 20 && !model.value.sessions[sid]; i++) await new Promise((res) => setTimeout(res, 100));
       if (model.value.sessions[sid]) openSession(sid);
     } catch (e) {
       toast({ text: `${shell ? 'terminal' : 'session'}: ${e.message}`, level: 'error' });
@@ -191,9 +215,9 @@ export function Wizard() {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || (e.target.tagName === 'INPUT' && e.target.type === 'text'))) { e.preventDefault(); start(); }
   };
 
-  // The plugin setup is the next step: it shows alone, over nothing, and the wizard (its entries
-  // kept) comes back if the setup is cancelled.
-  if (busy && pluginSetup.value) return null;
+  // A review is the next step: its checklist shows alone, over nothing, and the wizard (its
+  // entries kept) comes back if it is cancelled.
+  if (busy && checklistShown.value) return null;
 
   return html`<${Dialog} title=${shell ? 'New terminal' : 'New session'} testid="wizard" wide onClose=${() => { overlay.value = null; }}>
     <div class="wizard" onKeyDown=${key}>
@@ -207,14 +231,7 @@ export function Wizard() {
       </div>
       <${Folders} w=${w} set=${set} />
       ${shell ? null : html`<${ResumeField} w=${w} set=${set} />
-        <div class="wz-field">
-          <label for="wz-proxy">Proxy</label>
-          <select id="wz-proxy" class="select" data-testid="wizard-proxy" value=${w.proxy} onChange=${(e) => set({ proxy: e.target.value, firstParty: false })}>
-            ${proxyOptions(profiles).map((o) => html`<option value=${o.value} selected=${o.value === w.proxy}>${o.label}</option>`)}
-          </select>
-          <label class="wz-check"><input type="checkbox" data-testid="wizard-first-party" checked=${w.firstParty && fpOk} disabled=${!fpOk} onChange=${(e) => set({ firstParty: e.target.checked })} />
-            First-party session${fpOk ? '' : ' (needs a proxy profile)'}</label>
-        </div>`}
+        <${LaunchFields} w=${w} set=${set} />`}
       <div class="wz-field">
         <label for="wz-name">Name <span class="muted">(optional)</span></label>
         <input id="wz-name" class="input" data-testid="wizard-name" value=${w.name} maxlength="200" onInput=${(e) => set({ name: e.target.value })} />

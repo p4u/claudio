@@ -1,10 +1,10 @@
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useLayoutEffect, useRef } from 'preact/hooks';
-import { model, conn, mode, serverInfo } from '../store.js';
+import { model, conn, mode, serverInfo, focused } from '../store.js';
 import { overlay } from '../palette.js';
 import { openHostPanel, MiniBar } from './hosts.js';
-import { CredentialBar } from './stats.js';
+import { Segments } from './segments.js';
 import { updateOffered } from './claude.js';
 
 const CONN = { open: 'live', connecting: 'connecting', closed: 'offline' };
@@ -103,7 +103,7 @@ export function Topbar() {
     <div class="logo">claudi<span class="logo-accent">o</span></div>
     <${HostsMenu} hosts=${hosts} />
     <div class="topbar-spacer"></div>
-    <${CredentialBar} />
+    <${Segments} s=${focused.value ? m.sessions[focused.value] : null} testid="topbar-segments" />
     ${attn > 0 ? html`<span class="badge badge-attn" title="sessions waiting for you">${attn} waiting</span>` : null}
     <span class="badge conn" data-conn=${conn.value} title=${serverInfo.value.version ? `claudio ${serverInfo.value.version}` : ''}>${CONN[conn.value]}</span>
     <span class="badge" data-testid="mode-badge" data-mode=${mode.value} title="Ctrl+Shift+Space leaves the terminal">${mode.value === 'terminal' ? 'TERM' : 'APP'}</span>

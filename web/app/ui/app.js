@@ -33,10 +33,10 @@ import { Drawer } from './drawer.js';
 import './reader.js';
 import './changes.js';
 import './history.js';
-import './stats.js';
 import './session-tab.js';
 import { ExtensionsScreen, installExtensions } from './extensions.js';
-import { PluginSetupHost, installPluginGate, setupOpen, cancelPluginSetup } from './plugin-setup.js';
+import { PanelHost, panelOpen, closePanel, installAddons } from './panel.js';
+import { ChecklistHost, checklistOpen, cancelChecklist } from './checklist.js';
 import { ClaudeToastList } from './claude.js';
 import { HostPanel, installHosts } from './hosts.js';
 import { drawer, showBoard, boardShown, setGridSize, focusPane, openSession, openAndEnter, trackRemoved, ProxyChooserHost, renameSession, killSession, restartSession, openTerminalTab } from './session-actions.js';
@@ -100,7 +100,7 @@ export function App() {
       : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />` : o === 'compose' ? html`<${ComposeDialog} />`
       : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />`
       : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />` : null}
-    <${PluginSetupHost} /><${ProxyChooserHost} /><${Modal} />
+    <${PanelHost} /><${ChecklistHost} /><${ProxyChooserHost} /><${Modal} />
     <${InfoPopover} />
     <div class="toasts" aria-live="polite"><${ClaudeToastList} /><${ToastList} /></div>`;
 }
@@ -126,7 +126,7 @@ function step(delta) {
 export function installFocusModel() {
   defineAction('palette', () => { overlay.value = overlay.value === 'palette' ? null : 'palette'; });
   defineAction('help', () => { overlay.value = 'help'; });
-  defineAction('close-overlay', () => { if (modal.value) closeModal(); else if (setupOpen()) cancelPluginSetup(); else overlay.value = null; });
+  defineAction('close-overlay', () => { if (modal.value) closeModal(); else if (checklistOpen()) cancelChecklist(); else if (panelOpen.value) closePanel(); else overlay.value = null; });
   defineAction('rail-next', () => step(1));
   defineAction('rail-prev', () => step(-1));
   // `a`: the first card of the queue, in the focused pane
@@ -175,7 +175,7 @@ export function installFocusModel() {
   installActions();
   installExtensions();
   installHosts();
-  installPluginGate();
+  installAddons();
   onServerEvent(trackRemoved);
   installNotifications();
 
@@ -206,7 +206,7 @@ export function installFocusModel() {
     }
     // Enter on a focused button, row or summary activates it; it is not "type into the terminal".
     if (ev.key === 'Enter' && ev.target instanceof Element && ev.target.closest('button, a, summary, [role="button"], [role="row"]')) return;
-    const ctx = { typing: isTyping(document.activeElement), overlay: overlay.value !== null || modal.value !== null || setupOpen() };
+    const ctx = { typing: isTyping(document.activeElement), overlay: overlay.value !== null || modal.value !== null || checklistOpen() || panelOpen.value !== null };
     const action = appAction(ev, ctx);
     if (!action || ev.repeat) return;
     if (action === 'close-overlay' && !ctx.overlay) return;

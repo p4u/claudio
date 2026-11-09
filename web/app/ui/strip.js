@@ -1,6 +1,7 @@
 // The per-session facts: the context gauge, git counts and the status strip.
 import { html } from 'htm/preact';
 import { segments, level, ctxFraction } from '../gauge.js';
+import { Segments } from './segments.js';
 
 export function fmtTokens(n) {
   if (!Number.isFinite(n)) return '';
@@ -52,5 +53,6 @@ export function Strip({ s }) {
     ${s.output_tokens != null ? html`<span class="strip-item" title="output tokens">out ${fmtTokens(s.output_tokens)}</span>` : null}
     ${s.turns != null ? html`<span class="strip-item">${s.turns} turn${s.turns === 1 ? '' : 's'}</span>` : null}
     ${s.prompt_pending ? html`<span class="strip-item strip-pending" data-testid="prompt-pending">opening prompt pending</span>` : null}
+    <${Segments} s=${s} testid="strip-segments" />
   </footer>`;
 }

@@ -3,11 +3,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { BINDINGS } from '../keymap.js';
 import { filter } from '../fuzzy.js';
 import { overlay, registry, runAction, hasAction } from '../palette.js';
-import { model, req, selected } from '../store.js';
+import { model, req, selected, focused } from '../store.js';
 import { orderedSessions } from '../model.js';
 import { settings } from '../settings.js';
 import { confirm, prompt } from './modal.js';
 import { openAndEnter } from './session-actions.js';
+import { addonDecls, panelActions, openPanel, runPanelAction } from './panel.js';
 
 const SKIP = new Set(['palette', 'palette-ctrl', 'close-overlay', 'leave-terminal', 'enter-terminal', 'focus-pane-2', 'focus-pane-3', 'focus-pane-4']);
 
@@ -31,9 +32,24 @@ export function sessionCommands(s) {
     for (const [action, label] of [['reader', 'Reader'], ['changes', 'Changes'], ['history', 'History'], ['stats', 'Stats'], ['session', 'Session info']]) {
       cmds.push({ id: `${action}:${s.id}`, group: 'Sessions', title: `${label}: ${tag}`, when: () => hasAction(action), run: () => { selected.value = s.id; runAction(action, s.id); } });
     }
-    if (s.proxy) cmds.push({ id: `switch:${s.id}`, group: 'Sessions', title: `Switch subscription: ${tag}`, run: () => quiet(req('proxy.switch', { sid: s.id })) });
   }
   return cmds;
+}
+
+// Each addon panel ("Proxy stats"), about the focused session `s` when there is one, and the
+// actions it offered when it was last read.
+export function addonCommands(decls, actions, s) {
+  const out = [];
+  const sid = s?.id ?? null;
+  for (const d of decls ?? []) {
+    for (const p of d.panels ?? []) {
+      out.push({ id: `panel:${d.name}/${p.id}`, group: 'Addons', title: p.title, run: () => openPanel({ addon: d.name, panel: p.id, sid }) });
+      for (const a of actions?.[`${d.name}/${p.id}`] ?? []) {
+        out.push({ id: `panel-action:${d.name}/${p.id}/${a.id}`, group: 'Addons', title: `${p.title}: ${a.label}${s ? ` (${s.label})` : ''}`, run: () => runPanelAction({ addon: d.name, panel: p.id, sid }, a) });
+      }
+    }
+  }
+  return out;
 }
 
 export function buildCommands(m, cfg) {
@@ -43,6 +59,7 @@ export function buildCommands(m, cfg) {
     out.push({ id: `action:${b.action}`, group: 'Actions', title: b.help[0].toUpperCase() + b.help.slice(1), keys: b.keys, when: () => hasAction(b.action), run: () => runAction(b.action) });
   }
   out.push({ id: 'settings', group: 'App', title: 'Settings', run: () => { overlay.value = 'settings'; } });
+  out.push(...addonCommands(addonDecls.value, panelActions.value, m.sessions[focused.value]));
   for (const s of orderedSessions(m)) out.push(...sessionCommands(s));
   return out;
 }
@@ -56,7 +73,7 @@ export function Palette() {
   const cfg = settings.value;
   const all = useMemo(
     () => [...buildCommands(m, cfg), ...registry.value].filter((c) => !c.when || c.when()),
-    [m, cfg, registry.value],
+    [m, cfg, registry.value, addonDecls.value, panelActions.value, focused.value],
   );
   const items = useMemo(() => filter(all, q, (c) => c.title).slice(0, 60), [all, q]);
   useLayoutEffect(() => {
