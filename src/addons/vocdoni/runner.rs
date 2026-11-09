@@ -21,6 +21,9 @@ use super::state::stats::Focused;
 use super::state::{State, Task};
 use crate::addon::{AddonCtx, AddonError, AddonEvent};
 
+/// Why a launch fails when the profiles were not read yet.
+const NOT_READ: &str = "the proxy profiles are not read yet: try again";
+
 /// How long a spawn waits for a profile's proxy config.
 const CONFIG_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -69,13 +72,14 @@ impl Runner {
         self.active.load(Ordering::SeqCst)
     }
 
-    /// The profiles: as read at the start (or since), else read now, once
-    /// (blocking; a front-end reads them at its start, [`Runner::read_profiles`]).
+    /// The profiles as read at the addon's start (or since), never read
+    /// here (D3): before that read, none and an error, which fails a launch
+    /// that needs one (a launch waits for the start; never direct).
     pub fn profiles(&self) -> Profiles {
-        if let Some(p) = self.state().profiles() {
-            return p;
-        }
-        self.read_profiles()
+        self.state().profiles().unwrap_or_else(|| Profiles {
+            error: Some(NOT_READ.to_owned()),
+            ..Profiles::default()
+        })
     }
 
     /// Read the profiles now (blocking) and keep them.

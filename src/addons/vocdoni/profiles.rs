@@ -1,7 +1,7 @@
 //! Where the Vocdoni addon reads its proxy profiles: config.toml's
 //! `[proxy]` and `CLAUDIO_PROXY_URL` (the `env` profile, alone when set),
 //! or, in tests, one file alone. Reads are blocking: callers run them off
-//! the executor, or once at a front-end's start.
+//! the executor (the addon's start, a reload, a lookup).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

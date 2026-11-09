@@ -223,6 +223,33 @@ fn legacy_fields_are_adopted_and_written_back() {
     assert_eq!(v.legacy(&theirs), None);
 }
 
+/// F3: `resolve` and `options` never read config.toml (they run on the
+/// executor): before the addon's start read the profiles, a launch that
+/// needs one fails (never direct) and the wizard has no rows.
+#[test]
+fn resolve_and_options_never_read_the_profiles() {
+    let path = profiles_file();
+    let runner = runner(path.clone());
+    let vocdoni = Vocdoni::with_runner(Arc::clone(&runner));
+    let ctx = TestCtx::default();
+    let err = Launch::resolve(&vocdoni, &LaunchSelect::default(), &ctx).unwrap_err();
+    assert!(err.contains("not read yet"), "{err}");
+    assert!(Launch::resolve(&vocdoni, &pick("work"), &ctx).is_err());
+    assert!(Launch::options(&vocdoni, &ctx).is_empty());
+    assert_eq!(
+        Launch::resolve(&vocdoni, &LaunchSelect::of(None), &ctx),
+        Ok(Routing::Off)
+    );
+    // Read (off the executor, at the start): they answer from it.
+    runner.read_profiles();
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    assert_eq!(
+        Launch::resolve(&vocdoni, &LaunchSelect::default(), &ctx),
+        Ok(Routing::Required(choice("work".into(), false)))
+    );
+    assert_eq!(Launch::options(&vocdoni, &ctx).len(), 2);
+}
+
 #[tokio::test]
 async fn unknown_profile_fails_never_direct() {
     let p = || names(&["work"], Some("work"));
