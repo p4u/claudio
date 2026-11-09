@@ -543,7 +543,6 @@ input = "label"
                 ext("keys", "keys", 'k'),
                 ext("search", "x", 'x'),    // a built-in's name
                 ext("other", "keys", 'o'),  // a taken tag
-                ext("third", "latex", 't'), // a built-in's lens
                 ext("fourth", "four", 's'), // a taken key: the action goes
                 ext("fifth", "five", 'u'),  // the reader's key
                 ext("sixth", "six", 'e'),   // the extensions screen's key
@@ -558,7 +557,6 @@ input = "label"
             [
                 "extension search: the name is taken",
                 "extension other: lens keys is taken",
-                "extension third: lens latex is taken",
                 "extension fourth: key s is taken",
                 "extension fifth: key u is taken",
                 "extension sixth: key e is taken",

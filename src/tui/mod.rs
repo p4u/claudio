@@ -73,7 +73,6 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::{Addons, LaunchSelect};
-use crate::addons::vocdoni::proxy;
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
@@ -206,9 +205,7 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The plugin lists cached: their names are no unknown extensions.
-    let cached_plugins = proxy::plugins::load_all();
-    let registry = extension_registry(&config, &cached_plugins, &mut key_notices);
+    let registry = extension_registry(&config, &mut key_notices);
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() {
             Mode::Plain
@@ -293,36 +290,16 @@ async fn finish(
 }
 
 /// The extension registry this run starts with: the built-ins and the
-/// external extensions (read once, now) with config.toml's choices; a
-/// cached plugin's choice is left for the plugins. A lens the caps leave
-/// out is a notice.
+/// external extensions (read once, now) with config.toml's choices; the
+/// other names are the addons' rows'. A lens the caps leave out is a notice.
 fn extension_registry(
     config: &crate::config::Config,
-    cached_plugins: &[proxy::plugins::PluginList],
     key_notices: &mut Vec<String>,
 ) -> extensions::Registry {
     // External extensions are read once, at start.
     let external = extensions::manifest::load(&extensions::manifest::dir(), key_notices);
-    // A plugin's saved choice is no unknown name: the plugins come later. A
-    // built-in's or external's choice stays, whatever a plugin is named.
-    let builtins = extensions::Registry::default();
-    let known = |name: &str| {
-        builtins.extensions.iter().any(|e| e.name == name)
-            || external.iter().any(|e| e.name == name)
-    };
-    let builtin_choices: std::collections::BTreeMap<String, bool> = config
-        .extensions
-        .iter()
-        .filter(|(name, _)| {
-            known(name)
-                || !cached_plugins
-                    .iter()
-                    .any(|l| l.plugins.iter().any(|p| &p.name == *name))
-        })
-        .map(|(name, on)| (name.clone(), *on))
-        .collect();
-    let registry =
-        extensions::Registry::new(&builtin_choices, config.claude.latex, external, key_notices);
+    let choices = extensions::core_choices(&config.extensions, &external);
+    let registry = extensions::Registry::new(&choices, external, key_notices);
     let dropped = registry.dropped_lenses();
     if !dropped.is_empty() {
         key_notices.push(format!(

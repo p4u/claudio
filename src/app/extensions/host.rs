@@ -608,7 +608,7 @@ mod tests {
             actions: vec![],
             source: Source::External(program),
         };
-        let registry = Registry::new(&Default::default(), true, vec![ext], &mut Vec::new());
+        let registry = Registry::new(&Default::default(), vec![ext], &mut Vec::new());
         let (tx, rx) = mpsc::unbounded_channel();
         (dir, ExtensionHost::new(&registry, tx), rx)
     }
@@ -804,7 +804,7 @@ mod tests {
         };
         // Off in config.toml: the host knows it, but starts nothing.
         let off = [("fake".to_owned(), false)].into();
-        let registry = Registry::new(&off, true, vec![ext], &mut Vec::new());
+        let registry = Registry::new(&off, vec![ext], &mut Vec::new());
         let (tx, _notices) = mpsc::unbounded_channel();
         let host = ExtensionHost::new(&registry, tx);
         assert_eq!(host.render("keys", LensKind::Tag, "a").await, None);

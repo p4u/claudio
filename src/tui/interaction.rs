@@ -1241,7 +1241,7 @@ mod tests {
                 command: vec!["prog".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), true, vec![keys], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![keys], &mut Vec::new());
     }
 
     /// G5: the daemon's formula and lens lists (old daemons' `Latex`, new
@@ -1285,8 +1285,9 @@ mod tests {
         assert_eq!(row.trim_end(), "<latex>x^2</latex> <keys>Ctrl+C</keys>");
     }
 
-    /// The lenses still go to every spawn (the web UI renders their tags):
-    /// latex and mermaid by default, without latex once it is turned off.
+    /// The core's lenses still go to every spawn (the web UI renders their
+    /// tags): an external extension's, and none once it is turned off. The
+    /// latex and mermaid lenses are the web addon's, composed later.
     #[test]
     fn spawns_carry_the_enabled_lenses() {
         let respawned_lenses = |app: &mut App| -> Vec<String> {
@@ -1305,12 +1306,12 @@ mod tests {
             ext.lenses.into_iter().map(|l| l.name).collect()
         };
         let mut app = app_with(&[info(Some(1), None)]);
-        app.extensions = Registry::new(&Default::default(), true, vec![], &mut Vec::new());
-        assert_eq!(respawned_lenses(&mut app), ["latex", "mermaid"]);
+        with_keys(&mut app);
+        assert_eq!(respawned_lenses(&mut app), ["keys"]);
         let mut app = app_with(&[info(Some(1), None)]);
-        let off = std::collections::BTreeMap::from([("latex".to_owned(), false)]);
-        app.extensions = Registry::new(&off, true, vec![], &mut Vec::new());
-        assert_eq!(respawned_lenses(&mut app), ["mermaid"]);
+        with_keys(&mut app);
+        app.extensions.set_enabled("keys", false);
+        assert!(respawned_lenses(&mut app).is_empty());
     }
 
     #[test]

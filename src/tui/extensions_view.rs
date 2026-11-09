@@ -187,7 +187,8 @@ impl App {
                 let kind = match ext.source {
                     Source::BuiltIn => "built-in",
                     Source::External(_) => "external",
-                    Source::Addon { .. } => "plugin",
+                    // The addon that lists it (`web`, a plugin's addon).
+                    Source::Addon { addon, .. } => addon,
                 };
                 Row {
                     name: clean(&ext.name),
@@ -285,7 +286,7 @@ impl App {
         if let Source::Addon { addon, refused, .. } = &ext.source {
             if let Some(why) = refused {
                 self.notify(format!(
-                    "plugin {} is refused: {}",
+                    "extension {} is refused: {}",
                     clean(&name),
                     clean(why)
                 ));
@@ -342,7 +343,7 @@ mod tests {
                 command: vec!["p".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), true, vec![fake], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![fake], &mut Vec::new());
         app.activate(0);
         app.take_effects();
         app
@@ -391,15 +392,13 @@ mod tests {
         assert_eq!(
             row_lines(&app.extension_rows()),
             [
-                "[x] latex     built-in  —          <latex>",
-                "[x] diagram   built-in  —          ```mermaid",
                 "[x] search    built-in  Alt+z s    —",
                 "[x] snippets  built-in  Alt+z p/P  —",
                 "[x] fake      external  Alt+z k    <keys>",
             ]
         );
         assert_eq!(
-            app.extension_details(3),
+            app.extension_details(1),
             [
                 "saved prompts",
                 "Alt+z p  insert snippet",
@@ -407,14 +406,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            app.extension_details(1),
-            [
-                "Mermaid diagrams drawn in the web UI",
-                "```mermaid  fence lens (the web UI)",
-            ]
-        );
-        assert_eq!(
-            app.extension_details(4),
+            app.extension_details(2),
             [
                 "(no description)",
                 "Alt+z k  do it",
@@ -433,13 +425,13 @@ mod tests {
         app.on_terminal(press(KeyCode::Down));
         assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::End));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::Down));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::Home));
         assert_eq!(selected(&app), 0);
         app.on_terminal(press(KeyCode::PageDown));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::PageUp));
         assert_eq!(selected(&app), 0);
         let wheel = |kind| {
@@ -471,14 +463,11 @@ mod tests {
             let ext = app.extensions.session_extensions();
             ext.lenses.into_iter().map(|l| l.name).collect()
         };
-        assert!(
-            !lenses(&app).contains(&"mermaid".to_owned()),
-            "diagram is off"
-        );
-        assert!(row_lines(&app.extension_rows())[1].starts_with("[ ] diagram"));
+        assert!(!app.leader_entries().iter().any(|e| e.key == 'p'));
+        assert!(row_lines(&app.extension_rows())[1].starts_with("[ ] snippets"));
         assert_eq!(
             toggles(&mut app),
-            [("save", "diagram".to_owned(), false)],
+            [("save", "snippets".to_owned(), false)],
             "a built-in needs no host"
         );
         // An external one: the host follows, and it leaves the leader.
@@ -493,7 +482,7 @@ mod tests {
         );
         assert!(!lenses(&app).contains(&"keys".to_owned()));
         assert!(!app.leader_entries().iter().any(|e| e.key == 'k'));
-        assert_eq!(app.extensions.session_extensions().lenses.len(), 1);
+        assert!(app.extensions.session_extensions().lenses.is_empty());
         // Again: back on.
         app.on_terminal(press(KeyCode::Char(' ')));
         assert!(lenses(&app).contains(&"keys".to_owned()));
@@ -510,13 +499,15 @@ mod tests {
 
     #[test]
     fn latex_turned_off_in_claude_config_says_so() {
+        // The latex row is the web addon's.
         let mut app = app_with_fake("");
+        crate::tui::test_support::rows(&mut app, "web", &[("latex", None)], &[]);
         assert!(!app
-            .extension_details(0)
+            .extension_details(3)
             .iter()
             .any(|l| l.contains("[claude] latex")));
         app.claude_policy.latex = false;
-        let details = app.extension_details(0);
+        let details = app.extension_details(3);
         assert_eq!(
             details.last().map(String::as_str),
             Some("also off by [claude] latex = false")
@@ -529,17 +520,17 @@ mod tests {
         app.failed_extensions = vec!["fake".into()];
         let lines = row_lines(&app.extension_rows());
         assert_eq!(
-            lines[4],
+            lines[2],
             "[x] fake      external  Alt+z k    <keys>  (disabled after failures)"
         );
-        assert!(!lines[3].contains("failures"));
+        assert!(!lines[1].contains("failures"));
     }
 
     #[test]
     fn a_hostile_description_and_title_are_cleaned() {
         let mut app = app_with_fake("evil\u{1b}[31m red\nnext\u{202e}line\u{7}");
-        app.extensions.extensions[4].actions[0].title = "do\u{1b}]52;c;eA==\u{7} it".into();
-        let details = app.extension_details(4);
+        app.extensions.extensions[2].actions[0].title = "do\u{1b}]52;c;eA==\u{7} it".into();
+        let details = app.extension_details(2);
         for line in &details {
             assert!(
                 !line
@@ -552,12 +543,12 @@ mod tests {
         assert!(details[0].contains("next"), "on one line: {details:?}");
     }
 
-    /// [`app_with_fake`] with addon `team`'s rows `kb` and `latex` (a name
-    /// the core holds, refused by the registry).
+    /// [`app_with_fake`] with addon `team`'s rows `kb` and `search` (a
+    /// name the core holds, refused by the registry).
     fn app_with_rows(details: &[&str]) -> App {
         use crate::tui::test_support::rows;
         let mut app = app_with_fake("");
-        rows(&mut app, "team", &[("kb", None), ("latex", None)], details);
+        rows(&mut app, "team", &[("kb", None), ("search", None)], details);
         app.take_effects();
         app
     }
@@ -570,10 +561,10 @@ mod tests {
         ];
         let app = app_with_rows(&details);
         let lines = row_lines(&app.extension_rows());
-        assert_eq!(lines[5], "[x] kb        plugin    —          —");
-        assert_eq!(lines[6], "[ ] latex     plugin    —          —");
+        assert_eq!(lines[3], "[x] kb        team      —          —");
+        assert_eq!(lines[4], "[ ] search    team      —          —");
         assert_eq!(
-            app.extension_details(5),
+            app.extension_details(3),
             [
                 "1.4.0 · work",
                 "turning it on or off applies to new sessions",
@@ -582,7 +573,7 @@ mod tests {
         );
         // Refused by the core: the addon's lines do not apply.
         assert_eq!(
-            app.extension_details(6),
+            app.extension_details(4),
             ["1.4.0 · work", "refused: name taken"]
         );
         // The addon's own refusal is in its lines.
@@ -594,7 +585,7 @@ mod tests {
             &[("evil", Some("bundle URL is not https"))],
             &own,
         );
-        assert_eq!(app.extension_details(5), ["1.4.0 · work", own[0]]);
+        assert_eq!(app.extension_details(3), ["1.4.0 · work", own[0]]);
     }
 
     #[test]
@@ -602,7 +593,7 @@ mod tests {
         use crate::tui::test_support::rows;
         let mut app = app_with_rows(&[]);
         app.on_terminal(alt('i'));
-        for _ in 0..5 {
+        for _ in 0..3 {
             app.on_terminal(press(KeyCode::Down));
         }
         app.on_terminal(press(KeyCode::Char(' ')));
@@ -610,7 +601,7 @@ mod tests {
         assert_eq!(toggles(&mut app), [("team", "kb".to_owned(), false)]);
         assert_eq!(app.extension_config.get("kb"), Some(&false));
         // Kept for rows that come later.
-        rows(&mut app, "team", &[("kb", None), ("latex", None)], &[]);
+        rows(&mut app, "team", &[("kb", None), ("search", None)], &[]);
         assert!(!app
             .extensions
             .extensions
@@ -623,7 +614,7 @@ mod tests {
         app.on_terminal(press(KeyCode::Char(' ')));
         assert!(app.take_effects().is_empty());
         let notice = app.notice.as_ref().unwrap().text.clone();
-        assert_eq!(notice, "plugin latex is refused: name taken");
+        assert_eq!(notice, "extension search is refused: name taken");
     }
 
     #[test]
@@ -650,7 +641,7 @@ mod tests {
         });
         let lines = row_lines(&app.extension_rows());
         assert!(
-            lines[2].starts_with("[x] search    built-in  —"),
+            lines[0].starts_with("[x] search    built-in  —"),
             "{lines:?}"
         );
     }

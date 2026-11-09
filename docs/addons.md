@@ -83,7 +83,7 @@ request, config read and edit is attributed to it.
 | `sessions()`, `hosts()` | snapshots (`SessionSnap`, `HostSnap`) |
 | `config(section)` | a declared section of `config.toml` (empty when undeclared) |
 | `edit_config(section, edit)` | an atomic, minimal edit of a declared section (below) |
-| `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None` |
+| `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None`; `[claude] latex = false` answers `Some(false)` for `latex` (its documented alias) |
 | `core_extensions()` | the names the core's own extensions hold (built-in and external): an addon row of such a name is refused, so the addon must not use it either |
 | `notify(text)` | a notice in the front-end |
 | `changed()` | segments, rows, options or an open panel changed: front-ends re-read them |

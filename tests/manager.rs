@@ -3140,21 +3140,27 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
         Region::Screen,
         WAIT,
     );
+    // The built-ins, the external one, then the web addon's rows (P3.18:
+    // latex and diagram are the web addon's, so they follow and have no
+    // lens column of their own).
+    tui.wait_for("[x] diagram   web", Region::Screen, WAIT);
     let shown = tui.screen_text(Region::Screen);
     for row in [
-        "[x] latex     built-in  —              <latex>",
-        "[x] diagram   built-in  —              ```mermaid",
         "[x] search    built-in  Alt+z s",
         "[x] snippets  built-in  Alt+z p/P",
         "[x] fake      external  Alt+z k/l/d/h  <keys>",
-        "math typeset from <latex> tags",
+        "[x] latex     web       —",
+        "[x] diagram   web       —",
+        "search claude conversations",
         "changes apply now",
     ] {
         assert!(shown.contains(row), "missing {row:?} in:\n{shown}");
     }
 
     // Space on diagram: off now, and saved.
-    tui.send_keys(DOWN_ARROW);
+    for _ in 0..4 {
+        tui.send_keys(DOWN_ARROW);
+    }
     tui.wait_for("Mermaid diagrams drawn in the web UI", Region::Screen, WAIT);
     tui.send_keys(b" ");
     tui.wait_for("[ ] diagram", Region::Screen, WAIT);
@@ -3168,7 +3174,7 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     );
 
     // Snippets off: its keys leave the leader.
-    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(b"\x1b[H"); // Home
     tui.send_keys(DOWN_ARROW);
     tui.wait_for("saved prompts", Region::Screen, WAIT);
     tui.send_keys(b" ");
@@ -3200,6 +3206,56 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     );
     tui.send_keys(ALT_I);
     tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// The lens names of the journaled session in `dir`, once it has some.
+fn journaled_lenses(h: &ManagerHarness, dir: &std::path::Path) -> Vec<String> {
+    let dir = dir.to_str().unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let entry = h
+            .journal_sessions()
+            .into_iter()
+            .find(|e| e["cwd"] == dir && e["extensions"].is_object());
+        if let Some(entry) = entry {
+            return entry["extensions"]["lenses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["name"].as_str().unwrap().to_owned())
+                .collect();
+        }
+        assert!(Instant::now() < deadline, "{:?}", h.journal_sessions());
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// AC6: a session started from the TUI asks the daemon for the web addon's
+/// `latex` and `mermaid` lenses (the web UI renders them); turning `latex`
+/// off on the extensions screen drops it for the next session.
+#[test]
+fn test_tui_session_requests_the_latex_lens_from_the_web_addon() {
+    let h = ManagerHarness::new();
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    assert_eq!(journaled_lenses(&h, &h.dirs[0]), ["latex", "mermaid"]);
+
+    tui.send_keys(ALT_I);
+    tui.wait_for("[x] latex     web", Region::Screen, WAIT);
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(DOWN_ARROW);
+    tui.wait_for("math rendered from <latex> tags", Region::Screen, WAIT);
+    tui.send_keys(b" ");
+    tui.wait_for("[ ] latex", Region::Screen, WAIT);
+    tui.wait_for("extension latex off (saved)", Region::StatusBar, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[1]);
+    assert_eq!(journaled_lenses(&h, &h.dirs[1]), ["mermaid"]);
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
@@ -3495,7 +3551,9 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     // The extensions screen: `r` asks again, and each outcome shows.
     tui.send_keys(ALT_I);
     tui.wait_for(&format!("[x] {PLUGIN}"), Region::Screen, WAIT);
-    for _ in 0..4 {
+    // After the built-ins search and snippets (P3.18: latex and diagram are
+    // the web addon's rows, after the plugins).
+    for _ in 0..2 {
         tui.send_keys(DOWN_ARROW);
     }
     tui.wait_for("1 items disabled (Enter to change)", Region::Screen, WAIT);

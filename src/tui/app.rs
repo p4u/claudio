@@ -365,7 +365,6 @@ pub struct AppConfig {
 impl App {
     pub fn new(cfg: AppConfig) -> App {
         let (width, height) = cfg.size;
-        let latex = cfg.claude.latex;
         App {
             mode: cfg.mode,
             exit: Default::default(),
@@ -409,7 +408,6 @@ impl App {
             clicks: Clicks::default(),
             extensions: crate::app::extensions::Registry::new(
                 &Default::default(),
-                latex,
                 Vec::new(),
                 &mut Vec::new(),
             ),

@@ -2,8 +2,9 @@
 
 An extension adds to what claudio shows and does. It has **lenses** (things
 claudio renders from claude's answers, in the web UI) and **actions** (keys
-under the leader, `Alt+z`). Four extensions are built in: `latex`, `diagram`, `search` and
-`snippets`. You can add your own as a small program in any language.
+under the leader, `Alt+z`). Two extensions are built in, `search` and `snippets`; the
+`latex` and `diagram` rows are the web addon's (it asks claude for the lenses the web UI
+renders). You can add your own as a small program in any language.
 
 - [Using extensions](#using-extensions)
 - [Writing an external extension](#writing-an-external-extension)
@@ -14,8 +15,8 @@ under the leader, `Alt+z`). Four extensions are built in: `latex`, `diagram`, `s
 
 | Extension | Lens | Keys | What it does |
 |---|---|---|---|
-| `latex` | tag `<latex>` | — | Math typeset with KaTeX in the web UI's reader. |
-| `diagram` | fence ```` ```mermaid ```` | — | Mermaid diagrams drawn in the web UI's reader. |
+| `latex` (web addon) | tag `<latex>` | — | Math typeset with KaTeX in the web UI's reader. |
+| `diagram` (web addon) | fence ```` ```mermaid ```` | — | Mermaid diagrams drawn in the web UI's reader. |
 | `search` | — | `Alt+z s` | Search the claude conversations on the active session's host; Enter resumes one. |
 | `snippets` | — | `Alt+z p`, `Alt+z P` | Paste a saved prompt; save the last prompt as one. |
 
@@ -30,22 +31,28 @@ claude's screen as claude drew it: in the pane and in its reader view, a
 stay as their text (the reader shows a formula's tag as inline code, exactly
 as written, and a diagram as its code block). The lenses still matter to
 console sessions: their instructions reach claude, so the same session's
-answers render in the web UI.
+answers render in the web UI. The `latex` and `mermaid` lenses come from the
+web addon's share of every launch (docs/addons.md, "Launches"), whichever
+front-end starts the session; a build without the web addon asks claude for
+no tags.
 
 ### The extensions screen (`Alt+i`)
 
 ```
-[x] latex             built-in  —          <latex>
-[ ] diagram           built-in  —          ```mermaid
 [x] search            built-in  Alt+z s    —
 [x] snippets          built-in  Alt+z p/P  —
 [x] keys              external  Alt+z k    <keys>
-[x] vocdoni-internal  plugin    —          —
+[x] vocdoni-internal  vocdoni   —          —
+[x] latex             web       —          —
+[ ] diagram           web       —          —
 ```
 
 One row per extension: the built-ins, then the external ones that loaded
 (one that failed to load is not listed; its notice at start said why), then
-the plugins of your proxy profiles (see below).
+the addons' rows in registry order, each marked with its addon: the plugins
+of your proxy profiles (see below), then the web addon's `latex` and
+`diagram`. A name a built-in or external extension holds is refused to an
+addon's row.
 Below the list, the selected extension's description, its actions and its
 lenses. `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the mouse wheel move;
 `Space` turns the selected extension on or off, and so does `Enter` except
@@ -75,12 +82,13 @@ extension off in `~/.config/claudio/config.toml`:
 
 ```toml
 [extensions]
-diagram = false        # by name, built-in or external; every extension is on by default
+diagram = false        # by name: built-in, external or an addon's row; all on by default
 ```
 
-`[claude] latex = false` still turns math off. On the client it turns the
-`latex` extension off; on a host it keeps the latex instruction out of that
-host's sessions, and its daemon extracts no `<latex>` tags for the web UI.
+`[claude] latex = false` still turns math off. On the client it is an alias
+of `[extensions] latex = false` (and wins over it); on a host it keeps the
+latex instruction out of that host's sessions, and its daemon extracts no
+`<latex>` tags for the web UI.
 
 ### Proxy plugins
 

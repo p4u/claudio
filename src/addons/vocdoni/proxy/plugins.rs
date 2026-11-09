@@ -353,11 +353,6 @@ pub fn load_cache(profile: &str) -> Option<PluginList> {
     load_cache_from(&paths::plugins_cache(), profile)
 }
 
-/// Every cached list (a missing or unreadable file has none).
-pub fn load_all() -> Vec<PluginList> {
-    load_all_from(&paths::plugins_cache())
-}
-
 /// Store `list` as its profile's entry.
 pub fn save_cache(list: &PluginList) -> io::Result<()> {
     save_cache_to(&paths::plugins_cache(), list)
@@ -372,6 +367,7 @@ pub fn load_cache_from(path: &Path, profile: &str) -> Option<PluginList> {
     read_cache(path).profiles.remove(profile)
 }
 
+/// Every cached list (a missing or unreadable file has none).
 pub fn load_all_from(path: &Path) -> Vec<PluginList> {
     read_cache(path).profiles.into_values().collect()
 }

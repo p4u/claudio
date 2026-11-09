@@ -18,7 +18,7 @@ use crate::addon::ExtensionRow;
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::host::ExtensionHost;
 use crate::app::extensions::protocol::SessionContext;
-use crate::app::extensions::{manifest, ActionResult, Extension, Registry, Source};
+use crate::app::extensions::{core_choices, manifest, ActionResult, Extension, Registry, Source};
 use crate::config::Config;
 use crate::proto::{LensKind, SessionExtensions, SessionId};
 
@@ -41,7 +41,7 @@ pub(crate) struct Extensions {
 }
 
 impl Extensions {
-    /// Registry::new(&config.extensions, config.claude.latex, external, &mut notices),
+    /// Registry::new(core_choices(&config.extensions, &external), external, &mut notices),
     /// with `manifest::load(&manifest::dir(), &mut notices)` in spawn_blocking;
     /// ExtensionHost::new; its notices become `notice` events.
     pub(crate) async fn load(config: &Config, hub: &HubHandle) -> Arc<Extensions> {
@@ -53,12 +53,8 @@ impl Extensions {
         })
         .await
         .unwrap_or_default();
-        let registry = Registry::new(
-            &config.extensions,
-            config.claude.latex,
-            external,
-            &mut notices,
-        );
+        let choices = core_choices(&config.extensions, &external);
+        let registry = Registry::new(&choices, external, &mut notices);
         for notice in &notices {
             tracing::warn!("web: {}", crate::text::sanitize(notice));
         }
@@ -232,9 +228,10 @@ impl Extensions {
     }
 
     /// config.toml was re-read by the addon runtime: `config::load`
-    /// (spawn_blocking), `[extensions]` and `[claude]` applied to the
-    /// built-ins and external extensions, then `extensions_changed`.
-    pub(crate) async fn reread(&self, hub: &HubHandle) {
+    /// (spawn_blocking), `[extensions]` applied to the built-ins and
+    /// external extensions and, with `rows` (the addons' rows as the
+    /// runtime has them now), to the addons' rows; then `extensions_changed`.
+    pub(crate) async fn reread(&self, hub: &HubHandle, rows: &[(&'static str, ExtensionRow)]) {
         let path = self.config_path.clone();
         let Ok(config) = tokio::task::spawn_blocking(move || crate::config::load_from(&path)).await
         else {
@@ -247,10 +244,7 @@ impl Extensions {
             let mut registry = lock(&self.registry);
             let mut flips = Vec::new();
             for ext in registry.extensions.iter_mut().filter(|e| !e.is_addon()) {
-                let mut on = config.extensions.get(&ext.name).copied().unwrap_or(true);
-                if ext.name == "latex" && !config.claude.latex {
-                    on = false;
-                }
+                let on = config.extensions.get(&ext.name).copied().unwrap_or(true);
                 if ext.enabled != on {
                     ext.enabled = on;
                     if ext.is_external() {
@@ -263,6 +257,8 @@ impl Extensions {
         for (name, on) in flips {
             self.host.set_enabled(&name, on).await;
         }
+        *lock(&self.choices) = config.extensions.clone();
+        self.set_rows(rows);
         hub.set_claude_policy(config.claude.clone()).await;
         if *lock(&self.registry) != before {
             hub.broadcast(extensions_changed());
@@ -429,8 +425,8 @@ mod tests {
     #[test]
     fn extension_dtos_have_the_documented_fields() {
         let registry = Registry::default();
-        let latex = extension_dto(&registry.extensions[0]);
-        let mut keys: Vec<&String> = latex.as_object().unwrap().keys().collect();
+        let search = extension_dto(&registry.extensions[0]);
+        let mut keys: Vec<&String> = search.as_object().unwrap().keys().collect();
         keys.sort();
         assert_eq!(
             keys,
@@ -445,11 +441,21 @@ mod tests {
                 "source"
             ]
         );
-        assert_eq!(latex["source"], "builtin");
-        assert_eq!(latex["addon"], Value::Null);
-        assert_eq!(latex["lenses"][0], json!({"name": "latex", "kind": "tag"}));
-        let search = extension_dto(&registry.extensions[2]);
+        assert_eq!(search["source"], "builtin");
+        assert_eq!(search["addon"], Value::Null);
+        assert_eq!(search["lenses"], json!([]));
         assert_eq!(search["actions"][0]["id"], "search");
+        let mut keys = Registry::default();
+        keys.extensions.push(Extension {
+            lenses: vec![crate::app::extensions::Lens {
+                name: "keys".into(),
+                kind: LensKind::Tag,
+                instruction: String::new(),
+            }],
+            ..registry.extensions[0].clone()
+        });
+        let keys = extension_dto(&keys.extensions[2]);
+        assert_eq!(keys["lenses"][0], json!({"name": "keys", "kind": "tag"}));
     }
 
     #[test]

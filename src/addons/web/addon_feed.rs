@@ -62,9 +62,11 @@ impl Feed {
         }
     }
 
-    /// config.toml was re-read: the registry follows it.
+    /// config.toml was re-read: the registry follows it, the addons' rows
+    /// with it.
     async fn config_changed(&self) {
-        self.ext.reread(&self.hub).await;
+        let rows = self.runtime.extension_rows();
+        self.ext.reread(&self.hub, &rows).await;
     }
 }
 

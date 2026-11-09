@@ -128,6 +128,10 @@ pub(super) fn effective_extensions(
 ) -> SessionExtensions {
     let mut ext = requested
         .or(journaled)
+        // compat(v0.10): a client of the releases before addons sends no
+        // extensions; it gets the latex lens it always had. New clients
+        // ask for every lens (the web addon's latex), so a core-only build
+        // asks for none.
         .unwrap_or_else(|| SessionExtensions {
             lenses: vec![LensSpec {
                 name: "latex".to_owned(),

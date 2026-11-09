@@ -1853,7 +1853,9 @@ async fn web_extension_toggle_edits_config_and_is_reread() {
     tab.event("extensions_changed", |_| true).await;
     let list = tab.req("extensions.list", json!({})).await.unwrap();
     assert_eq!(diagram(&list)["enabled"], false);
-    assert_eq!(diagram(&list)["source"], "builtin");
+    // P3.18: the diagram row is the web addon's.
+    assert_eq!(diagram(&list)["source"], "addon");
+    assert_eq!(diagram(&list)["addon"], "web");
 
     fs::write(&path, config.replace("diagram = false", "diagram = true")).unwrap();
     let edited = std::time::Instant::now();
@@ -2144,10 +2146,15 @@ async fn web_addons_ops_refuse_unknown_addons_and_bad_args() {
         let err = tab.req(op, args.clone()).await.unwrap_err();
         assert!(err.starts_with("bad request"), "{op} {args}: {err}");
     }
-    assert_eq!(
-        tab.req("addons.rows", json!({})).await,
-        Ok(json!({"rows": []}))
-    );
+    // No proxy, so no plugin rows: only the web addon's (P3.18).
+    let rows = tab.req("addons.rows", json!({})).await.unwrap();
+    let rows: Vec<(&str, &str)> = rows["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["addon"].as_str().unwrap(), r["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [("web", "latex"), ("web", "diagram")]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
