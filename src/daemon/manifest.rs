@@ -40,8 +40,9 @@ use super::Daemon;
 use crate::claude::SESSION_MARKERS;
 use crate::paths;
 use crate::plugins::manifest::{self, Manifest, Marketplace, PluginRef};
+use crate::plugins::manifest::{key_ok, name_ok};
 use crate::proto::{retrying, Applied, Msg};
-use crate::proxy::plugins::{key_ok, name_ok, sha256_ok, test_http_ok};
+use crate::proxy::plugins::{sha256_ok, test_http_ok};
 use crate::text::sanitize;
 
 /// A manifest's size cap.

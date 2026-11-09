@@ -594,7 +594,7 @@ pub fn save_plugin_choices(
     choices: &PluginChoices,
 ) -> Result<(), SaveError> {
     use std::os::unix::fs::PermissionsExt;
-    if !crate::proxy::plugins::name_ok(name) {
+    if !crate::plugins::manifest::name_ok(name) {
         return Err(SaveError::BadName);
     }
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

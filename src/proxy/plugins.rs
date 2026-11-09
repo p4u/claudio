@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::api::{build_client, ApiError};
 use super::profile::Profile;
 use crate::paths;
+use crate::plugins::manifest::{key_ok, name_ok};
 
 /// At most this many plugins per list are used.
 pub const MAX_PLUGINS: usize = 32;
@@ -27,40 +28,6 @@ pub const MAX_PLUGINS: usize = 32;
 pub const MAX_ENV_KEYS: usize = 64;
 /// One env value's cap, in bytes.
 pub const MAX_ENV_VALUE: usize = 4096;
-
-/// Env key prefixes a plugin may not set: the proxy's own and Claude Code's
-/// switches, the loaders and the toolchains that read code from the env.
-const DENIED_PREFIXES: &[&str] = &[
-    "ANTHROPIC_",
-    "CLAUDIO_",
-    "CLAUDE_",
-    "NODE_",
-    "LD_",
-    "DYLD_",
-    "GIT_",
-    "SSL_",
-    "XDG_",
-    "SSH_",
-];
-
-/// Env keys a plugin may not set (nor their lowercase forms).
-const DENIED_KEYS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "SHELL",
-    "TERM",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "BASH_ENV",
-    "ENV",
-    "PYTHONPATH",
-    "PERL5OPT",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-];
 
 /// One plugin of a profile.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -151,38 +118,12 @@ impl PluginList {
     }
 }
 
-/// `[a-z0-9-]{1,40}`: a plugin name, and a path component on every host.
-pub fn name_ok(name: &str) -> bool {
-    (1..=40).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 /// 64 lowercase hex digits.
 pub fn sha256_ok(hash: &str) -> bool {
     hash.len() == 64
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// `[A-Z_][A-Z0-9_]{0,63}`, and not one a plugin may not set.
-pub fn key_ok(key: &str) -> Result<(), String> {
-    let mut bytes = key.bytes();
-    let shape = key.len() <= 64
-        && bytes
-            .next()
-            .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
-        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
-    if !shape {
-        return Err("bad env key".to_owned());
-    }
-    let upper = key.to_ascii_uppercase();
-    if DENIED_PREFIXES.iter().any(|p| upper.starts_with(p)) || DENIED_KEYS.contains(&&*upper) {
-        return Err(format!("env key {key} not allowed"));
-    }
-    Ok(())
 }
 
 /// Whether `url` is a plain-http loopback URL a test lets through:
