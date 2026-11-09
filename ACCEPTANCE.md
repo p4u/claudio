@@ -167,5 +167,5 @@ attribution or co-author trailers.
 make check     # fmt, clippy -D warnings, scripts/check_rules.py, core-only build, library tests
 ```
 
-`scripts/check_rules.py` holds the mechanical checks (A1, A2, A8, D2, D4); A1 and A2 apply once
-the workspace has the core and addon crates.
+`scripts/check_rules.py` holds the mechanical checks (A1, A2, A8, D2, D4). A2 checks dependency
+kinds (`cargo metadata`); `make matrix` runs the feature matrix (E5).

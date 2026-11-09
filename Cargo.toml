@@ -1,80 +1,135 @@
-[package]
-name = "claudio"
+# The claudio workspace: the `claudio` binary (this package) and its crates.
+# `[workspace.package]` stays first: release.yml reads the release version from
+# the first `version =` line of this file.
+[workspace]
+members = ["crates/core", "crates/tui", "addons/api", "addons/web", "addons/vocdoni"]
+resolver = "2"
+
+[workspace.package]
 version = "0.8.0"
 edition = "2021"
+
+[workspace.dependencies]
+claudio-core = { path = "crates/core" }
+claudio-tui = { path = "crates/tui" }
+claudio-api = { path = "addons/api" }
+claudio-web = { path = "addons/web" }
+claudio-vocdoni = { path = "addons/vocdoni" }
+alacritty_terminal = "0.26"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+crossterm = { version = "0.29", features = ["event-stream"] }
+flate2 = "1"
+futures = "0.3"
+libc = "0.2"
+portable-pty = "0.8"
+# The reader view's markdown (claude's answers). Pure Rust; no default
+# features (no HTML output). Pinned exactly: the reader's hostile-input
+# bounds were measured against this version.
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+# `claudio web`'s WebSocket in the web suites: the version axum's `ws` feature
+# pulls, so one copy builds.
+tokio-tungstenite = "0.29"
+toml = "0.9"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-segmentation = "1"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+vte = "0.13"
+
+[package]
+name = "claudio"
+version.workspace = true
+edition.workspace = true
 description = "Drop-in `claude` wrapper emulating `-p`, with an optional OpenAI-compatible API server (--api) routed through the same PTY-driven backend (responsible-disclosure research)"
+# Every integration suite is listed below. They drive the claudio binary, so they are this
+# package's targets even where the file lives next to the crate it tests (P4 plan, D1).
+autotests = false
 
 [[bin]]
 name = "claudio"
 path = "src/main.rs"
 
 [[test]]
+name = "manager"
+path = "crates/tui/tests/manager.rs"
+
+[[test]]
+name = "web"
+path = "addons/web/tests/web.rs"
+required-features = ["web"]
+
+[[test]]
+name = "web_manager"
+path = "addons/web/tests/manager.rs"
+required-features = ["web"]
+
+[[test]]
+name = "vocdoni_manager"
+path = "addons/vocdoni/tests/manager.rs"
+required-features = ["vocdoni"]
+
+[[test]]
+name = "vocdoni_web"
+path = "addons/vocdoni/tests/web.rs"
+required-features = ["vocdoni", "web"]
+
+[[test]]
+name = "integration"
+path = "addons/api/tests/integration.rs"
+required-features = ["api"]
+
+[[test]]
 name = "remote"
 path = "tests/remote.rs"
-required-features = ["diag"]
+required-features = ["diag", "vocdoni"]
 
 [[test]]
 name = "screenshots"
 path = "tests/screenshots.rs"
+required-features = ["vocdoni"]
 
 [features]
+default = ["api", "web", "vocdoni"]
+# The addons this binary links (docs/addons.md). Without any, the core alone (ACCEPTANCE A4).
+api = ["dep:claudio-api"]
+web = ["dep:claudio-web"]
+vocdoni = ["dep:claudio-vocdoni"]
 # Enables diagnostic / test-harness CLI subcommands (`__bootstrap`,
-# `__connect-check`, `__remote-session`, `__ssh-hosts`).  Not included in
-# production release builds.
-diag = []
+# `__connect-check`, `__remote-session`, `__ssh-hosts`, `__remote-manifest`).
+# Not included in production release builds.
+diag = ["claudio-core/diag", "claudio-vocdoni?/diag"]
 
 [dependencies]
-# Core -p (print-mode) emulation backend.
-portable-pty = "0.8"
-vte = "0.13"
-uuid = { version = "1", features = ["v4", "serde"] }
-serde_json = "1"
+claudio-core.workspace = true
+claudio-tui.workspace = true
+claudio-api = { workspace = true, optional = true }
+claudio-web = { workspace = true, optional = true }
+claudio-vocdoni = { workspace = true, optional = true }
+# `claudio sessions`' one-shot runtime.
+tokio.workspace = true
 
-# OpenAI-compatible API server (--api). Only exercised in API mode, but linked
-# unconditionally so a single static binary serves both roles.
-serde = { version = "1", features = ["derive"] }
-axum = { version = "0.8", features = ["ws"] }
-futures = "0.3"
-thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Session manager (bare `claudio`): TUI client + per-host daemon.
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-alacritty_terminal = "0.26"
-libc = "0.2"
-toml = "0.9"
-sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-unicode-segmentation = "1"
-unicode-width = "0.2"
-# The reader view's markdown (claude's answers). Pure Rust; no default
-# features (no HTML output). Pinned exactly: the reader's hostile-input
-# bounds were measured against this version.
-pulldown-cmark = { version = "=0.13.6", default-features = false }
-# `claudio web`: the embedded browser app is stored gzipped (build.rs) and
-# decompressed for a client without gzip; base64 for the import-map hash in
-# debug disk mode. Pure Rust (flate2's default miniz_oxide backend).
-flate2 = "1"
-base64 = "0.22"
-
-[build-dependencies]
-flate2 = "1"
-sha2 = "0.10"
-base64 = "0.22"
-
-# Only needed in integration tests (no runtime dep).
+# The integration suites (crates/tui/tests, addons/*/tests, tests/).
 [dev-dependencies]
-uuid = { version = "1", features = ["v4", "serde"] }
-tokio = { version = "1", features = ["test-util"] }
-# `claudio web`'s WebSocket in tests/web.rs: the version axum's `ws` feature
-# pulls, so one copy builds.
-tokio-tungstenite = "0.29"
+claudio-core = { workspace = true, features = ["test-support"] }
+alacritty_terminal.workspace = true
+futures.workspace = true
+libc.workspace = true
+portable-pty.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
+uuid.workspace = true
 
 [profile.release]
 strip = true

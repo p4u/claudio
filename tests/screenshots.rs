@@ -17,6 +17,7 @@
 //! - `inkscape` or `magick` (ImageMagick) must be in `$PATH`.
 //! - The `claude` binary must be in `$PATH`.
 
+#[path = "../crates/tui/tests/common/mod.rs"]
 mod common;
 
 use std::{

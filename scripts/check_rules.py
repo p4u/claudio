@@ -132,6 +132,10 @@ def measure():
     return over, hard
 
 
+ADDONS = {"claudio-api", "claudio-web", "claudio-vocdoni"}
+PACKAGES = {"claudio", CORE, TUI} | ADDONS
+
+
 def dependency_violations():
     try:
         meta = subprocess.run(
@@ -143,19 +147,24 @@ def dependency_violations():
     packages = json.loads(meta.stdout)["packages"]
     names = {p["name"] for p in packages}
     bad = []
+    if os.path.isdir(os.path.join(ROOT, "crates")):
+        bad += [f"A2 the workspace has no package {n}" for n in sorted(PACKAGES - names)]
     for p in packages:
         me = p["name"]
-        deps = {d["name"] for d in p["dependencies"] if d["name"] in names}
-        if me == CORE:
-            allowed = set()
-        elif me == TUI:
-            allowed = {CORE}
-        elif me == "claudio":
-            allowed = names - {me}
-        else:  # an addon
-            allowed = {CORE, TUI}
-        for d in sorted(deps - allowed):
-            bad.append(f"A2 {me} depends on {d}")
+        if me == "claudio":
+            continue
+        for d in p["dependencies"]:
+            dep, dev = d["name"], d.get("kind") == "dev"
+            if dep not in names or dep == me:
+                continue
+            if me == CORE:
+                allowed = set()
+            elif me == TUI:
+                allowed = {CORE}
+            else:  # an addon: a dev-dependency may be the TUI or another addon (tests)
+                allowed = (names - {"claudio", me}) if dev else {CORE}
+            if dep not in allowed:
+                bad.append(f"A2 {me} {'dev-' if dev else ''}depends on {dep}")
     return bad
 
 

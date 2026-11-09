@@ -22,7 +22,7 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
       - name: Unit tests
-        run: cargo test --locked --bin claudio
+        run: cargo test --locked --workspace --lib --bins
         env:
           RUST_BACKTRACE: 1
       # End-to-end tests require an authenticated `claude` and are gated behind
@@ -43,5 +43,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: make check (ACCEPTANCE.md)
         run: make check
+        env:
+          RUST_BACKTRACE: 1
+
+  features:
+    name: features [${{ matrix.features || 'core only' }}] (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features: ["", "api", "web", "vocdoni", "api,web,vocdoni"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: make features
+        run: make features FEATURES="${{ matrix.features }}"
         env:
           RUST_BACKTRACE: 1

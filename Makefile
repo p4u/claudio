@@ -10,6 +10,8 @@
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
 #   make check      → the acceptance checks of ACCEPTANCE.md (fmt, clippy, rules, core-only build, unit tests)
+#   make features   → one cell of the feature matrix (FEATURES="api,web"; "" is the core alone)
+#   make matrix     → the whole feature matrix: core only, each addon alone, all of them
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
 #   make test-web   → browser app: node unit tests + Playwright e2e (debug build, fake claude/proxy)
 #   make e2e        → E2E suite only (alias for the integration subset of make test)
@@ -27,7 +29,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker check test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
+.PHONY: all build static static-docker check features matrix test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
 
 all: build
 
@@ -72,7 +74,7 @@ test: test-unit
 
 ## Unit tests only — no network, no claude, ~0.1 s.
 test-unit:
-	$(CARGO) test --locked --bin claudio
+	$(CARGO) test --locked --workspace --lib --bins
 
 ## Session-manager integration tests (fake claude, no API needed).
 test-manager:
@@ -81,9 +83,9 @@ test-manager:
 ## Browser app: node unit tests, then Playwright e2e against a debug build
 ## (fake claude and proxy; uses the browsers cached in ~/.cache/ms-playwright).
 test-web:
-	node --test web/tests/*.test.mjs
+	node --test addons/web/web/tests/*.test.mjs
 	$(CARGO) build --locked
-	cd web/e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --no-audit --no-fund && npx playwright test
+	cd addons/web/web/e2e && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --no-audit --no-fund && npx playwright test
 
 ## E2E integration tests only (alias; same as the integration portion of `make test`).
 e2e:
@@ -98,11 +100,30 @@ fmt:
 ## so it never invalidates the normal build.
 CHECK_CARGO := $(if $(RUSTUP_CARGO),PATH=$(dir $(RUSTUP_CARGO)):$$PATH CARGO_TARGET_DIR=target/check $(RUSTUP_CARGO),CARGO_TARGET_DIR=target/check $(CARGO))
 check:
-	$(CHECK_CARGO) fmt --check
-	$(CHECK_CARGO) clippy --locked --all-targets --all-features -- -D warnings
+	$(CHECK_CARGO) fmt --all --check
+	$(CHECK_CARGO) clippy --locked --workspace --all-targets --all-features -- -D warnings
 	python3 scripts/check_rules.py
 	$(CHECK_CARGO) build --locked --no-default-features
-	$(CHECK_CARGO) test --locked --bin claudio
+	$(CHECK_CARGO) test --locked --workspace --lib --bins
+	@# Each crate on its own too (E5): the workspace build unifies features, so a
+	@# crate missing one it needs would pass above and fail alone.
+	@for p in claudio-core claudio-tui claudio-api claudio-web claudio-vocdoni; do \
+		$(CHECK_CARGO) test --locked -p $$p --lib || exit 1; done
+
+## One cell of the feature matrix (ACCEPTANCE E5). FEATURES="" is the core alone (A4),
+## which also runs the TUI's manager suite against that binary.
+## cargo accepts --features "" (no feature).
+FEATURES ?=
+features:
+	$(CHECK_CARGO) clippy --locked -p claudio --no-default-features --features "$(FEATURES)" --all-targets -- -D warnings
+	$(CHECK_CARGO) build --locked -p claudio --no-default-features --features "$(FEATURES)"
+	$(CHECK_CARGO) test --locked -p claudio --no-default-features --features "$(FEATURES)" --bins
+	$(if $(FEATURES),,$(CHECK_CARGO) test --locked -p claudio --no-default-features --test manager -- --test-threads=1)
+
+## The whole matrix: core only, each addon alone, all of them.
+matrix:
+	@for f in "" api web vocdoni api,web,vocdoni; do \
+		$(MAKE) --no-print-directory features FEATURES="$$f" || exit 1; done
 
 ## Run representative cases against the real, locally-authenticated claude.
 evidence: build

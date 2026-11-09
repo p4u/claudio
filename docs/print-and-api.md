@@ -1,6 +1,6 @@
 # claudio: print mode, API server, and proxy
 
-This document covers `claudio -p` (drop-in for `claude -p`) and the `--api` OpenAI-compatible server, both the API addon's (`src/addons/api/`, docs/addons.md), and the `claude-proxy` integration (the Vocdoni addon's).
+This document covers `claudio -p` (drop-in for `claude -p`) and the `--api` OpenAI-compatible server, both the API addon's (`addons/api/`, docs/addons.md), and the `claude-proxy` integration (the Vocdoni addon's). A claudio built without the API addon (`cargo build --no-default-features`, or features without `api`) refuses `-p`/`--print`/`--api` with exit 2 (`claudio: print mode and the API server need the api addon; this build has none`): claudio never runs `claude -p`. The release binaries have every addon.
 
 > **Background.** `claudio` demonstrates that client-side restrictions on programmatic Claude Code use cannot be enforced: every signal that would distinguish "human" from "automation" lives on the user's machine, and the model requests produced are identical either way. It uses only your own authenticated session and documented, supported Claude Code features. It does **not** bypass authentication or billing — every request counts against your account.
 

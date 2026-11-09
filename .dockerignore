@@ -3,3 +3,7 @@ target/
 .github/
 *.md
 workspace/
+# The web page's vendored LICENSES.md is embedded like the rest of the page.
+!addons/web/web/**/*.md
+addons/web/web/e2e/node_modules
+addons/web/web/e2e/test-results

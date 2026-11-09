@@ -3,9 +3,10 @@
 An addon adds a feature to claudio without the core knowing it by name: a command, a way to
 route a session (a proxy), status-bar segments, a panel, a checklist, extension rows, or work
 inside each host's daemon. The core stays generic (ACCEPTANCE.md A1, A3); everything else is an
-addon. This page is the addon API, `crate::addon` (`src/addon/`). It describes the contract the
-core keeps with an addon and the limits it enforces.
+addon. This page is the addon API, `claudio_core::addon` (`crates/core/src/addon/`). It describes
+the contract the core keeps with an addon and the limits it enforces.
 
+- [Crates](#crates)
 - [Capabilities](#capabilities)
 - [The registry](#the-registry)
 - [Execution model](#execution-model)
@@ -17,6 +18,36 @@ core keeps with an addon and the limits it enforces.
 - [The Vocdoni addon](#the-vocdoni-addon)
 - [Config sections and reserved words](#config-sections-and-reserved-words)
 - [Limits](#limits)
+
+## Crates
+
+claudio is one binary built from a Cargo workspace. Each addon is its own crate and a cargo
+feature of the `claudio` package (all on by default):
+
+| Crate | Path | What |
+|---|---|---|
+| `claudio-core` | `crates/core` | the addon API, the daemon and its protocol, the client, SSH, the shared app layer |
+| `claudio-tui` | `crates/tui` | the console session manager and `--plain` |
+| `claudio-api` | `addons/api` | feature `api`: `-p`/`--print` and `--api` |
+| `claudio-web` | `addons/web` | feature `web`: `claudio web`, its server and page |
+| `claudio-vocdoni` | `addons/vocdoni` | feature `vocdoni`: the claude-proxy client and the team plugins |
+| `claudio` | `.` (`src/main.rs`) | the binary: wiring only, `addons()` registers the enabled addons |
+
+**The dependency rule (ACCEPTANCE.md A2).** An addon crate depends on `claudio-core` only, never
+on the TUI or another addon; `claudio-tui` depends on `claudio-core` only, and `claudio-core` on
+none of these. An addon's dev-dependencies may add the TUI or another addon for its tests.
+`scripts/check_rules.py` (in `make check`) enforces it from `cargo metadata`.
+
+**`test-support`.** `claudio-core`'s fixtures for other crates' tests (`TestAddon`, the daemon
+harness, the fake host behind a real `Client`) are compiled under its `test-support` feature,
+which only dev-dependencies enable: a release binary never links them.
+
+**Builds without addons.** `cargo build --no-default-features` is the core alone (A4);
+`--no-default-features --features web,vocdoni` picks some. `make matrix` builds and tests the
+core alone, each addon alone and all of them. A build without the `api` addon refuses
+`-p`/`--print`/`--api` (before a bare `--`) with exit 2, because claudio never invokes
+`claude -p`: `claudio: print mode and the API server need the api addon; this build has none`.
+A build without the `web` addon asks claude for no lenses.
 
 ## Capabilities
 
@@ -54,7 +85,8 @@ feature (`addon:<name>`).
    `sessions`, `--plain`, no argument (the manager) and the addons' launch flags (the manager,
    routed as they ask).
 3. `Addons::dispatch`: each addon's `dispatch(argv, addons)`, in registry order; the first
-   `Some(code)` wins, `None` means "not mine".
+   `Some(code)` wins, `None` means "not mine". In a build without the `api` addon, `-p`,
+   `--print` or `--api` before a bare `--` then exits 2 (see [Crates](#crates)).
 4. `-h`/`--help`: claude's help, then every addon's `help()`, in registry order.
 5. Anything else: the real `claude`, unchanged.
 
@@ -65,7 +97,7 @@ Nothing downcasts an addon: the core reaches it only through these capabilities.
 ## The registry
 
 `Addons::new(list)` builds the immutable set this binary runs with; `main` builds it once
-(`crate::addons::all()`) and hands an `Arc<Addons>` to every entry point. Registration is refused,
+(`addons()` in `src/main.rs`) and hands an `Arc<Addons>` to every entry point. Registration is refused,
 and claudio exits with the reason, when:
 
 - a name is not `[a-z][a-z0-9-]{0,31}`, is repeated, or is a reserved word;
@@ -81,7 +113,7 @@ and claudio exits with the reason, when:
 
 An addon is a **pure state machine** (A6: no files, network, processes or sockets; unit tested)
 wrapped by its capability impls, which are its **runner**. The runner does the I/O through
-`AddonCtx`, which the core implements once (`src/app/addons/`) for both front-ends: the TUI
+`AddonCtx`, which the core implements once (`crates/core/src/app/addons/`) for both front-ends: the TUI
 runner and the web hub. Each addon gets its own context, bound to its name, so every
 request, config read and edit is attributed to it.
 
@@ -285,7 +317,7 @@ op`. A core-only daemon lists no addon features. The daemon protocol, its featur
 
 ## The API addon
 
-`src/addons/api/`: `-p`/`--print` emulation and the OpenAI-compatible `--api` server
+`addons/api/` (claudio-api): `-p`/`--print` emulation and the OpenAI-compatible `--api` server
 (docs/print-and-api.md), with `Commands` only. `is_relay` takes the print path's hook relays
 (`<Event> <port>`, and `__hook <Event>` unless it is the core's five-word manager relay);
 `dispatch` runs `cli::parse` on whatever argv is left (so `--` keeps its meaning) and takes it
@@ -295,8 +327,8 @@ composition (tools disabled, no addon's share).
 
 ## The web addon
 
-`src/addons/web/` (the page is `web/` at the root, embedded by `build.rs`): `Commands` for
-`claudio web …` (docs/web.md, protocol docs/web-protocol.md). Its `Launch` is `Optional` for
+`addons/web/` (claudio-web; the server is `src/`, the page `web/`, embedded by `build.rs`):
+`Commands` for `claudio web …` (docs/web.md, protocol docs/web-protocol.md). Its `Launch` is `Optional` for
 every launch, from every front-end: `prepare` gives the `latex` tag lens (with the
 `<latex>` instruction) unless `extension_on("latex")` is false, and the `mermaid` fence lens
 (with the diagram instruction) unless `extension_on("diagram")` is false, so the daemon
@@ -307,7 +339,7 @@ claude for no tags.
 
 ## The Vocdoni addon
 
-`src/addons/vocdoni/`: the claude-proxy client and the team plugins. It owns the `[proxy]` and
+`addons/vocdoni/` (claudio-vocdoni): the claude-proxy client and the team plugins. It owns the `[proxy]` and
 `[plugins]` sections and lists `addon:vocdoni` in a daemon's features.
 
 **Commands.** `claudio vocdoni login [URL] [--name NAME] [--token] [--unverified] | status |

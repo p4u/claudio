@@ -3,8 +3,8 @@
 Every claudio client (the console TUI, `claudio --plain`, `claudio web`, the SSH bridge's peer)
 talks to a host's session daemon (`claudio --daemon`) over its Unix socket, directly or through
 `ssh HOST claudio --slave`. This page is the contract for what an addon and a mixed-version pair
-of peers rely on. The types are in `src/proto.rs` (and `src/proto/spawn.rs`), the daemon's
-handling in `src/daemon/server.rs`.
+of peers rely on. The types are in `crates/core/src/proto.rs` (and `crates/core/src/proto/spawn.rs`), the
+daemon's handling in `crates/core/src/daemon/server.rs`.
 
 - [Framing](#framing)
 - [Handshake and features](#handshake-and-features)

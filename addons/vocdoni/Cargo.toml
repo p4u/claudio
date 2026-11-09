@@ -1,0 +1,32 @@
+[package]
+name = "claudio-vocdoni"
+description = "claudio addon: the claude-proxy client and the Vocdoni team plugins"
+version.workspace = true
+edition.workspace = true
+publish = false
+# addons/vocdoni/tests/ are targets of the root package (they drive the claudio binary).
+autotests = false
+
+[features]
+# `__remote-manifest`, a diag word of the SSH test harness; never in a release.
+diag = []
+
+[dependencies]
+claudio-core.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+claudio-core = { workspace = true, features = ["test-support"] }
+# The fake proxy and fake daemons of the unit tests.
+axum.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,6 +1,6 @@
 # `claudio web` browser protocol, version 2
 
-This is the contract between the server (`src/addons/web/`) and the browser app (`web/app/`). Both
+This is the contract between the server (`addons/web/src/`) and the browser app (`addons/web/web/app/`). Both
 are built from it in parallel; neither side may add, rename or reshape a message without
 changing this file first. Derived from `docs/specs/2026-11-08-web-ui-design.md`
 (§Browser protocol, §Session model, §Spawn composition) and, for version 2,

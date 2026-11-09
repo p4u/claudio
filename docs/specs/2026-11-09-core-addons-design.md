@@ -130,7 +130,8 @@ addons/vocdoni        claudio-vocdoni the claude-proxy client and the team plugi
 
 Dependencies (A2): `claudio` → {tui, api, web, vocdoni}; tui → core; every addon → core only.
 An addon may take `claudio-tui` or another addon as a **dev-dependency** for integration tests,
-never as a dependency. The binary's features `api`, `web`, `vocdoni` (all `default`) select the
+never as a dependency (amended 2026-11-09, P4 plan D1 / ruling R24: none does; the integration
+suites are root `[[test]]` targets, see "Tests" below). The binary's features `api`, `web`, `vocdoni` (all `default`) select the
 linked addons; `src/main.rs` builds one immutable `Addons` registry (`Arc<Addons>`) and passes it
 to every entry point (`tui::run(addons)`, `tui::plain(addons, …)`, `daemon::run(addons)`, and
 each command).
@@ -377,6 +378,16 @@ freshness; `config::save_plugin_choices` → the generic `edit_config`.
   proxy/plugin tests, with the TUI harness and `claudio-web` as dev-dependencies),
   `addons/web/tests/web.rs`, `addons/api/tests/integration.rs`. CI runs the feature matrix:
   core-only, each addon alone, and all.
+  *Amended 2026-11-09 (P4 plan D1 / ruling R24), as built:* each suite is a `[[test]]` of the
+  root package (`autotests = false`) with `required-features`, its file beside the crate it
+  tests: `crates/tui/tests/manager.rs` (`manager`, no feature, also run on the core-only
+  binary), `addons/web/tests/{web,manager}.rs` (`web`, `web_manager`),
+  `addons/vocdoni/tests/{manager,web}.rs` (`vocdoni_manager`, `vocdoni_web`: 16 + 13),
+  `addons/api/tests/integration.rs` (`integration`), `tests/remote.rs` and
+  `tests/screenshots.rs`. Only the binary's package has `CARGO_BIN_EXE_claudio`, so no addon
+  takes the TUI or another addon as a dev-dependency; the shared harnesses are
+  `crates/tui/tests/common/` and `addons/web/tests/web_harness/`, reached by `#[path]`. Each
+  crate's unit tests also run alone (`cargo test -p <crate> --lib`, in `make check`).
 - **Rollout**: each phase lands on `refactor/core-addons` with all suites green, then merges to
   local `main`. Push, tag and release wait for the owner. Rollback: revert the merge (the legacy
   field writes keep a reverted build's sessions intact).

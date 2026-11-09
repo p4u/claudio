@@ -1,32 +1,14 @@
 //! claudio — a session manager for the `claude` CLI and a drop-in wrapper
-//! for it. This file is wiring: it builds the addon registry
-//! (`addons::all()`) and routes argv to the core's words or an addon's;
-//! anything unclaimed execs the real `claude` unchanged.
-
-mod addon;
-mod addons;
-mod app;
-mod claude;
-mod client;
-mod config;
-mod daemon;
-mod freshness;
-mod paths;
-mod plain;
-mod proto;
-mod release;
-mod remote;
-mod term;
-mod text;
-mod tui;
-mod upgrade;
-mod version;
+//! for it. This file is wiring: it builds the addon registry (`addons()`)
+//! and routes argv to the core's words or an addon's; anything unclaimed
+//! execs the real `claude` unchanged.
 
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use addon::Addons;
+use claudio_core::addon::{Addon, Addons};
+use claudio_core::{app, claude, client, daemon, paths, proto, remote, upgrade};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
@@ -43,6 +25,10 @@ fn route(argv: &[String], addons: &Arc<Addons>) -> ExitCode {
         return code;
     }
     if let Some(code) = addons.dispatch(argv) {
+        return code;
+    }
+    #[cfg(not(feature = "api"))]
+    if let Some(code) = refuse_print_without_api(&argv[1..]) {
         return code;
     }
     let args = &argv[1..];
@@ -78,7 +64,7 @@ fn core_word(argv: &[String], addons: &Arc<Addons>) -> Option<ExitCode> {
         Some("daemon") => daemon::ctl::daemon_cmd(&argv[2..]),
         Some("sessions") => sessions_cmd(),
         // One plain claude with a manager session's launch, no daemon or TUI.
-        Some("--plain") => plain::run(&argv[2..], Arc::clone(addons)),
+        Some("--plain") => claudio_tui::plain::args::run(&argv[2..], Arc::clone(addons)),
         // The session manager; launch flags route its new sessions.
         None => manager_cmd(&[], Arc::clone(addons)),
         Some(w) if addons.launch_flags().iter().any(|(_, d)| d.name == w) => {
@@ -89,13 +75,43 @@ fn core_word(argv: &[String], addons: &Arc<Addons>) -> Option<ExitCode> {
     Some(code)
 }
 
+/// The addons this build registers (docs/addons.md), in registry order.
+/// Each is a cargo feature (`api`, `web`, `vocdoni`, all default); without
+/// any, the core alone. The API addon parses every remaining argv
+/// (`cli::parse`), so it is last.
+fn addons() -> Vec<Arc<dyn Addon>> {
+    vec![
+        #[cfg(feature = "vocdoni")]
+        Arc::new(claudio_vocdoni::Vocdoni::new()),
+        #[cfg(feature = "web")]
+        Arc::new(claudio_web::WebAddon),
+        #[cfg(feature = "api")]
+        Arc::new(claudio_api::ApiAddon),
+    ]
+}
+
 /// The addon registry this binary runs with; a refused registration exits.
 fn registry() -> Arc<Addons> {
-    let addons = Addons::new(addons::all()).unwrap_or_else(|e| {
+    let addons = Addons::new(addons()).unwrap_or_else(|e| {
         eprintln!("claudio: {e}");
         std::process::exit(1)
     });
     Arc::new(addons)
+}
+
+/// A build without the api addon: `-p`/`--print`/`--api` before a bare
+/// `--` exit 2, because claudio never invokes `claude -p` (CLAUDE.md).
+#[cfg(not(feature = "api"))]
+fn refuse_print_without_api(args: &[String]) -> Option<ExitCode> {
+    let print = args
+        .iter()
+        .take_while(|a| *a != "--")
+        .any(|a| a == "-p" || a == "--print" || a == "--api");
+    if !print {
+        return None;
+    }
+    eprintln!("claudio: print mode and the API server need the api addon; this build has none");
+    Some(ExitCode::from(2))
 }
 
 /// Whether argv is asking for help (`-h`/`--help` anywhere on the line).
@@ -130,7 +146,7 @@ fn print_help(args: &[String], addons: &Addons) -> ExitCode {
 /// claude arguments after them.
 fn manager_cmd(args: &[String], addons: Arc<Addons>) -> ExitCode {
     match app::launch::split_flags(&addons, args) {
-        Ok((select, [])) => tui::run(addons, select),
+        Ok((select, [])) => claudio_tui::run(addons, select),
         Ok(_) => {
             let names: Vec<&str> = addons.launch_flags().iter().map(|(_, d)| d.name).collect();
             let names = match names.split_last() {
@@ -196,7 +212,19 @@ fn exec_claude_transparently(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addon::test_support::TestAddon;
+    use claudio_core::addon::test_support::TestAddon;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        std::iter::once("claudio")
+            .chain(words.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn addons_all_registers() {
+        assert!(Addons::new(addons()).is_ok());
+    }
 
     #[test]
     fn main_routes_relays_before_core_words() {
@@ -210,15 +238,87 @@ mod tests {
             )])
             .unwrap(),
         );
-        let argv = |w: &[&str]| -> Vec<String> {
-            std::iter::once("claudio")
-                .chain(w.iter().copied())
-                .map(String::from)
-                .collect()
-        };
         assert_eq!(route(&argv(&["__probe"]), &addons), ExitCode::from(7));
         assert_eq!(route(&argv(&["mine", "x"]), &addons), ExitCode::from(9));
         // The core's words are never an addon's dispatch.
         assert_eq!(core_word(&argv(&["mine"]), &addons), None);
+    }
+
+    #[cfg(not(feature = "api"))]
+    #[test]
+    fn a_build_without_the_api_addon_refuses_print_mode() {
+        let addons = registry();
+        for flag in ["-p", "--print", "--api"] {
+            let args = argv(&["--model", "m", flag, "hi"]);
+            assert_eq!(route(&args, &addons), ExitCode::from(2), "{flag}");
+        }
+        // After a bare `--`, `-p` is a prompt for the real claude.
+        let prompt = argv(&["--", "-p"]);
+        assert_eq!(refuse_print_without_api(&prompt[1..]), None);
+        assert_eq!(refuse_print_without_api(&argv(&["--resume"])[1..]), None);
+    }
+
+    #[cfg(not(feature = "web"))]
+    #[tokio::test]
+    async fn a_build_without_the_web_addon_asks_claude_for_no_lenses() {
+        use claudio_core::addon::{LaunchOp, LaunchSelect};
+        use claudio_core::app::addons::test_support::{fake_host, next_request, reply};
+        use claudio_core::app::addons::{AddonRuntime, RuntimeOptions};
+        use claudio_core::app::launch::{self, LaunchSpec, Step};
+        use claudio_core::proto::{Msg, SessionId, SpawnSpec};
+
+        let opts = RuntimeOptions {
+            config_path: "/nonexistent/claudio/config.toml".into(),
+            watch_config: false,
+        };
+        let (rt, _rx) = AddonRuntime::start(registry(), opts);
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let client = fake_host(&[], move |mut s| async move {
+            while let Some((req, msg)) = next_request(&mut s).await {
+                let Msg::Spawn(spec) = msg else {
+                    reply(&mut s, req, Msg::Pong).await;
+                    continue;
+                };
+                reply(
+                    &mut s,
+                    req,
+                    Msg::Spawned {
+                        id: spec.id,
+                        pid: None,
+                    },
+                )
+                .await;
+                let _ = sent_tx.send(spec);
+                return;
+            }
+        })
+        .await;
+        let sid = SessionId::from_u128(7);
+        let spec = LaunchSpec {
+            op: LaunchOp::New,
+            sid,
+            host: "local".into(),
+            cwd: "/w".into(),
+            select: LaunchSelect::of(None),
+            frontend: claudio_core::addon::Frontend::Tui,
+            base: Msg::Spawn(SpawnSpec {
+                id: sid,
+                cwd: "/w".into(),
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            }),
+            core_lenses: Default::default(),
+        };
+        let step = launch::run(&rt, spec, client).await;
+        assert!(matches!(step, Step::Sent { .. }), "{step:?}");
+        let spawned = sent_rx.await.unwrap();
+        let lenses = spawned.extensions.unwrap_or_default().lenses;
+        let names: Vec<&str> = lenses.iter().map(|l| l.name.as_str()).collect();
+        assert!(
+            !names.contains(&"latex") && !names.contains(&"mermaid"),
+            "{names:?}"
+        );
+        rt.shutdown();
     }
 }
