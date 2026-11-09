@@ -1,6 +1,6 @@
 # `claudio web` as a daemon service: design
 
-Status: audited (2026-11-09; awaiting owner approval)   Class: architectural
+Status: approved (2026-11-09)   Class: architectural
 Owner decisions so far:
 - 2026-11-09: `claudio web` and `claudio web --remote` save their settings in `config.toml` and
   hand the server to the daemon; the terminal is not kept open.
