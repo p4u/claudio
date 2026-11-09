@@ -1,10 +1,24 @@
-# `claudio web` browser protocol, version 1
+# `claudio web` browser protocol, version 2
 
 This is the contract between the server (`src/web/`) and the browser app (`web/app/`). Both
 are built from it in parallel; neither side may add, rename or reshape a message without
 changing this file first. Derived from `docs/specs/2026-11-08-web-ui-design.md`
-(§Browser protocol, §Session model, §Spawn composition). Where the spec is silent, the
-decision is marked **(decided here)**.
+(§Browser protocol, §Session model, §Spawn composition) and, for version 2,
+`docs/specs/2026-11-09-core-addons-design.md` (§Web protocol v2). Where the spec is silent,
+the decision is marked **(decided here)**.
+
+Version 2 replaces the proxy and plugin ops of version 1 by generic addon ops (`addons.*`, §5):
+the server knows no proxy or plugin, it renders what the addons (docs/addons.md) hand it.
+
+**Compatibility (transitional).** While the page moves to version 2 (core-addons plan
+P3.14-P3.15), the server serves both op sets under `"v": 1`: the `addons.*` ops, the
+`launch`/`defer` args, `review` replies, `segments` and `launch` in the Session and the
+`addons.changed` event are added beside the version-1 `proxy.*`/`plugins.*` ops, args, fields
+and events (`profiles` in the snapshot, `proxy`/`proxy_known`/`first_party` in the Session,
+`plugin_status`, `profiles`; version 1's text is in git history). A request giving both a
+version-1 arg (`proxy`, `first_party`, `skip_plugins`) and `launch`/`defer` answers
+`"bad request: launch: not with proxy, first_party or skip_plugins"`. P3.16 removes the version-1
+set and the hello says `"v": 2`.
 
 ## 1. HTTP surface
 
@@ -72,17 +86,17 @@ One socket per browser tab, `ws://<host>/ws` (or `wss://` behind a TLS proxy).
 ### 3.1 On open (server → client)
 
 ```json
-{"t":"hello","v":1,"version":"0.8.0","features":[]}
-{"t":"snapshot","hosts":[Host],"sessions":[Session],"profiles":{"names":["work"],"default":"work"},"layout":Layout,"order":["<uuid>"]}
+{"t":"hello","v":2,"version":"0.9.0","features":[]}
+{"t":"snapshot","hosts":[Host],"sessions":[Session],"layout":Layout,"order":["<uuid>"]}
 ```
 
-`features` is reserved for later minor additions (empty in v1); clients ignore unknown entries.
+`features` is reserved for later minor additions (empty in v2); clients ignore unknown entries.
 Right after the snapshot the server replays, in this order **(decided here)**: one
 `host_stats` per host with stats, one `lens` and one `latex` per session with a non-empty item
 list, one `claude` per host with an open offer (`offer_install`/`offer_update`) or a running
 install/update.
 
-If `hello.v` is not `1`, the page shows "server updated" and reloads once
+If `hello.v` is not `2`, the page shows "server updated" and reloads once
 (`sessionStorage["claudio.reloaded"] = "1"`); a second mismatch in a row shows the message
 without reloading. The flag is cleared after a matching hello.
 
@@ -135,10 +149,9 @@ a socket path or a hook token.
 | `created_at` | number | Unix seconds |
 | `pid` | number \| null | |
 | `dormant` | bool | journaled, no process (`pid` null and `state` `exited`): offer *Resume*, never auto-respawn |
-| `proxy` | string \| null | proxy profile name; null = direct or unknown (see `proxy_known`) |
-| `proxy_known` | bool | whether `proxy`/`first_party` are known (web-state.json or the TUI's state.json) **(decided here)** |
-| `first_party` | bool | |
-| `ephemeral` | bool | always false in v1 (ephemeral sessions are not listed) |
+| `launch` | `{"known": bool, "choice": LaunchChoice \| null}` | how it was launched: `choice` null is direct; `known` false when neither web-state.json nor the TUI's state.json knows (a session started elsewhere: it is never restarted direct, see `session.respawn`) |
+| `segments` | [Segment] | its addons' status segments, by priority (lower first) |
+| `ephemeral` | bool | always false (ephemeral sessions are not listed) |
 | `prompt_pending` | bool | an opening prompt waits to be pasted **(decided here)** |
 
 ### Attention
@@ -170,7 +183,7 @@ only for the approval kinds and the two kinds above. Show `message` first.
 | `outdated` | bool | the daemon is older than this claudio and was left running because it was busy; the server reconnects once it is idle (checked every 120 s) |
 | `hostname`, `os`, `arch` | string \| null | from the daemon's Welcome |
 | `claude` | `{"path": string, "version": string}` \| null | null: claude is not installed there |
-| `features` | [string] | the daemon's features: `lens`, `search`, `last_prompt`, `attention`, `worktree` |
+| `features` | [string] | the daemon's features: `lens`, `search`, `last_prompt`, `attention`, `worktree`, and `addon:<name>` for each addon it runs ops for |
 | `version` | string \| null | the daemon's claudio version |
 
 ### Layout **(decided here)**
@@ -190,10 +203,44 @@ browsers.
   `U` (unmerged), `?` (untracked: both `?`). `added`/`removed` sum the staged and unstaged
   counts; null for binary or untracked files. Paths are relative to `root`.
 - SearchHit `{"host","conversation","cwd","modified","title","snippet","matches"}`.
-- Extension `{"name","description","enabled": bool,"source": "builtin"|"external"|"plugin","profile": string|null,"refused": string|null,"lenses":[{"name","kind":"tag"|"fence"}],"actions":[{"id","title","input": string|null}]}`.
+- Extension `{"name","description","enabled": bool,"source": "builtin"|"external"|"addon","addon": string|null,"refused": string|null,"lenses":[{"name","kind":"tag"|"fence"}],"actions":[{"id","title","input": string|null}]}`
+  (`addon`: the addon whose row it is; its details come from `addons.rows`).
 - ActionResult `{"kind":"document","title","markdown"}` | `{"kind":"notice","text"}` |
   `{"kind":"paste","text"}` | `{"kind":"list","title","items":[{"label","detail": string|null,"result": ActionResult}]}` |
   `{"kind":"resume","host","cwd","conversation"}`.
+
+### Addons **(version 2)**
+
+Every string here comes from an addon. The server cleans it before it is sent (control and
+format characters removed, one line, at most 4096 bytes; a segment at most 64 characters, a
+checklist at most 256 items, a panel over 64 KiB encoded replaced by an error page) and the
+page renders it as text (§7). No addon DTO carries an env value or a token.
+
+- Segment `{"addon","id","text","tone": "ok"|"warn"|"hot"|"muted"|"accent","priority": 0-255}`.
+- LaunchOption `{"id","label","group","default": bool,"detail": string|null}`: one entry of a
+  select; options of one `group` share a select (the group `Proxy` is the proxy profiles).
+- LaunchSelect `{"pick": "default"|"direct"|"option","addon"?,"option"?,"flags":[string]}`:
+  what the member asked for; `addon`/`option` only with `"pick":"option"`; `flags` are the
+  labelled flags' `name`s (below) the member turned on.
+- LaunchChoice `{"addon","option","flags":[string]}`: what a session was launched with.
+- AddonDecl `{"name","panels":[{"id","title","windows":[string],"key": string|null}],"launch_options":[LaunchOption],"launch_flags":[{"name","label"}]}`:
+  `windows` the time windows a panel request may name (the first is the default), `key` the
+  TUI's default key spec (informative); `launch_flags` the switches the wizard shows as
+  checkboxes (`name` is what goes into `LaunchSelect.flags`).
+- Panel `{"title","pages":[{"title","blocks":[Block]}],"actions":[PanelAction],"updated": number|null}`
+  (`updated`: Unix seconds the data was fetched).
+- Block, by `kind`: `{"kind":"text","text","tone"?}`, `{"kind":"key_values","items":[[k,v]]}`,
+  `{"kind":"table","header":[string],"rows":[[string]]}`,
+  `{"kind":"gauge","label","used": n,"limit": n,"resets": string|null}`,
+  `{"kind":"bars","label","series":[[label, n]]}`.
+- PanelAction `{"id","label","key": string|null,"confirm": string|null}` (`confirm`: ask
+  this first).
+- Checklist `{"id","revision","title","intro","items":[ChecklistItem]}`; ChecklistItem
+  `{"id","label","detail": string|null,"section": string|null,"on": bool}` (a `section` heading
+  is printed when it changes). A save names the `revision` it saw.
+- ExtensionRow `{"addon","name","description","on": bool,"refused": string|null,"details":[string],"setup": string|null}`
+  (`setup`: the id of the checklist that sets it up, of the same addon).
+- Notice `{"text","level": "info"|"warn"|"error"}`.
 
 ## 5. Ops
 
@@ -218,14 +265,20 @@ known host answers `"no such host"`; a known but disconnected one `"not connecte
 | `session.attach` | `sid`, `rows`, `cols` (1..=1000) | `{}` | then an `attached` event and the snapshot. First subscriber of the session: the server attaches at `rows`×`cols`; later ones: the server re-attaches at the session's current size (no resize), so every subscribed tab gets a fresh `attached` + snapshot |
 | `session.detach` | `sid` | `{}` | the server detaches from the daemon when the last subscriber leaves |
 | `session.resize` | `sid`, `rows`, `cols` | `{}` | send only from the focused pane, debounced 250 ms, never in reply to `attached` |
-| `session.spawn` | `host`, `cwd`, `rows`, `cols`, `proxy` (see below), `first_party?` (bool), `resume?` (conversation id), `name?`, `prompt?` (≤ 64 KiB), `skip_plugins?` ([name]) | `{"sid":uuid}` | `proxy`: `{"kind":"default"}` (`[proxy] default`; direct when none), `{"kind":"direct"}`, `{"kind":"profile","name":"work"}`. `first_party` without a proxy answers `"first-party needs a proxy profile"`. With `prompt`, the session's `prompt_pending` is true until the server pasted it (or gave up after 60 s with a `notice`). Waits ≤ 20 s for pending plugin manifests |
+| `session.spawn` | `host`, `cwd`, `rows`, `cols`, `launch?` (LaunchSelect; default `{"pick":"default"}`), `defer?` ([{`addon`,`id`}], ≤ 16), `resume?` (conversation id), `name?`, `prompt?` (≤ 64 KiB) | `{"sid":uuid}` or `{"review":{"addon","id","revision"}}` | `launch` names a registered addon and one of its options, and only labelled flags (else `"bad request: launch: …"`); flags without an addon's option in effect answer `"bad request: launch: flags need an addon's option"`. An addon that cannot launch as asked fails it (never direct). The addons prepare the launch within 25 s; when one needs a checklist reviewed first, nothing is started and the reply is `review` (below). With `prompt`, the session's `prompt_pending` is true until the server pasted it (or gave up after 60 s with a `notice`) |
 | `session.shell` | `host`, `cwd`, `rows`, `cols`, `name?` | `{"sid":uuid}` | a terminal tab (login shell) |
-| `session.respawn` | `sid`, `fresh` (bool), `rows`, `cols`, `proxy?`, `first_party?` | `{"sid":uuid}` | resume unless `fresh`. Without `proxy`, the server uses what it knows; when it knows nothing (and the session is claude): `"proxy unknown"`; the UI asks (default/direct/profile, pre-selecting `[proxy] default`) and sends again with `proxy` |
+| `session.respawn` | `sid`, `fresh` (bool), `rows`, `cols`, `launch?` (LaunchSelect) | `{"sid":uuid}` | resume unless `fresh`. Without `launch`, the server launches it as it was (its `launch.choice`); when it does not know (`launch.known` false, a claude session): `"launch unknown"`, and the UI asks (the launch options, pre-selecting the default) and sends again with `launch`. A respawn never waits for a review |
 | `session.kill` | `sid` | `{}` | |
 | `session.rename` | `sid`, `name` (string ≤ 200 chars, or null to clear) | `{}` | |
 | `session.paste` | `sid`, `text` (≤ 64 KiB), `submit` (bool) | `{}` | wrapped in bracketed paste; `ESC[201~` and C0 controls other than `\t`/`\n` removed (CR/CRLF become `\n`); `\r` after it when `submit`. `"too large"` past 64 KiB |
 | `session.approve` | `sid`, `decision` (`"approve"`\|`"deny"`), `attention_seq` (number) | `{}` | accepted only when the server's state is `needs_approval`, its attention kind is `permission_prompt`/`worker_permission_prompt` and its seq equals `attention_seq`: `approve` sends `\r` (Enter), `deny` sends `ESC`. Else `"stale"`, or `"not a permission prompt"` for another kind with the right seq. On a host without the `attention` feature: `attention_seq` must be `0` |
 | `session.order` | `sids` ([uuid]) | `{}` | the board order; saved, and sent to the other tabs as `order` |
+
+**Review (decided here).** A `review` reply means addon `addon` wants checklist `id` (at
+`revision`) reviewed before this launch. The server keeps nothing of it. The page shows
+`addons.checklist {addon, id}` and then: *Save* → `addons.checklist.save` and the same
+`session.spawn` again; *Skip* → the same `session.spawn` with `{addon, id}` added to `defer`
+(the addon leaves that checklist's part out of this launch only); *Cancel* → nothing is sent.
 
 ### Files and conversations
 
@@ -252,7 +305,7 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | `git.commit` | `sid`, `oid` (full hash) | GitCommitInfo | |
 | `git.diff` | `sid`, `oid`, `file?` (index into the commit's `files`) | GitPatch | whole commit without `file` |
 
-### Proxy
+### Proxy (version 1 only; removed in version 2)
 
 | Op | Args | → |
 |---|---|---|
@@ -263,7 +316,7 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 `proxy.credential`/`proxy.switch` need a session with a proxy profile and a
 `claude_session_id`; else `"no proxy for this session"` / `"no conversation yet"`.
 
-### Snippets, extensions, plugins
+### Snippets, extensions, plugins (the `plugins.*` ops: version 1 only)
 
 | Op | Args | → | Notes |
 |---|---|---|---|
@@ -271,13 +324,31 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | `snippets.save` | `text` (≤ 64 KiB), `name?` | `{"name"}` | without `name`: stored under the slug of the text, never replacing (`-2`, `-3`… when taken). With `name`: stored under `slug(name)` (same slug rules as the TUI) and an existing snippet of that name is replaced; the reply's `name` is that slug. These are the prompts the Compose editor's "Saved" library lists |
 | `snippets.delete` | `name` | `{}` | `name` must be the name of an existing snippet as `snippets.list` returns it (slug characters only: no `/`, `..`, hidden or non-`.md` file); anything else `"bad request: name: …"` |
 | `extensions.list` | — | `{"extensions":[Extension]}` | registry order |
-| `extensions.toggle` | `name`, `on` | `{}` | writes `[extensions] name = on` in config.toml; applies to new sessions |
+| `extensions.toggle` | `name`, `on` | `{}` | writes `[extensions] name = on` in config.toml; applies to new sessions. An addon's row goes the way of `addons.row_action` `toggle` |
 | `extensions.action` | `ext`, `action`, `input?`, `sid?` | `{"result":ActionResult}` | external extensions only; a built-in answers `"not an external extension"` (search and snippets are UI features) |
 | `extensions.render` **(decided here)** | `lens`, `kind` (`"tag"`\|`"fence"`), `source` | `{"inline": string\|null,"block":[string]\|null}` | an external lens item rendered by its program, as the TUI's reader does; both null when it has no rendering |
 | `plugins.list` | — | `{"plugins":[{"name","version","profile","enabled","refused": string\|null,"choices_saved": bool,"manifest": "fetching"\|"ready"\|"failed","manifest_error": string\|null,"description": string}]}` | |
 | `plugins.items` | `name` | `{"name","version","items":[{"id","section","title","checked"}]}` | `section` is the manifest section's heading; `checked` = not in the saved `disabled` (all checked on first sight) |
 | `plugins.save` | `name`, `disabled` ([item id]) | `{}` | saves `[plugins.<name>]` and asks every connected host again |
 | `plugins.status` | — | `{"status":[PluginStatus]}` | one per (host, plugin) asked; same shape as the `plugin_status` event minus `ev` |
+
+### Addons **(version 2)**
+
+`addon` must name a registered addon (else `"bad request: addon: no such addon"`); `id`, `name`
+and `panel` match `[a-z0-9-]{1,64}`; `sid`, where given, must name a session the server knows
+(`"no such session"`). A session-bound request carries only `sid`: the server finds the
+session's launch and conversation in its own state and hands the addon those, never anything
+the page sends (an extra arg answers `"bad request: …"`).
+
+| Op | Args | → | Notes |
+|---|---|---|---|
+| `addons.list` | — | `{"addons":[AddonDecl]}` | registry order; addons with neither panels, launch options nor launch flags are left out |
+| `addons.panel` | `addon`, `id`, `page?` (≥ 0), `window?` (one of the panel's `windows`), `sid?` | Panel | 10 s; past it, or when the addon fails, an error page (one `text` block saying why) |
+| `addons.action` | `addon`, `panel`, `action`, `sid?` | Notice | 15 s, then `"<addon>: the action timed out"`; the addon's refusal is the error |
+| `addons.checklist` | `addon`, `id` | Checklist | `"no such checklist"` when the addon has none (yet) |
+| `addons.checklist.save` | `addon`, `id`, `revision`, `answer`: `{"off":[item id]}` (≤ 256 ids of ≤ 128 bytes, each one of the checklist's) \| `"defer"` | `{}` | `"stale"` when the checklist's revision is no longer `revision` (the page reads it again); `"defer"` puts it off for this server run. 15 s |
+| `addons.rows` | — | `{"rows":[ExtensionRow]}` | registry order; `on`/`refused` as the registry has them (a name a core extension holds is refused) |
+| `addons.row_action` | `addon`, `name`, `action`: `"toggle"` \| `"refresh"`, `on?` (bool; `toggle` only, required) | `{}` | `toggle` writes `[extensions] <name> = on` in config.toml, then tells the addon (a refused row answers `"refused: <why>"`); `refresh` has the addon refetch its rows' data. 15 s; then `extensions_changed` |
 
 ### Claude, layout
 
@@ -300,11 +371,12 @@ after 500 ms, then listed in `failed`. Hits are merged newest first.
 | `lens` | `sid`, `seq`, `items`: [{`tag`,`text`}] | the session's whole tag-lens list, oldest first (a host without the `lens` feature: its formulas as `latex` items) |
 | `latex` | `sid`, `seq`, `formulas`: [string] | sent with every `lens`, the `latex` items' texts, same `seq` |
 | `notice` | `text`, `level` (`"info"`\|`"warn"`\|`"error"`), `host`: string\|null, `sid`: uuid\|null | |
-| `plugin_status` | `host`, `name`, `state` (`"pending"`\|`"ready"`\|`"failed"`\|`"too_old"`), `installed` [id], `present` [id], `skipped` [{`id`,`reason`,`retry_secs`: n\|null}], `dropped` [string], `error`: string\|null | an `Applied` answer changed |
+| `addons.changed` **(version 2)** | `addon` | the addon's segments, rows, launch options or an open panel changed: re-read what is shown of it (`addons.list`, `addons.rows`, an open panel). A session whose segments changed also gets a `session` event |
+| `plugin_status` (version 1 only) | `host`, `name`, `state` (`"pending"`\|`"ready"`\|`"failed"`\|`"too_old"`), `installed` [id], `present` [id], `skipped` [{`id`,`reason`,`retry_secs`: n\|null}], `dropped` [string], `error`: string\|null | an `Applied` answer changed |
 | `claude` | `host`, `phase` (`"offer_install"`\|`"offer_update"`\|`"installing"`\|`"updating"`\|`"done"`\|`"failed"`), `have`: string\|null, `want`: string\|null, `version`: string\|null, `tail`: string\|null (≤ 2 KiB) | install/update offers and progress |
 | `order` | `sids` | another tab reordered |
 | `layout` | `layout` | another tab saved a layout |
-| `profiles` | `names`, `default` | config.toml's proxy profiles changed |
+| `profiles` (version 1 only) | `names`, `default` | config.toml's proxy profiles changed |
 | `extensions_changed` | — | the registry changed (a toggle, or config.toml re-read): call `extensions.list` |
 
 Seq rules for `lens`/`latex`: keep the list with the higher `seq`; a lower one is dropped;
@@ -324,4 +396,10 @@ after an `attached` event or a `session` event whose session was just (re)create
   `htmlLabels: false`, `startOnLoad: false`; the SVG goes through DOMPurify's SVG profile.
   A diagram whose type is not available renders as a code block with a notice.
 - Code fences: highlight.js (common languages), a copy button per block.
-- Everything else from the server (labels, attention text, git text, hosts): text nodes only.
+- Everything else from the server (labels, attention text, git text, hosts, and every addon
+  string: segments, launch options, panels, checklists, rows, notices): text nodes only.
+- Panel blocks: `text` a paragraph, `key_values` a two-column list, `table` an HTML table of
+  text cells, `gauge` a label with `used / limit` and a bar, `bars` one bar per entry. Bars
+  are `<div>`s whose width is a CSS percentage of the largest value (no SVG, no canvas, no
+  inline script); `tone` maps to the theme's tokens (ok green, warn violet, hot coral, muted
+  steel, accent teal).
