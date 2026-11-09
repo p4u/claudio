@@ -25,6 +25,7 @@ mod keymap;
 mod keys;
 mod leader;
 mod notifications;
+mod pane;
 mod panel_view;
 mod plain;
 mod reader;

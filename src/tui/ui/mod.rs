@@ -328,7 +328,7 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
     };
     // Claude's screen as claude drew it: formulas, diagrams and tag lenses
     // render in the web UI only.
-    view.mirror.render(area, frame.buffer_mut());
+    super::pane::render(&view.mirror, area, frame.buffer_mut());
     if let Some(sel) = app.selection.as_ref().filter(|s| s.session == view.id) {
         highlight_selection(frame.buffer_mut(), area, sel);
     }
