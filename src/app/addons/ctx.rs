@@ -1,0 +1,238 @@
+//! [`Ctx`]: the one [`AddonCtx`] implementation, one per addon (D2). It holds
+//! the runtime weakly, so an addon keeping its context never keeps the
+//! runtime alive.
+
+use std::sync::{Arc, Weak};
+
+use serde_json::Value;
+
+use super::{Inner, RuntimeOut};
+use crate::addon::{
+    self, AddonCtx, AddonError, BoxFuture, ConfigEdit, HostSnap, Level, Notice, SessionSnap,
+};
+use crate::proto::{self, Msg};
+
+/// The cap of an offered checklist id.
+const CHECKLIST_ID_BYTES: usize = 64;
+
+pub(super) struct Ctx {
+    inner: Weak<Inner>,
+    addon: &'static str,
+}
+
+impl Ctx {
+    pub(super) fn new(inner: &Arc<Inner>, addon: &'static str) -> Ctx {
+        Ctx {
+            inner: Arc::downgrade(inner),
+            addon,
+        }
+    }
+
+    /// Whether `section` is one this addon declared (A3).
+    fn declared(&self, inner: &Inner, section: &str) -> bool {
+        inner
+            .addons
+            .get(self.addon)
+            .is_some_and(|a| a.config_sections().contains(&section))
+    }
+}
+
+/// A finished request: `err` now.
+fn failed<T: Send + 'static>(err: T) -> BoxFuture<'static, T> {
+    Box::pin(async move { err })
+}
+
+impl AddonCtx for Ctx {
+    fn addon(&self) -> &'static str {
+        self.addon
+    }
+
+    fn spawn(&self, task: BoxFuture<'static, ()>) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let (limit, timeout) = (inner.limits.tasks, inner.limits.task_timeout);
+        let mut tasks = inner.tasks();
+        if tasks.stopped {
+            return;
+        }
+        let set = tasks.addons.entry(self.addon).or_default();
+        while set.try_join_next().is_some() {}
+        if set.len() >= limit {
+            tracing::warn!(
+                addon = self.addon,
+                limit,
+                "addon task dropped: too many running"
+            );
+            return;
+        }
+        let addon = self.addon;
+        let run = async move {
+            if tokio::time::timeout(timeout, task).await.is_err() {
+                tracing::warn!(addon, "addon task timed out");
+            }
+        };
+        set.spawn_on(run, &inner.runtime);
+    }
+
+    fn http(&self) -> reqwest::Client {
+        match self.inner.upgrade() {
+            Some(inner) => inner.http.clone(),
+            None => reqwest::Client::new(),
+        }
+    }
+
+    fn request(
+        &self,
+        host: &str,
+        op: &str,
+        body: Value,
+    ) -> BoxFuture<'static, Result<Value, AddonError>> {
+        let not_connected = || AddonError::NotConnected(host.to_owned());
+        let Some(inner) = self.inner.upgrade() else {
+            return failed(Err(not_connected()));
+        };
+        let (client, has) = match inner.state().hosts.get(host) {
+            Some(h) => (
+                h.client.clone(),
+                h.features.contains(&addon::feature(self.addon)),
+            ),
+            None => (None, false),
+        };
+        let Some(client) = client else {
+            return failed(Err(not_connected()));
+        };
+        if !has {
+            return failed(Err(AddonError::Missing(host.to_owned())));
+        }
+        if proto::addon_body_ok(&body).is_err() {
+            return failed(Err(AddonError::TooLarge));
+        }
+        let msg = Msg::AddonOp {
+            addon: self.addon.to_owned(),
+            op: op.to_owned(),
+            body,
+        };
+        let timeout = inner.limits.request_timeout;
+        let reply = client.request(msg);
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, reply).await {
+                Err(_) => Err(AddonError::Timeout),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => Err(AddonError::Timeout),
+                Ok(Err(e)) => Err(AddonError::Daemon(e.to_string())),
+                Ok(Ok(Msg::AddonReply { body })) => match proto::addon_body_ok(&body) {
+                    Ok(()) => Ok(body),
+                    Err(_) => Err(AddonError::TooLarge),
+                },
+                Ok(Ok(_)) => Err(AddonError::Daemon("unexpected reply".to_owned())),
+            }
+        })
+    }
+
+    fn host_has(&self, host: &str) -> bool {
+        let Some(inner) = self.inner.upgrade() else {
+            return false;
+        };
+        let feature = addon::feature(self.addon);
+        let state = inner.state();
+        state
+            .hosts
+            .get(host)
+            .is_some_and(|h| h.client.is_some() && h.features.contains(&feature))
+    }
+
+    fn sessions(&self) -> Vec<SessionSnap> {
+        self.inner
+            .upgrade()
+            .map(|i| i.state().sessions.clone())
+            .unwrap_or_default()
+    }
+
+    fn hosts(&self) -> Vec<HostSnap> {
+        self.inner
+            .upgrade()
+            .map(|i| i.host_snaps())
+            .unwrap_or_default()
+    }
+
+    fn config(&self, section: &str) -> toml::Table {
+        let Some(inner) = self.inner.upgrade() else {
+            return toml::Table::new();
+        };
+        if !self.declared(&inner, section) {
+            return toml::Table::new();
+        }
+        let state = inner.state();
+        match state.config.get(section) {
+            Some(toml::Value::Table(t)) => t.clone(),
+            _ => toml::Table::new(),
+        }
+    }
+
+    fn edit_config(
+        &self,
+        section: &str,
+        edit: ConfigEdit,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let Some(inner) = self.inner.upgrade() else {
+            return failed(Err("claudio is stopping".to_owned()));
+        };
+        if !self.declared(&inner, section) {
+            return failed(Err(format!("[{section}] is not {}'s", self.addon)));
+        }
+        let section = section.to_owned();
+        Box::pin(async move {
+            let _edit = inner.edit.lock().await;
+            let path = inner.opts.config_path.clone();
+            let edited = tokio::task::spawn_blocking(move || {
+                crate::app::config_edit::edit_section(&path, &section, edit)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|_| "the config edit stopped".to_owned())??;
+            if edited {
+                if let Some(config) =
+                    super::events::load_config(inner.opts.config_path.clone()).await
+                {
+                    inner.state().config = config;
+                }
+                inner.event(addon::AddonEvent::ConfigChanged);
+            }
+            Ok(())
+        })
+    }
+
+    fn extension_on(&self, name: &str) -> Option<bool> {
+        let inner = self.inner.upgrade()?;
+        let state = inner.state();
+        state.config.get("extensions")?.get(name)?.as_bool()
+    }
+
+    fn notify(&self, text: String) {
+        if let Some(inner) = self.inner.upgrade() {
+            let notice = addon::notice(Notice {
+                text,
+                level: Level::Info,
+            });
+            inner.outbox.push(RuntimeOut::Notice {
+                addon: self.addon,
+                notice,
+            });
+        }
+    }
+
+    fn changed(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.outbox.changed(self.addon);
+        }
+    }
+
+    fn offer_checklist(&self, id: String) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.outbox.push(RuntimeOut::Offer {
+                addon: self.addon,
+                checklist: addon::line(&id, CHECKLIST_ID_BYTES),
+            });
+        }
+    }
+}

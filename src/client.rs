@@ -70,8 +70,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 /// `UpdateClaude` runs up to 300 s on the daemon, plus the re-probe.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(330);
-/// A `Manifest` download may take the daemon's 120 s, after waiting for
-/// one already running.
+/// A `Manifest` download (the daemon's 120 s, after one already running)
+/// or an `AddonOp` (the daemon's 150 s; the addon runtime stops at 170 s).
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(250);
 
 /// Something the daemon sent without being asked.
@@ -471,7 +471,7 @@ impl Client {
         let timeout = match msg {
             Msg::Spawn(_) | Msg::SpawnShell(_) => SPAWN_TIMEOUT,
             Msg::UpdateClaude { .. } => UPDATE_TIMEOUT,
-            Msg::Manifest { .. } => DOWNLOAD_TIMEOUT,
+            Msg::Manifest { .. } | Msg::AddonOp { .. } => DOWNLOAD_TIMEOUT,
             _ => REQUEST_TIMEOUT,
         };
         let queued = self.enqueue(msg);

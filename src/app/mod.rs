@@ -2,6 +2,10 @@
 //! state, daemon connections, the extension registry and snippets. Nothing
 //! here draws or reads input; it imports neither ratatui, crossterm nor axum.
 
+// P3: the runtime lands before all its callers (docs/plans/2026-11-09-core-addons-p3-plan.md);
+// removed in P3.20, with the addon API's own allow.
+#[allow(dead_code)]
+pub(crate) mod addons;
 pub(crate) mod browser;
 pub(crate) mod config_edit;
 pub(crate) mod connections;
