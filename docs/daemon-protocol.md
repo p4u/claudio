@@ -19,9 +19,9 @@ handling in `src/daemon/server.rs`.
 A frame is `[u32 BE length][u8 tag][payload]`; `length` counts the tag and the payload and is at
 most `MAX_FRAME` (1 MiB).
 
-- Tag `J`: a JSON control message, `Envelope { req, msg }`. A request carries a `req` id and its
-  reply echoes it; a pushed event carries none. `msg` is a `Msg`, tagged by its `op` field
-  (`snake_case`). Unknown fields are ignored, and an `op` a peer does not know decodes to
+- Tag `J`: a JSON control message, `Envelope { req, msg }`, one flat object: a `Msg`, tagged by
+  its `op` field (`snake_case`), plus `req`. A request carries a `req` id and its reply echoes
+  it; a pushed event carries none. Unknown fields are ignored, and an `op` a peer does not know decodes to
   `Msg::Unknown`.
 - Tag `D`: terminal bytes for one session: a 16-byte session id, then raw bytes (input from the
   client, PTY output from the daemon). The first `D` frame after `Attached` is the screen
@@ -70,8 +70,8 @@ first. Replies are matched by `req`, never by order.
 `Msg` is tagged by its `op` key, so the addon's op travels as `name`:
 
 ```json
-{"req": 7, "msg": {"op": "addon_op", "addon": "echo", "name": "sleep", "body": {"secs": 2}}}
-{"req": 7, "msg": {"op": "addon_reply", "body": {"slept": 2.0}}}
+{"req": 7, "op": "addon_op", "addon": "echo", "name": "sleep", "body": {"secs": 2}}
+{"req": 7, "op": "addon_reply", "body": {"slept": 2.0}}
 ```
 
 `body` is any JSON value (`null` when absent). The daemon finds the addon in its registry and
