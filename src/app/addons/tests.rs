@@ -309,6 +309,25 @@ async fn spawned_tasks_are_bounded_timed_out_and_aborted_at_shutdown() {
 }
 
 #[tokio::test]
+async fn extension_on_maps_claude_latex_false_onto_latex() {
+    let text = "[claude]\nlatex = false\n[extensions]\nlatex = true\ndiagram = true\n";
+    let (dir, path) = scratch(text);
+    let echo = Arc::new(TestAddon::new("echo"));
+    let (rt, _rx) = runtime(vec![echo.clone()], &path, Limits::default());
+    seen(&echo, 1).await; // Started: the config is read
+    let ctx = rt.ctx("echo");
+    // The alias wins over `[extensions] latex`, and only for latex.
+    assert_eq!(ctx.extension_on("latex"), Some(false));
+    assert_eq!(ctx.extension_on("diagram"), Some(true));
+    std::fs::write(&path, "[claude]\nlatex = true\n").unwrap();
+    rt.config_changed();
+    assert_eq!(seen(&echo, 2).await[1], "ConfigChanged");
+    assert_eq!(ctx.extension_on("latex"), None);
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn config_is_limited_to_declared_sections() {
     let text = "[team]\nurl = \"https://e.org\"\n[other]\nx = 1\n[extensions]\nteam = false\n";
     let (dir, path) = scratch(text);

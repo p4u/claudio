@@ -214,6 +214,12 @@ impl AddonCtx for Ctx {
     fn extension_on(&self, name: &str) -> Option<bool> {
         let inner = self.inner.upgrade()?;
         let state = inner.state();
+        // `[claude] latex = false` is the documented alias of
+        // `[extensions] latex = false`, mapped here once (and it wins).
+        let claude_latex = || state.config.get("claude")?.get("latex")?.as_bool();
+        if name == "latex" && claude_latex() == Some(false) {
+            return Some(false);
+        }
         state.config.get("extensions")?.get(name)?.as_bool()
     }
 
