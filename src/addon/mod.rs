@@ -1,8 +1,5 @@
 //! The addon API (docs/addons.md): what an addon implements, what the core
 //! offers it, the data it hands the front-ends, and the registry.
-// P3: the API lands before its consumers (docs/plans/2026-11-09-core-addons-p3-plan.md);
-// removed in P3.20.
-#![allow(dead_code)]
 
 mod clean;
 mod daemon;
@@ -93,11 +90,15 @@ pub trait Commands: Send + Sync {
 /// Each addon gets its own (D2).
 pub trait AddonCtx: Send + Sync {
     /// The addon this context belongs to.
+    // The API's own surface (docs/addons.md): no addon of this build calls
+    // it yet; it stays for the addons P4 makes crates (one allow per item).
+    #[allow(dead_code)]
     fn addon(&self) -> &'static str;
     /// A task on the front-end's runtime: ≤ 64 live per addon, 300 s each,
     /// aborted at shutdown.
     fn spawn(&self, task: BoxFuture<'static, ()>);
     /// The one shared HTTP client (cheap clone).
+    #[allow(dead_code)] // API surface, as `addon` above.
     fn http(&self) -> reqwest::Client;
     /// `AddonOp { addon: self.addon(), op, body }` to `host`'s daemon;
     /// `Missing` without `addon:<name>` in its features; bodies ≤ 512 KiB
@@ -113,6 +114,7 @@ pub trait AddonCtx: Send + Sync {
     /// The sessions the front-end knows.
     fn sessions(&self) -> Vec<SessionSnap>;
     /// The hosts the front-end knows.
+    #[allow(dead_code)] // API surface, as `addon` above.
     fn hosts(&self) -> Vec<HostSnap>;
     /// A declared section of config.toml (empty for an undeclared one).
     fn config(&self, section: &str) -> toml::Table;
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn name_ok_accepts_the_documented_charset_only() {
-        for good in ["a", "vocdoni", "web", "a-1", "x9", &"a".repeat(32)] {
+        for good in ["a", "team", "web", "a-1", "x9", &"a".repeat(32)] {
             assert!(name_ok(good), "{good}");
         }
         for bad in [

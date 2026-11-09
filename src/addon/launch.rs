@@ -160,6 +160,7 @@ pub struct LaunchRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub enum LaunchArg {
     /// Passed as is.
+    #[allow(dead_code)] // API surface (docs/addons.md); this build's addons use Optional.
     Plain(String),
     /// `flag value`, dropped by the daemon when its claude lacks `flag` (D6).
     Optional { flag: String, value: String },
