@@ -9,6 +9,7 @@
 #   make static     → portable static musl binary    (dist/claudio; ARCH=aarch64 for arm64)
 #   make static-docker → static binary via container (no host Rust toolchain)
 #   make test       → unit tests + full E2E suite against real claude
+#   make check      → the acceptance checks of ACCEPTANCE.md (fmt, clippy, rules, core-only build, unit tests)
 #   make test-unit  → unit tests only (no claude needed, ~0.1 s)
 #   make test-web   → browser app: node unit tests + Playwright e2e (debug build, fake claude/proxy)
 #   make e2e        → E2E suite only (alias for the integration subset of make test)
@@ -26,7 +27,7 @@ ARCH        ?= x86_64
 MUSL_TARGET := $(ARCH)-unknown-linux-musl
 DIST        := dist
 
-.PHONY: all build static static-docker test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
+.PHONY: all build static static-docker check test test-unit test-web e2e fmt clean install dev dev-undo uninstall docker evidence help
 
 all: build
 
@@ -91,6 +92,17 @@ e2e:
 
 fmt:
 	$(CARGO) fmt
+
+## The acceptance checks of ACCEPTANCE.md. Run with rustup's toolchain when there
+## is one (a distro clippy built for another rustc fails), in its own target dir
+## so it never invalidates the normal build.
+CHECK_CARGO := $(if $(RUSTUP_CARGO),PATH=$(dir $(RUSTUP_CARGO)):$$PATH CARGO_TARGET_DIR=target/check $(RUSTUP_CARGO),CARGO_TARGET_DIR=target/check $(CARGO))
+check:
+	$(CHECK_CARGO) fmt --check
+	$(CHECK_CARGO) clippy --locked --all-targets --all-features -- -D warnings
+	python3 scripts/check_rules.py
+	$(CHECK_CARGO) build --locked --no-default-features
+	$(CHECK_CARGO) test --locked --bin claudio
 
 ## Run representative cases against the real, locally-authenticated claude.
 evidence: build

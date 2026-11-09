@@ -27,3 +27,21 @@ jobs:
           RUST_BACKTRACE: 1
       # End-to-end tests require an authenticated `claude` and are gated behind
       # CLAUDIO_E2E; they do not run in CI.
+
+  check:
+    name: acceptance checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: make check (ACCEPTANCE.md)
+        run: make check
+        env:
+          RUST_BACKTRACE: 1
