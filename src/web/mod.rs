@@ -8,6 +8,7 @@ mod dto;
 mod ext;
 mod hub;
 mod input;
+mod lenses;
 mod plugins;
 mod proxy;
 mod spawn;
@@ -231,6 +232,42 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         auth::csp(assets.importmap_sha256()),
     )
     .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
+    let state = build_state(auth, assets).await?;
+    let (hub, ext) = (state.hub.clone(), Arc::clone(&state.ctx.ext));
+    if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
+        eprintln!("claudio web: local build {}", version());
+    }
+    // The one line on stdout (the tests read it).
+    let mut out = io::stdout();
+    let _ = writeln!(out, "claudio web: {url}");
+    let _ = out.flush();
+    let wanted = crate::app::browser::browser_wanted(
+        std::env::consts::OS,
+        |k| std::env::var(k).ok(),
+        io::stdout().is_terminal(),
+    );
+    if !args.no_open && wanted {
+        crate::app::browser::open_browser(&url);
+    }
+    tracing::info!(listen = %args.listen, "web: serving");
+
+    // Tabs are closed (1001) and web-state.json written before the server
+    // stops waiting for its connections.
+    let stop = async move {
+        shutdown().await;
+        hub.shutdown().await;
+        ext.shutdown().await;
+    };
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(stop)
+        .await
+        .map_err(|e| format!("server error: {e}"))
+}
+
+/// The server's state: the hub (from config.toml, both state files and the
+/// proxy profiles, read off the executor), the extensions, the plugins and
+/// the spawn context.
+async fn build_state(auth: auth::Auth, assets: Arc<assets::Assets>) -> Result<AppState, String> {
     // Files, before the hub starts: off the executor.
     let state_path = state::path();
     let (hub_cfg, cached_plugins) = {
@@ -265,43 +302,14 @@ async fn serve(args: WebArgs, token: String, url: String) -> Result<(), String> 
         plugins,
         ext: Arc::clone(&ext),
     });
-    let state = AppState {
+    Ok(AppState {
         auth: Arc::new(auth),
         assets,
         hub: hub.clone(),
         search_slots: Arc::default(),
         tabs: Arc::default(),
         ctx,
-    };
-
-    if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
-        eprintln!("claudio web: local build {}", version());
-    }
-    // The one line on stdout (the tests read it).
-    let mut out = io::stdout();
-    let _ = writeln!(out, "claudio web: {url}");
-    let _ = out.flush();
-    let wanted = crate::app::browser::browser_wanted(
-        std::env::consts::OS,
-        |k| std::env::var(k).ok(),
-        io::stdout().is_terminal(),
-    );
-    if !args.no_open && wanted {
-        crate::app::browser::open_browser(&url);
-    }
-    tracing::info!(listen = %args.listen, "web: serving");
-
-    // Tabs are closed (1001) and web-state.json written before the server
-    // stops waiting for its connections.
-    let stop = async move {
-        shutdown().await;
-        hub.shutdown().await;
-        ext.shutdown().await;
-    };
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(stop)
-        .await
-        .map_err(|e| format!("server error: {e}"))
+    })
 }
 
 /// Ctrl+C or SIGTERM.

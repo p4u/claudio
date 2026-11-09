@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::dto;
 use super::input::{self, Decision};
+use super::lenses;
 use super::state::{self, Layout, SessionMeta, WebState};
 use crate::app::connections::Connections;
 use crate::claude::update::{decide, needs_update, short, Decision as Policy};
@@ -481,43 +482,12 @@ pub(crate) fn apply_event(
             }
             out.changed = changed;
         }
-        // A daemon without the `lens` feature sends formulas only: they are
-        // its `latex` items. A lens daemon's are in its `Lens` events.
-        SessionEvent::Latex { seq, formulas } => {
-            if !lens_host {
-                let items = formulas
-                    .into_iter()
-                    .map(|text| LensItem {
-                        tag: "latex".to_owned(),
-                        text,
-                    })
-                    .collect();
-                out.lens = take_lens(view, seq, items);
-            }
-        }
-        SessionEvent::Lens { seq, items } => {
-            if lens_host {
-                out.lens = take_lens(view, seq, items);
-            }
+        e @ (SessionEvent::Latex { .. } | SessionEvent::Lens { .. }) => {
+            out.lens = lenses::relay(view, e, lens_host);
         }
         SessionEvent::Unknown => {}
     }
     out
-}
-
-/// Take lens list `seq`, unless a newer one is held (a replay and a
-/// broadcast may cross).
-fn take_lens(
-    view: &mut SessionView,
-    seq: u64,
-    items: Vec<LensItem>,
-) -> Option<(u64, Vec<LensItem>)> {
-    if seq <= view.lens_seq {
-        return None;
-    }
-    view.lens_seq = seq;
-    view.lens = items.clone();
-    Some((seq, items))
 }
 
 /// The daemon (re)attached the session: its size, and any lens `seq` is
@@ -1052,7 +1022,7 @@ fn tail(text: &str) -> String {
     text[at..].to_owned()
 }
 
-fn ev(name: &str, mut fields: Value) -> Value {
+pub(crate) fn ev(name: &str, mut fields: Value) -> Value {
     fields["t"] = "ev".into();
     fields["ev"] = name.into();
     fields
@@ -1361,7 +1331,7 @@ impl Hub {
         }
         for view in self.board() {
             if !view.lens.is_empty() {
-                out.extend(lens_events(view.info.id, view.lens_seq, &view.lens));
+                out.extend(lenses::lens_events(view.info.id, view.lens_seq, &view.lens));
             }
         }
         for h in self.ordered_hosts() {
@@ -1659,7 +1629,7 @@ impl Hub {
             self.send_session(sid);
         }
         if let Some((seq, items)) = applied.lens {
-            for v in lens_events(sid, seq, &items) {
+            for v in lenses::lens_events(sid, seq, &items) {
                 self.send_tabs(&v);
             }
         }
@@ -2247,22 +2217,6 @@ fn host_stats(host: &str, (cpu, mem_used, mem_total): (f32, u64, u64)) -> Value 
     )
 }
 
-/// The `lens` event of a list and its `latex` twin (same seq).
-fn lens_events(sid: SessionId, seq: u64, items: &[LensItem]) -> [Value; 2] {
-    let formulas: Vec<&str> = items
-        .iter()
-        .filter(|i| i.tag == "latex")
-        .map(|i| i.text.as_str())
-        .collect();
-    [
-        ev("lens", json!({"sid": sid, "seq": seq, "items": items})),
-        ev(
-            "latex",
-            json!({"sid": sid, "seq": seq, "formulas": formulas}),
-        ),
-    ]
-}
-
 fn claude_event(
     host: &str,
     phase: &str,
@@ -2466,7 +2420,8 @@ mod tests {
         let got = apply_event(&mut v, latex(), false, 1).lens;
         assert_eq!(got, Some((1, vec![item("latex", "x^2")])));
         assert_eq!(v.lens, vec![item("latex", "x^2")]);
-        let events = lens_events(v.info.id, 1, &[item("latex", "a"), item("chem", "b")]);
+        let events =
+            super::lenses::lens_events(v.info.id, 1, &[item("latex", "a"), item("chem", "b")]);
         assert_eq!(events[0]["ev"], "lens");
         assert_eq!(events[1]["formulas"], json!(["a"]));
         assert_eq!(events[1]["seq"], 1);

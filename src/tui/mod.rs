@@ -12,6 +12,11 @@ mod extensions_view;
 mod fmt;
 mod git_app;
 mod git_view;
+mod hosts;
+use hosts::{
+    client_claude, connect_local, on_connected, retry_outdated, spawn_connect, spawn_connect_after,
+    spawn_reader, spawn_reconnect_local,
+};
 mod interaction;
 mod keymap;
 mod leader;
@@ -19,6 +24,7 @@ mod notifications;
 mod plain;
 pub(crate) mod plugin_setup;
 mod plugins_glue;
+mod proxy_glue;
 mod proxy_state;
 mod reader;
 mod selection;
@@ -61,11 +67,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use crate::client::{self, Client, Incoming};
-use crate::freshness::{self, DaemonCheck};
+use crate::client::{Client, Incoming};
 use crate::paths;
 use crate::proto::{Msg, SessionInfo};
-use crate::remote::bootstrap::ensure_remote;
 
 use crate::app::connections::Connections;
 use crate::app::extensions;
@@ -111,7 +115,7 @@ fn copy_to_clipboard(text: &str) {
 }
 
 /// What the UI is started as.
-enum Launch {
+enum Entry {
     /// The session manager, with a startup proxy override for new sessions.
     Manager {
         proxy: crate::proxy::ProxyChoice,
@@ -149,7 +153,7 @@ pub fn run() -> ExitCode {
 ///
 /// `first_party` (--first-party) makes every session of this run first-party.
 pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice, first_party: bool) -> ExitCode {
-    run_launch(Launch::Manager {
+    run_launch(Entry::Manager {
         proxy: proxy_override,
         first_party,
     })
@@ -163,14 +167,14 @@ pub fn run_plain(
     first_party: bool,
     args: Vec<String>,
 ) -> ExitCode {
-    run_launch(Launch::Plain {
+    run_launch(Entry::Plain {
         proxy,
         first_party,
         args,
     })
 }
 
-fn run_launch(launch: Launch) -> ExitCode {
+fn run_launch(entry: Entry) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -181,18 +185,18 @@ fn run_launch(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = rt.block_on(main(launch));
+    let code = rt.block_on(main(entry));
     rt.shutdown_background();
     code
 }
 
-async fn main(launch: Launch) -> ExitCode {
+async fn main(entry: Entry) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let config = crate::config::load();
     let mut key_notices = Vec::new();
-    let (proxy_override, first_party, plain) = match launch {
-        Launch::Manager { proxy, first_party } => (proxy, first_party, None),
-        Launch::Plain {
+    let (proxy_override, first_party, plain) = match entry {
+        Entry::Manager { proxy, first_party } => (proxy, first_party, None),
+        Entry::Plain {
             proxy,
             first_party,
             args,
@@ -241,39 +245,7 @@ async fn main(launch: Launch) -> ExitCode {
         .into_iter()
         .filter(|l| proxy_profiles.contains(&l.profile))
         .collect();
-    // External extensions are read once, at start.
-    let external = extensions::manifest::load(&extensions::manifest::dir(), &mut key_notices);
-    // A plugin's saved choice is no unknown name: the plugins come later. A
-    // built-in's or external's choice stays, whatever a plugin is named.
-    let builtins = extensions::Registry::default();
-    let known = |name: &str| {
-        builtins.extensions.iter().any(|e| e.name == name)
-            || external.iter().any(|e| e.name == name)
-    };
-    let builtin_choices: std::collections::BTreeMap<String, bool> = config
-        .extensions
-        .iter()
-        .filter(|(name, _)| {
-            known(name)
-                || !cached_plugins
-                    .iter()
-                    .any(|l| l.plugins.iter().any(|p| &p.name == *name))
-        })
-        .map(|(name, on)| (name.clone(), *on))
-        .collect();
-    let registry = extensions::Registry::new(
-        &builtin_choices,
-        config.claude.latex,
-        external,
-        &mut key_notices,
-    );
-    let dropped = registry.dropped_lenses();
-    if !dropped.is_empty() {
-        key_notices.push(format!(
-            "extensions: lenses {} left out of the session context (caps)",
-            dropped.join(", ")
-        ));
-    }
+    let registry = extension_registry(&config, &cached_plugins, &mut key_notices);
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() {
             Mode::Plain
@@ -353,51 +325,45 @@ async fn main(launch: Launch) -> ExitCode {
     }
 }
 
-/// Start the local daemon if needed (replacing an outdated one), connect and
-/// list its sessions.
-async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
-    let check = client::ensure_local_daemon().await?;
-    let client = client::connect(&paths::daemon_socket()).await?;
-    if check == DaemonCheck::Deferred {
-        client.mark_daemon_outdated();
-    }
-    list_sessions(&client).await.map(|s| (client, s))
-}
-
-/// Once the outdated daemon behind `client` is idle, ask for a reconnect:
-/// connecting runs the freshness check again (`connect_local`'s, or the
-/// remote bridge's), which replaces it now. A busy one waits for next time.
-async fn retry_outdated(
-    host: String,
-    generation: u64,
-    client: Client,
-    tx: mpsc::Sender<HostEvent>,
-) {
-    let Ok(Msg::Sessions { sessions }) = client.request(Msg::ListSessions).await else {
-        return;
+/// The extension registry this run starts with: the built-ins and the
+/// external extensions (read once, now) with config.toml's choices; a
+/// cached plugin's choice is left for the plugins. A lens the caps leave
+/// out is a notice.
+fn extension_registry(
+    config: &crate::config::Config,
+    cached_plugins: &[crate::proxy::plugins::PluginList],
+    key_notices: &mut Vec<String>,
+) -> extensions::Registry {
+    // External extensions are read once, at start.
+    let external = extensions::manifest::load(&extensions::manifest::dir(), key_notices);
+    // A plugin's saved choice is no unknown name: the plugins come later. A
+    // built-in's or external's choice stays, whatever a plugin is named.
+    let builtins = extensions::Registry::default();
+    let known = |name: &str| {
+        builtins.extensions.iter().any(|e| e.name == name)
+            || external.iter().any(|e| e.name == name)
     };
-    if !freshness::busy(&sessions) {
-        let _ = tx.send(HostEvent::Reconnect { host, generation }).await;
+    let builtin_choices: std::collections::BTreeMap<String, bool> = config
+        .extensions
+        .iter()
+        .filter(|(name, _)| {
+            known(name)
+                || !cached_plugins
+                    .iter()
+                    .any(|l| l.plugins.iter().any(|p| &p.name == *name))
+        })
+        .map(|(name, on)| (name.clone(), *on))
+        .collect();
+    let registry =
+        extensions::Registry::new(&builtin_choices, config.claude.latex, external, key_notices);
+    let dropped = registry.dropped_lenses();
+    if !dropped.is_empty() {
+        key_notices.push(format!(
+            "extensions: lenses {} left out of the session context (caps)",
+            dropped.join(", ")
+        ));
     }
-}
-
-/// The `claude --version` its daemon reported at connect, if claude is there.
-fn client_claude(client: &Client) -> Option<String> {
-    client
-        .welcome()
-        .host
-        .claude
-        .as_ref()
-        .map(|c| c.version.clone())
-}
-
-async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
-    match client.request(Msg::ListSessions).await? {
-        Msg::Sessions { sessions } => Ok(sessions),
-        other => Err(io::Error::other(format!(
-            "unexpected reply to ListSessions: {other:?}"
-        ))),
-    }
+    registry
 }
 
 // ── Terminal setup ────────────────────────────────────────────────────────────
@@ -737,29 +703,7 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
-                    // A newer attempt is already in flight.
-                    if generation < conns.current_generation(&host) {
-                        continue;
-                    }
-                    let home = client.welcome().host.home.clone();
-                    let remote_claude = client_claude(&client);
-                    conns.reset_delay(&host);
-                    // Start the reader tagged with the current generation.
-                    let cur_gen = conns.current_generation(&host);
-                    if let Some(rx) = client.take_incoming() {
-                        spawn_reader(host.clone(), cur_gen, rx, ev_tx.clone());
-                    }
-                    conns.connected(&host, client);
-                    // Record this host in the MRU so it appears first next time.
-                    crate::remote::hosts::touch(&host);
-                    app.on_ssh_hosts(crate::remote::hosts::candidates());
-                    app.on_host_connected(&host, &home);
-                    app.on_plugin_host(&host);
-                    // Recover this host's sessions only.
-                    app.recover_host(&host, &sessions);
-                    app.subscribe_host_stats(&host);
-                    app.check_remote_claude(&host, remote_claude.as_deref());
-                    app.redraw = true;
+                    on_connected(&mut app, conns, &ev_tx, host, client, sessions, generation);
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
                     // A newer attempt is already in flight.
@@ -813,20 +757,12 @@ async fn event_loop(
                         spawn_connect(host, gen, ev_tx.clone(), true);
                     }
                 }
-                Some(HostEvent::ProxyConfig { profile_name, config }) => {
-                    if let Some(cfg) = config {
-                        app.on_proxy_config(profile_name, cfg);
-                    }
-                }
-                Some(HostEvent::ProxyStats { profile_name, fetch }) => {
-                    app.on_proxy_stats(profile_name, fetch);
-                }
-                Some(HostEvent::SessionCredential { session, claude_session_id, result }) => {
-                    app.on_session_credential(session, &claude_session_id, result);
-                }
-                Some(HostEvent::SubscriptionSwitch { session, result }) => {
-                    app.on_switch_result(session, result);
-                }
+                Some(
+                    ev @ (HostEvent::ProxyConfig { .. }
+                    | HostEvent::ProxyStats { .. }
+                    | HostEvent::SessionCredential { .. }
+                    | HostEvent::SubscriptionSwitch { .. }),
+                ) => app.on_proxy_event(ev),
                 Some(HostEvent::UpgradeAvailable(tag)) => {
                     if let Some(t) = tag {
                         app.upgrade_notice = Some(t);
@@ -1337,116 +1273,5 @@ fn describe_api_error(e: crate::proxy::api::ApiError) -> String {
             "rate limited by the proxy; wait a few seconds".to_owned()
         }
         other => other.to_string(),
-    }
-}
-
-/// Spawn a task that reads incoming items from `rx` and forwards them,
-/// tagged with `host` and `gen`, to `tx`.
-fn spawn_reader(
-    host: String,
-    gen: u64,
-    mut rx: mpsc::Receiver<Incoming>,
-    tx: mpsc::Sender<HostEvent>,
-) {
-    tokio::spawn(async move {
-        while let Some(item) = rx.recv().await {
-            if tx
-                .send(HostEvent::Incoming(host.clone(), gen, item))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-}
-
-/// Spawn a task that reconnects to the local daemon (starting it if needed)
-/// after `delay`; the outcome comes back tagged with `generation`.
-fn spawn_reconnect_local(delay: Duration, generation: u64, tx: mpsc::Sender<HostEvent>) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        let event = match connect_local().await {
-            Ok((client, sessions)) => HostEvent::LocalReconnected {
-                client,
-                sessions,
-                generation,
-            },
-            Err(_) => HostEvent::LocalReconnectFailed { generation },
-        };
-        let _ = tx.send(event).await;
-    });
-}
-
-/// Spawn a background task that bootstraps + connects to `host`.
-fn spawn_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bootstrap: bool) {
-    tokio::spawn(async move {
-        do_connect(host, gen, tx, skip_bootstrap).await;
-    });
-}
-
-/// Spawn a task that sleeps `delay` then connects.
-fn spawn_connect_after(
-    host: String,
-    gen: u64,
-    delay: Duration,
-    tx: mpsc::Sender<HostEvent>,
-    skip_bootstrap: bool,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        do_connect(host, gen, tx, skip_bootstrap).await;
-    });
-}
-
-async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bootstrap: bool) {
-    // Bootstrap (upload binary if needed). Skip on reconnect or when the last
-    // failure was not a bootstrap failure.
-    if !skip_bootstrap {
-        if let Err(e) = ensure_remote(&host).await {
-            let _ = tx
-                .send(HostEvent::ConnectFailed {
-                    host,
-                    error: e,
-                    generation: gen,
-                })
-                .await;
-            return;
-        }
-    }
-    // Connect the SSH bridge.
-    match client::connect_ssh(&host).await {
-        Ok(client) => {
-            let sessions = match list_sessions(&client).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx
-                        .send(HostEvent::ConnectFailed {
-                            host,
-                            error: e.to_string(),
-                            generation: gen,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            let _ = tx
-                .send(HostEvent::Connected {
-                    host,
-                    client,
-                    sessions,
-                    generation: gen,
-                })
-                .await;
-        }
-        Err(e) => {
-            let _ = tx
-                .send(HostEvent::ConnectFailed {
-                    host,
-                    error: e.to_string(),
-                    generation: gen,
-                })
-                .await;
-        }
     }
 }
