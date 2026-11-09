@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-/// Protocol version. Bump on incompatible changes; it is part of the daemon
-/// socket name, so daemons of different versions coexist instead of colliding.
-pub const PROTO: u32 = 1;
+pub use crate::version::PROTO;
 
 /// Hard cap on a single frame (tag + payload).
 pub const MAX_FRAME: usize = 1 << 20;

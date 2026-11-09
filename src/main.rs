@@ -30,6 +30,7 @@ mod term;
 mod text;
 mod tui;
 mod upgrade;
+mod version;
 mod web;
 
 use std::io::{IsTerminal, Read, Write};

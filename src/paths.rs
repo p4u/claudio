@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::proto::PROTO;
+use crate::version::PROTO;
 
 /// The current user's home directory (honours `$HOME`).
 pub fn home() -> PathBuf {
