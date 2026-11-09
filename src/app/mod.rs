@@ -6,3 +6,6 @@ pub(crate) mod connections;
 pub(crate) mod extensions;
 pub(crate) mod snippets;
 pub(crate) mod state;
+
+#[cfg(test)]
+pub(crate) mod test_support;

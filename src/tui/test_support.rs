@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use uuid::Uuid;
 
 use super::app::{App, AppConfig, Mode};
 use super::keymap::Keymap;
 use crate::app::state::ClientState;
-use crate::proto::{SessionInfo, SessionKind, SessionState};
+use crate::proto::SessionInfo;
+
+pub use crate::app::test_support::{info, shell_info};
 
 /// A manager on a 100×30 terminal with home `/home/u`, the default keys, and
 /// nothing from the machine it runs on: no proxy profiles, no SSH hosts, no
@@ -46,35 +47,6 @@ pub fn app_with(live: &[SessionInfo]) -> App {
     app.recover(&ClientState::default(), live);
     app.take_effects();
     app
-}
-
-/// An idle claude session in `/srv/app`, as the local daemon lists it:
-/// running as `pid` (`None`: dormant), in conversation `csid`.
-pub fn info(pid: Option<u32>, csid: Option<&str>) -> SessionInfo {
-    SessionInfo {
-        id: Uuid::new_v4(),
-        cwd: "/srv/app".into(),
-        name: None,
-        state: SessionState::Idle,
-        claude_session_id: csid.map(Into::into),
-        title: None,
-        pid,
-        created_at: 1,
-        branch: None,
-        model: None,
-        context_tokens: None,
-        kind: SessionKind::Claude,
-        ephemeral: false,
-        attention: None,
-    }
-}
-
-/// A terminal tab in `/srv/app`.
-pub fn shell_info(pid: Option<u32>) -> SessionInfo {
-    SessionInfo {
-        kind: SessionKind::Shell,
-        ..info(pid, None)
-    }
 }
 
 /// A key press with `mods`, as the terminal reports it.
