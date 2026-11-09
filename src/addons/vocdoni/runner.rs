@@ -267,8 +267,10 @@ impl Runner {
                 sha256,
                 body,
             } => {
-                let body = serde_json::to_value(&body).unwrap_or_default();
-                let result = ctx.request(&host, OP_APPLY, body).await.and_then(applied);
+                let result = match request_body(&body) {
+                    Ok(body) => ctx.request(&host, OP_APPLY, body).await.and_then(applied),
+                    Err(e) => Err(e),
+                };
                 self.transition(|s| s.on_applied(&host, &name, &sha256, result));
             }
             Task::SaveChoices { name, choices } => {
@@ -367,6 +369,12 @@ fn used_profiles(ctx: &dyn AddonCtx) -> BTreeSet<String> {
         .filter(|c| c.addon == super::NAME)
         .map(|c| c.option)
         .collect()
+}
+
+/// `body` as a request's JSON: one that does not serialise is a failed
+/// answer for the state, never a `null` body the daemon refuses (D5).
+pub(super) fn request_body<T: serde::Serialize>(body: &T) -> Result<serde_json::Value, AddonError> {
+    serde_json::to_value(body).map_err(|_| AddonError::Daemon("bad request body".to_owned()))
 }
 
 /// The `Applied` of a reply body.

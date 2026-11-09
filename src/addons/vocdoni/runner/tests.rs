@@ -205,3 +205,16 @@ async fn an_over_count_list_is_never_cached() {
     assert_eq!(cache::load_cache_from(&path, "work"), Some(cached));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// F7: a body that does not serialise is a failed answer, never a `null`
+/// request (the daemon would refuse it as "bad request", with no hint).
+#[test]
+fn a_body_that_does_not_serialise_is_a_failed_answer() {
+    let tuple_keys = std::collections::BTreeMap::from([((1u8, 2u8), 3u8)]);
+    assert_eq!(
+        request_body(&tuple_keys),
+        Err(AddonError::Daemon("bad request body".into()))
+    );
+    let body = request_body(&serde_json::json!({"name": "kb"})).unwrap();
+    assert_eq!(body["name"], "kb");
+}

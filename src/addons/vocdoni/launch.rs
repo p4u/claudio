@@ -19,7 +19,7 @@ use super::daemon::{Applied, OP_APPLY};
 use super::plugins::state::{layer_env, plugins_part, PluginPart};
 use super::profiles::{missing, Profiles};
 use super::proxy::env::session_env;
-use super::runner::{applied, Runner};
+use super::runner::{applied, request_body, Runner};
 use super::{Vocdoni, NAME};
 use crate::addon::{
     AddonCtx, BoxFuture, FlagArg, FlagDecl, Launch, LaunchArg, LaunchChoice, LaunchError, LaunchOp,
@@ -402,8 +402,10 @@ async fn ask(
         let plugin = name.clone();
         ctx.spawn(Box::pin(async move {
             let sha256 = body.sha256.clone();
-            let body = serde_json::to_value(&body).unwrap_or_default();
-            let result = inner.request(&host, OP_APPLY, body).await.and_then(applied);
+            let result = match request_body(&body) {
+                Ok(body) => inner.request(&host, OP_APPLY, body).await.and_then(applied),
+                Err(e) => Err(e),
+            };
             let ready = result.clone().ok();
             runner.transition(|s| s.on_applied(&host, &plugin, &sha256, result));
             let _ = done.send(ready);
