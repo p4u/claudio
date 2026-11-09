@@ -115,43 +115,18 @@ claudio-tui.workspace = true
 claudio-api = { workspace = true, optional = true }
 claudio-web = { workspace = true, optional = true }
 claudio-vocdoni = { workspace = true, optional = true }
-# The TUI and the addons are still modules of this package until P4.3-P4.6;
-# P4.7 drops what then has no user here.
+# `claudio sessions`' one-shot runtime.
+tokio.workspace = true
+
+# The integration suites (crates/tui/tests, addons/*/tests, tests/).
+[dev-dependencies]
+claudio-core = { workspace = true, features = ["test-support"] }
 alacritty_terminal.workspace = true
-axum.workspace = true
-base64.workspace = true
-crossterm.workspace = true
-flate2.workspace = true
 futures.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
-pulldown-cmark.workspace = true
-ratatui.workspace = true
-reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tokio-stream = "0.1"
-toml.workspace = true
-tower = "0.5"
-tower-http.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-unicode-segmentation.workspace = true
-unicode-width.workspace = true
-uuid.workspace = true
-vte.workspace = true
-
-# build.rs (the web page) moves to addons/web in P4.5; P4.7 drops these.
-[build-dependencies]
-base64.workspace = true
-flate2.workspace = true
-sha2.workspace = true
-
-[dev-dependencies]
-claudio-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true

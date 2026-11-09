@@ -261,37 +261,19 @@ name = "claudio"
 version = "0.8.0"
 dependencies = [
  "alacritty_terminal",
- "axum",
- "base64",
  "claudio-api",
  "claudio-core",
  "claudio-tui",
  "claudio-vocdoni",
  "claudio-web",
- "crossterm",
- "flate2",
  "futures",
  "libc",
  "portable-pty",
- "pulldown-cmark",
- "ratatui",
- "reqwest",
- "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-tungstenite",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "unicode-segmentation",
- "unicode-width",
  "uuid",
- "vte 0.13.1",
 ]
 
 [[package]]
@@ -2797,17 +2779,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
- "tokio",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
-dependencies = [
- "futures-core",
- "pin-project-lite",
  "tokio",
 ]
 
