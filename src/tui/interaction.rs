@@ -26,7 +26,6 @@ use super::leader::{Input, Picker};
 use super::reader::{ReaderView, RenderedAnswer};
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
-use super::stats_view::StatsView;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
 
@@ -41,8 +40,8 @@ pub enum Modal {
     /// The new-session wizard. Boxed like the history viewer: both are
     /// several hundred bytes, the other modals a few dozen.
     Wizard(Box<Wizard>),
-    /// Proxy stats popup (see `stats_view.rs`).
-    ProxyStats(StatsView),
+    /// An addon's panel (see `panel_view.rs`).
+    Panel(Box<super::panel_view::PanelView>),
     /// Overview / "mission control": all sessions at a glance.
     Overview {
         selected: usize,
@@ -81,7 +80,7 @@ impl Modal {
             Modal::Git(_)
                 | Modal::Overview { .. }
                 | Modal::Help
-                | Modal::ProxyStats { .. }
+                | Modal::Panel(_)
                 | Modal::Reader(_)
                 | Modal::Leader
                 | Modal::Picker(_)
@@ -97,7 +96,7 @@ impl Modal {
             (Modal::Git(_), Action::GitLog)
                 | (Modal::Overview { .. }, Action::Overview)
                 | (Modal::Help, Action::Help)
-                | (Modal::ProxyStats { .. }, Action::ProxyStats)
+                | (Modal::Panel(_), Action::Panel(_))
                 | (Modal::Reader(_), Action::Formulas)
                 | (Modal::Leader, Action::Extensions)
                 | (Modal::ExtensionsMenu(_), Action::ExtensionsMenu)
@@ -208,7 +207,7 @@ impl App {
                 self.save();
                 self.quit = true;
             }
-            Action::ProxyStats => self.open_proxy_stats(),
+            Action::Panel(i) => self.open_panel(i),
             Action::Overview => self.open_overview(),
             Action::Help => self.open_help(),
             Action::GitLog => self.open_git_log(),
@@ -334,7 +333,7 @@ impl App {
                 }
                 _ => {}
             },
-            Modal::ProxyStats(_) => self.stats_key(key),
+            Modal::Panel(_) => self.panel_key(&key),
             Modal::Overview { selected, filter } => {
                 let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
                 match key.code {
@@ -468,7 +467,7 @@ impl App {
                 self.redraw = true;
             }
             Some(
-                Modal::ProxyStats(_)
+                Modal::Panel(_)
                 | Modal::Overview { .. }
                 | Modal::Help
                 | Modal::Confirm(_)

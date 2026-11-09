@@ -25,8 +25,8 @@ pub enum Action {
     NextAttention,
     /// Leave the UI; sessions keep running in the daemon.
     Quit,
-    /// Open the proxy stats popup for the active session.
-    ProxyStats,
+    /// Open addon panel `n` (`Addons::panels` order) for the active session.
+    Panel(u8),
     /// Open the overview ("mission control") popup.
     Overview,
     /// Open the help popup.
@@ -64,7 +64,7 @@ impl Action {
             Action::Close => "close",
             Action::NextAttention => "next_attention",
             Action::Quit => "quit",
-            Action::ProxyStats => "proxy_stats",
+            Action::Panel(_) => "panel",
             Action::Overview => "overview",
             Action::Help => "help",
             Action::Terminal => "terminal",
@@ -142,14 +142,6 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "jump to next session needing attention",
         action: Action::NextAttention,
-        scope: Scope::Global,
-    },
-    // Alt+s: proxy stats. Verified not used by claude (bundle grep: empty).
-    Binding {
-        code: KeyCode::Char('s'),
-        mods: KeyModifiers::ALT,
-        label: "proxy stats popup",
-        action: Action::ProxyStats,
         scope: Scope::Global,
     },
     // Alt+g: "glance" / overview. Verified free: not in claude bundle,
@@ -251,9 +243,6 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
 /// [`goto_session`]); these are not in [`DEFAULT_BINDINGS`].
 const GOTO_SESSION_HELP: (&str, &str) = ("Alt+Shift+1…9,0", "go to session 1…10");
 
-/// Help-popup label for `n` inside the proxy stats popup.
-const SWITCH_SUBSCRIPTION_HELP: &str = "move the session to the next proxy subscription";
-
 /// `Alt+Shift+<digit>` → [`Action::GotoSession`].
 ///
 /// With the kitty keyboard protocol (enabled in `tui/mod.rs`), terminals send
@@ -270,17 +259,39 @@ fn goto_session(key: &KeyEvent) -> Option<Action> {
     }
 }
 
-/// The only actions `claudio --plain` keeps, in help order. Everything else
-/// (tabs, wizard, rename, quit, ...) belongs to the manager and goes to claude.
-pub const PLAIN_ACTIONS: [Action; 7] = [
+/// The only actions `claudio --plain` keeps, in help order, besides every
+/// addon panel (right after help). Everything else (tabs, wizard, rename,
+/// quit, ...) belongs to the manager and goes to claude.
+pub const PLAIN_ACTIONS: [Action; 6] = [
     Action::Help,
-    Action::ProxyStats,
     Action::GitLog,
     Action::Reset,
     Action::Formulas,
     Action::Extensions,
     Action::ExtensionsMenu,
 ];
+
+/// Where `action` sits in `--plain`'s help: an addon panel right after help.
+fn plain_rank(action: Action) -> usize {
+    match action {
+        Action::Panel(n) => 1 + usize::from(n),
+        a => match PLAIN_ACTIONS.iter().position(|p| *p == a) {
+            Some(0) | None => 0,
+            Some(i) => i + 1 + usize::from(u8::MAX),
+        },
+    }
+}
+
+/// An addon panel's key, as `PanelDecl.key` and `.title` declare it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelBinding {
+    /// The keymap action name (`[keys] <action>` overrides it).
+    pub action: &'static str,
+    /// The default key spec (`alt+s`).
+    pub default: &'static str,
+    /// The help popup's label.
+    pub title: &'static str,
+}
 
 /// The effective keymap: defaults + config overrides.
 ///
@@ -291,47 +302,66 @@ pub struct Keymap {
     bindings: Vec<Binding>,
     /// Whether `Alt+Shift+<digit>` jumps to a tab (the manager only).
     goto_tabs: bool,
+    /// The addon panels' action names, by [`Action::Panel`] index.
+    panels: Vec<&'static str>,
 }
 
 impl Default for Keymap {
     fn default() -> Self {
-        Keymap::build(&std::collections::BTreeMap::new(), &mut Vec::new())
+        Keymap::build(&std::collections::BTreeMap::new(), &mut Vec::new(), &[])
     }
 }
 
 impl Keymap {
-    /// Build from defaults + overrides. Collect notices for any problem.
+    /// Build from defaults, the addon panels' keys and overrides. Collect
+    /// notices for any problem.
     pub fn build(
         overrides: &std::collections::BTreeMap<String, String>,
         notices: &mut Vec<String>,
+        panels: &[PanelBinding],
     ) -> Keymap {
-        Keymap::build_with(overrides, notices, |_| true, true)
+        Keymap::build_with((overrides, panels), notices, |_| true, true)
     }
 
-    /// The keymap of `claudio --plain`: only [`PLAIN_ACTIONS`] (in that order)
-    /// act, and the rest of the keyboard goes to claude. `[keys]` overrides of
-    /// those actions apply as in the manager; overrides of the manager-only
-    /// actions are ignored without a notice, since they stay valid for the
-    /// manager.
+    /// [`Keymap::build_plain`] when `plain`, else [`Keymap::build`].
+    pub fn of(
+        plain: bool,
+        overrides: &std::collections::BTreeMap<String, String>,
+        notices: &mut Vec<String>,
+        panels: &[PanelBinding],
+    ) -> Keymap {
+        match plain {
+            true => Keymap::build_plain(overrides, notices, panels),
+            false => Keymap::build(overrides, notices, panels),
+        }
+    }
+
+    /// The keymap of `claudio --plain`: only [`PLAIN_ACTIONS`] and the addon
+    /// panels (in that order) act, and the rest of the keyboard goes to
+    /// claude. `[keys]` overrides of those actions apply as in the manager;
+    /// overrides of the manager-only actions are ignored without a notice,
+    /// since they stay valid for the manager.
     pub fn build_plain(
         overrides: &std::collections::BTreeMap<String, String>,
         notices: &mut Vec<String>,
+        panels: &[PanelBinding],
     ) -> Keymap {
-        let mut km = Keymap::build_with(overrides, notices, |a| PLAIN_ACTIONS.contains(&a), false);
-        km.bindings
-            .sort_by_key(|b| PLAIN_ACTIONS.iter().position(|a| *a == b.action));
+        let keep = |a| PLAIN_ACTIONS.contains(&a) || matches!(a, Action::Panel(_));
+        let mut km = Keymap::build_with((overrides, panels), notices, keep, false);
+        km.bindings.sort_by_key(|b| plain_rank(b.action));
         km
     }
 
-    /// Defaults restricted to the actions `keep` accepts, plus overrides.
+    /// Defaults restricted to the actions `keep` accepts, the panels' keys
+    /// (after `next_attention`), plus overrides.
     fn build_with(
-        overrides: &std::collections::BTreeMap<String, String>,
+        (overrides, panels): (&std::collections::BTreeMap<String, String>, &[PanelBinding]),
         notices: &mut Vec<String>,
         keep: impl Fn(Action) -> bool,
         goto_tabs: bool,
     ) -> Keymap {
         // Start from defaults (clone the static slice into an owned Vec).
-        let mut bindings: Vec<Binding> = DEFAULT_BINDINGS
+        let bindings: Vec<Binding> = DEFAULT_BINDINGS
             .iter()
             .filter(|b| keep(b.action))
             .map(|b| Binding {
@@ -342,48 +372,114 @@ impl Keymap {
                 scope: b.scope,
             })
             .collect();
-
+        let mut km = Keymap {
+            bindings,
+            goto_tabs,
+            panels: panels.iter().map(|p| p.action).collect(),
+        };
+        km.add_panels(panels, notices);
         for (name, spec) in overrides {
-            // Find the action by name.
-            let action = DEFAULT_BINDINGS
-                .iter()
-                .find(|b| b.action.name() == name)
-                .map(|b| b.action);
-            let Some(action) = action else {
-                notices.push(format!("config.toml [keys]: unknown action '{name}'"));
-                continue;
-            };
-            if !keep(action) {
-                continue;
-            }
-            let (code, mods) = match parse_key_spec(spec) {
-                Ok(km) => km,
+            km.apply_override(name, spec, notices, &keep);
+        }
+        km
+    }
+
+    /// Bind each panel's default key, unless taken (a notice says so).
+    fn add_panels(&mut self, panels: &[PanelBinding], notices: &mut Vec<String>) {
+        let mut at = self
+            .bindings
+            .iter()
+            .position(|b| b.action == Action::NextAttention)
+            .map_or(self.bindings.len(), |i| i + 1);
+        for (i, p) in panels.iter().enumerate().take(usize::from(u8::MAX)) {
+            let (code, mods) = match parse_key_spec(p.default) {
+                Ok(key) => key,
                 Err(e) => {
-                    notices.push(format!("config.toml [keys] '{name}': {e}"));
+                    notices.push(format!("addon panel '{}': {e}", p.action));
                     continue;
                 }
             };
-            // Collision check: reject if another action already claims this key.
-            if let Some(existing) = bindings
-                .iter()
-                .find(|b| b.code == code && b.mods == mods && b.action != action)
-            {
+            if let Some(taken) = self.bound(code, mods, None) {
                 notices.push(format!(
-                    "config.toml [keys] '{name}': key {} already bound to '{}', skipping",
+                    "addon panel '{}': key {} already bound to '{}', skipping",
+                    p.action,
                     key_str(code, mods),
-                    existing.action.name()
+                    self.name_of(taken)
                 ));
                 continue;
             }
-            // Replace the existing binding for this action.
-            if let Some(b) = bindings.iter_mut().find(|b| b.action == action) {
-                b.code = code;
-                b.mods = mods;
-            }
+            let binding = Binding {
+                code,
+                mods,
+                label: p.title,
+                action: Action::Panel(i as u8),
+                scope: Scope::Global,
+            };
+            self.bindings.insert(at.min(self.bindings.len()), binding);
+            at += 1;
         }
-        Keymap {
-            bindings,
-            goto_tabs,
+    }
+
+    /// `[keys] name = spec`: rebind action `name` unless the key is taken.
+    fn apply_override(
+        &mut self,
+        name: &str,
+        spec: &str,
+        notices: &mut Vec<String>,
+        keep: &impl Fn(Action) -> bool,
+    ) {
+        let action = DEFAULT_BINDINGS
+            .iter()
+            .find(|b| b.action.name() == name)
+            .map(|b| b.action)
+            .or_else(|| {
+                let i = self.panels.iter().position(|p| *p == name)?;
+                Some(Action::Panel(i as u8))
+            });
+        let Some(action) = action else {
+            notices.push(format!("config.toml [keys]: unknown action '{name}'"));
+            return;
+        };
+        if !keep(action) {
+            return;
+        }
+        let (code, mods) = match parse_key_spec(spec) {
+            Ok(km) => km,
+            Err(e) => {
+                notices.push(format!("config.toml [keys] '{name}': {e}"));
+                return;
+            }
+        };
+        // Collision check: reject if another action already claims this key.
+        if let Some(existing) = self.bound(code, mods, Some(action)) {
+            notices.push(format!(
+                "config.toml [keys] '{name}': key {} already bound to '{}', skipping",
+                key_str(code, mods),
+                self.name_of(existing)
+            ));
+            return;
+        }
+        // Replace the existing binding for this action.
+        if let Some(b) = self.bindings.iter_mut().find(|b| b.action == action) {
+            b.code = code;
+            b.mods = mods;
+        }
+    }
+
+    /// The action other than `but` bound to `code`+`mods`, if any.
+    fn bound(&self, code: KeyCode, mods: KeyModifiers, but: Option<Action>) -> Option<Action> {
+        let b = self
+            .bindings
+            .iter()
+            .find(|b| b.code == code && b.mods == mods && Some(b.action) != but)?;
+        Some(b.action)
+    }
+
+    /// `action`'s `[keys]` name: a panel's is its addon's.
+    pub fn name_of(&self, action: Action) -> &'static str {
+        match action {
+            Action::Panel(i) => self.panels.get(usize::from(i)).copied().unwrap_or("panel"),
+            a => a.name(),
         }
     }
 
@@ -434,14 +530,6 @@ impl Keymap {
                 .position(|b| b.action == Action::NextSession)
                 .map_or(entries.len(), |i| i + 1);
             entries.insert(at, (GOTO_SESSION_HELP.0.to_owned(), GOTO_SESSION_HELP.1));
-        }
-        // The stats popup's `n` (`stats_view.rs`) sits right after its key.
-        if let Some(key) = self.key_for(Action::ProxyStats) {
-            let at = entries
-                .iter()
-                .position(|(k, _)| *k == key)
-                .map_or(entries.len(), |i| i + 1);
-            entries.insert(at, (format!("{key} → n"), SWITCH_SUBSCRIPTION_HELP));
         }
         entries
     }
@@ -645,7 +733,7 @@ mod tests {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert("formulas".to_owned(), "alt+y".to_owned());
         let mut notices = Vec::new();
-        let km = Keymap::build(&overrides, &mut notices);
+        let km = Keymap::build(&overrides, &mut notices, &[]);
         assert!(notices.is_empty(), "{notices:?}");
         let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
         assert_eq!(km.lookup(&alt('y')), Some(Action::Formulas));
@@ -787,7 +875,7 @@ mod tests {
     fn alt_shift_letter_override_matches_terminal_events() {
         let overrides = [("quit".to_owned(), "alt+shift+q".to_owned())].into();
         let mut notices = Vec::new();
-        let km = Keymap::build(&overrides, &mut notices);
+        let km = Keymap::build(&overrides, &mut notices, &[]);
         assert!(notices.is_empty(), "{notices:?}");
         let alt_shift = KeyModifiers::ALT | KeyModifiers::SHIFT;
         // Legacy encoding (ESC Q) and kitty protocol (base key + SHIFT).
@@ -825,7 +913,7 @@ mod tests {
         // Try to bind "quit" to alt+n, which is already "new_session".
         overrides.insert("quit".to_owned(), "alt+n".to_owned());
         let mut notices = Vec::new();
-        let km = Keymap::build(&overrides, &mut notices);
+        let km = Keymap::build(&overrides, &mut notices, &[]);
         // Notice should mention the collision.
         assert!(!notices.is_empty(), "expected a collision notice");
         assert!(
@@ -900,7 +988,7 @@ mod tests {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert("goto_session".to_owned(), "alt+j".to_owned());
         let mut notices = Vec::new();
-        let km = Keymap::build(&overrides, &mut notices);
+        let km = Keymap::build(&overrides, &mut notices, &[]);
         assert!(notices[0].contains("unknown action 'goto_session'"));
         assert_eq!(km.lookup(&key(KeyCode::Char('j'), KeyModifiers::ALT)), None);
     }
@@ -944,13 +1032,81 @@ mod tests {
 
     // ── Plain keymap ──────────────────────────────────────────────────────────
 
+    /// The Vocdoni addon's panel key, as `PanelDecl.key` declares it.
+    const PROXY: &[PanelBinding] = &[PanelBinding {
+        action: "proxy_stats",
+        default: "alt+s",
+        title: "Proxy stats",
+    }];
+
+    #[test]
+    fn panel_keys_come_from_addons_and_are_collision_checked() {
+        let none = std::collections::BTreeMap::new();
+        let mut notices = Vec::new();
+        let km = Keymap::build(&none, &mut notices, PROXY);
+        assert!(notices.is_empty(), "{notices:?}");
+        let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(km.lookup(&alt('s')), Some(Action::Panel(0)));
+        assert_eq!(km.name_of(Action::Panel(0)), "proxy_stats");
+        // In help right after next_attention, under the panel's title.
+        let help = km.help_entries();
+        let at = help.iter().position(|(k, _)| k == "Alt+a").unwrap();
+        assert_eq!(help[at + 1], ("Alt+s".to_owned(), "Proxy stats"));
+        // Without the addon the key is claude's.
+        assert_eq!(Keymap::default().lookup(&alt('s')), None);
+        // A panel whose default key is taken (or bad) is skipped, said once.
+        let clash = [
+            PanelBinding {
+                action: "mine",
+                default: "alt+n",
+                title: "Mine",
+            },
+            PanelBinding {
+                action: "bad",
+                default: "alt+",
+                title: "Bad",
+            },
+        ];
+        let mut notices = Vec::new();
+        let km = Keymap::build(&none, &mut notices, &clash);
+        assert_eq!(km.lookup(&alt('n')), Some(Action::NewSession));
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(
+            notices[0].contains("'mine'") && notices[0].contains("already bound to 'new_session'")
+        );
+        // An override onto a panel's key is refused with its name.
+        let over = [("quit".to_owned(), "alt+s".to_owned())].into();
+        let mut notices = Vec::new();
+        let km = Keymap::build(&over, &mut notices, PROXY);
+        assert!(
+            notices[0].contains("already bound to 'proxy_stats'"),
+            "{notices:?}"
+        );
+        assert_eq!(km.lookup(&alt('s')), Some(Action::Panel(0)));
+    }
+
+    #[test]
+    fn proxy_stats_override_still_rebinds_the_panel() {
+        let over = [("proxy_stats".to_owned(), "alt+p".to_owned())].into();
+        let mut notices = Vec::new();
+        let km = Keymap::build(&over, &mut notices, PROXY);
+        assert!(notices.is_empty(), "{notices:?}");
+        let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(km.lookup(&alt('p')), Some(Action::Panel(0)));
+        assert_eq!(km.lookup(&alt('s')), None);
+        assert_eq!(km.key_for(Action::Panel(0)).as_deref(), Some("Alt+p"));
+    }
+
     fn plain_keymap(overrides: &[(&str, &str)]) -> (Keymap, Vec<String>) {
         let overrides = overrides
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let mut notices = Vec::new();
-        (Keymap::build_plain(&overrides, &mut notices), notices)
+        (
+            Keymap::build_plain(&overrides, &mut notices, PROXY),
+            notices,
+        )
     }
 
     #[test]
@@ -959,7 +1115,7 @@ mod tests {
         assert!(notices.is_empty());
         let alt = |c| key(KeyCode::Char(c), KeyModifiers::ALT);
         assert_eq!(km.lookup(&alt('h')), Some(Action::Help));
-        assert_eq!(km.lookup(&alt('s')), Some(Action::ProxyStats));
+        assert_eq!(km.lookup(&alt('s')), Some(Action::Panel(0)));
         assert_eq!(km.lookup(&alt('l')), Some(Action::GitLog));
         assert_eq!(km.lookup(&alt('e')), Some(Action::Reset));
         assert_eq!(km.lookup(&alt('u')), Some(Action::Formulas));
@@ -990,31 +1146,8 @@ mod tests {
         let keys: Vec<String> = km.help_entries().into_iter().map(|(k, _)| k).collect();
         assert_eq!(
             keys,
-            [
-                "Alt+h",
-                "Alt+s",
-                "Alt+s → n",
-                "Alt+l",
-                "Alt+e",
-                "Alt+u",
-                "Alt+z",
-                "Alt+i"
-            ]
+            ["Alt+h", "Alt+s", "Alt+l", "Alt+e", "Alt+u", "Alt+z", "Alt+i"]
         );
-    }
-
-    #[test]
-    fn help_lists_the_subscription_switch_after_the_stats_key() {
-        let entries = Keymap::default().help_entries();
-        let at = entries.iter().position(|(k, _)| k == "Alt+s").unwrap();
-        assert_eq!(
-            entries[at + 1],
-            ("Alt+s → n".to_owned(), SWITCH_SUBSCRIPTION_HELP)
-        );
-        // A remapped stats key moves the row along with it.
-        let overrides = [("proxy_stats".to_owned(), "alt+p".to_owned())].into();
-        let km = Keymap::build(&overrides, &mut Vec::new());
-        assert!(km.help_entries().iter().any(|(k, _)| k == "Alt+p → n"));
     }
 
     #[test]
@@ -1026,7 +1159,7 @@ mod tests {
         ]);
         assert_eq!(
             km.lookup(&key(KeyCode::Char('p'), KeyModifiers::ALT)),
-            Some(Action::ProxyStats)
+            Some(Action::Panel(0))
         );
         assert_eq!(km.lookup(&key(KeyCode::Char('s'), KeyModifiers::ALT)), None);
         // Valid for the manager, so no notice and no effect; unknown still says so.

@@ -24,13 +24,13 @@ mod interaction;
 mod keymap;
 mod leader;
 mod notifications;
+mod panel_view;
 mod plain;
 mod proxy_glue;
 mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
-pub(crate) mod stats_view;
 
 /// `recent` without the local directories that no longer exist, so the
 /// wizard never offers a deleted directory (the check is I/O, so it happens
@@ -184,10 +184,8 @@ async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
             (select, Some(start))
         }
     };
-    let keymap = match plain {
-        Some(_) => keymap::Keymap::build_plain(&config.keys, &mut key_notices),
-        None => keymap::Keymap::build(&config.keys, &mut key_notices),
-    };
+    let panels = panel_view::panel_bindings(&addons);
+    let keymap = keymap::Keymap::of(plain.is_some(), &config.keys, &mut key_notices, &panels);
     let plain_id = plain.as_ref().map(|p| p.id);
 
     // The manager's session list; `--plain` neither reads nor writes it.
@@ -438,11 +436,6 @@ enum HostEvent {
         session: crate::proto::SessionId,
         claude_session_id: String,
         result: Result<Option<proxy::api::SessionCredential>, String>,
-    },
-    /// The proxy answered a subscription switch request.
-    SubscriptionSwitch {
-        session: crate::proto::SessionId,
-        result: Result<proxy::api::SwitchOutcome, proxy::api::SwitchError>,
     },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
@@ -709,11 +702,9 @@ async fn event_loop(
                         spawn_connect(host, gen, ev_tx.clone(), true);
                     }
                 }
-                Some(
-                    ev @ (HostEvent::ProxyStats { .. }
-                    | HostEvent::SessionCredential { .. }
-                    | HostEvent::SubscriptionSwitch { .. }),
-                ) => app.on_proxy_event(ev),
+                Some(ev @ (HostEvent::ProxyStats { .. } | HostEvent::SessionCredential { .. })) => {
+                    app.on_proxy_event(ev)
+                }
                 Some(HostEvent::UpgradeAvailable(tag)) => app.on_upgrade_available(tag),
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
@@ -905,19 +896,6 @@ fn run_effect(
                     .await;
             });
         }
-        Effect::SwitchSubscription {
-            profile_name,
-            session,
-            claude_session_id,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let result = switch_subscription(&profile_name, &claude_session_id).await;
-                let _ = tx
-                    .send(HostEvent::SubscriptionSwitch { session, result })
-                    .await;
-            });
-        }
         Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
     }
 }
@@ -961,20 +939,6 @@ async fn fetch_session_credential(
     proxy::api::fetch_session(&url, &token, claude_session_id)
         .await
         .map_err(describe_api_error)
-}
-
-/// Ask the proxy to move a conversation to its next subscription.
-async fn switch_subscription(
-    profile_name: &str,
-    claude_session_id: &str,
-) -> Result<proxy::api::SwitchOutcome, proxy::api::SwitchError> {
-    use proxy::api::{ApiError, SwitchError};
-    let Some((url, token)) = proxy::resolve::resolve_profile(profile_name) else {
-        return Err(SwitchError::Api(ApiError::Http(
-            reqwest::StatusCode::UNAUTHORIZED,
-        )));
-    };
-    proxy::api::switch_session(&url, &token, claude_session_id).await
 }
 
 /// A one-line, user-facing description of a proxy API error.

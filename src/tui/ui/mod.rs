@@ -16,14 +16,13 @@ mod confirm;
 mod extensions;
 mod git;
 mod leader;
+mod panel;
 mod reader;
-mod stats;
 mod status;
 
 use confirm::draw_confirm;
 use git::draw_git;
 use reader::draw_reader;
-use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
@@ -98,7 +97,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
                 .unwrap_or_default();
             draw_wizard(frame, w, app.now, &toggle_key)
         }
-        Some(Modal::ProxyStats(view)) => draw_proxy_stats(frame, app, view),
+        Some(Modal::Panel(view)) => panel::draw_panel(frame, view, app.now),
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),

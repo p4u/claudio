@@ -17,8 +17,10 @@ use super::addon_calls::{AddonCall, Origin};
 use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mode, ReplyTo};
 use super::HostEvent;
 use crate::addon::{
-    checklist as clean_checklist, line, option as clean_option, Addons, Checklist, ChecklistAnswer,
-    Frontend, LaunchOp, LaunchOption, Level, Notice, Pick, SessionSnap, TEXT_BYTES,
+    checklist as clean_checklist, error_panel, line, notice as clean_notice,
+    option as clean_option, panel as clean_panel, ActionRequest, Addons, Checklist,
+    ChecklistAnswer, Frontend, LaunchOp, LaunchOption, Level, Notice, PanelRequest, Pick,
+    SessionSnap, TEXT_BYTES,
 };
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
@@ -32,6 +34,10 @@ use crate::proto::{Msg, SessionId};
 const MAX_PARKED: usize = 8;
 /// A checklist's save outside a launch (an addon's action, D13).
 const SAVE_TIMEOUT: Duration = Duration::from_secs(15);
+/// An addon's panel (D13, F13).
+const PANEL_TIMEOUT: Duration = Duration::from_secs(10);
+/// An addon's panel action (D13).
+const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The runtime and what it tells the UI, as the event loop holds them.
 pub(super) struct Runner {
@@ -263,8 +269,72 @@ pub(super) fn run(effect: Effect, app: &mut App, edge: &Edge, tx: &mpsc::Sender<
         Effect::Addon(AddonCall::ReviewAnswer { launch, answer }) => {
             answer_review(edge, launch, answer, tx)
         }
+        Effect::Addon(AddonCall::Panel { gen, addon, req }) => panel(edge, (gen, addon), req, tx),
+        Effect::Addon(AddonCall::Action { addon, req }) => action(edge, addon, req, tx),
         _ => {}
     }
+}
+
+/// `addon`'s panel for `req` on a task, within [`PANEL_TIMEOUT`]: cleaned
+/// (C2), or an error page when the addon timed out or panicked; it comes
+/// back with `gen`, and the view drops it if it asked again since (A10).
+fn panel(
+    edge: &Edge,
+    (gen, addon): (u64, &'static str),
+    req: PanelRequest,
+    tx: &mpsc::Sender<HostEvent>,
+) {
+    let Some(entry) = edge.addons().get(addon).cloned() else {
+        return;
+    };
+    let decl = entry
+        .ui()
+        .and_then(|u| u.panels().iter().find(|p| p.id == req.id));
+    let title = decl.map_or("panel", |d| d.title);
+    let (ctx, tx) = (edge.ctx(addon), tx.clone());
+    tokio::spawn(async move {
+        let mut job = tokio::spawn(async move {
+            let ui = entry.ui()?;
+            Some(ui.panel(req, ctx).await)
+        });
+        let panel = match tokio::time::timeout(PANEL_TIMEOUT, &mut job).await {
+            Ok(Ok(Some(panel))) => clean_panel(panel),
+            Ok(Ok(None)) => error_panel(title, "no such panel"),
+            Ok(Err(_)) => error_panel(title, "failed"),
+            Err(_) => {
+                job.abort();
+                error_panel(title, "timed out")
+            }
+        };
+        let done = AddonResult::Panel { gen, addon, panel };
+        let _ = tx.send(HostEvent::Addon(done)).await;
+    });
+}
+
+/// Run `addon`'s panel action `req` on a task, within [`ACTION_TIMEOUT`];
+/// its notice is cleaned (C2).
+fn action(edge: &Edge, addon: &'static str, req: ActionRequest, tx: &mpsc::Sender<HostEvent>) {
+    let Some(entry) = edge.addons().get(addon).cloned() else {
+        return;
+    };
+    let (ctx, tx) = (edge.ctx(addon), tx.clone());
+    tokio::spawn(async move {
+        let mut job = tokio::spawn(async move {
+            let ui = entry.ui().ok_or("no actions")?;
+            ui.action(req, ctx).await
+        });
+        let result = match tokio::time::timeout(ACTION_TIMEOUT, &mut job).await {
+            Ok(Ok(Ok(notice))) => Ok(clean_notice(notice)),
+            Ok(Ok(Err(why))) => Err(format!("{addon}: {}", line(&why, TEXT_BYTES))),
+            Ok(Err(_)) => Err(format!("{addon}: the action failed")),
+            Err(_) => {
+                job.abort();
+                Err(format!("{addon}: the action timed out"))
+            }
+        };
+        let done = AddonResult::ActionDone { addon, result };
+        let _ = tx.send(HostEvent::Addon(done)).await;
+    });
 }
 
 /// Run a call into the Vocdoni addon's plugin state: the transition is

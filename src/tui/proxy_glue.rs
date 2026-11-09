@@ -1,11 +1,11 @@
 //! The TUI's proxy glue: what `App` does with the proxy's answers. The
 //! Vocdoni addon takes it over (core-addons plan, P3.5b-P3.12).
 
-use super::app::{App, Effect, Modal};
+use super::app::{App, Effect};
 use super::proxy_state::{ProxyFetch, SessionCred};
 use super::sessions::SessionView;
 use super::HostEvent;
-use crate::addons::vocdoni::proxy::api::{SessionCredential, SwitchError, SwitchOutcome};
+use crate::addons::vocdoni::proxy::api::SessionCredential;
 use crate::proto::SessionId;
 
 impl App {
@@ -22,20 +22,12 @@ impl App {
                 claude_session_id,
                 result,
             } => self.on_session_credential(session, &claude_session_id, result),
-            HostEvent::SubscriptionSwitch { session, result } => {
-                self.on_switch_result(session, result)
-            }
             _ => {}
         }
     }
 
     /// Called when a `FetchProxyStats` effect completes.
     pub fn on_proxy_stats(&mut self, profile_name: String, fetch: ProxyFetch) {
-        if let Some(Modal::ProxyStats(view)) = &mut self.modal {
-            if view.profile.as_deref() == Some(profile_name.as_str()) {
-                view.on_fetched();
-            }
-        }
         let status = self.proxy_status.entry(profile_name.clone()).or_default();
         status.apply(fetch);
         // A failed catalogue fetch is asked again on the next look.
@@ -128,33 +120,5 @@ impl App {
             return None;
         }
         entry.cred.as_ref()
-    }
-
-    /// Called when a `SwitchSubscription` effect completes: say what the
-    /// proxy answered, and look the credential up again so the status bar
-    /// follows once the switch happens.
-    pub fn on_switch_result(
-        &mut self,
-        session: SessionId,
-        result: Result<SwitchOutcome, SwitchError>,
-    ) {
-        match result {
-            Ok(o) => {
-                let from = o.from.name().unwrap_or("current subscription");
-                let to =
-                    o.to.as_ref()
-                        .and_then(|t| t.name())
-                        .unwrap_or("next available");
-                self.notify(format!(
-                    "switch scheduled: {from} → {to} (on the next message)"
-                ));
-                let active = self.active_view().map(|v| v.id) == Some(session);
-                if active {
-                    self.refresh_session_cred(0);
-                }
-            }
-            Err(SwitchError::Api(e)) => self.notify(format!("switch failed: {e}")),
-            Err(e) => self.notify(e.to_string()),
-        }
     }
 }

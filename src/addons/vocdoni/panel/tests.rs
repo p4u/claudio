@@ -381,3 +381,32 @@ async fn the_switch_action_needs_a_conversation() {
     v.can_switch = false;
     assert!(!flat(&pages::page(0, &v, Some(&status()))).contains("press n"));
 }
+
+/// The formatters the stats popup's numbers were read with (from
+/// `tui::fmt`'s tests).
+#[test]
+fn numbers_and_dates_read_as_before() {
+    use super::blocks::{fmt_count, fmt_delta, fmt_pct, fmt_rfc3339};
+    assert_eq!(fmt_count(0), "0");
+    assert_eq!(fmt_count(999), "999");
+    assert_eq!(fmt_count(1000), "1,000");
+    assert_eq!(fmt_count(1234567), "1,234,567");
+    assert_eq!(fmt_count(-1234), "-1,234");
+    assert_eq!(fmt_pct(0.873), "87%");
+    assert_eq!(fmt_pct(0.0021), "0.2%");
+    assert_eq!(fmt_pct(0.0), "0%");
+    assert_eq!(fmt_pct(1.0), "100%");
+    assert_eq!(fmt_delta(0.26), "+26%");
+    assert_eq!(fmt_delta(-0.08), "-8%");
+    assert_eq!(fmt_delta(0.001), "±0%");
+    assert_eq!(fmt_rfc3339("2026-10-09T15:00:00Z"), "2026-10-09 15:00 UTC");
+    assert_eq!(
+        fmt_rfc3339("2026-10-09T15:00:59.5+02:00"),
+        "2026-10-09 13:00 UTC"
+    );
+    assert_eq!(fmt_rfc3339("soon"), "soon");
+    // Slicing this by bytes would split `é` and panic.
+    assert_eq!(fmt_rfc3339("2026-10-09T1234éZ"), "2026-10-09T1234éZ");
+    assert_eq!(fmt_rfc3339("2026-10-09Té"), "2026-10-09Té");
+    assert_eq!(fmt_rfc3339(""), "");
+}

@@ -3,8 +3,6 @@
 
 use ratatui::text::Span;
 
-use crate::text::parse_rfc3339;
-
 /// Token counts as `claudio proxy status` prints them: `1.2M`, `340k`, `42`.
 pub use crate::text::fmt_tokens;
 
@@ -82,48 +80,12 @@ pub fn short_model(id: &str) -> &str {
 
 // ── Numbers ───────────────────────────────────────────────────────────────────
 
-/// `1234567` → `1,234,567`.
-pub fn fmt_count(n: i64) -> String {
-    let digits = n.abs().to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 {
-        out.insert(0, '-');
-    }
-    out
-}
-
 /// A context window: `1M`, `200k`, `32k`. Round figures stay round.
 pub fn fmt_window(n: u64) -> String {
     if n >= 1_000_000 && n.is_multiple_of(1_000_000) {
         format!("{}M", n / 1_000_000)
     } else {
         fmt_tokens(n.min(i64::MAX as u64) as i64)
-    }
-}
-
-/// A fraction as a percentage: `0.873` → `87%`, `0.0021` → `0.2%`.
-pub fn fmt_pct(frac: f64) -> String {
-    let pct = frac * 100.0;
-    if pct > 0.0 && pct < 10.0 {
-        format!("{pct:.1}%")
-    } else {
-        format!("{pct:.0}%")
-    }
-}
-
-/// A signed change: `+26%`, `-8%`, `±0%`.
-pub fn fmt_delta(frac: f64) -> String {
-    let pct = (frac * 100.0).round() as i64;
-    match pct {
-        0 => "±0%".to_owned(),
-        p if p > 0 => format!("+{p}%"),
-        p => format!("{p}%"),
     }
 }
 
@@ -160,14 +122,6 @@ pub fn fmt_utc(secs: i64) -> String {
         rest / 3600,
         rest % 3600 / 60
     )
-}
-
-/// `2026-10-09T15:00:00Z` → `2026-10-09 15:00 UTC`; anything that is not an
-/// RFC 3339 timestamp is shown as it is.
-pub fn fmt_rfc3339(ts: &str) -> String {
-    parse_rfc3339(ts)
-        .and_then(|secs| i64::try_from(secs).ok())
-        .map_or_else(|| ts.to_owned(), fmt_utc)
 }
 
 #[cfg(test)]
@@ -212,44 +166,15 @@ mod tests {
 
     #[test]
     fn numbers() {
-        assert_eq!(fmt_count(0), "0");
-        assert_eq!(fmt_count(999), "999");
-        assert_eq!(fmt_count(1000), "1,000");
-        assert_eq!(fmt_count(1234567), "1,234,567");
-        assert_eq!(fmt_count(-1234), "-1,234");
-
         assert_eq!(fmt_window(1_000_000), "1M");
         assert_eq!(fmt_window(200_000), "200k");
         assert_eq!(fmt_window(1_500_000), "1.5M");
         assert_eq!(fmt_window(812), "812");
-
-        assert_eq!(fmt_pct(0.873), "87%");
-        assert_eq!(fmt_pct(0.0021), "0.2%");
-        assert_eq!(fmt_pct(0.0), "0%");
-        assert_eq!(fmt_pct(1.0), "100%");
-
-        assert_eq!(fmt_delta(0.26), "+26%");
-        assert_eq!(fmt_delta(-0.08), "-8%");
-        assert_eq!(fmt_delta(0.001), "±0%");
     }
 
     #[test]
-    fn names_and_timestamps() {
+    fn names() {
         assert_eq!(short_model("claude-opus-5-5[1m]"), "opus-5-5[1m]");
         assert_eq!(short_model("gpt-x"), "gpt-x");
-        assert_eq!(fmt_rfc3339("2026-10-09T15:00:00Z"), "2026-10-09 15:00 UTC");
-        assert_eq!(
-            fmt_rfc3339("2026-10-09T15:00:59.5+02:00"),
-            "2026-10-09 13:00 UTC"
-        );
-        assert_eq!(fmt_rfc3339("soon"), "soon");
-    }
-
-    #[test]
-    fn a_malformed_timestamp_is_shown_as_is() {
-        // Slicing this by bytes would split `é` and panic.
-        assert_eq!(fmt_rfc3339("2026-10-09T1234éZ"), "2026-10-09T1234éZ");
-        assert_eq!(fmt_rfc3339("2026-10-09Té"), "2026-10-09Té");
-        assert_eq!(fmt_rfc3339(""), "");
     }
 }

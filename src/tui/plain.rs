@@ -134,11 +134,17 @@ mod tests {
     use ratatui::Terminal;
     use uuid::Uuid;
 
+    /// The registered addons' panel keys (the Vocdoni panel's Alt+s).
+    fn proxy_key() -> Vec<crate::tui::keymap::PanelBinding> {
+        let addons = crate::addon::Addons::new(crate::addons::all()).unwrap();
+        crate::tui::panel_view::panel_bindings(&addons)
+    }
+
     fn plain_app(args: &[&str]) -> (App, SessionId) {
         let mut notices = Vec::new();
         let mut app = App::new(AppConfig {
             mode: Mode::Plain,
-            keymap: Keymap::build_plain(&Default::default(), &mut notices),
+            keymap: Keymap::build_plain(&Default::default(), &mut notices, &proxy_key()),
             notify: false,
             launch_default: LaunchSelect::of(None),
             ..test_support::config()
@@ -208,7 +214,7 @@ mod tests {
             let mut notices = Vec::new();
             let mut app = App::new(AppConfig {
                 mode: Mode::Plain,
-                keymap: Keymap::build_plain(&Default::default(), &mut notices),
+                keymap: Keymap::build_plain(&Default::default(), &mut notices, &proxy_key()),
                 notify: false,
                 launch_default: LaunchSelect::of(None),
                 ..test_support::config()

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use super::{feature, name_ok, Addon, FlagDecl};
+use super::{feature, name_ok, Addon, FlagDecl, PanelDecl};
 
 /// The `config.toml` tables the core owns; no addon may claim them.
 pub const CORE_SECTIONS: &[&str] = &["ui", "keys", "update", "claude", "extensions"];
@@ -179,6 +179,17 @@ impl Addons {
             .collect()
     }
 
+    /// `(addon, panel)` for every panel, in registry order.
+    pub fn panels(&self) -> Vec<(&'static str, PanelDecl)> {
+        self.list
+            .iter()
+            .flat_map(|a| {
+                let panels = a.ui().map_or(&[][..], |u| u.panels());
+                panels.iter().map(move |p| (a.name(), *p))
+            })
+            .collect()
+    }
+
     /// `(addon, flag)` for every launch flag.
     pub fn launch_flags(&self) -> Vec<(&'static str, FlagDecl)> {
         self.list
@@ -195,7 +206,7 @@ impl Addons {
 mod tests {
     use super::*;
     use crate::addon::test_support::TestAddon;
-    use crate::addon::{PanelDecl, PanelKey};
+    use crate::addon::PanelKey;
 
     fn reg(list: Vec<TestAddon>) -> Result<Addons, String> {
         Addons::new(

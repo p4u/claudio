@@ -24,14 +24,6 @@ pub struct ProxyStatus {
 }
 
 impl ProxyStatus {
-    /// Windows that have stats, in canonical order.
-    pub fn cached_windows(&self) -> Vec<Window> {
-        Window::ALL
-            .into_iter()
-            .filter(|w| self.stats.contains_key(w))
-            .collect()
-    }
-
     /// Merge the result of one fetch.
     pub fn apply(&mut self, fetch: ProxyFetch) {
         for (window, result) in fetch.stats {

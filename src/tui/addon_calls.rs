@@ -2,7 +2,9 @@
 //! and what comes back ([`AddonResult`]). `App` never sees the runtime
 //! (A6): it emits calls as effects and takes results as events.
 
-use crate::addon::{Checklist, ChecklistAnswer, LaunchOption, Notice};
+use crate::addon::{
+    ActionRequest, Checklist, ChecklistAnswer, LaunchOption, Notice, Panel, PanelRequest,
+};
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
 use crate::app::launch::ReviewAnswer;
@@ -44,6 +46,19 @@ pub enum AddonCall {
     },
     /// The member's answer to the review launch `launch` waits for.
     ReviewAnswer { launch: u64, answer: ReviewAnswer },
+    /// `addon`'s panel as `req` asks (10 s; an [`AddonResult::Panel`] with
+    /// `gen` back).
+    Panel {
+        gen: u64,
+        addon: &'static str,
+        req: PanelRequest,
+    },
+    /// Run one of `addon`'s panel actions (15 s; an
+    /// [`AddonResult::ActionDone`] back).
+    Action {
+        addon: &'static str,
+        req: ActionRequest,
+    },
 }
 
 /// What the addon runtime and the runner tell `App` (`addon_runner`).
@@ -63,6 +78,18 @@ pub enum AddonResult {
     Offer { addon: &'static str, id: String },
     /// A notice, cleaned.
     Notice(Notice),
+    /// `addon`'s panel for request `gen`, cleaned (an error page when it
+    /// failed or timed out).
+    Panel {
+        gen: u64,
+        addon: &'static str,
+        panel: Panel,
+    },
+    /// A panel action of `addon` ended: its notice (cleaned) or why not.
+    ActionDone {
+        addon: &'static str,
+        result: Result<Notice, String>,
+    },
 }
 
 impl App {
@@ -84,6 +111,8 @@ impl App {
             } => self.on_checklist(addon, origin, checklist),
             AddonResult::Offer { addon, id } => self.on_offer(addon, id),
             AddonResult::Notice(notice) => self.notify(notice.text),
+            AddonResult::Panel { gen, panel, .. } => self.on_panel(gen, panel),
+            AddonResult::ActionDone { result, .. } => self.on_action_done(result),
         }
     }
 

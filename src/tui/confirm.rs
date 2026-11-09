@@ -29,12 +29,10 @@ pub enum ConfirmAction {
     Reset { id: SessionId, fresh: bool },
     /// Kill session `id` and close its tab.
     Kill(SessionId),
-    /// Ask the proxy `profile` to move conversation `claude_session_id` of
-    /// session `session` to another subscription.
-    SwitchSubscription {
-        session: SessionId,
-        profile: String,
-        claude_session_id: String,
+    /// Run one of `addon`'s panel actions.
+    AddonAction {
+        addon: &'static str,
+        req: crate::addon::ActionRequest,
     },
 }
 
@@ -179,11 +177,10 @@ impl App {
             }
             Some(ConfirmAction::Reset { id, fresh }) => self.reset_session(id, fresh),
             Some(ConfirmAction::Kill(id)) => self.kill_session(id),
-            Some(ConfirmAction::SwitchSubscription {
-                session,
-                profile,
-                claude_session_id,
-            }) => self.start_switch(profile, session, claude_session_id),
+            Some(ConfirmAction::AddonAction { addon, req }) => {
+                let call = super::addon_calls::AddonCall::Action { addon, req };
+                self.emit(super::app::Effect::Addon(call));
+            }
             None => {}
         }
         self.show_next_confirm();

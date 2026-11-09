@@ -28,14 +28,6 @@ impl Window {
             Window::D30 => 30.0,
         }
     }
-
-    pub fn next(self) -> Window {
-        match self {
-            Window::H24 => Window::D7,
-            Window::D7 => Window::D30,
-            Window::D30 => Window::H24,
-        }
-    }
 }
 
 /// Fetch `profile`'s stats for `windows`, its pool health and (with

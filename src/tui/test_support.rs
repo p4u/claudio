@@ -19,11 +19,13 @@ pub use crate::app::test_support::{info, shell_info};
 /// nothing from the machine it runs on: no proxy profiles, no SSH hosts, no
 /// saved state, no local claude.
 pub fn config() -> AppConfig {
+    let addons = std::sync::Arc::new(crate::addon::Addons::new(crate::addons::all()).unwrap());
+    let panels = super::panel_view::panel_bindings(&addons);
     AppConfig {
         mode: Mode::Manager,
         size: (100, 30),
         home: "/home/u".to_owned(),
-        keymap: Keymap::default(),
+        keymap: Keymap::build(&Default::default(), &mut Vec::new(), &panels),
         notify: true,
         copy_on_select: true,
         launch_default: Default::default(),
@@ -32,7 +34,7 @@ pub fn config() -> AppConfig {
         recent_dirs: HashMap::new(),
         claude_skipped: HashMap::new(),
         ssh_hosts: Vec::new(),
-        addons: std::sync::Arc::new(crate::addon::Addons::new(crate::addons::all()).unwrap()),
+        addons,
     }
 }
 
@@ -43,17 +45,6 @@ pub fn via(profile: &str) -> Option<crate::addon::LaunchChoice> {
         option: profile.into(),
         flags: Vec::new(),
     })
-}
-
-/// Launch option `name` (a proxy profile), not the default.
-pub fn option(name: &str) -> crate::addon::LaunchOption {
-    crate::addon::LaunchOption {
-        id: name.into(),
-        label: name.into(),
-        group: "Proxy".into(),
-        default: false,
-        detail: None,
-    }
 }
 
 /// An app made from [`config`].
