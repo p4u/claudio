@@ -1,6 +1,6 @@
-//! The TUI's view of the addon's plugin state, for the old setup screen
-//! and extension rows (temporary: core-addons plan P3.8-P3.13, the one
-//! core-to-addon import; checklists (P3.11) and extension rows (P3.13)
+//! The front-ends' view of the addon's plugin state, for the extension
+//! rows and the web's v1 plugin ops (temporary: core-addons plan
+//! P3.8-P3.13, the one core-to-addon import; extension rows (P3.13)
 //! replace it). Queries read the state; calls are transitions whose tasks
 //! the runner does.
 
@@ -44,11 +44,6 @@ impl Bridge {
     /// registry's plugin rows.
     pub fn enabled(&self) -> BTreeMap<String, bool> {
         self.0.state().plugins.config.clone()
-    }
-
-    /// Plugin `name`'s manifest, as fetched.
-    pub fn manifest(&self, name: &str) -> Option<ManifestState> {
-        self.manifest_at(name).map(|(_, m)| m)
     }
 
     /// Plugin `name`'s manifest, as fetched, and the hash it was fetched at.
@@ -106,29 +101,11 @@ impl Bridge {
         state.plugin_details(name, profile, refused)
     }
 
-    /// The plugins whose first-sight setup is due.
-    pub fn first_sight(&self) -> Vec<String> {
-        self.0.state().first_sight()
-    }
-
-    /// The member saved `choices` for plugin `name`.
-    pub fn save_choices(&self, name: &str, choices: PluginChoices) {
-        self.0.transition(|s| s.save_choices(name, choices));
-    }
-
     /// The member saved `choices` for plugin `name`: written to
     /// `[plugins.<name>]` (awaited: `Err` says why not), then every host is
     /// asked again.
     pub async fn save(&self, name: &str, choices: PluginChoices) -> Result<(), String> {
         self.0.save(name, choices).await
-    }
-
-    /// The member put plugin `name`'s first-sight setup off for this run.
-    pub fn defer(&self, name: &str) {
-        self.0.transition(|s| {
-            s.defer(name);
-            Vec::new()
-        });
     }
 
     /// Plugin `name` turned on or off.

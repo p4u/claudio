@@ -191,10 +191,6 @@ pub fn run_bridge(app: &mut App) -> Vec<Effect> {
     let mut rest = Vec::new();
     for effect in app.take_effects() {
         match effect {
-            Effect::Bridge(BridgeCall::SaveChoices { name, choices }) => {
-                b.save_choices(&name, choices)
-            }
-            Effect::Bridge(BridgeCall::Defer(name)) => b.defer(&name),
             Effect::Bridge(BridgeCall::SetEnabled { name, on }) => b.set_enabled(&name, on),
             Effect::Bridge(BridgeCall::Refresh) => b.refresh(),
             other => rest.push(other),

@@ -171,13 +171,6 @@ pub enum Effect {
 /// (temporary: P3.13 replaces them).
 #[derive(Debug, Clone, PartialEq)]
 pub enum BridgeCall {
-    /// Write the member's choices for a plugin and ask every host again.
-    SaveChoices {
-        name: String,
-        choices: crate::addons::vocdoni::plugins::choices::PluginChoices,
-    },
-    /// Put a plugin's first-sight setup off for this run.
-    Defer(String),
     /// Turn a plugin on or off.
     SetEnabled { name: String, on: bool },
     /// `r`: every list, manifest and host answer again.

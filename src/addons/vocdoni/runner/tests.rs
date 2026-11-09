@@ -59,12 +59,11 @@ async fn runner_asks_a_host_once_choices_are_saved() {
     runner.on_event(&AddonEvent::Tick, &(ctx.clone() as Arc<dyn AddonCtx>));
     assert!(lock(&ctx.requests).is_empty(), "nothing before the setup");
 
-    let bridge = Bridge(Arc::clone(&runner));
     let choices = PluginChoices {
         disabled: vec!["mcp:kb".into()],
         ..PluginChoices::default()
     };
-    bridge.save_choices("kb", choices.clone());
+    runner.transition(|s| s.save_choices("kb", choices.clone()));
     until("the answer", || {
         matches!(
             runner.state().apply_state("local", "kb"),

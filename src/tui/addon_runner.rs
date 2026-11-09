@@ -274,8 +274,6 @@ fn bridge(call: BridgeCall, runtime: &AddonRuntime) {
         return;
     };
     match call {
-        BridgeCall::SaveChoices { name, choices } => bridge.save_choices(&name, choices),
-        BridgeCall::Defer(name) => bridge.defer(&name),
         BridgeCall::SetEnabled { name, on } => bridge.set_enabled(&name, on),
         BridgeCall::Refresh => bridge.refresh(),
     }
