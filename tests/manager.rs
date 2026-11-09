@@ -1869,7 +1869,6 @@ fn test_plain_help_lists_only_the_plain_keys() {
     for key in [
         "Alt+h",
         "Alt+s",
-        "Alt+s → n",
         "Alt+l",
         "Alt+e",
         "Alt+u",
@@ -1881,7 +1880,7 @@ fn test_plain_help_lists_only_the_plain_keys() {
     }
     assert_eq!(
         screen.matches("Alt+").count(),
-        9,
+        8,
         "exactly the plain keys:\n{screen}"
     );
 

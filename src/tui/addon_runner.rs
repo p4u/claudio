@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -18,9 +18,9 @@ use super::app::{AddonResult, App, BridgeCall, Effect, LaunchCall, Launched, Mod
 use super::HostEvent;
 use crate::addon::{
     checklist as clean_checklist, error_panel, line, notice as clean_notice,
-    option as clean_option, panel as clean_panel, ActionRequest, Addons, Checklist,
-    ChecklistAnswer, Frontend, LaunchOp, LaunchOption, Level, Notice, PanelRequest, Pick,
-    SessionSnap, TEXT_BYTES,
+    option as clean_option, panel as clean_panel, segment as clean_segment, ActionRequest, Addons,
+    Checklist, ChecklistAnswer, Frontend, LaunchOp, LaunchOption, Level, Notice, PanelRequest,
+    Pick, Segment, SessionSnap, TEXT_BYTES,
 };
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
@@ -38,6 +38,9 @@ const SAVE_TIMEOUT: Duration = Duration::from_secs(15);
 const PANEL_TIMEOUT: Duration = Duration::from_secs(10);
 /// An addon's panel action (D13).
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
+/// How often the segments are read again while nothing changed (their
+/// ages: `⇆ switched 3m ago`).
+const SEGMENTS_EVERY: Duration = Duration::from_secs(1);
 
 /// The runtime and what it tells the UI, as the event loop holds them.
 pub(super) struct Runner {
@@ -51,6 +54,8 @@ pub(super) struct Runner {
 pub(super) struct Edge {
     rt: AddonRuntime,
     parked: Arc<Mutex<HashMap<u64, Waiting>>>,
+    /// The sessions last synced, and when their segments were last read.
+    shown: Arc<Mutex<(Vec<SessionSnap>, Instant)>>,
 }
 
 impl Deref for Edge {
@@ -67,6 +72,7 @@ impl Edge {
         Edge {
             rt,
             parked: Arc::default(),
+            shown: Arc::new(Mutex::new((Vec::new(), Instant::now()))),
         }
     }
 
@@ -177,9 +183,10 @@ pub(super) fn on_reply(app: &mut App, runtime: &AddonRuntime, to: ReplyTo, reply
 
 /// The sessions as `App` has them now, its active one focused. The runtime
 /// sends events only for what changed; the Vocdoni addon learns the
-/// options they (and the run's flags) use.
-pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
-    if let Some(bridge) = Bridge::of(runtime.addons()) {
+/// options they (and the run's flags) use. When they changed, or a second
+/// passed, `App` gets every session's segments again.
+pub(super) fn sync(edge: &Edge, app: &mut App) {
+    if let Some(bridge) = Bridge::of(edge.addons()) {
         let mut used: Vec<(String, String)> = app
             .sessions
             .iter()
@@ -191,26 +198,60 @@ pub(super) fn sync(runtime: &AddonRuntime, app: &App) {
         }
         bridge.use_launches(&used);
     }
+    let snaps = snaps(app);
+    let due = {
+        let mut shown = edge.shown.lock().unwrap_or_else(|e| e.into_inner());
+        let due = shown.0 != snaps || shown.1.elapsed() >= SEGMENTS_EVERY;
+        if due {
+            *shown = (snaps.clone(), Instant::now());
+        }
+        due
+    };
+    if due {
+        app.on_addon(AddonResult::Segments(segments(edge, &snaps)));
+    }
+    edge.sessions_reset(snaps);
+}
+
+/// The sessions as an addon sees them.
+fn snaps(app: &App) -> Vec<SessionSnap> {
     let active = app.active_view().map(|v| v.id);
-    let snaps = app
-        .sessions
-        .iter()
-        .map(|v| SessionSnap {
-            sid: v.id,
-            host: v.host.clone(),
-            kind: v.kind,
-            cwd: v.cwd.clone(),
-            label: v
-                .name
-                .clone()
-                .or_else(|| v.title.clone())
-                .unwrap_or_else(|| v.cwd.clone()),
-            conversation: v.claude_session_id.clone(),
-            launch: v.launch.clone(),
-            focused: Some(v.id) == active,
-        })
-        .collect();
-    runtime.sessions_reset(snaps);
+    let snap = |v: &super::sessions::SessionView| SessionSnap {
+        sid: v.id,
+        host: v.host.clone(),
+        kind: v.kind,
+        cwd: v.cwd.clone(),
+        label: v
+            .name
+            .clone()
+            .or_else(|| v.title.clone())
+            .unwrap_or_else(|| v.cwd.clone()),
+        conversation: v.claude_session_id.clone(),
+        launch: v.launch.clone(),
+        focused: Some(v.id) == active,
+    };
+    app.sessions.iter().map(snap).collect()
+}
+
+/// Every session's segments from every addon with a `Ui`, cleaned (C2).
+fn segments(
+    runtime: &AddonRuntime,
+    snaps: &[SessionSnap],
+) -> HashMap<SessionId, Vec<(&'static str, Segment)>> {
+    let mut all = HashMap::new();
+    for addon in runtime.addons().iter() {
+        let Some(ui) = addon.ui() else {
+            continue;
+        };
+        let ctx = runtime.ctx(addon.name());
+        for s in snaps {
+            let own = ui.segments(s, ctx.as_ref()).into_iter();
+            let own = own.map(|seg| (addon.name(), clean_segment(seg)));
+            all.entry(s.sid).or_insert_with(Vec::new).extend(own);
+        }
+    }
+    all.retain(|_, v: &mut Vec<_>| !v.is_empty());
+    all
 }
 
 /// What the runtime tells the UI: notices are shown, a change re-reads
@@ -221,6 +262,7 @@ pub(super) fn on_out(app: &mut App, runtime: &AddonRuntime, out: RuntimeOut) {
         RuntimeOut::Notice { addon, notice } => app.notify(format!("{addon}: {}", notice.text)),
         RuntimeOut::Changed { addon } => {
             app.on_addon(AddonResult::Changed { addon });
+            app.on_addon(AddonResult::Segments(segments(runtime, &snaps(app))));
             for (shown, id) in app.checklists_shown() {
                 if let Some(c) = checklist_of(runtime, shown, &id).filter(|_| shown == addon) {
                     app.refresh_checklist(shown, &c);
@@ -585,8 +627,6 @@ pub(super) fn save_extension(name: String, on: bool, tx: &mpsc::Sender<HostEvent
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::addon::test_support::TestAddon;
     use crate::addon::Addon;
@@ -621,10 +661,11 @@ mod tests {
             watch_config: false,
         };
         let (runtime, _rx) = AddonRuntime::start(addons, opts);
+        let edge = Edge::new(runtime.clone());
         let mut app = app_with(&[info(Some(7), None)]);
         let sid = app.sessions[0].id;
-        sync(&runtime, &app);
-        sync(&runtime, &app); // nothing changed: no event
+        sync(&edge, &mut app);
+        sync(&edge, &mut app); // nothing changed: no event
         let got = seen(&echo, 2).await;
         assert_eq!(
             got[1],
@@ -648,7 +689,7 @@ mod tests {
             "event ClaudeInstalled { host: \"local\" }"
         );
         app.sessions.clear();
-        sync(&runtime, &app);
+        sync(&edge, &mut app);
         assert_eq!(
             seen(&echo, 4).await[3],
             format!("event SessionRemoved {{ sid: {sid} }}")

@@ -130,12 +130,6 @@ impl SessionView {
         }
     }
 
-    /// The option it was launched with (the proxy profile, while only the
-    /// Vocdoni addon routes launches; P3.12 makes the status generic).
-    pub fn profile(&self) -> Option<&str> {
-        self.launch.as_ref().map(|c| c.option.as_str())
-    }
-
     /// The tab label: the user's name, else a meaningful claude title (not
     /// "Claude Code"), else the cwd's basename. A terminal is its name, else
     /// `term`; its title is ignored so a shell prompt cannot rename the tab.
@@ -278,7 +272,6 @@ impl App {
         }
         self.redraw = true;
         self.save();
-        self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
     }
 
     /// Forget session `i` and activate a neighbour.
@@ -287,7 +280,7 @@ impl App {
             return;
         }
         let removed = self.sessions.remove(i);
-        self.session_creds.remove(&removed.id);
+        self.segments.remove(&removed.id);
         match self.active {
             Some(a) if a == i => {
                 self.active = None;

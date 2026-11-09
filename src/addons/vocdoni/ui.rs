@@ -20,8 +20,6 @@ use crate::addon::{
 };
 
 /// The most characters of a credential's name a segment shows.
-// The segments reach the TUI's status bar from P3.12c on (core-addons plan).
-#[allow(dead_code)]
 const NAME_CHARS: usize = 24;
 
 impl Ui for Vocdoni {
@@ -59,8 +57,6 @@ impl Ui for Vocdoni {
     }
 }
 
-// The segments reach the TUI's status bar from P3.12c on (core-addons plan).
-#[allow(dead_code)]
 fn segment(id: &str, text: String, tone: Tone, priority: u8) -> Segment {
     Segment {
         id: id.to_owned(),
@@ -74,8 +70,6 @@ fn segment(id: &str, text: String, tone: Tone, priority: u8) -> Segment {
 /// proxy named its credential for this conversation `work-max (max)`
 /// (20), `⇆ switched 3m ago` (21, for ten minutes), `5h 37%` (110) and
 /// `7d 12%` (150). A direct session gets none.
-// Read by the TUI's status bar from P3.12c on (core-addons plan).
-#[allow(dead_code)]
 pub(super) fn segments(state: &State, s: &SessionSnap) -> Vec<Segment> {
     let Some(profile) = profile_of(s) else {
         return Vec::new();

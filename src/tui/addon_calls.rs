@@ -2,8 +2,10 @@
 //! and what comes back ([`AddonResult`]). `App` never sees the runtime
 //! (A6): it emits calls as effects and takes results as events.
 
+use std::collections::HashMap;
+
 use crate::addon::{
-    ActionRequest, Checklist, ChecklistAnswer, LaunchOption, Notice, Panel, PanelRequest,
+    ActionRequest, Checklist, ChecklistAnswer, LaunchOption, Notice, Panel, PanelRequest, Segment,
 };
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
@@ -90,6 +92,8 @@ pub enum AddonResult {
         addon: &'static str,
         result: Result<Notice, String>,
     },
+    /// Every session's addon segments, cleaned (C2): the status bar's.
+    Segments(HashMap<SessionId, Vec<(&'static str, Segment)>>),
 }
 
 impl App {
@@ -113,6 +117,11 @@ impl App {
             AddonResult::Notice(notice) => self.notify(notice.text),
             AddonResult::Panel { gen, panel, .. } => self.on_panel(gen, panel),
             AddonResult::ActionDone { result, .. } => self.on_action_done(result),
+            AddonResult::Segments(segments) if segments != self.segments => {
+                self.segments = segments;
+                self.redraw = true;
+            }
+            AddonResult::Segments(_) => {}
         }
     }
 

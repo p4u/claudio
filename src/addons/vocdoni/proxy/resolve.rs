@@ -30,8 +30,3 @@ pub fn find_profile(name: &str) -> Option<Profile> {
             .and_then(|sec| sec.profiles.get(name).cloned())
     }
 }
-
-/// Resolve a proxy profile by name to `(url, token)`.
-pub fn resolve_profile(name: &str) -> Option<(String, String)> {
-    find_profile(name).map(|p| (p.url, p.token))
-}

@@ -841,7 +841,6 @@ impl App {
             SessionEvent::ClaudeSession { claude_session_id } => {
                 v.claude_session_id = Some(claude_session_id);
                 self.save();
-                self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
             }
             // A fresh reset: recovery must not resume the old conversation
             // from what we saved.

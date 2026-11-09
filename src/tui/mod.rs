@@ -26,8 +26,6 @@ mod leader;
 mod notifications;
 mod panel_view;
 mod plain;
-mod proxy_glue;
-mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
@@ -426,17 +424,6 @@ enum HostEvent {
     /// Drop `host`'s connection and connect again: its outdated daemon has
     /// become idle (see [`retry_outdated`]).
     Reconnect { host: String, generation: u64 },
-    /// Proxy stats, pool health and model catalogue fetched (or failed).
-    ProxyStats {
-        profile_name: String,
-        fetch: proxy_state::ProxyFetch,
-    },
-    /// The credential claude-proxy reports for a session (or why not).
-    SessionCredential {
-        session: crate::proto::SessionId,
-        claude_session_id: String,
-        result: Result<Option<proxy::api::SessionCredential>, String>,
-    },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
@@ -591,9 +578,6 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // 60-second proxy stats refresh.
-    let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
-    proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut outdated_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + OUTDATED_RETRY, OUTDATED_RETRY);
     outdated_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -607,7 +591,7 @@ async fn event_loop(
                 effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host, &runtime,
             );
         }
-        addon_runner::sync(&runtime, &app);
+        addon_runner::sync(&runtime, &mut app);
         if app.quit {
             runtime.shutdown();
             ext_host.shutdown().await;
@@ -702,9 +686,6 @@ async fn event_loop(
                         spawn_connect(host, gen, ev_tx.clone(), true);
                     }
                 }
-                Some(ev @ (HostEvent::ProxyStats { .. } | HostEvent::SessionCredential { .. })) => {
-                    app.on_proxy_event(ev)
-                }
                 Some(HostEvent::UpgradeAvailable(tag)) => app.on_upgrade_available(tag),
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
@@ -729,14 +710,6 @@ async fn event_loop(
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
             Some(out) = rx.recv() => addon_runner::on_out(&mut app, &runtime, out),
             _ = tick.tick() => app.on_tick(),
-            _ = proxy_tick.tick() => {
-                // Refresh proxy stats for the active session's profile (they
-                // feed the status bar, which `--plain` does not have).
-                let proxy_name = app.active_view().and_then(|v| v.profile().map(str::to_owned));
-                if let Some(name) = proxy_name.filter(|_| manager) {
-                    app.schedule_proxy_stats(&name, vec![proxy::stats::Window::H24]);
-                }
-            }
             _ = outdated_tick.tick() => retry_outdated_hosts(conns, &ev_tx),
             _ = tokio::time::sleep(wait), if app.redraw => {}
         }
@@ -863,97 +836,6 @@ fn run_effect(
                 app.notify(format!("could not save state: {e}"));
             }
         }
-        Effect::FetchProxyStats {
-            profile_name,
-            windows,
-            models,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetch = fetch_proxy_stats(&profile_name, &windows, models).await;
-                let _ = tx
-                    .send(HostEvent::ProxyStats {
-                        profile_name,
-                        fetch,
-                    })
-                    .await;
-            });
-        }
-        Effect::FetchSessionCredential {
-            profile_name,
-            session,
-            claude_session_id,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let result = fetch_session_credential(&profile_name, &claude_session_id).await;
-                let _ = tx
-                    .send(HostEvent::SessionCredential {
-                        session,
-                        claude_session_id,
-                        result,
-                    })
-                    .await;
-            });
-        }
         Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
-    }
-}
-
-/// Fetch proxy stats for `windows`, pool health, and (when `models`) the
-/// model catalogue for a named profile. Requests run sequentially to stay
-/// well inside the proxy's per-user rate limit (1 req/s, burst 10).
-async fn fetch_proxy_stats(
-    profile_name: &str,
-    windows: &[proxy::stats::Window],
-    models: bool,
-) -> proxy_state::ProxyFetch {
-    use proxy::api;
-    let mut out = proxy_state::ProxyFetch::default();
-    let Some((url, token)) = proxy::resolve::resolve_profile(profile_name) else {
-        let err = format!("proxy profile '{profile_name}' not found");
-        out.stats = windows.iter().map(|w| (*w, Err(err.clone()))).collect();
-        return out;
-    };
-    for w in windows {
-        let result = api::fetch_stats(&url, &token, w.param())
-            .await
-            .map_err(describe_api_error);
-        out.stats.push((*w, result));
-    }
-    out.pool = api::fetch_pool_health(&url, &token).await.ok();
-    if models {
-        out.models = api::fetch_models(&url, &token).await.ok();
-    }
-    out
-}
-
-/// Ask the proxy which credential a conversation uses. `Ok(None)` is "not
-/// known (yet)": no credential to show, not an error.
-async fn fetch_session_credential(
-    profile_name: &str,
-    claude_session_id: &str,
-) -> Result<Option<proxy::api::SessionCredential>, String> {
-    let (url, token) = proxy::resolve::resolve_profile(profile_name)
-        .ok_or_else(|| format!("proxy profile '{profile_name}' not found"))?;
-    proxy::api::fetch_session(&url, &token, claude_session_id)
-        .await
-        .map_err(describe_api_error)
-}
-
-/// A one-line, user-facing description of a proxy API error.
-fn describe_api_error(e: proxy::api::ApiError) -> String {
-    use proxy::api::ApiError;
-    match e {
-        ApiError::Http(s) if s.as_u16() == 403 => {
-            "stats need a user token (admin and anonymous tokens are refused)".to_owned()
-        }
-        ApiError::Http(s) if s.as_u16() == 404 => {
-            "this proxy has no claudio API (upgrade claude-proxy)".to_owned()
-        }
-        ApiError::Http(s) if s.as_u16() == 429 => {
-            "rate limited by the proxy; wait a few seconds".to_owned()
-        }
-        other => other.to_string(),
     }
 }
