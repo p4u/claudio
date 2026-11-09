@@ -3,17 +3,29 @@
 
 use super::*;
 use crate::addon::Tone;
+use crate::app::state::SavedRoute;
 
 fn addons() -> Addons {
     Addons::new(crate::addons::all()).unwrap()
+}
+
+/// A persisted pre-addon route.
+fn legacy(proxy: Option<&str>, first_party: bool) -> SavedRoute {
+    SavedRoute {
+        launch: None,
+        legacy: crate::addon::LegacyChoice {
+            proxy: proxy.map(str::to_owned),
+            first_party,
+        },
+    }
 }
 
 #[test]
 fn a_session_launch_is_known_only_when_recorded_and_adopted() {
     let addons = addons();
     assert_eq!(launch_of(&addons, None), (false, None));
-    assert_eq!(launch_of(&addons, Some(&(None, false))), (true, None));
-    let (known, choice) = launch_of(&addons, Some(&(Some("work".into()), true)));
+    assert_eq!(launch_of(&addons, Some(&legacy(None, false))), (true, None));
+    let (known, choice) = launch_of(&addons, Some(&legacy(Some("work"), true)));
     assert!(known);
     let choice = choice.unwrap();
     assert_eq!(
@@ -24,7 +36,7 @@ fn a_session_launch_is_known_only_when_recorded_and_adopted() {
     // No addon of this build adopts it: unknown, never direct (F4).
     let none = Addons::empty();
     assert_eq!(
-        launch_of(&none, Some(&(Some("work".into()), false))),
+        launch_of(&none, Some(&legacy(Some("work"), false))),
         (false, None)
     );
 

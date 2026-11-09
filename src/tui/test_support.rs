@@ -70,6 +70,7 @@ pub fn known(live: &[SessionInfo]) -> ClientState {
             host: "local".to_owned(),
             claude_session_id: info.claude_session_id.clone(),
             created_at: info.created_at,
+            launch: None,
             proxy: None,
             first_party: false,
             route_unknown: false,

@@ -331,8 +331,8 @@ pub(crate) struct SessionView {
     /// From the last Attached.
     pub size: Option<(u16, u16)>,
     pub prompt: Option<PendingPrompt>,
-    /// Known proxy/first_party.
-    pub meta: Option<(Option<String>, bool)>,
+    /// Its persisted launch, when known.
+    pub meta: Option<crate::app::state::SavedRoute>,
     /// Its launch and its addons' segments (`addons::refresh`).
     pub addon: super::addons::SessionAddons,
 }
@@ -383,9 +383,8 @@ pub(crate) struct SessionRef {
     pub client: Client,
     pub features: Vec<String>,
     pub info: SessionInfo,
-    pub proxy: Option<String>,
-    pub first_party: bool,
-    pub proxy_known: bool,
+    /// Its persisted launch, when known.
+    pub route: Option<crate::app::state::SavedRoute>,
 }
 
 type Reply<T> = oneshot::Sender<T>;
@@ -1255,15 +1254,12 @@ impl Hub {
             .get(&view.host)
             .map(|h| h.features.clone())
             .unwrap_or_default();
-        let (proxy, first_party) = view.meta.clone().unwrap_or((None, false));
         Ok(SessionRef {
             host: view.host.clone(),
             client,
             features,
             info: view.info.clone(),
-            proxy,
-            first_party,
-            proxy_known: view.meta.is_some(),
+            route: view.meta.clone(),
         })
     }
 
@@ -1416,7 +1412,7 @@ impl Hub {
         let Some(view) = self.sessions.get_mut(&sid) else {
             return;
         };
-        view.meta = Some((meta.proxy, meta.first_party));
+        view.meta = Some(meta.route());
         if let Some((mut prompt, size)) = prompt {
             prompt.on_state(view.info.state);
             view.prompt = Some(prompt);
@@ -1479,7 +1475,7 @@ impl Hub {
     fn add_view(&mut self, host: &str, info: SessionInfo, now: u64) {
         let sid = info.id;
         let mut view = SessionView::new(host, info, now);
-        view.meta = state::known_proxy(&self.web, &self.tui_state, sid);
+        view.meta = state::known_launch(&self.web, &self.tui_state, sid);
         self.sessions.insert(sid, view);
         if let Some((meta, prompt)) = self.pending_spawns.remove(&sid) {
             self.apply_spawn(sid, meta, prompt);

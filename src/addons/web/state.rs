@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::state::ClientState;
+use crate::addon::{LaunchChoice, LegacyChoice};
+use crate::app::state::{ClientState, SavedRoute, SavedSession};
 use crate::paths;
 use crate::proto::SessionId;
 
@@ -30,11 +31,40 @@ pub(crate) struct WebState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionMeta {
     pub host: String,
-    /// The proxy profile's name; `None`: direct.
+    /// What it was launched with (`None` with no `proxy`: direct); read
+    /// first, as state.json's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchChoice>,
+    /// compat(v0.10): the proxy profile's name, still written for a
+    /// rolled-back build.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// compat(v0.10): first-party, still written.
     #[serde(default)]
     pub first_party: bool,
+}
+
+impl SessionMeta {
+    /// The record of a session on `host` launched as `route` says.
+    pub(crate) fn new(host: &str, route: SavedRoute) -> SessionMeta {
+        SessionMeta {
+            host: host.to_owned(),
+            launch: route.launch,
+            proxy: route.legacy.proxy,
+            first_party: route.legacy.first_party,
+        }
+    }
+
+    /// Its persisted route.
+    pub(crate) fn route(&self) -> SavedRoute {
+        SavedRoute {
+            launch: self.launch.clone(),
+            legacy: LegacyChoice {
+                proxy: self.proxy.clone(),
+                first_party: self.first_party,
+            },
+        }
+    }
 }
 
 /// The browser's panes (docs/web-protocol.md §4).
@@ -102,21 +132,21 @@ pub(crate) fn save(path: &Path, s: &WebState) -> io::Result<()> {
     paths::write_atomic(path, &json)
 }
 
-/// What is known of `sid`'s proxy: the web's own record first, then the
+/// What is known of `sid`'s launch: the web's own record first, then the
 /// TUI's state.json (read only; an entry the TUI marks as started
 /// elsewhere knows nothing, R19). `None`: nothing is known.
-pub(crate) fn known_proxy(
+pub(crate) fn known_launch(
     web: &WebState,
     tui: &ClientState,
     sid: SessionId,
-) -> Option<(Option<String>, bool)> {
+) -> Option<SavedRoute> {
     if let Some(meta) = web.sessions.get(&sid) {
-        return Some((meta.proxy.clone(), meta.first_party));
+        return Some(meta.route());
     }
     tui.sessions
         .iter()
         .find(|s| s.id == sid && !s.route_unknown)
-        .map(|s| (s.proxy.clone(), s.first_party))
+        .map(SavedSession::route)
 }
 
 #[cfg(test)]
@@ -134,11 +164,7 @@ mod tests {
 
     #[test]
     fn records_of_sessions_a_host_no_longer_lists_are_forgotten() {
-        let meta = |host: &str| SessionMeta {
-            host: host.into(),
-            proxy: None,
-            first_party: false,
-        };
+        let meta = |host: &str| SessionMeta::new(host, SavedRoute::default());
         let (kept, gone, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let mut s = WebState::default();
         s.sessions.insert(kept, meta("local"));
@@ -167,6 +193,7 @@ mod tests {
             a,
             SessionMeta {
                 host: "local".into(),
+                launch: None,
                 proxy: Some("work".into()),
                 first_party: true,
             },
@@ -226,17 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn known_proxy_prefers_web_state_then_tui_state() {
+    fn known_launch_prefers_web_state_then_tui_state() {
         let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let mut web = WebState::default();
-        web.sessions.insert(
-            a,
-            SessionMeta {
-                host: "local".into(),
-                proxy: None,
-                first_party: false,
-            },
-        );
+        web.sessions
+            .insert(a, SessionMeta::new("local", SavedRoute::default()));
         let saved = |id, proxy: &str| SavedSession {
             id,
             name: None,
@@ -244,6 +265,7 @@ mod tests {
             host: "local".into(),
             claude_session_id: None,
             created_at: 0,
+            launch: None,
             proxy: Some(proxy.into()),
             first_party: true,
             route_unknown: false,
@@ -253,12 +275,13 @@ mod tests {
             sessions: vec![saved(a, "tui-a"), saved(b, "tui-b")],
             ..ClientState::default()
         };
-        assert_eq!(known_proxy(&web, &tui, a), Some((None, false)));
-        assert_eq!(
-            known_proxy(&web, &tui, b),
-            Some((Some("tui-b".into()), true))
-        );
-        assert_eq!(known_proxy(&web, &tui, c), None);
+        assert_eq!(known_launch(&web, &tui, a), Some(SavedRoute::default()));
+        let legacy = LegacyChoice {
+            proxy: Some("tui-b".into()),
+            first_party: true,
+        };
+        assert_eq!(known_launch(&web, &tui, b).map(|r| r.legacy), Some(legacy));
+        assert_eq!(known_launch(&web, &tui, c), None);
     }
 
     /// R19: a session the TUI only knows from its daemon (another client
@@ -271,7 +294,7 @@ mod tests {
         });
         let tui: ClientState =
             serde_json::from_value(serde_json::json!({ "sessions": [entry] })).unwrap();
-        assert_eq!(known_proxy(&WebState::default(), &tui, sid), None);
+        assert_eq!(known_launch(&WebState::default(), &tui, sid), None);
     }
 
     #[test]
@@ -286,5 +309,62 @@ mod tests {
             .collect();
         assert_eq!(names, ["web-state.json"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// P3.19: the previous release's web-state.json (AC8, B3).
+#[cfg(test)]
+mod launch_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::addon::test_support::TestAddon;
+    use crate::addon::{Addon, Addons};
+
+    fn sid(n: u128) -> SessionId {
+        format!("0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c{n:04}")
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn v080_web_state_loads_with_its_proxy() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/web-state-v0.8.0.json");
+        let web = load(&path);
+        assert_eq!(web.sessions.len(), 3);
+        assert_eq!(web.hosts, ["devbox"]);
+        assert_eq!(web.layout.grid, 2);
+        let team: Arc<dyn Addon> = Arc::new(TestAddon::new("team").adopts_legacy());
+        let addons = Addons::new(vec![team]).unwrap();
+        let tui = ClientState::default();
+        let launch = |n| known_launch(&web, &tui, sid(n)).map(|r| r.resolve(&addons));
+        let choice = |option: &str, flags: &[&str]| LaunchChoice {
+            addon: "team".into(),
+            option: option.into(),
+            flags: flags.iter().map(|f| f.to_string()).collect(),
+        };
+        assert_eq!(launch(11), Some(Ok(None)), "direct");
+        assert_eq!(launch(12), Some(Ok(Some(choice("work", &[])))));
+        assert_eq!(
+            launch(13),
+            Some(Ok(Some(choice("lab", &["--first-party"]))))
+        );
+        // Without an addon that adopts it: kept, and refused (never direct).
+        let none = Addons::empty();
+        let route = known_launch(&web, &tui, sid(12)).unwrap();
+        assert!(route.resolve(&none).is_err());
+        // Written back with `launch` and the fields v0.8.0 reads.
+        let meta = SessionMeta::new(
+            "local",
+            SavedRoute::of(&addons, Some(&choice("lab", &["--first-party"]))),
+        );
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["launch"]["option"], "lab");
+        assert_eq!(
+            (json["proxy"].as_str(), json["first_party"].as_bool()),
+            (Some("lab"), Some(true))
+        );
+        assert_eq!(SessionMeta::new("local", route.clone()).route(), route);
     }
 }

@@ -231,7 +231,13 @@ mod tests {
             tool: Some("Bash".into()),
             detail: None,
         });
-        view.meta = Some((Some("work".into()), true));
+        view.meta = Some(crate::app::state::SavedRoute {
+            launch: None,
+            legacy: crate::addon::LegacyChoice {
+                proxy: Some("work".into()),
+                first_party: true,
+            },
+        });
         let v = session(&view);
         assert_eq!(keys(&v), want);
         assert_eq!(v["attention"]["kind"], "permission_prompt");

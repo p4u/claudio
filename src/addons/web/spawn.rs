@@ -17,9 +17,10 @@ use super::events::notice_event;
 use super::ext::Extensions;
 use super::hub::{HubHandle, SessionRef};
 use super::state::SessionMeta;
-use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice};
+use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect};
 use crate::app::addons::AddonRuntime;
 use crate::app::launch::{self, LaunchSpec, ReviewAnswer, Step};
+use crate::app::state::SavedRoute;
 use crate::client::Client;
 use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
 
@@ -242,15 +243,10 @@ fn select_of(ctx: &SpawnCtx, arg: Option<&LaunchArg>) -> Result<LaunchSelect, St
     Ok(select)
 }
 
-/// The record of a session launched with `choice` (web-state.json keeps
-/// its pre-addon fields until P3.19).
+/// The record of a session launched with `choice`: `launch`, and its
+/// pre-addon fields for one release (compat(v0.10)).
 fn meta_of(ctx: &SpawnCtx, host: &str, choice: Option<&LaunchChoice>) -> SessionMeta {
-    let legacy = launch::legacy(ctx.runtime.addons(), choice);
-    SessionMeta {
-        host: host.to_owned(),
-        proxy: legacy.proxy,
-        first_party: legacy.first_party,
-    }
+    SessionMeta::new(host, SavedRoute::of(ctx.runtime.addons(), choice))
 }
 
 /// `session.spawn`: `{"sid"}`, or `{"review"}`.
@@ -338,14 +334,10 @@ fn respawn_select(
     if let Some(arg) = &req.launch {
         return select_of(ctx, Some(arg));
     }
-    if !session.proxy_known {
+    let Some(route) = &session.route else {
         return Err("launch unknown".to_owned());
-    }
-    let legacy = LegacyChoice {
-        proxy: session.proxy.clone(),
-        first_party: session.first_party,
     };
-    let choice = launch::adopt_legacy(ctx.runtime.addons(), &legacy)?;
+    let choice = route.resolve(ctx.runtime.addons())?;
     Ok(LaunchSelect::of(choice.as_ref()))
 }
 

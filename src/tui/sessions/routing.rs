@@ -20,8 +20,8 @@ impl App {
             // A terminal skips the addons: it has no routing to know.
             _ if v.kind == SessionKind::Shell => return Ok(LaunchSelect::of(None)),
             Some(UnknownRoute::Foreign) => return Err(FOREIGN.to_owned()),
-            Some(UnknownRoute::Unadopted(legacy)) => {
-                let why = crate::app::launch::adopt_legacy(&self.addons, legacy).err();
+            Some(UnknownRoute::Unadopted(route)) => {
+                let why = route.resolve(&self.addons).err();
                 return Err(why.unwrap_or_else(|| "its saved routing is unknown".to_owned()));
             }
             None => {}

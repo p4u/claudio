@@ -704,3 +704,56 @@ fn a_profile_load_error_fails_resolve_unless_direct() {
     };
     assert_eq!(resolve(&other, broken), Ok(Routing::Off));
 }
+
+/// P3.19 (AC8): the previous release's state.json and web-state.json
+/// routings are adopted as this addon's choices, and written back.
+#[test]
+fn v080_fixtures_adopt_their_proxy_profiles() {
+    use crate::addon::{Launch, LaunchChoice, LegacyChoice};
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(name)).unwrap()).unwrap()
+    };
+    let legacy = |v: &serde_json::Value| LegacyChoice {
+        proxy: v["proxy"].as_str().map(str::to_owned),
+        first_party: v["first_party"].as_bool().unwrap_or(false),
+    };
+    let state = read("state-v0.8.0.json");
+    let web = read("web-state-v0.8.0.json");
+    let mut entries: Vec<LegacyChoice> = state["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(legacy)
+        .collect();
+    entries.extend(web["sessions"].as_object().unwrap().values().map(legacy));
+    let vocdoni = super::super::Vocdoni::new();
+    let adopted: Vec<Option<LaunchChoice>> =
+        entries.iter().map(|l| vocdoni.adopt_legacy(l)).collect();
+    let choice = |option: &str, first_party: bool| {
+        Some(LaunchChoice {
+            addon: "vocdoni".into(),
+            option: option.into(),
+            flags: if first_party {
+                vec![super::FIRST_PARTY_FLAG.into()]
+            } else {
+                Vec::new()
+            },
+        })
+    };
+    let want = [
+        None,
+        choice("work", false),
+        choice("lab", true),
+        None,
+        None,
+        choice("work", false),
+        choice("lab", true),
+    ];
+    assert_eq!(adopted, want);
+    for (entry, adopted) in entries.iter().zip(&adopted) {
+        if let Some(choice) = adopted {
+            assert_eq!(vocdoni.legacy(choice).as_ref(), Some(entry));
+        }
+    }
+}

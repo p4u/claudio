@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 mod routing;
 
-use crate::addon::{Addons, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice, Pick};
+use crate::addon::{Addons, LaunchChoice, LaunchOp, LaunchSelect, Pick};
 use crate::proto::{
     GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
     SpawnSpec,
@@ -20,7 +20,7 @@ use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
 use super::wizard::{self, Wizard};
 use crate::app::label::sanitize_label;
-use crate::app::state::{self, ClientState, KillTombstone, SavedSession};
+use crate::app::state::{self, ClientState, KillTombstone, SavedRoute, SavedSession};
 
 // ── SessionView ───────────────────────────────────────────────────────────────
 
@@ -62,8 +62,9 @@ pub struct SessionView {
 /// Why a session's routing is unknown to this front-end (R19, F4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownRoute {
-    /// A saved pre-addon routing no addon of this build adopts: kept as saved.
-    Unadopted(LegacyChoice),
+    /// A saved launch this build cannot make (its addon is missing, or no
+    /// addon adopts its pre-addon routing): kept as saved, written back.
+    Unadopted(SavedRoute),
     /// Known only from its daemon: another front-end started it.
     Foreign,
 }
@@ -121,17 +122,13 @@ impl SessionView {
         }
     }
 
-    /// The view of a session as state.json remembers it: its routing as
-    /// the addon that adopts it has it.
+    /// The view of a session as state.json remembers it: its `launch`,
+    /// else its pre-addon routing as the addon that adopts it has it.
     pub fn from_saved(saved: SavedSession, size: (u16, u16), addons: &Addons) -> SessionView {
-        let legacy = LegacyChoice {
-            proxy: saved.proxy,
-            first_party: saved.first_party,
-        };
-        let (launch, unknown) = match crate::app::launch::adopt_legacy(addons, &legacy) {
-            _ if saved.route_unknown => (None, Some(UnknownRoute::Foreign)),
+        let (launch, unknown) = match saved.launch_of(addons) {
             Ok(choice) => (choice, None),
-            Err(_) => (None, Some(UnknownRoute::Unadopted(legacy))),
+            Err(_) if saved.route_unknown => (None, Some(UnknownRoute::Foreign)),
+            Err(_) => (None, Some(UnknownRoute::Unadopted(saved.route()))),
         };
         SessionView {
             name: saved.name,
@@ -173,24 +170,28 @@ impl SessionView {
         sanitize_label(&raw, 200)
     }
 
-    /// The record for state.json; the routing in its pre-addon fields.
+    /// The record for state.json: `launch`, and the pre-addon fields
+    /// derived from it (compat(v0.10)); an unadopted route as it was saved.
     pub fn saved(&self, addons: &Addons) -> SavedSession {
-        let legacy = match &self.unknown {
-            Some(UnknownRoute::Unadopted(legacy)) => legacy.clone(),
-            _ => crate::app::launch::legacy(addons, self.launch.as_ref()),
+        let route = match &self.unknown {
+            Some(UnknownRoute::Unadopted(route)) => route.clone(),
+            _ => SavedRoute::of(addons, self.launch.as_ref()),
         };
-        SavedSession {
+        let mut saved = SavedSession {
             id: self.id,
             name: self.name.clone(),
             cwd: self.cwd.clone(),
             host: self.host.clone(),
             claude_session_id: self.claude_session_id.clone(),
             created_at: self.created_at,
-            proxy: legacy.proxy,
-            first_party: legacy.first_party,
+            launch: None,
+            proxy: None,
+            first_party: false,
             route_unknown: self.unknown == Some(UnknownRoute::Foreign),
             kind: self.kind,
-        }
+        };
+        saved.set_route(route);
+        saved
     }
 }
 

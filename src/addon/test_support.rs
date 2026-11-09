@@ -37,6 +37,7 @@ pub(crate) struct TestAddon {
     has_launch: bool,
     has_ui: bool,
     has_daemon: bool,
+    adopts: bool,
     routing: Mutex<Result<Routing, String>>,
     prepare: Mutex<Script>,
     segments: Mutex<Vec<Segment>>,
@@ -61,6 +62,7 @@ impl TestAddon {
             has_launch: false,
             has_ui: false,
             has_daemon: false,
+            adopts: false,
             routing: Mutex::new(Ok(Routing::Optional)),
             prepare: Mutex::new(Script::Ok(LaunchPart::default())),
             segments: Mutex::new(Vec::new()),
@@ -88,6 +90,15 @@ impl TestAddon {
     /// Has `Launch`; `resolve` answers `routing`.
     pub fn routing(mut self, routing: Result<Routing, String>) -> Self {
         self.routing = Mutex::new(routing);
+        self.has_launch = true;
+        self
+    }
+
+    /// Has `Launch`, and adopts a pre-addon routing as the Vocdoni addon
+    /// does: `proxy` is the option, `first_party` the `--first-party` flag
+    /// (and `legacy` the reverse, for its own choices).
+    pub fn adopts_legacy(mut self) -> Self {
+        self.adopts = true;
         self.has_launch = true;
         self
     }
@@ -275,6 +286,21 @@ impl Commands for TestAddon {
 impl Launch for TestAddon {
     fn flags(&self) -> &'static [FlagDecl] {
         self.flags
+    }
+    fn adopt_legacy(&self, legacy: &LegacyChoice) -> Option<LaunchChoice> {
+        let option = legacy.proxy.clone().filter(|_| self.adopts)?;
+        let flags = legacy.first_party.then(|| "--first-party".to_owned());
+        Some(LaunchChoice {
+            addon: self.name.to_owned(),
+            option,
+            flags: flags.into_iter().collect(),
+        })
+    }
+    fn legacy(&self, choice: &LaunchChoice) -> Option<LegacyChoice> {
+        (self.adopts && choice.addon == self.name).then(|| LegacyChoice {
+            proxy: Some(choice.option.clone()),
+            first_party: choice.flags.iter().any(|f| f == "--first-party"),
+        })
     }
     /// A flag with a value picks the option it names (an empty one is a
     /// usage error), a `--no-…` switch picks direct, any other switch is

@@ -612,7 +612,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::SavedSession;
+    use crate::app::state::{self as state, SavedSession};
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
@@ -1009,6 +1009,7 @@ mod tests {
             host: "devbox".into(),
             claude_session_id: Some("c9".into()),
             created_at: 1,
+            launch: None,
             proxy: Some("work".into()),
             first_party: false,
             route_unknown: false,
@@ -1034,8 +1035,16 @@ mod tests {
         let ids: Vec<_> = app.sessions.iter().map(|v| v.id).collect();
         assert_eq!(ids, [remote.id, local.id]);
         assert_eq!((app.active, app.sessions[0].attached), (Some(0), false));
+        // P3.19: state.json keeps the tab and writes its launch beside
+        // the pre-addon fields.
+        let kept = app.to_state().sessions[0].clone();
+        let launch = kept.launch.clone().expect("its launch");
+        assert_eq!(launch.option, "work");
         assert_eq!(
-            app.to_state().sessions[0],
+            SavedSession {
+                launch: None,
+                ..kept
+            },
             remote,
             "state.json keeps the tab"
         );
@@ -1711,6 +1720,7 @@ mod tests {
                 host: "local".into(),
                 claude_session_id: None,
                 created_at: 1,
+                launch: None,
                 proxy: Some("work".into()),
                 first_party: false,
                 route_unknown: false,
@@ -1863,6 +1873,7 @@ mod tests {
             host: "local".into(),
             claude_session_id: Some("c1".into()),
             created_at: 1,
+            launch: None,
             proxy: Some("work".into()),
             first_party: true,
             route_unknown: false,
@@ -1888,7 +1899,10 @@ mod tests {
             .map(|n| n.text.clone())
             .unwrap_or_default();
         assert!(
-            notice.starts_with("cannot respawn '/srv/app': saved proxy work"),
+            notice.starts_with(&format!(
+                "cannot respawn '/srv/app': {}",
+                state::NOT_AVAILABLE
+            )),
             "{notice}"
         );
         assert_eq!(app.sessions[0].launch, None);
@@ -1899,7 +1913,7 @@ mod tests {
         assert!(test_support::launches(&effects).is_empty());
         let notice = app.notice.as_ref().map(|n| n.text.as_str()).unwrap_or("");
         assert!(
-            notice.starts_with("cannot restart: saved proxy work"),
+            notice.starts_with(&format!("cannot restart: {}", state::NOT_AVAILABLE)),
             "{notice}"
         );
     }

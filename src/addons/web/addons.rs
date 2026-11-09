@@ -15,8 +15,8 @@ use super::hub::SessionView;
 use super::ws::parse;
 use super::AppState;
 use crate::addon::{
-    self, error_panel, line, ActionRequest, Addons, FlagArg, LaunchChoice, LegacyChoice, PanelDecl,
-    PanelRequest, Segment, SessionSnap, Ui, TEXT_BYTES,
+    self, error_panel, line, ActionRequest, Addons, FlagArg, LaunchChoice, PanelDecl, PanelRequest,
+    Segment, SessionSnap, Ui, TEXT_BYTES,
 };
 use crate::addon::{ChecklistAnswer, LaunchSelect, Pick, RowAction};
 use crate::app::addons::AddonRuntime;
@@ -46,23 +46,16 @@ pub(crate) struct SessionAddons {
     pub segments: Vec<(&'static str, Segment)>,
 }
 
-/// A session's recorded routing (`proxy`, `first_party`) as its launch:
-/// `(known, choice)`. Unrecorded, or recorded but adopted by no addon of
-/// this build: unknown (never direct, R19/F4).
+/// A session's recorded launch as `(known, choice)`. Unrecorded, or
+/// recorded but not one this build can make: unknown (never direct,
+/// R19/F4, AC8).
 pub(crate) fn launch_of(
     addons: &Addons,
-    meta: Option<&(Option<String>, bool)>,
+    meta: Option<&crate::app::state::SavedRoute>,
 ) -> (bool, Option<LaunchChoice>) {
-    let Some((proxy, first_party)) = meta else {
-        return (false, None);
-    };
-    let legacy = LegacyChoice {
-        proxy: proxy.clone(),
-        first_party: *first_party,
-    };
-    match crate::app::launch::adopt_legacy(addons, &legacy) {
-        Ok(choice) => (true, choice),
-        Err(_) => (false, None),
+    match meta.map(|route| route.resolve(addons)) {
+        Some(Ok(choice)) => (true, choice),
+        None | Some(Err(_)) => (false, None),
     }
 }
 
