@@ -8,16 +8,14 @@ const H = (name) => ({ name, connected: true });
 test('snapshot replaces hosts, sessions, order and layout', () => {
   let m = emptyModel();
   m = applySnapshot(m, { hosts: [H('local'), H('z6')], sessions: [S('a'), S('b')], order: ['b', 'a'],
-    layout: { grid: 2, panes: ['a', null], focus: 1 }, profiles: { names: ['work'], default: 'work' } });
+    layout: { grid: 2, panes: ['a', null], focus: 1 } });
   assert.deepEqual(Object.keys(m.hosts), ['local', 'z6']);
   assert.deepEqual(Object.keys(m.sessions), ['a', 'b']);
   assert.deepEqual(m.order, ['b', 'a']);
   assert.equal(m.layout.grid, 2);
-  assert.deepEqual(m.profiles, { names: ['work'], default: 'work' });
   m = applySnapshot(m, { hosts: [H('local')], sessions: [S('c')], order: [], layout: { grid: 1, panes: [null], focus: 0 } });
   assert.deepEqual(Object.keys(m.sessions), ['c']);
   assert.deepEqual(Object.keys(m.hosts), ['local']);
-  assert.deepEqual(m.profiles, { names: [], default: null });
 });
 
 test('session upserts and session_removed deletes', () => {
@@ -60,18 +58,18 @@ test('lens keeps the higher seq and attached resets it', () => {
   assert.equal(m.lens.a.seq, 1);
 });
 
-test('other events fill claude, plugins, order, layout and profiles', () => {
+test('other events fill claude, order and layout; version 1 plugin events are not kept', () => {
   let m = emptyModel();
   m = applyEvent(m, { ev: 'claude', host: 'local', phase: 'offer_update', have: '1', want: '2' });
   assert.equal(m.claude.local.phase, 'offer_update');
-  m = applyEvent(m, { ev: 'plugin_status', host: 'local', name: 'p', state: 'ready' });
-  assert.equal(m.plugins['local/p'].state, 'ready');
+  assert.equal(applyEvent(m, { ev: 'plugin_status', host: 'local', name: 'p', state: 'ready' }), m);
+  assert.equal(applyEvent(m, { ev: 'profiles', names: ['a'], default: null }), m);
   m = applyEvent(m, { ev: 'order', sids: ['x'] });
   assert.deepEqual(m.order, ['x']);
   m = applyEvent(m, { ev: 'layout', layout: { grid: 4, panes: [null, null, null, null], focus: 0 } });
   assert.equal(m.layout.grid, 4);
-  m = applyEvent(m, { ev: 'profiles', names: ['a'], default: null });
-  assert.deepEqual(m.profiles.names, ['a']);
+  assert.equal(m.profiles, undefined);
+  assert.equal(m.plugins, undefined);
   assert.equal(applyEvent(m, { ev: 'nothing-known' }), m);
 });
 

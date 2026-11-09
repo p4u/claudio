@@ -3,8 +3,7 @@ export function emptyModel() {
   return {
     hosts: {}, sessions: {}, order: [],
     layout: { grid: 1, panes: [null], focus: 0 },
-    profiles: { names: [], default: null },
-    lens: {}, stats: {}, claude: {}, plugins: {},
+    lens: {}, stats: {}, claude: {},
   };
 }
 
@@ -14,12 +13,10 @@ const without = (obj, k) => { const { [k]: _, ...rest } = obj; return rest; };
 export function applySnapshot(model, snap) {
   return {
     ...emptyModel(),
-    plugins: model.plugins,
     hosts: keyed(snap.hosts, 'name'),
     sessions: keyed(snap.sessions, 'id'),
     order: [...(snap.order ?? [])],
     layout: snap.layout ?? emptyModel().layout,
-    profiles: snap.profiles ?? emptyModel().profiles,
   };
 }
 
@@ -51,10 +48,6 @@ export function applyEvent(model, ev) {
       return lensAt(model, ev.sid, ev.seq, { items: ev.items ?? [] });
     case 'latex':
       return lensAt(model, ev.sid, ev.seq, { formulas: ev.formulas ?? [] });
-    case 'plugin_status': {
-      const { ev: _e, t: _t, ...rest } = ev;
-      return { ...model, plugins: { ...model.plugins, [`${ev.host}/${ev.name}`]: rest } };
-    }
     case 'claude': {
       const { ev: _e, t: _t, ...rest } = ev;
       return { ...model, claude: { ...model.claude, [ev.host]: rest } };
@@ -63,8 +56,6 @@ export function applyEvent(model, ev) {
       return { ...model, order: [...ev.sids] };
     case 'layout':
       return { ...model, layout: ev.layout };
-    case 'profiles':
-      return { ...model, profiles: { names: ev.names ?? [], default: ev.default ?? null } };
     default:
       return model;
   }

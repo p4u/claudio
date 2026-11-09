@@ -28,7 +28,7 @@ export function Settings() {
       <input class="toggle" type="checkbox" data-testid="inline-composer" checked=${s.inlineComposer} onChange=${(e) => updateSettings({ inlineComposer: e.target.checked })} /></label>
     <label class="set-row"><span>Sound<small>off by default</small></span>
       <input class="toggle" type="checkbox" checked=${s.sound} onChange=${(e) => updateSettings({ sound: e.target.checked })} /></label>
-    <div class="set-row"><span>Extensions<small>lenses, actions and proxy plugins</small></span>
+    <div class="set-row"><span>Extensions<small>lenses, actions and addon rows</small></span>
       <button type="button" class="btn btn-sm" data-testid="open-extensions" onClick=${() => { overlay.value = 'extensions'; }}>Manage…</button></div>
     <div class="set-row"><span>Capture all keys<small>fullscreen, so Ctrl+T, Ctrl+W, Ctrl+N and Ctrl+Tab reach the terminal</small></span>
       <button type="button" class="btn btn-sm" data-testid="capture-keys" aria-pressed=${captured.value} onClick=${captureKeys}>${captured.value ? 'Release' : 'Capture'}</button></div>
