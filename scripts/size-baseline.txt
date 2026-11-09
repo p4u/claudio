@@ -52,6 +52,5 @@ fn crates/tui/src/wizard.rs::refilter#2 85
 unwrap addons/api/src/api/pool.rs 9
 unwrap addons/api/src/print/hooks.rs 3
 unwrap addons/vocdoni/src/cmd.rs 2
-unwrap addons/web/build.rs 1
 unwrap crates/core/src/daemon/host.rs 4
 unwrap crates/tui/src/keymap.rs 2

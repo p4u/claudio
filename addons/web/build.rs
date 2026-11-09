@@ -119,7 +119,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
         } else if !SKIP_FILES.contains(&name) {
             let rel = path
                 .strip_prefix(root)
-                .unwrap()
+                .expect("a walked path is under web/")
                 .to_str()
                 .expect("UTF-8 path");
             out.push((rel.replace('\\', "/"), path.clone()));
