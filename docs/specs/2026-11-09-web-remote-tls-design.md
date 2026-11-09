@@ -152,7 +152,8 @@ claudio web --print-cert
   at 32 per non-loopback peer (IPv4 address or IPv6 /64; a plan addition, so one address cannot
   take every slot); an accepted connection that has not sent the end of its first request's
   headers (`\r\n\r\n`) within 30 s is closed by a wrapper deadline (axum's hyper builder has no
-  timer). TLS 1.2 and 1.3, default suites, no client auth, ALPN `http/1.1` only (the
+  timer); the deadline covers that first request only, so an idle keep-alive connection
+  afterwards keeps its slot until the client closes it (bounded by the connection caps). TLS 1.2 and 1.3, default suites, no client auth, ALPN `http/1.1` only (the
   workspace's axum has no `http2` feature). The `ServerConfig` is built from an explicit
   `rustls::crypto::ring::default_provider()`. A failed handshake closes that connection only,
   logged at debug with the peer address and the rustls error, never bytes.
@@ -293,7 +294,7 @@ claudio web --print-cert
   (argon2id, reservation-based per-peer and global rate limits, bounded hashing); DNS rebinding
   (Host check); CSRF and cross-site WebSocket hijacking (Origin check, SameSite=Strict); cookie
   theft over the network (Secure, HttpOnly); slow or stalled clients (handshake deadline and
-  concurrency, header deadline, connection caps); a token leak (the token works only for local
+  concurrency, a first-request header deadline, connection caps); a token leak (the token works only for local
   requests).
 - **Accepted risk, documented**: the first visit's certificate check is the member's (compare the
   fingerprint); the browser remembers the exception per host and certificate (Chromium for 7

@@ -521,7 +521,7 @@ the Session's `launch` and `segments`); change it first, in its own commit. User
 - `remote.rs` — `--remote`'s address grammar, certificate names, start-up banner, `prepare`.
 - `tls/` — `cert.rs` (self-signed certificate kept in `web-tls/`, fingerprint, `--print-cert`),
   `listener.rs` (the `axum::serve::Listener` over TLS: handshake tasks, connection caps,
-  header deadline).
+  a header deadline for a connection's first request).
 - `assets.rs` — the embedded app, gzipped by `build.rs`; `CLAUDIO_WEB_DIR=<dir>` serves from
   disk in a debug build.
 - `ws.rs` — the WebSocket: `hello` + `snapshot`, JSON requests (§5 ops), binary PTY frames,

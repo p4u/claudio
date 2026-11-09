@@ -4,7 +4,8 @@
 //! so one slow client never stalls the others. Open connections are capped
 //! (256 overall, 32 per peer but loopback); a connection that has not sent
 //! the end of its first request's headers within 30 s is closed (axum's
-//! hyper builder has no timer).
+//! hyper builder has no timer). Later requests on a kept-alive connection
+//! have no deadline: an idle one keeps its slot until the client closes it.
 
 use std::collections::HashMap;
 use std::future::Future;
