@@ -29,7 +29,6 @@ pub trait Addon: Send + Sync + 'static {
     fn ui(&self) -> Option<&dyn Ui>;
     fn daemon(&self) -> Option<&dyn DaemonOps>;
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>);
-    fn as_any(&self) -> &dyn std::any::Any;                 // P3 bridge only, removed in P3.13
 }
 ```
 
@@ -50,12 +49,7 @@ addons)` runs after the core's own words, in registry order, before passthrough 
 
 **Launch**, **Ui** and **DaemonOps** are described below.
 
-**`as_any` (transitional).** While the TUI's plugin setup screen and extension rows still read
-the Vocdoni addon's state directly (core-addons plan P3.8-P3.13), `as_any` lets that one bridge
-(`addons::vocdoni::bridge`) find the registered addon by downcasting. It is a P3 bridge only and
-is removed in P3.13, once checklists and extension rows go through `Ui`. It has no default body
-(a default cannot turn a `?Sized` `Self` into `Any`): each addon writes `fn as_any(&self) -> &dyn
-Any { self }`. Nothing else may downcast an addon.
+Nothing downcasts an addon: the core reaches it only through these capabilities.
 
 ## The registry
 
@@ -90,6 +84,7 @@ request, config read and edit is attributed to it.
 | `config(section)` | a declared section of `config.toml` (empty when undeclared) |
 | `edit_config(section, edit)` | an atomic, minimal edit of a declared section (below) |
 | `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None` |
+| `core_extensions()` | the names the core's own extensions hold (built-in and external): an addon row of such a name is refused, so the addon must not use it either |
 | `notify(text)` | a notice in the front-end |
 | `changed()` | segments, rows, options or an open panel changed: front-ends re-read them |
 | `offer_checklist(id)` | ask front-ends to show a checklist when idle |
@@ -229,9 +224,15 @@ spec, checked for collisions by the keymap; `[keys] <action>` overrides it). A p
 
 **Checklist items** with a `section` print a heading when the section changes.
 
-**Extension rows** appear on the extensions screen beside the core's. The core writes a toggle
-to `[extensions] <row> = true|false` and tells the addon with `row_action(row, Toggled(on))`; the
-addon reads it back with `ctx.extension_on(row)` and never writes `[extensions]` itself.
+**Extension rows** appear on the extensions screen beside the core's, after them, in registry
+order. A row whose name is not `[a-z][a-z0-9-]{0,31}`, or is held by a core extension or an
+earlier row, is listed refused and off (`core_extensions()` tells the addon which names the
+core holds). A row is on when `[extensions] <row>` says so, else when `default_on`, and never
+while refused. The core writes a toggle to `[extensions] <row> = true|false`, has the runtime
+re-read `config.toml`, then tells the addon with `row_action(row, Toggled(on))`; the addon reads
+it back with `ctx.extension_on(row)` and never writes `[extensions]` itself. The screen's refresh
+key sends `row_action(row, Refresh)` once to every addon with rows (its first row). Enter on a
+row with `setup` opens that checklist.
 
 **Sanitising (C2).** Every string an addon hands a front-end (segment, panel, checklist,
 extension row, launch option, notice) goes through `crate::addon::clean` in the runtime, never
@@ -328,8 +329,11 @@ are the addon's own snapshot of the session, never the request's.
 A6): each profile's list (`plugins.json`, then the proxy every 15 min), each plugin's manifest,
 what each host answered, and the member's `[plugins.<name>]` choices. `runner.rs` drives it from
 the runtime's events and does its tasks through the `AddonCtx` (fetches, `vocdoni/apply` asks,
-`edit_config("plugins", …)`). Until the extension rows become the addon's rows (P3.13), the TUI
-reads them through `bridge.rs`.
+`edit_config("plugins", …)`). `rows.rs` lists one extension row per plugin of every profile's
+list (its version and profile, its manifest, setup and per-host state as details; `setup` is its
+checklist); a toggle is the plugin's on/off for new sessions, `Refresh` refetches every list and
+manifest and asks every host again. The runner starts on the runtime's first event; the profiles
+its sessions use (and a `--proxy` given on the command line) have their lists fetched.
 
 ## Config sections and reserved words
 
