@@ -151,7 +151,7 @@ mod tests {
                 item("instructions", "instructions", "Instructions", true),
             ],
         };
-        ChecklistView::new("vocdoni", checklist, Origin::Offer)
+        ChecklistView::new("team", checklist, Origin::Offer)
     }
 
     #[test]

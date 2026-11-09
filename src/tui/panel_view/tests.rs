@@ -46,7 +46,7 @@ fn k(code: KeyCode) -> KeyEvent {
 
 #[test]
 fn keys_page_window_scroll_and_close() {
-    let mut v = PanelView::new("vocdoni", DECL, None, 1);
+    let mut v = PanelView::new("team", DECL, None, 1);
     assert_eq!(v.req.window.as_deref(), Some("24h"));
     assert!(v.loading);
     assert!(
@@ -119,7 +119,7 @@ fn alt_s_opens_the_vocdoni_panel_about_the_active_session() {
     };
     assert_eq!(
         (*addon, req.id.as_str(), req.sid),
-        ("vocdoni", "proxy", Some(sid))
+        ("team", "proxy", Some(sid))
     );
     let gen = *gen;
     assert!(matches!(&app.modal, Some(Modal::Panel(v)) if v.loading));
@@ -186,7 +186,7 @@ fn an_action_asks_its_confirm_then_runs_and_its_notice_shows() {
         action: "switch".into(),
         sid: Some(sid),
     };
-    let addon = "vocdoni";
+    let addon = "team";
     assert_eq!(calls(&mut app), [AddonCall::Action { addon, req: run }]);
     let notice = Notice {
         text: "switch scheduled: a → b (on the next message)".into(),

@@ -134,10 +134,9 @@ mod tests {
     use ratatui::Terminal;
     use uuid::Uuid;
 
-    /// The registered addons' panel keys (the Vocdoni panel's Alt+s).
+    /// The registered addons' panel keys (the test addon's Alt+s).
     fn proxy_key() -> Vec<crate::tui::keymap::PanelBinding> {
-        let addons = crate::addon::Addons::new(crate::addons::all()).unwrap();
-        crate::tui::panel_view::panel_bindings(&addons)
+        crate::tui::panel_view::panel_bindings(&test_support::addons())
     }
 
     fn plain_app(args: &[&str]) -> (App, SessionId) {

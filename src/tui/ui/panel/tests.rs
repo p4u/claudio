@@ -13,7 +13,7 @@ const DECL: PanelDecl = PanelDecl {
 };
 
 fn view(blocks: Vec<Block>) -> PanelView {
-    let mut v = PanelView::new("vocdoni", DECL, None, 1);
+    let mut v = PanelView::new("team", DECL, None, 1);
     let panel = Panel {
         title: "Proxy stats: work".into(),
         pages: vec![

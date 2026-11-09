@@ -72,7 +72,7 @@ fn calls(app: &mut App) -> Vec<AddonCall> {
 
 fn show(app: &mut App, origin: Origin, c: Checklist) {
     app.on_addon(AddonResult::Checklist {
-        addon: "vocdoni",
+        addon: "team",
         origin,
         checklist: c,
     });
@@ -82,7 +82,7 @@ fn show(app: &mut App, origin: Origin, c: Checklist) {
 fn keys_move_toggle_and_answer() {
     let c = checklist("1", &["a", "b", "c"]);
     let mut v = ChecklistView::new(
-        "vocdoni",
+        "team",
         c,
         Origin::Row {
             back: Box::default(),
@@ -121,7 +121,7 @@ fn keys_move_toggle_and_answer() {
         "Space toggle · a all on · n all off · Enter save · Esc cancel"
     );
     // One the member did not open counts keys once armed.
-    let mut review = ChecklistView::new("vocdoni", checklist("1", &["a"]), launch_origin());
+    let mut review = ChecklistView::new("team", checklist("1", &["a"]), launch_origin());
     assert_eq!(review.on_key(&k(KeyCode::Char('s'))), Outcome::Stay);
     review.armed = 0;
     assert_eq!(review.on_key(&k(KeyCode::Char('s'))), Outcome::Skip);
@@ -129,7 +129,7 @@ fn keys_move_toggle_and_answer() {
         review.hint(),
         "Space toggle · a all on · n all off · Enter save · s skip · Esc cancel"
     );
-    let offer = ChecklistView::new("vocdoni", checklist("1", &["a"]), Origin::Offer);
+    let offer = ChecklistView::new("team", checklist("1", &["a"]), Origin::Offer);
     assert_eq!(offer.armed, ARM_TICKS);
     assert_eq!(
         offer.hint(),
@@ -141,7 +141,7 @@ fn keys_move_toggle_and_answer() {
 /// the ids still there; a new id is as the addon has it.
 #[test]
 fn a_new_revision_replaces_the_items_keeping_the_toggles() {
-    let mut v = ChecklistView::new("vocdoni", checklist("1", &["a", "b", "c"]), Origin::Offer);
+    let mut v = ChecklistView::new("team", checklist("1", &["a", "b", "c"]), Origin::Offer);
     v.checklist.items[0].on = false;
     v.selected = 2;
     let mut next = checklist("2", &["a", "d"]);
@@ -156,14 +156,14 @@ fn a_new_revision_replaces_the_items_keeping_the_toggles() {
     show(&mut app, Origin::Offer, checklist("1", &["a", "b"]));
     arm(&mut app);
     app.on_terminal(press(KeyCode::Char(' ')));
-    assert_eq!(app.checklists_shown(), [("vocdoni", "team".to_owned())]);
-    app.refresh_checklist("vocdoni", &checklist("2", &["a", "b", "x"]));
+    assert_eq!(app.checklists_shown(), [("team", "team".to_owned())]);
+    app.refresh_checklist("team", &checklist("2", &["a", "b", "x"]));
     let v = open(&app);
     assert_eq!(v.checklist.revision, "2");
     assert_eq!(v.off_ids(), ["a"]);
     app.on_terminal(press(KeyCode::Enter));
     let saved = AddonCall::SaveChecklist {
-        addon: "vocdoni",
+        addon: "team",
         id: "team".into(),
         answer: ChecklistAnswer::Save {
             revision: "2".into(),
@@ -183,11 +183,11 @@ fn an_offer_waits_its_turn_and_esc_puts_it_off() {
         vec![Choice::new('n', "no", None)],
     ));
     app.on_addon(AddonResult::Offer {
-        addon: "vocdoni",
+        addon: "team",
         id: "team".into(),
     });
     let ask = AddonCall::OpenChecklist {
-        addon: "vocdoni",
+        addon: "team",
         id: "team".into(),
         origin: Origin::Offer,
     };
@@ -199,7 +199,7 @@ fn an_offer_waits_its_turn_and_esc_puts_it_off() {
     );
     // Offered again while queued: still one.
     app.on_addon(AddonResult::Offer {
-        addon: "vocdoni",
+        addon: "team",
         id: "team".into(),
     });
     assert!(calls(&mut app).is_empty());
@@ -216,7 +216,7 @@ fn an_offer_waits_its_turn_and_esc_puts_it_off() {
     app.on_terminal(press(KeyCode::Esc));
     assert!(app.modal.is_none());
     let defer = AddonCall::SaveChecklist {
-        addon: "vocdoni",
+        addon: "team",
         id: "team".into(),
         answer: ChecklistAnswer::Defer,
         origin: Origin::Offer,
@@ -298,7 +298,7 @@ fn a_review_takes_over_the_offer_of_the_same_checklist() {
 #[test]
 fn enter_on_a_plugin_row_opens_its_checklist_and_esc_goes_back() {
     let mut app = idle_app();
-    crate::tui::test_support::rows(&mut app, "vocdoni", &[("team", None)], &[]);
+    crate::tui::test_support::rows(&mut app, "team", &[("team", None)], &[]);
     let row = app
         .extensions
         .extensions
@@ -315,7 +315,7 @@ fn enter_on_a_plugin_row_opens_its_checklist_and_esc_goes_back() {
     let [AddonCall::OpenChecklist { addon, id, origin }] = &call[..] else {
         panic!("{call:?}")
     };
-    assert_eq!((*addon, id.as_str()), ("vocdoni", "team"));
+    assert_eq!((*addon, id.as_str()), ("team", "team"));
     let Origin::Row { back } = origin else {
         panic!("{origin:?}")
     };

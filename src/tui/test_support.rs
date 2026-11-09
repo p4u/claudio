@@ -11,11 +11,60 @@ use crate::proto::{Msg, SessionInfo};
 
 pub use crate::app::test_support::{info, shell_info};
 
+/// The test addon's name: a routing addon like the Vocdoni one, without
+/// its code (the TUI's tests run on the addon API only).
+pub const TEAM: &str = "team";
+
+/// Its launch flags, as the Vocdoni addon declares them.
+const TEAM_FLAGS: &[crate::addon::FlagDecl] = &[
+    crate::addon::FlagDecl {
+        name: "--proxy",
+        value: Some("NAME"),
+        help: "new sessions use proxy profile NAME",
+        label: None,
+    },
+    crate::addon::FlagDecl {
+        name: "--no-proxy",
+        value: None,
+        help: "new sessions start without a proxy",
+        label: None,
+    },
+    crate::addon::FlagDecl {
+        name: "--first-party",
+        value: None,
+        help: "proxied sessions are first-party",
+        label: Some("First-party session"),
+    },
+];
+
+/// Its panel, on Alt+s.
+const TEAM_PANELS: &[crate::addon::PanelDecl] = &[crate::addon::PanelDecl {
+    id: "proxy",
+    title: "Proxy stats",
+    key: Some(crate::addon::PanelKey {
+        action: "proxy_stats",
+        default: "alt+s",
+    }),
+    windows: &["24h", "7d", "30d"],
+}];
+
+/// The registry the TUI's tests run with: the test addon [`TEAM`] (its
+/// flags, its Alt+s panel, and the pre-addon routing adopted as its
+/// choices).
+pub fn addons() -> std::sync::Arc<crate::addon::Addons> {
+    use crate::addon::test_support::TestAddon;
+    let team = TestAddon::new(TEAM)
+        .launch_flags(TEAM_FLAGS)
+        .panels(TEAM_PANELS)
+        .adopts_legacy();
+    std::sync::Arc::new(crate::addon::Addons::new(vec![std::sync::Arc::new(team)]).unwrap())
+}
+
 /// A manager on a 100×30 terminal with home `/home/u`, the default keys, and
 /// nothing from the machine it runs on: no proxy profiles, no SSH hosts, no
 /// saved state, no local claude.
 pub fn config() -> AppConfig {
-    let addons = std::sync::Arc::new(crate::addon::Addons::new(crate::addons::all()).unwrap());
+    let addons = addons();
     let panels = super::panel_view::panel_bindings(&addons);
     AppConfig {
         mode: Mode::Manager,
@@ -34,10 +83,10 @@ pub fn config() -> AppConfig {
     }
 }
 
-/// The launch choice of proxy profile `profile` (the Vocdoni addon's).
+/// The launch choice of proxy profile `profile` (the test addon's).
 pub fn via(profile: &str) -> Option<crate::addon::LaunchChoice> {
     Some(crate::addon::LaunchChoice {
-        addon: "vocdoni".into(),
+        addon: TEAM.into(),
         option: profile.into(),
         flags: Vec::new(),
     })

@@ -597,7 +597,7 @@ mod tests {
             tone,
             priority,
         };
-        ("vocdoni", segment)
+        ("team", segment)
     }
 
     /// An app with one active claude session on a proxy, in a repo, with a

@@ -180,12 +180,12 @@ mod tests {
                 default,
                 detail: None,
             };
-            ("vocdoni", o)
+            ("team", o)
         }
 
         fn profile(option: &str) -> Pick {
             Pick::Option {
-                addon: "vocdoni".into(),
+                addon: "team".into(),
                 option: option.into(),
             }
         }

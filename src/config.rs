@@ -1,8 +1,9 @@
 //! Global configuration from `~/.config/claudio/config.toml`.
 //!
-//! Only the sections claudio itself defines are parsed here; the proxy section
-//! lives in [`crate::addons::vocdoni::proxy::profile`], which reads the same file. Unknown
-//! sections are preserved on write via a `flatten` map.
+//! Only the sections the core defines are parsed here; an addon's sections
+//! (`[proxy]` and `[plugins]`, for one) are its own, read and
+//! edited through `AddonCtx::config`/`edit_config`. Unknown sections are
+//! preserved on write via a `flatten` map.
 //!
 //! ```toml
 //! [ui]
