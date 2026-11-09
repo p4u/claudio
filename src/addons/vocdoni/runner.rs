@@ -86,11 +86,18 @@ impl Runner {
         read
     }
 
-    /// Profile `name`, read off the executor (`None`: it does not exist).
+    /// Profile `name`, read off the executor (`None`: it does not exist,
+    /// or the profiles cannot be read).
     pub async fn find_profile(&self, name: &str) -> Option<Profile> {
+        self.lookup_profile(name).await.ok().flatten()
+    }
+
+    /// Profile `name`, read off the executor: `Err` when the profiles
+    /// cannot be read, `Ok(None)` when it does not exist.
+    pub async fn lookup_profile(&self, name: &str) -> Result<Option<Profile>, String> {
         let (source, name) = (self.source.clone(), name.to_owned());
         let found = tokio::task::spawn_blocking(move || source.find(&name)).await;
-        found.ok().flatten()
+        found.map_err(|e| format!("profile lookup: {e}"))?
     }
 
     /// The state, locked (never across an await or a context call).
@@ -160,6 +167,7 @@ impl Runner {
         let extensions = extensions_of(&*ctx, &cached);
         self.transition(|s| {
             s.first_party = profiles.first_party;
+            s.profile_error = profiles.error;
             s.load(
                 (profiles.names, profiles.default),
                 choices,
@@ -181,6 +189,7 @@ impl Runner {
         let choices = choices::from_table(&ctx.config("plugins"));
         self.transition(|s| {
             s.first_party = profiles.first_party;
+            s.profile_error = profiles.error;
             s.reload((profiles.names, profiles.default), choices)
         });
     }

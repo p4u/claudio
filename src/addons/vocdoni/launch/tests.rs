@@ -52,6 +52,7 @@ fn names(list: &[&str], default: Option<&str>) -> Profiles {
         names: list.iter().map(|s| s.to_string()).collect(),
         default: default.map(str::to_owned),
         first_party: Default::default(),
+        error: None,
     }
 }
 
@@ -637,4 +638,69 @@ async fn a_default_the_profiles_lack_fails_the_launch() {
     };
     assert!(why.contains("'gone' not found"), "{why}");
     assert!(sent.is_empty(), "{sent:?}");
+}
+
+/// R20: profiles that cannot be read (an unreadable config.toml, or one
+/// that does not parse) fail a default or a chosen profile's launch with
+/// the load error, nothing sent; an explicit direct launch still goes.
+#[tokio::test]
+async fn unreadable_or_malformed_profiles_fail_the_launch_never_direct() {
+    use std::os::unix::fs::PermissionsExt;
+    let unreadable = config_file(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\nurl = \"http://127.0.0.1:1\"\ntoken = \"t\"\n",
+    );
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let malformed = config_file("[proxy\ndefault = \"work\"\n");
+    let mistyped = config_file("[proxy]\ndefault = 5\n");
+    for (path, why) in [
+        (&unreadable, "Permission denied"),
+        (&malformed, "config.toml"),
+        (&mistyped, "config.toml"),
+    ] {
+        for select in [LaunchSelect::default(), pick("work")] {
+            for frontend in [crate::addon::Frontend::Tui, crate::addon::Frontend::Plain] {
+                let (step, sent) = compose_launch(path.clone(), select.clone(), frontend).await;
+                let Step::Failed(e) = step else {
+                    panic!("{path:?} {select:?}: not failed: {step:?}")
+                };
+                assert!(e.contains("cannot read the proxy profiles"), "{e}");
+                assert!(e.contains(why), "{e}");
+                assert!(sent.is_empty(), "{sent:?}");
+            }
+        }
+        let (step, sent) = compose_launch(
+            path.clone(),
+            LaunchSelect::of(None),
+            crate::addon::Frontend::Plain,
+        )
+        .await;
+        assert!(matches!(step, Step::Sent { choice: None, .. }), "{step:?}");
+        assert_eq!(sent.len(), 1, "direct still starts");
+    }
+    for path in [unreadable, malformed, mistyped] {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+/// R20: a load error is not "no profiles": resolve fails the default and a
+/// chosen profile with it; direct and other addons' options go on.
+#[test]
+fn a_profile_load_error_fails_resolve_unless_direct() {
+    let broken = || Profiles {
+        error: Some("cannot read the proxy profiles: config.toml: line 2".into()),
+        ..Profiles::default()
+    };
+    for select in [LaunchSelect::default(), pick("work")] {
+        let err = resolve(&select, broken).unwrap_err();
+        assert!(err.starts_with("cannot read the proxy profiles"), "{err}");
+    }
+    assert_eq!(resolve(&LaunchSelect::of(None), broken), Ok(Routing::Off));
+    let other = LaunchSelect {
+        pick: Pick::Option {
+            addon: "other".into(),
+            option: "x".into(),
+        },
+        flags: Vec::new(),
+    };
+    assert_eq!(resolve(&other, broken), Ok(Routing::Off));
 }

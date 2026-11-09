@@ -289,7 +289,8 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 **Launch.** Flags `--proxy NAME`, `--no-proxy` and `--first-party` (the wizard checkbox
 "First-party session"); one option per proxy profile (group "Proxy", the configured default
 marked). The default profile, or a chosen one, is `Routing::Required`: a profile that does not
-exist fails the launch, never direct. `prepare` builds the profile's env from its proxy config
+exist fails the launch, never direct, and so does a `config.toml` whose `[proxy]` cannot be read
+or parsed (the launch says why); `--no-proxy` and an explicit direct pick still start. `prepare` builds the profile's env from its proxy config
 (cached 5 min, else fetched within 5 s; unreachable means the built-in model defaults, still
 through the proxy), removes `ANTHROPIC_API_KEY` (and `CLAUDE_CODE_USE_GATEWAY` for a first-party
 session) from the inherited env, and adds the plugins' share: for a new session it asks the host

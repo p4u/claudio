@@ -164,16 +164,21 @@ fn options(p: &Profiles) -> Vec<LaunchOption> {
 }
 
 /// The default profile (if any) or the chosen one is required; a chosen
-/// one that does not exist fails the launch. Direct, and other addons'
-/// options, leave this addon out. The profiles are read only when the pick needs them.
+/// one that does not exist, or profiles that cannot be read, fail the
+/// launch (R20). Direct, and other addons' options, leave this addon out.
+/// The profiles are read only when the pick needs them.
 fn resolve(select: &LaunchSelect, profiles: impl FnOnce() -> Profiles) -> Result<Routing, String> {
+    let read = || match profiles() {
+        Profiles { error: Some(e), .. } => Err(e),
+        p => Ok(p),
+    };
     let profile = match &select.pick {
-        Pick::Default => match profiles().default {
+        Pick::Default => match read()?.default {
             Some(default) => default,
             None => return Ok(Routing::Off),
         },
         Pick::Option { addon, option } if addon == NAME => {
-            if !profiles().names.contains(option) {
+            if !read()?.names.contains(option) {
                 return Err(missing(option));
             }
             option.clone()
@@ -197,7 +202,8 @@ async fn prepare(
         return Ok(LaunchPart::default());
     };
     let name = choice.option.clone();
-    let Some(mut profile) = runner.find_profile(&name).await else {
+    let found = runner.lookup_profile(&name).await;
+    let Some(mut profile) = found.map_err(LaunchError::Failed)? else {
         return Err(LaunchError::Failed(missing(&name)));
     };
     profile.first_party |= first_party(&choice.flags);

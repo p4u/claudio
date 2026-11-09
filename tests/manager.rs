@@ -2071,6 +2071,38 @@ fn test_plain_no_proxy_keeps_api_key() {
     drop(tui);
 }
 
+/// R20: a `[proxy]` section that cannot be read (here mistyped; the rest of
+/// config.toml still parses) fails `--plain`'s default launch with the load
+/// error: claude never starts, and never direct.
+#[test]
+fn test_plain_with_unreadable_proxy_profiles_never_starts_direct() {
+    let harness = ManagerHarness::new();
+    let marker = harness.root.join("claude-ran");
+    harness.write_marker_fake_claude(&marker);
+    let config = harness.config_home.join("claudio").join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("[proxy]\ndefault = 5\n");
+    fs::write(&config, text).unwrap();
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    cmd.arg("--plain");
+    cmd.cwd(&harness.dirs[0]);
+    harness.apply(&mut cmd);
+    let mut tui = TuiProcess::spawn(cmd);
+    assert_eq!(tui.wait_exit_code(DAEMON_WAIT), 1);
+    let screen = tui.screen_text(Region::Screen);
+    assert!(
+        screen.contains("cannot read the proxy profiles"),
+        "{screen}"
+    );
+    assert!(!marker.exists(), "claude started");
+
+    // `--no-proxy` still starts it, direct.
+    let tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+    assert!(marker.exists());
+    drop(tui);
+}
+
 /// The env-recording fakes never write the inherited environment into a
 /// fixture (C1, E3): a sentinel secret in this test process's env reaches
 /// claude's process (inherited through the UI and the daemon: the record

@@ -18,6 +18,10 @@ pub struct Profiles {
     pub default: Option<String>,
     /// The profiles marked `first_party = true`.
     pub first_party: BTreeSet<String>,
+    /// Why they could not be read (config.toml unreadable or malformed),
+    /// distinct from "no profiles": a launch that needs a profile, the
+    /// default's included, fails with it (R20).
+    pub error: Option<String>,
 }
 
 /// Where the profiles are read.
@@ -33,8 +37,8 @@ pub enum ProfileSource {
 }
 
 impl ProfileSource {
-    /// Every profile's name, the default and the first-party ones; empty
-    /// on any error.
+    /// Every profile's name, the default and the first-party ones; on a
+    /// read or parse error, none and the error.
     pub fn read(&self) -> Profiles {
         let section = match self {
             // The env profile alone, when it is set (never first-party).
@@ -43,14 +47,20 @@ impl ProfileSource {
                 return Profiles {
                     names,
                     default,
-                    first_party: BTreeSet::new(),
+                    ..Profiles::default()
                 };
             }
             ProfileSource::Config => profile::load(),
             ProfileSource::File(path) => profile::load_from(path),
         };
-        let Ok(sec) = section else {
-            return Profiles::default();
+        let sec = match section {
+            Ok(sec) => sec,
+            Err(e) => {
+                return Profiles {
+                    error: Some(unreadable(&e)),
+                    ..Profiles::default()
+                }
+            }
         };
         Profiles {
             names: sec.profiles.keys().cloned().collect(),
@@ -61,16 +71,27 @@ impl ProfileSource {
                 .map(|(n, _)| n.clone())
                 .collect(),
             default: sec.default,
+            error: None,
         }
     }
 
-    /// Profile `name` (`env`: `CLAUDIO_PROXY_URL`), if it exists.
-    pub fn find(&self, name: &str) -> Option<Profile> {
-        match self {
-            ProfileSource::Config => find_profile(name),
-            ProfileSource::File(path) => profile::load_from(path).ok()?.profiles.remove(name),
-        }
+    /// Profile `name` (`env`: `CLAUDIO_PROXY_URL`), if it exists; `Err`
+    /// when the profiles cannot be read.
+    pub fn find(&self, name: &str) -> Result<Option<Profile>, String> {
+        let section = match self {
+            ProfileSource::Config if name == "env" => return Ok(find_profile(name)),
+            ProfileSource::Config => profile::load(),
+            ProfileSource::File(path) => profile::load_from(path),
+        };
+        let mut sec = section.map_err(|e| unreadable(&e))?;
+        Ok(sec.profiles.remove(name))
     }
+}
+
+/// The launch error of profiles that cannot be read (the error names a
+/// location, never the file's text, which holds tokens).
+fn unreadable(e: &std::io::Error) -> String {
+    format!("cannot read the proxy profiles: {e}")
 }
 
 /// Why profile `name` cannot be used.

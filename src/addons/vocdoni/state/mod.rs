@@ -81,6 +81,8 @@ pub struct State {
     pub first_party: BTreeSet<String>,
     /// Whether the profiles were read (a launch reads them once if not).
     pub profiles_read: bool,
+    /// Why the profiles could not be read, if they could not (R20).
+    pub profile_error: Option<String>,
     /// Per profile: its proxy config and when it was fetched (Unix seconds).
     pub config: HashMap<String, (ConfigResponse, u64)>,
     /// Lists, manifests, host answers, choices, `[extensions]`.
@@ -176,6 +178,7 @@ impl State {
             names: self.profiles.clone(),
             default: self.default.clone(),
             first_party: self.first_party.clone(),
+            error: self.profile_error.clone(),
         })
     }
 
@@ -183,6 +186,7 @@ impl State {
     pub fn set_profiles(&mut self, p: Profiles) {
         (self.profiles, self.default) = (p.names, p.default);
         self.first_party = p.first_party;
+        self.profile_error = p.error;
         self.profiles_read = true;
     }
 
