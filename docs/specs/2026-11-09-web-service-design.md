@@ -42,7 +42,10 @@ than the owner wants to type.
 6. `claudio web --foreground` keeps today's behaviour exactly, apart from goals 7 and 8 (the
    test suites and anyone who wants a foreground server use it).
 7. A signed-in browser stays signed in across web and daemon restarts and across closing the
-   browser, until it goes unused for 30 days, signs out, or the token or password changes.
+   browser. Its sign-in ends when it goes unused for 30 days, when it signs out (the page's
+   palette gets "Sign out"), when it is the least recently used of more than 64, 400 days after
+   it signed in (the cookie's life), or when the server next starts after the token, the
+   password or the mode (loopback or `--remote`) changed.
 8. A `--remote` password may be 8 to 1024 bytes.
 
 ## Non-goals
@@ -53,9 +56,10 @@ than the owner wants to type.
 - Showing the web's state in the TUI or in `claudio daemon status`.
 - More than one service per addon, or services for addons other than web (the API allows
   them; nothing else uses it in this work).
-- Any change to the login methods (token, password), the rate limits, TLS, the page, the wire
-  protocol's messages or the DTOs. `docs/web-protocol.md` changes only in its sentence about
-  session lifetime.
+- Any change to the login methods (token, password), the rate limits, TLS, the wire
+  protocol's messages or the DTOs. The page changes only by the palette's "Sign out" (§3).
+  `docs/web-protocol.md` changes only in its Cookie bullet (lines 53-55): the cookie's
+  `Max-Age` and the session lifetime.
 
 ## Current state
 
@@ -217,55 +221,119 @@ no web service (older, or built without the web addon): claudio daemon restart w
 claudio web --foreground`. It exits 1 with `[web]` already saved: the next daemon start brings
 the web up.
 
-### 3. Persistent sign-ins (`addons/web/src/auth.rs`)
+### 3. Persistent sign-ins (`addons/web/src/sessions.rs`, new; used by `auth.rs`)
 
-Applies to every server mode (`--service` and `--foreground`).
+The store is a pure type (entries, the epoch, the cap, the idle rule; `now` is a parameter: A6).
+Its file format, the loader and the writer task are the module's I/O edge. `auth.rs` keeps the
+cookie, the guard and the login rules. This applies to every server mode (`--service` and
+`--foreground`).
 
 - **Lifetime:** `SESSION_IDLE` becomes 30 days; `MAX_SESSIONS` stays 64 (least recently used
   goes). The server is the authority on expiry. The cookie gets `Max-Age=34560000` (400 days,
   the longest browsers keep) so that closing the browser does not drop it, and never needs
-  re-sending. A cookie the server no longer knows is refused as today (the page shows the login).
-  `HttpOnly; SameSite=Strict; Path=/` and `Secure` (TLS or `--allow-host`) are unchanged; the
-  sign-out cookie keeps `Max-Age=0`.
+  re-sending. `HttpOnly; SameSite=Strict; Path=/` and `Secure` (TLS or `--allow-host`) are
+  unchanged; the sign-out cookie keeps `Max-Age=0`.
+  - A cookie the server no longer knows is refused as today. A page load shows the password
+    form, or without a password the "open the URL `claudio web` printed" card. A page that is
+    already open keeps retrying its socket until it is reloaded.
+  - A login that arrives with a live session cookie replaces that session (the old entry is
+    removed in the same step). So opening the token link again, which `claudio web` does at
+    every run, does not fill the 64 slots with sessions no browser holds.
+- **Use** is a request that passes the cookie check (`/api/*` and the `/ws` upgrade). Because
+  the page talks over one WebSocket after it loads, an open socket counts too: `ws::upgrade`
+  keeps the hash of the session it was opened with, and the tab task marks that session used
+  once an hour while the socket is open. A mark for a session that is gone does nothing.
 - **Store:** `<config>/web-sessions.json`, 0600, written with `paths::write_atomic`:
 
   ```json
   {"version":1,"epoch":"<hex>","sessions":[{"hash":"<hex>","seen":<unix seconds>}]}
   ```
 
-  - `hash` is the SHA-256 of the cookie value. The file never holds a cookie value, so a copy of
-    it (a backup) signs no one in.
+  - `hash` is the SHA-256 of the cookie value's 64 ASCII characters. A presented value that is
+    not 64 lowercase hex is refused without hashing. The file never holds a cookie value, so a
+    copy of it (a backup) signs no one in.
   - A presented cookie is hashed and compared with every stored hash in constant time, as the
     values are today.
-  - `seen` is wall-clock time (an `Instant` does not survive a restart); a session is live
-    while `now − seen < 30 days`.
-- **Epoch:** `epoch` is the SHA-256 of the token followed by the password file's contents
-  (empty when there is none). At load, a file whose `epoch` differs from the current one is
-  dropped whole. So `--rotate-token` and `--set-password` sign every browser out, whoever
-  changed the file and however (a hand edit included), at the next server start. Both already
-  restart a running service (`apply { force: true }`, §2), which drops the sessions held in
-  memory.
-- **Load** happens once at server start, off the executor, before the listener binds. A file
-  that is missing, not a regular file of this uid with mode 0600, over 64 KiB, not this format,
-  or of an unknown `version` gives an empty store and one warning naming the file, never a
-  failed start. Entries past the idle limit, and any beyond 64, are dropped.
-- **Writes** go through one writer task, newest state wins (the pattern of `hub_io`'s
-  web-state writer):
-  - immediately on a login and on a sign-out;
-  - on use, only when a session's stored `seen` is over 1 hour old (the idle limit is
-    30 days, so 1 hour of precision is enough and requests do not each write the disk);
-  - once more at graceful shutdown.
+  - `seen` is wall-clock Unix seconds (`paths::unix_now()`; an `Instant` does not survive a
+    restart), in memory and in the file. Idle time is `now.saturating_sub(seen)`; a session is
+    live while that is under 30 days. A `seen` later than `now` is set to `now` at load and on
+    use, so a clock that once ran ahead cannot keep an entry alive. A clock set forward by more
+    than 30 days signs everyone out; accepted. Each entry also remembers the `seen` last written
+    to the file, for the 1-hour rule under "Writes".
+- **Epoch:** `epoch` is the lowercase hex SHA-256 of
+  `"claudio-web-sessions-v1" ‖ 0x00 ‖ mode ‖ 0x00 ‖ token ‖ 0x00 ‖ password`:
+  - `mode` is `local` or `remote` (see "Mode" below);
+  - `token` is the 64 hex characters this server serves with;
+  - `password` is the bytes of `<config>/web-password` as read at this start, in every mode. It
+    is empty when the file is missing, over 512 bytes (`password.rs` `FILE_MAX`), or not a
+    private regular file of this uid. With `--remote` the same bytes feed
+    `password::Stored::parse` (one read), so the epoch and the password in use cannot differ.
 
-  A failed write is logged (file name and error, never content) and retried at the next change.
-- **Two servers** on one host (a `--foreground` one beside the service) share the file: the
-  last writer wins, so one may forget a browser the other signed in. This is accepted and
-  documented, not locked.
+  The epoch is computed once, before the store is loaded, and kept for the life of the process.
+  Every write stamps that value; a write never reads the token or the password file. (A server
+  stopped after a rotation writes its sessions once more: with a re-read they would carry the
+  new epoch and survive it.)
+
+  At load, a file whose `epoch` differs is dropped whole, silently. So a new token or password
+  signs every browser out at the next server start, whoever changed the file and however (a
+  hand edit included). `claudio web --rotate-token`, `--print-url --rotate-token` and
+  `--set-password` restart a running service (`apply { force: true }`, §2), so there they act
+  at once. A `--foreground` server is not restarted by them: it keeps its token, password and
+  sessions until it is restarted, as today.
+- **Mode:** the mode is part of the epoch, so a start in the other mode (loopback ↔ `--remote`)
+  signs every browser out. A session made with the token in loopback mode (from any machine,
+  through an `--allow-host` proxy) must not stay valid under `--remote`, where every non-local
+  request needs the password (C5).
+- **Load** happens once per start, in `run` (`lib.rs`). It runs after the token is loaded and,
+  with `--remote`, after `remote::prepare`, and before the runtime is built: blocking I/O off
+  the executor, like the token's, and before `serve` binds, so no request meets a store that is
+  still loading. `Auth::new` takes the loaded store and the epoch.
+  - A missing file is the normal first start: an empty store, nothing printed.
+  - A different `epoch` gives an empty store, nothing printed.
+  - Otherwise the file is opened with `O_NOFOLLOW | O_CLOEXEC` and checked on the open
+    descriptor, as `claude/hooks.rs` `read_context` does. It must be a regular file of this uid
+    with no group or other permission bits (`mode & 0o077 == 0`, the token's rule), at most
+    64 KiB, and parse as this format with `version` 1, every `hash` 64 lowercase hex and no hash
+    twice.
+  - Anything else gives an empty store and one stderr line, `claudio web: ignoring <path>:
+    <why>; browsers sign in again` (`eprintln!`: the tracing subscriber is installed later),
+    never a failed start. The file stays as it is until the next write replaces it; a file of a
+    newer `version` is therefore lost at the first login after a downgrade.
+  - Entries past the idle limit are dropped; of more than 64, the 64 most recently seen stay.
+- **Writes** go through one writer task that always writes the newest state (a
+  `tokio::sync::watch` of the store, so nothing queues: A10):
+  - on a login and on a sign-out. The reply waits until that write has finished or failed (at
+    most 2 s): a cookie is never handed out, and a sign-out never confirmed, before the file
+    says so. A failed write changes no status code: the login or sign-out holds in memory.
+  - on use, when a session's `seen` in the file is over 1 hour older than its `seen` in memory
+    (memory is updated on every use; the idle limit is 30 days, so 1 hour of precision in the
+    file is enough and requests do not each write the disk);
+  - once more in `serve`'s `stop` sequence, after `hub.shutdown()`, awaited (at most 2 s; the
+    service's 3 s watchdog of §2 stays the outer bound).
+
+  A failed write is logged (file name and error, never content) and retried at the next change
+  and after 60 s, doubling to 1 h (`write_atomic` leaves a temp file behind when it fails, so
+  the retry is slow).
+- **Two servers** on one host and one config dir (a `--foreground` one beside the service)
+  share the file, unlocked: the last writer wins.
+  - One may forget a browser the other signed in.
+  - One may bring back a session the other signed out: it still holds it in memory and writes
+    it again within the hour or when it stops. With two servers a sign-out is sure only when
+    made on each, or with `--rotate-token` and a restart of both.
+  - Two servers with different tokens or modes drop each other's sessions at every start.
+
+  Accepted and documented in `docs/web.md`, not locked.
+- **Sign-out in the page:** the palette (`k`) gets "Sign out": `POST /api/logout`, then a
+  reload, which shows the login. `docs/web.md` lists it, and one e2e spec covers it: a
+  signed-out page shows the login, and `/api/me` answers 401 with the old cookie. This is the
+  only page change in this work; it uses no new message or DTO, and follows `DESIGN.md`.
 
 ### 4. Password minimum (`addons/web/src/password.rs`)
 
 `MIN_BYTES` becomes 8 (`password.rs:22`); `MAX_BYTES` (1024), argon2id's parameters and the
-login limits are unchanged. Stored passwords of any length keep working; `--set-password` asks
-for at least 8 bytes.
+login limits are unchanged. A stored password is never re-checked against the minimum
+(`Stored::verify` checks only the maximum); `--set-password` asks for at least 8 bytes. The
+minimum counts bytes, as today, and `docs/web.md` says "bytes" where it gives the range.
 
 ### Alternatives considered
 
@@ -277,7 +345,7 @@ for at least 8 bytes.
 | Child always started; it exits 0 when `[web]` is off | A process spawn at every daemon start on every host, and "off" is indistinguishable from "just exited". |
 | Web addon spawns the child itself from an op handler | No hook at daemon start (so no autostart), and process supervision would live outside the core's process-group and shutdown handling. |
 | Supervisor rotates the log on a timer (copy + truncate) | Loses lines, bounds size only per interval, and the error tail must be read back from a file; piping stderr through the daemon bounds it exactly. |
-| Stateless signed cookies (HMAC with a kept key) | Sign-out of one browser then needs a revocation list anyway, and a stolen key forges any session; hashed server-side sessions keep today's model and only add a file. |
+| Stateless signed cookies (HMAC with a kept key) | The key would live in the config dir, so a copy of that dir (a backup) could forge a remote session, where today it yields a local-only token and an argon2id hash. Signing out one browser would also need a revocation list. Hashed server-side sessions keep today's model and only add a file. |
 | Store cookie values as they are | A copy of the file (a backup, another user's misconfigured share) would sign its reader in; hashes cost nothing at 32 random bytes of entropy. |
 | A sliding cookie `Max-Age` of 30 days | Needs a `Set-Cookie` on use to slide; the server already enforces idle, so a long cookie life is simpler and no weaker. |
 
@@ -285,11 +353,13 @@ for at least 8 bytes.
 
 - **Behaviour change:** a bare `claudio web` no longer stays in the foreground. A script or unit
   that ran `claudio web` as a long-running process must add `--foreground`. Sign-ins now last
-  until 30 days unused and survive restarts and closed browsers; `--rotate-token` is the way to
-  sign every browser out. Release notes and `docs/web.md` say so.
+  until 30 days unused and survive restarts and closed browsers. `claudio web --rotate-token`
+  signs every browser out (a `--foreground` server must then be restarted for it to take
+  effect), and the palette's "Sign out" ends one. Release notes and `docs/web.md` say so.
 - **Sessions file:** new; a previous release ignores it (its sessions stay in memory), and a
   downgrade followed by an upgrade finds the file again, still valid if the token and password
-  did not change. No migration.
+  did not change. No migration. A sign-out made while the previous release runs is not in the
+  file: after the upgrade that session is valid again until it idles out.
 - **Mixed versions:** the new `addon:web` feature appears in `Welcome.features`.
   - New CLI, daemon without `addon:web`: handled as above.
   - Old CLI, new daemon: never sends web ops; an old `claudio web` still serves in the foreground.
@@ -349,7 +419,9 @@ for at least 8 bytes.
 - **Persisted sign-ins** widen what a stolen cookie is worth: it stays valid up to 30 days of
   disuse instead of 24 h or the next restart. The owner accepted this (2026-11-09).
   - Mitigations, unchanged: `HttpOnly`, `SameSite=Strict`, the strict CSP, `Secure` with TLS.
-  - New: the epoch binding, so rotating the token or the password signs everyone out.
+  - New: the epoch binding, so rotating the token or the password (or switching between
+    loopback and `--remote`) signs everyone out; and the palette's "Sign out", so one browser
+    can end its own sign-in.
   - The sessions file holds hashes only. Anyone who can read it as this uid can already read
     `web-token`.
 - **Password of 8 bytes:** guessing over the network stays bounded by argon2id and the login
@@ -398,24 +470,42 @@ for at least 8 bytes.
   and doc examples; the supervisor module contains no addon name.
 - [ ] AC11: each test of AC3, AC4, AC7 and AC9 ends with no process of its own left: it waits
   for the service pid to be gone before its dirs are removed.
-- [ ] AC12: the session store is unit-tested (auth tests) for:
-  - a save/load round trip;
-  - the 30-day idle limit, on wall-clock `seen`;
-  - the 64 cap;
-  - an epoch mismatch → empty;
-  - a bad mode, a symlink, an oversize, corrupt or unknown-version file → empty plus one
-    warning, start not failed;
-  - sign-out removes the entry;
-  - the file never contains a cookie value;
-  - `seen` is written at most once an hour per session under steady use.
+- [ ] AC12: the session store is unit-tested (its own module's tests; the clock, the file path
+  and the epoch inputs are parameters) for:
+  - a save/load round trip; the file is 0600 and contains neither a cookie value nor the token;
+  - idle: live at 30 days − 1 s, gone at 30 days, on wall-clock `seen`; a `seen` later than now
+    counts as now;
+  - the cap: a 65th login drops the least recently seen; a file with 70 entries loads the 64
+    most recently seen;
+  - the epoch: a different token, different password bytes and the other mode each give a
+    different epoch and an empty store, with no message; a write made after the token file
+    changed on disk still carries the epoch of the start;
+  - a missing file → empty, no message; a bad mode, a symlink, an oversize or corrupt file, a
+    malformed or repeated hash, an unknown version → empty plus the loader's reason (one line),
+    start not failed;
+  - a login's entry is in the file, and a signed-out entry is out of it, before the reply;
+  - a login with a live cookie replaces that session;
+  - `seen` is written at most once an hour per session under steady use;
+  - an open socket marks its session used once an hour (injected clock), so a session whose
+    only activity is an open tab is live after 30 days;
+  - a failed write (unwritable directory) keeps the session in memory and is retried.
 - [ ] AC13: integration (`addons/web/tests/web.rs`):
-  - a browser cookie from a login stays valid after `claudio daemon restart` (service mode) and
-    after a `--foreground` server is stopped and started again;
-  - the login reply's `Set-Cookie` carries `Max-Age=34560000`;
-  - after `claudio web --rotate-token`, and after `claudio web --set-password`, the old cookie
-    is refused.
-- [ ] AC14: an 8-byte password is accepted by `--set-password` and logs in; 7 bytes is refused
-  with "at least 8 bytes" (`password.rs` tests, `web.rs`).
+  - the login reply's `Set-Cookie` carries `Max-Age=34560000` with the flags it has today; the
+    sign-out reply's carries `Max-Age=0`;
+  - a cookie from a login stays valid after a `--foreground` server is killed (the harness's
+    SIGKILL) and started again, and a signed-out cookie stays refused after the same;
+  - after a restart with `--foreground --rotate-token` the old cookie is refused;
+  - a cookie from a loopback-mode login is refused by a `--remote` start on the same config dir;
+  - service mode (in the commit of step 3 or step 4, whichever lands last): the cookie stays
+    valid after `claudio daemon restart`; it is refused after `claudio web --rotate-token` and
+    after `claudio web --set-password` (typed through the PTY harness; `--set-password` refuses
+    a pipe).
+- [ ] AC14: `password.rs` tests: 8 bytes is accepted, 7 is refused with "at least 8 bytes",
+  1024 and 1025 as today (the old `password_length_is_12_to_1024_bytes` test is replaced).
+  `web.rs`: `claudio web --set-password` typed through the PTY harness with an 8-byte password
+  exits 0, and that password logs in to a `--remote` server.
+- [ ] AC15: an e2e spec: the palette's "Sign out" shows the login, and `/api/me` answers 401
+  with the old cookie, after a reload too.
 
 ## Constraints
 
@@ -430,17 +520,26 @@ for at least 8 bytes.
      bodies);
   2. the core supervisor with its `TestAddon` tests, no web code (A3);
   3. the web addon's service;
-  4. persistent sign-ins: `docs/web-protocol.md`'s session sentence first, in its own commit,
-     then the code;
+  4. persistent sign-ins: `docs/web-protocol.md`'s Cookie bullet first, in its own commit,
+     then the code, then the page's "Sign out";
   5. the password minimum.
 
   `make check` passes at each. Steps 4 and 5 touch only `addons/web` and may come before 2–3.
 - `app.rs` stays pure; no TUI change.
-- `docs/web-protocol.md` changes only in its session-lifetime sentence (line 54). These are
+- `docs/web-protocol.md` changes only in its Cookie bullet (lines 53-55): `Max-Age=34560000` in
+  the cookie, and "30 days idle, kept across restarts, at most 64" for the sessions. These are
   updated in the same branch:
-  - `docs/web.md`: usage, the `--remote` steps, "keeps the old password until it restarts",
-    "24 h idle" (lines 37, 147), the password range (line 118), the env and sign-out notes,
-    and that the web survives a logout only where the daemon does;
+  - `docs/web.md`:
+    - usage, including line 27's `--rotate-token` note;
+    - the `--remote` steps, and "keeps the old password until it restarts, and a restart signs
+      every browser out" (lines 68-70);
+    - "24 h idle" (line 37);
+    - the Cookie bullet (lines 146-148): the cookie's `Max-Age`, `web-sessions.json`, what it
+      holds, the epoch, two servers;
+    - the password range (lines 68 and 118);
+    - the palette's "Sign out", the env and sign-out notes, and that the web survives a logout
+      only where the daemon does;
+  - the module docs that state the old rules: `auth.rs:1-12`, `password.rs:21`;
   - `docs/addons.md`, `docs/daemon-protocol.md`;
   - `README.md`: the `claudio web` lines and the `--remote` paragraph;
   - the `Makefile`'s `dev` notes;
