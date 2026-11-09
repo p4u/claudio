@@ -166,6 +166,45 @@ pub fn claude_flags(claude: &Path, path: Option<&OsStr>) -> Option<ClaudeFlags> 
     })
 }
 
+/// Spawn `cmd`, retrying briefly on `ETXTBSY` ("Text file busy"). Linux
+/// refuses to exec a file some process still has open for writing, and a
+/// `fork` elsewhere in this process hands its child a copy of that descriptor
+/// until the child execs. So a claude that was just written (an update, the
+/// installer) can fail to start for a few milliseconds although it is fine;
+/// without the retry the probe would report it missing.
+fn spawn_when_not_busy(cmd: &mut Command) -> io::Result<std::process::Child> {
+    const TRIES: u32 = 20;
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < TRIES => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Write a fake `claude` script and return once it can be executed. A `fork`
+/// on another test thread may hold the write descriptor for a moment, and
+/// until its child execs, `exec` of the file fails with `ETXTBSY`; a test that
+/// ran the script first would fail at random. One `--version` run (fake
+/// claudes answer it) shows the file is free: the descriptor is then gone for
+/// good.
+#[cfg(test)]
+pub(crate) fn write_executable(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cmd = Command::new(path);
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    spawn_when_not_busy(&mut cmd).unwrap().wait().unwrap();
+}
+
 /// Stdout of `<claude> <arg>` when it exits 0 within [`VERSION_TIMEOUT`].
 /// Stdout is drained on a thread so long output can't fill the pipe and stall
 /// the child.
@@ -174,13 +213,11 @@ fn run_capture(claude: &Path, arg: &str, path: Option<&OsStr>) -> Option<String>
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
-    let mut child = cmd
-        .arg(arg)
+    cmd.arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    let mut child = spawn_when_not_busy(&mut cmd).ok()?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut out = String::new();
@@ -319,16 +356,7 @@ mod tests {
             let script = format!("#!/bin/sh\n[ \"$1\" = --help ] && printf '%s\\n' '{text}'\n");
             std::fs::write(&bin, script).unwrap();
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-            // A script just written may be busy for a moment (ETXTBSY while
-            // another test thread forks): probe again.
-            (0..20)
-                .find_map(|_| {
-                    claude_flags(&bin, None).or_else(|| {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        None
-                    })
-                })
-                .unwrap()
+            claude_flags(&bin, None).unwrap()
         };
         let both = help("  --plugin-dir <paths...>  --allow-dangerously-skip-permissions");
         assert_eq!(
@@ -357,13 +385,11 @@ mod tests {
 
     #[test]
     fn probe_runs_claude_with_the_given_path() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("claudio-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
         // An npm-style claude needs its interpreter from the user's PATH.
-        std::fs::write(&bin, "#!/bin/sh\necho \"$PATH\"\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&bin, "#!/bin/sh\necho \"$PATH\"\n");
         let info = probe(&bin, Some(OsStr::new("/login/bin:/usr/bin:/bin")));
         let claude = info.claude.unwrap();
         assert_eq!(claude.version, "/login/bin:/usr/bin:/bin");

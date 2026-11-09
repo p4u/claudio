@@ -29,9 +29,7 @@ fn fake_claude_exits_immediately() -> &'static Path {
              if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
              if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
              exit 3\n";
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, script);
         bin
     })
 }
@@ -59,9 +57,7 @@ fn fake_claude_resume_fails() -> &'static Path {
              echo {BANNER}\n\
              exec cat\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, &script);
         bin
     })
 }
@@ -84,9 +80,7 @@ fn fake_claude() -> &'static Path {
              echo {BANNER}\n\
              exec cat\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, &script);
         bin
     })
 }
@@ -1418,9 +1412,7 @@ fn fake_claude_logging_argv() -> &'static Path {
              echo {BANNER}\n\
              exec cat\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, &script);
         bin
     })
 }
@@ -1695,9 +1687,7 @@ fn fake_claude_slow_to_stop() -> &'static Path {
              echo {BANNER}\n\
              exec cat\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, &script);
         bin
     })
 }
@@ -2280,9 +2270,7 @@ echo "$spec" >> "$ctl/installed"
 echo "done $spec" >> "$ctl/log"
 echo '{"ok":true}'
 "#;
-        std::fs::write(&bin, script).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        crate::daemon::host::write_executable(&bin, script);
         bin
     })
 }
