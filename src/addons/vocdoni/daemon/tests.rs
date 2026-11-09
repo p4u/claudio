@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use super::{apply_msg, ApplyRequest, VocdoniDaemon};
+use super::applied::apply_msg;
+use super::{ApplyRequest, VocdoniDaemon};
 use crate::addon::{Addon, Addons};
 use crate::addons::vocdoni::test_support::*;
 use crate::addons::vocdoni::Vocdoni;

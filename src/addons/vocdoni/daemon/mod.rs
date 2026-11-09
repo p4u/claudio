@@ -46,9 +46,9 @@ use crate::claude::SESSION_MARKERS;
 use crate::paths;
 use crate::text::sanitize;
 
-mod applied;
+pub(crate) mod applied;
 mod ops;
-pub use applied::{applied_of, apply_msg, retry_secs, retrying, serves_apply};
+pub use applied::{retry_secs, retrying, serves_apply};
 pub use applied::{Applied, ApplyRequest, OP_APPLY};
 pub use ops::VocdoniDaemon;
 

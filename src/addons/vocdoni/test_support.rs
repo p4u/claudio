@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::daemon::{apply_msg, retrying, Applied, ApplyRequest, Manifests, VocdoniDaemon};
+use super::daemon::applied::apply_msg;
+use super::daemon::{retrying, Applied, ApplyRequest, Manifests, VocdoniDaemon};
 use super::plugins::state::applied as applied_for;
 use super::Vocdoni;
 use crate::addon::{

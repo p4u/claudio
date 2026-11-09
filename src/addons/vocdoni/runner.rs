@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use super::daemon::{serves_apply, Applied, OP_APPLY};
-use super::plugins::choices;
+use super::plugins::choices::{self, PluginChoices};
 use super::plugins::manifest::Manifest;
 use super::plugins::state::PluginsFetch;
 use super::profiles::{ProfileSource, Profiles};
@@ -238,6 +238,23 @@ impl Runner {
             Task::Notice(text) => ctx.notify(text),
             Task::Changed => ctx.changed(),
         }
+    }
+
+    /// The member saved `choices` for plugin `name`: written to
+    /// `[plugins.<name>]` first (awaited), then the state's transition
+    /// (every host asked again).
+    pub async fn save(self: &Arc<Self>, name: &str, choices: PluginChoices) -> Result<(), String> {
+        let ctx = self.ctx.get().cloned();
+        let ctx = ctx.ok_or_else(|| "the plugins have not started yet".to_owned())?;
+        let (own, saved) = (name.to_owned(), choices.clone());
+        let edit = Box::new(move |t: &mut toml::Table| choices::set(t, &own, &saved));
+        ctx.edit_config("plugins", edit).await?;
+        self.transition(|s| {
+            let tasks = s.save_choices(name, choices);
+            let written = |t: &Task| matches!(t, Task::SaveChoices { .. });
+            tasks.into_iter().filter(|t| !written(t)).collect()
+        });
+        Ok(())
     }
 
     /// `profile`'s proxy config: cached (5 min), else fetched within 5 s

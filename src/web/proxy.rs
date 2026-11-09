@@ -1,72 +1,28 @@
-//! The proxy ops (`proxy.stats`, `proxy.credential`, `proxy.switch`) and
-//! the proxy config cache spawns use. Every DTO is built field by field: no
+//! The proxy ops (`proxy.stats`, `proxy.credential`, `proxy.switch`; the
+//! session-bound ones take the profile from the session's recorded launch,
+//! server state). Every DTO is built field by field: no
 //! `Profile`, token or proxy URL leaves this file, and an error names the
 //! profile, never its URL (a transport error's text carries the URL).
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::addons::vocdoni::proxy::api::{
-    self, ApiError, ConfigResponse, PoolHealthResponse, SessionCredential, StatsResponse,
-    SwitchError, SwitchOutcome,
+    self, ApiError, PoolHealthResponse, SessionCredential, StatsResponse, SwitchError,
+    SwitchOutcome,
 };
 use crate::addons::vocdoni::proxy::profile::Profile;
 use crate::addons::vocdoni::proxy::stats::Window;
 
-/// How long a profile's `/v1/claudio/config` is kept.
-const CONFIG_TTL: Duration = Duration::from_secs(300);
-/// The longest a config fetch may take.
-const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Each profile's `/v1/claudio/config`, as fetched last (not secret: model
-/// names and limits).
-pub(crate) struct ProxyCache {
-    configs: Mutex<HashMap<String, (ConfigResponse, Instant)>>,
-}
-
-impl ProxyCache {
-    pub(crate) fn new() -> ProxyCache {
-        ProxyCache {
-            configs: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// `find_profile` in spawn_blocking; `"proxy profile '<name>' not found"`.
-    pub(crate) async fn profile(name: &str) -> Result<Profile, String> {
-        let owned = name.to_owned();
-        tokio::task::spawn_blocking(move || {
-            crate::addons::vocdoni::proxy::resolve::find_profile(&owned)
-        })
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| format!("proxy profile '{}' not found", clean(name)))
-    }
-
-    /// `/v1/claudio/config` of `name`, cached 300 s; a failure (5 s timeout) is `None`
-    /// (session_env then uses its built-in model defaults, as the TUI).
-    pub(crate) async fn config(&self, name: &str, profile: &Profile) -> Option<ConfigResponse> {
-        {
-            let configs = self.configs.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some((cfg, at)) = configs.get(name) {
-                if at.elapsed() < CONFIG_TTL {
-                    return Some(cfg.clone());
-                }
-            }
-        }
-        let fetch = api::fetch_config(&profile.url, &profile.token);
-        let cfg = tokio::time::timeout(CONFIG_TIMEOUT, fetch)
-            .await
-            .ok()?
-            .ok()
-            .flatten()?;
-        let mut configs = self.configs.lock().unwrap_or_else(|p| p.into_inner());
-        configs.insert(name.to_owned(), (cfg.clone(), Instant::now()));
-        Some(cfg)
-    }
+/// `find_profile` in spawn_blocking; `"proxy profile '<name>' not found"`.
+async fn find(name: &str) -> Result<Profile, String> {
+    let owned = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::addons::vocdoni::proxy::resolve::find_profile(&owned)
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(|| format!("proxy profile '{}' not found", clean(name)))
 }
 
 /// A profile name for a message: sanitized, ≤ 80 characters.
@@ -189,7 +145,7 @@ fn switch_dto(o: &SwitchOutcome) -> Value {
 /// fetch_stats + fetch_pool_health (pool None on failure).
 pub(crate) async fn stats(profile: &str, window: &str) -> Result<Value, String> {
     let param = window_param(window)?;
-    let p = ProxyCache::profile(profile).await?;
+    let p = find(profile).await?;
     let s = api::fetch_stats(&p.url, &p.token, param)
         .await
         .map_err(api_error)?;
@@ -198,7 +154,7 @@ pub(crate) async fn stats(profile: &str, window: &str) -> Result<Value, String> 
 }
 
 pub(crate) async fn credential(profile: &str, claude_session_id: &str) -> Result<Value, String> {
-    let p = ProxyCache::profile(profile).await?;
+    let p = find(profile).await?;
     let c = api::fetch_session(&p.url, &p.token, claude_session_id)
         .await
         .map_err(api_error)?;
@@ -207,7 +163,7 @@ pub(crate) async fn credential(profile: &str, claude_session_id: &str) -> Result
 }
 
 pub(crate) async fn switch(profile: &str, claude_session_id: &str) -> Result<Value, String> {
-    let p = ProxyCache::profile(profile).await?;
+    let p = find(profile).await?;
     match api::switch_session(&p.url, &p.token, claude_session_id).await {
         Ok(o) => Ok(switch_dto(&o)),
         Err(SwitchError::Api(e)) => Err(api_error(e)),

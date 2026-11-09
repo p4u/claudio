@@ -1695,6 +1695,49 @@ async fn web_direct_launches_keep_the_inherited_api_key() {
     assert!(!env.contains("CLAUDECODE="), "a parent claude's marker");
 }
 
+/// A web spawn goes through the launch composer whatever its route: with
+/// the proxy, the inherited `ANTHROPIC_API_KEY` is removed (`env_remove`)
+/// and the proxy token set; direct, the key is kept. Never direct for the
+/// default profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_spawn_uses_the_composer_env_remove() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dirs = h.dirs.clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let spawn = |dir: &std::path::PathBuf, kind: &str| json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": kind}});
+    tab.req("session.spawn", spawn(&dirs[0], "default"))
+        .await
+        .expect("spawn through the proxy");
+    let env = launched_env(&env_file).await;
+    assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
+    assert!(
+        !env.contains("ANTHROPIC_API_KEY="),
+        "the inherited API key reached a proxied session"
+    );
+    fs::remove_file(&env_file).unwrap();
+    tab.req("session.spawn", spawn(&dirs[1], "direct"))
+        .await
+        .expect("spawn direct");
+    let env = launched_env(&env_file).await;
+    assert!(
+        env.contains("ANTHROPIC_API_KEY=test-key-not-real"),
+        "{}",
+        env.len()
+    );
+    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN="));
+    // First-party without a proxy is refused, never started.
+    let mut bad = spawn(&dirs[1], "direct");
+    bad["first_party"] = json!(true);
+    let err = tab.req("session.spawn", bad).await.unwrap_err();
+    assert_eq!(err, "first-party needs a proxy profile");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_plugin_without_choices_is_left_out_until_saved() {
     let h = ManagerHarness::new();

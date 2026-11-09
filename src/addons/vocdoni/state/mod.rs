@@ -124,6 +124,7 @@ impl State {
         profiles: (Vec<String>, Option<String>),
         choices: BTreeMap<String, PluginChoices>,
     ) -> Vec<Task> {
+        let moved = (&self.profiles, &self.default) != (&profiles.0, &profiles.1);
         (self.profiles, self.default) = profiles;
         self.profiles_read = true;
         let names: BTreeSet<String> = self
@@ -143,7 +144,7 @@ impl State {
             self.request_again(name, &mut tasks);
         }
         self.request_all(&mut tasks);
-        if !changed.is_empty() {
+        if moved || !changed.is_empty() {
             tasks.push(Task::Changed);
         }
         tasks

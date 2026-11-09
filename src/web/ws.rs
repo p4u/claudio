@@ -22,7 +22,7 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{ext, proxy};
+use super::{ext, plugins};
 use crate::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
@@ -242,7 +242,7 @@ fn reply(id: u32, res: Result<Value, String>) -> Value {
 }
 
 /// `args` as an op's argument struct; `bad request: <why>` otherwise.
-fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
+pub(super) fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| format!("bad request: {e}"))
 }
 
@@ -393,13 +393,6 @@ struct LayoutArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatsArgs {
-    profile: String,
-    window: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SnippetArgs {
     text: String,
     #[serde(default)]
@@ -436,19 +429,6 @@ struct RenderArgs {
     lens: String,
     kind: String,
     source: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NameArgs {
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginSaveArgs {
-    name: String,
-    disabled: Vec<String>,
 }
 
 /// The longest path `fs.list` / `claude.sessions` take, in bytes.
@@ -755,20 +735,6 @@ pub(crate) async fn dispatch(
             let a: LayoutArgs = parse(args)?;
             hub.layout(tab, a.layout).await.map(|()| json!({}))
         }
-        "proxy.stats" => {
-            let a: StatsArgs = parse(args)?;
-            proxy::stats(&a.profile, &a.window).await
-        }
-        "proxy.credential" => {
-            let a: SidArgs = parse(args)?;
-            let (profile, conversation) = session_proxy(hub, a.sid).await?;
-            proxy::credential(&profile, &conversation).await
-        }
-        "proxy.switch" => {
-            let a: SidArgs = parse(args)?;
-            let (profile, conversation) = session_proxy(hub, a.sid).await?;
-            proxy::switch(&profile, &conversation).await
-        }
         "snippets.list" => {
             parse::<NoArgs>(args)?;
             ext::snippets_list().await
@@ -789,7 +755,7 @@ pub(crate) async fn dispatch(
             let a: ToggleArgs = parse(args)?;
             let ctx = &state.ctx;
             ctx.ext
-                .toggle(&ctx.plugins, hub, &a.name, a.on)
+                .toggle(&state.addons, hub, &a.name, a.on)
                 .await
                 .map(|()| json!({}))
         }
@@ -805,43 +771,11 @@ pub(crate) async fn dispatch(
             let a: RenderArgs = parse(args)?;
             state.ctx.ext.render(&a.lens, &a.kind, &a.source).await
         }
-        "plugins.list" => {
-            parse::<NoArgs>(args)?;
-            Ok(state.ctx.plugins.list())
-        }
-        "plugins.items" => {
-            let a: NameArgs = parse(args)?;
-            state.ctx.plugins.items(&a.name)
-        }
-        "plugins.save" => {
-            let a: PluginSaveArgs = parse(args)?;
-            state
-                .ctx
-                .plugins
-                .save(&a.name, a.disabled)
-                .await
-                .map(|()| json!({}))
-        }
-        "plugins.status" => {
-            parse::<NoArgs>(args)?;
-            Ok(state.ctx.plugins.status())
+        op if op.starts_with("proxy.") || op.starts_with("plugins.") => {
+            plugins::dispatch_v1(state, op, args).await
         }
         _ => Err("unknown op".to_owned()),
     }
-}
-
-/// The proxy profile and conversation of session `sid`, for
-/// `proxy.credential` / `proxy.switch`.
-async fn session_proxy(hub: &hub::HubHandle, sid: SessionId) -> Result<(String, String), String> {
-    let s = hub.session(sid).await?;
-    let profile = s
-        .proxy
-        .ok_or_else(|| "no proxy for this session".to_owned())?;
-    let conversation = s
-        .info
-        .claude_session_id
-        .ok_or_else(|| "no conversation yet".to_owned())?;
-    Ok((profile, conversation))
 }
 
 /// A full object id: 40 or 64 hex digits.

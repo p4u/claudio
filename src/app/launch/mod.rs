@@ -228,12 +228,35 @@ pub async fn run(rt: &AddonRuntime, spec: LaunchSpec, client: Client) -> Step {
     run_within(rt, spec, client, BUDGET).await
 }
 
+/// [`run`] with checklists skipped for this launch from the start:
+/// `(addon, checklist)` pairs (the web's v1 `skip_plugins`); a pair of an
+/// addon this build does not register is ignored.
+pub async fn run_deferring(
+    rt: &AddonRuntime,
+    spec: LaunchSpec,
+    client: Client,
+    deferred: &[(String, String)],
+) -> Step {
+    start(rt, spec, client, BUDGET, deferred).await
+}
+
 /// [`run`] with another budget (tests).
 pub(crate) async fn run_within(
     rt: &AddonRuntime,
     spec: LaunchSpec,
     client: Client,
     budget: Duration,
+) -> Step {
+    start(rt, spec, client, budget, &[]).await
+}
+
+/// Resolve, then prepare from `deferred` on.
+async fn start(
+    rt: &AddonRuntime,
+    spec: LaunchSpec,
+    client: Client,
+    budget: Duration,
+    deferred: &[(String, String)],
 ) -> Step {
     if !matches!(spec.base, Msg::Spawn(_) | Msg::Respawn(_)) {
         return Step::Failed("only a claude spawn or respawn is launched".to_owned());
@@ -247,7 +270,12 @@ pub(crate) async fn run_within(
         .filter(|(_, r)| *r != Routing::Off)
         .map(|(a, _)| *a)
         .collect();
-    let launch = Parked::new(spec, choice, routings, todo, budget);
+    let mut launch = Parked::new(spec, choice, routings, todo, budget);
+    for (addon, checklist) in deferred {
+        if let Some(addon) = rt.addons().get(addon) {
+            launch.defer(addon.name(), checklist.clone());
+        }
+    }
     proceed(rt, launch, client).await
 }
 

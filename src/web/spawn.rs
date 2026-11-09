@@ -1,10 +1,9 @@
 //! Starting sessions from the browser: `session.spawn`, `session.shell`,
-//! `session.respawn`, composed as the TUI does: a session without a proxy
-//! profile through the launch composer (`app::launch`), one with a profile
-//! as src/tui/proxy_glue.rs `send_with_proxy` (the proxy profile's env, the
-//! plugins' flags, env and instructions, the extensions' lenses). Nothing
-//! env-bearing leaves this file except in `Msg::Spawn`/`Msg::Respawn` over
-//! the daemon socket: no DTO, log line, notice or error carries it.
+//! `session.respawn`. A claude session goes through the launch composer
+//! (`app::launch`), as the TUI's: the v1 `proxy`/`first_party` are its
+//! select (`plugins::select_of`), the addons add their share there. The
+//! env never reaches this file: it lives in the composer until the
+//! `Msg::Spawn`/`Msg::Respawn` goes over the daemon socket.
 
 use std::sync::Arc;
 
@@ -12,12 +11,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::ext::Extensions;
-use super::hub::HubHandle;
-use super::plugins::{notice_event, Plugins};
-use super::proxy::ProxyCache;
+use super::hub::{HubHandle, SessionRef};
+use super::plugins::{deferred, notice_event, select_of};
 use super::state::SessionMeta;
-use crate::addon::{Frontend, LaunchOp, LaunchSelect};
-use crate::addons::vocdoni::plugins::state::{compose, with_plugins, PluginPart};
+use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect, LegacyChoice};
 use crate::app::addons::AddonRuntime;
 use crate::app::launch::{self, LaunchSpec, Step};
 use crate::client::Client;
@@ -127,39 +124,12 @@ pub(crate) fn check_spawn(req: &SpawnReq) -> Result<(), String> {
 
 const FIRST_PARTY: &str = "first-party needs a proxy profile";
 
-/// What a spawn needs besides its request: the hub, the proxy config
-/// cache, the plugins, the extensions and the addon runtime (launches
-/// without a proxy go through the launch composer).
+/// What a spawn needs besides its request: the hub, the extensions (the
+/// core's lenses) and the addon runtime the launch composer runs on.
 pub(crate) struct SpawnCtx {
     pub hub: HubHandle,
-    pub proxy: ProxyCache,
-    pub plugins: Plugins,
     pub ext: Arc<Extensions>,
     pub runtime: AddonRuntime,
-}
-
-/// default → `default` (the `[proxy] default`, or "env" with CLAUDIO_PROXY_URL); direct → none; profile → its name.
-pub(crate) fn pick_profile(arg: &ProxyArg, default: Option<&str>) -> Option<String> {
-    match arg {
-        ProxyArg::Default => default.map(str::to_owned),
-        ProxyArg::Direct => None,
-        ProxyArg::Profile { name } => Some(name.clone()),
-    }
-}
-
-/// The proxy profile `arg` names, with the default read from config.toml
-/// and the env (in `spawn_blocking`): `None` is direct.
-async fn resolve(arg: &ProxyArg) -> Result<Option<String>, String> {
-    let default = match arg {
-        ProxyArg::Default => {
-            tokio::task::spawn_blocking(crate::addons::vocdoni::proxy::resolve::load_proxy_profiles)
-                .await
-                .map_err(|_| "cannot read config.toml".to_owned())?
-                .1
-        }
-        _ => None,
-    };
-    Ok(pick_profile(arg, default.as_deref()))
 }
 
 fn reply_id(reply: std::io::Result<Msg>) -> Result<SessionId, String> {
@@ -170,61 +140,31 @@ fn reply_id(reply: std::io::Result<Msg>) -> Result<SessionId, String> {
     }
 }
 
-/// `profile`'s env for a claude session (the proxy URL and token, its
-/// config's models), built in `spawn_blocking` (it reads config.toml). It
-/// goes into the daemon request only.
-async fn proxy_env(
+/// `select`'s routing, checked: first-party needs an addon's option.
+fn check_first_party(
     ctx: &SpawnCtx,
-    profile: &str,
+    select: &LaunchSelect,
     first_party: bool,
-) -> Result<Vec<(String, String)>, String> {
-    let p = ProxyCache::profile(profile).await?;
-    let config = ctx.proxy.config(profile, &p).await;
-    drop(p);
-    let name = profile.to_owned();
-    tokio::task::spawn_blocking(move || {
-        crate::addons::vocdoni::proxy::resolve::proxy_env_for(
-            Some(&name),
-            config.as_ref(),
-            first_party,
-        )
-    })
-    .await
-    .map_err(|_| "cannot read config.toml".to_owned())?
-}
-
-/// `msg` (a `Spawn` or `Respawn` without env) with the plugins' share and
-/// `profile`'s env, exactly as the TUI's `send_with_proxy`: compose's
-/// notices go to the tabs (they name plugins, never values).
-async fn with_proxy(
-    ctx: &SpawnCtx,
-    msg: Msg,
-    profile: Option<&str>,
-    first_party: bool,
-    parts: Vec<PluginPart>,
-) -> Result<Msg, String> {
-    let env = match profile {
-        Some(name) => proxy_env(ctx, name, first_party).await?,
-        None => Vec::new(),
-    };
-    let composed = compose(&parts);
-    for text in &composed.notices {
-        ctx.hub.broadcast(notice_event(text, "warn"));
+) -> Result<(), String> {
+    let (choice, _) = launch::resolve(&ctx.runtime, select)?;
+    match choice {
+        None if first_party => Err(FIRST_PARTY.to_owned()),
+        _ => Ok(()),
     }
-    Ok(with_plugins(msg, composed).merge_env(env))
 }
 
 /// `base` (a claude `Spawn` or `Respawn` without env or extensions)
-/// launched direct through the launch composer (`app::launch`): the core's
-/// lenses, the addons' share and `env_remove` are added there, off this
-/// function's view; the notices go to the tabs. The session's id.
-async fn launch_direct(
+/// launched through the launch composer (`app::launch`) as `select` asks,
+/// with `deferred` skipped: the core's lenses, the addons' share and
+/// `env_remove` are added there, off this function's view; the notices go
+/// to the tabs. The session's id and its launch's choice.
+async fn launch(
     ctx: &SpawnCtx,
-    op: LaunchOp,
+    (op, select, deferred): (LaunchOp, LaunchSelect, Vec<(String, String)>),
     (host, cwd): (&str, &str),
     base: Msg,
     client: Client,
-) -> Result<SessionId, String> {
+) -> Result<(SessionId, Option<LaunchChoice>), String> {
     let sid = match &base {
         Msg::Spawn(spec) => spec.id,
         Msg::Respawn(spec) => spec.id,
@@ -235,17 +175,21 @@ async fn launch_direct(
         sid,
         host: host.to_owned(),
         cwd: cwd.to_owned(),
-        select: LaunchSelect::of(None),
+        select,
         frontend: Frontend::Web,
         base,
         core_lenses: ctx.ext.session_extensions(),
     };
-    match launch::run(&ctx.runtime, spec, client).await {
-        Step::Sent { notices, reply, .. } => {
+    match launch::run_deferring(&ctx.runtime, spec, client, &deferred).await {
+        Step::Sent {
+            choice,
+            notices,
+            reply,
+        } => {
             for text in &notices {
                 ctx.hub.broadcast(notice_event(text, "warn"));
             }
-            reply_id(reply)
+            Ok((reply_id(reply)?, choice))
         }
         // Checklists reach the page with web protocol v2 (P3.14); until
         // then such a launch fails.
@@ -254,57 +198,46 @@ async fn launch_direct(
     }
 }
 
+/// The record of a session launched with `choice` (web-state.json keeps
+/// its pre-addon fields until P3.19).
+fn meta_of(ctx: &SpawnCtx, host: &str, choice: Option<&LaunchChoice>) -> SessionMeta {
+    let legacy = launch::legacy(ctx.runtime.addons(), choice);
+    SessionMeta {
+        host: host.to_owned(),
+        proxy: legacy.proxy,
+        first_party: legacy.first_party,
+    }
+}
+
 pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<SessionId, String> {
     check_spawn(&req)?;
     let hub = &ctx.hub;
     let (client, _) = hub.host_client(&req.host).await?;
-    let profile = resolve(&req.proxy).await?;
-    if req.first_party && profile.is_none() {
-        return Err(FIRST_PARTY.to_owned());
-    }
-    let parts = match &profile {
-        Some(p) => ctx.plugins.parts(&req.host, p, &req.skip_plugins).await,
-        None => Vec::new(),
-    };
+    let select = select_of(&req.proxy, req.first_party);
+    check_first_party(ctx, &select, req.first_party)?;
     let args = req
         .resume
         .as_ref()
         .map(|r| vec!["--resume".to_owned(), r.clone()])
         .unwrap_or_default();
-    let mut spec = SpawnSpec {
+    let spec = SpawnSpec {
         id: Uuid::new_v4(),
         cwd: req.cwd.clone(),
         name: check_name(req.name.as_deref())?,
         args,
-        env: vec![],
         rows: req.rows,
         cols: req.cols,
-        ephemeral: false,
-        extensions: None,
-        env_remove: None,
-        optional: Vec::new(),
+        ..Default::default()
     };
-    let sid = match profile.as_deref() {
-        None => {
-            let op = match req.resume {
-                Some(_) => LaunchOp::Resume,
-                None => LaunchOp::New,
-            };
-            let place = (req.host.as_str(), req.cwd.as_str());
-            launch_direct(ctx, op, place, Msg::Spawn(spec), client).await?
-        }
-        Some(name) => {
-            spec.extensions = Some(ctx.ext.session_extensions());
-            let msg = with_proxy(ctx, Msg::Spawn(spec), Some(name), req.first_party, parts).await?;
-            reply_id(client.request(msg).await)?
-        }
+    let op = match req.resume {
+        Some(_) => LaunchOp::Resume,
+        None => LaunchOp::New,
     };
+    let how = (op, select, deferred(&req.skip_plugins));
+    let place = (req.host.as_str(), req.cwd.as_str());
+    let (sid, choice) = launch(ctx, how, place, Msg::Spawn(spec), client).await?;
     tracing::info!(op = "session.spawn", host = %req.host, %sid, "web op");
-    let meta = SessionMeta {
-        host: req.host.clone(),
-        proxy: profile,
-        first_party: req.first_party,
-    };
+    let meta = meta_of(ctx, &req.host, choice.as_ref());
     let prompt = req
         .prompt
         .filter(|p| !p.trim().is_empty())
@@ -335,13 +268,33 @@ pub(crate) async fn spawn_shell(
     };
     let sid = reply_id(client.request(Msg::SpawnShell(spec)).await)?;
     tracing::info!(op = "session.shell", host = %host, %sid, "web op");
-    let meta = SessionMeta {
-        host: host.clone(),
-        proxy: None,
-        first_party: false,
-    };
+    let meta = meta_of(ctx, &host, None);
     hub.spawned(host, sid, meta, None).await;
     Ok(sid)
+}
+
+/// How a claude session is launched again: as the request says, else as
+/// it was (its recorded routing; one no addon adopts fails, never direct),
+/// else "proxy unknown".
+fn respawn_select(
+    ctx: &SpawnCtx,
+    req: &RespawnReq,
+    session: &SessionRef,
+) -> Result<LaunchSelect, String> {
+    if let Some(arg) = &req.proxy {
+        let select = select_of(arg, req.first_party);
+        check_first_party(ctx, &select, req.first_party)?;
+        return Ok(select);
+    }
+    if !session.proxy_known {
+        return Err("proxy unknown".to_owned());
+    }
+    let legacy = LegacyChoice {
+        proxy: session.proxy.clone(),
+        first_party: session.first_party,
+    };
+    let choice = launch::adopt_legacy(ctx.runtime.addons(), &legacy)?;
+    Ok(LaunchSelect::of(choice.as_ref()))
 }
 
 pub(crate) async fn respawn(ctx: &SpawnCtx, req: RespawnReq) -> Result<SessionId, String> {
@@ -351,66 +304,23 @@ pub(crate) async fn respawn(ctx: &SpawnCtx, req: RespawnReq) -> Result<SessionId
     let spec = RespawnSpec {
         id: req.sid,
         fresh: req.fresh,
-        env: vec![],
         rows: req.rows,
         cols: req.cols,
-        extensions: None,
-        env_remove: None,
+        ..Default::default()
     };
-    let (msg, profile, first_party) = if session.info.kind == SessionKind::Claude {
-        let (profile, first_party) = match &req.proxy {
-            Some(arg) => {
-                let profile = resolve(arg).await?;
-                if req.first_party && profile.is_none() {
-                    return Err(FIRST_PARTY.to_owned());
-                }
-                (profile, req.first_party)
-            }
-            None if session.proxy_known => {
-                let profile = session.proxy.clone();
-                let first_party = session.first_party && profile.is_some();
-                (profile, first_party)
-            }
-            None => return Err("proxy unknown".to_owned()),
-        };
-        let Some(name) = profile.as_deref() else {
-            let place = (session.host.as_str(), session.info.cwd.as_str());
-            let base = Msg::Respawn(spec);
-            let client = session.client.clone();
-            let sid = launch_direct(ctx, LaunchOp::Respawn, place, base, client).await?;
-            return respawned(ctx, session.host, sid, None, false).await;
-        };
-        // The plugins' env and instructions now (the journaled args keep
-        // their flags); a respawn waits for no manifest, as the TUI's reset.
-        let parts = ctx.plugins.parts_now(&session.host, name).await;
-        let spec = RespawnSpec {
-            extensions: Some(ctx.ext.session_extensions()),
-            ..spec
-        };
-        let msg = with_proxy(ctx, Msg::Respawn(spec), Some(name), first_party, parts).await?;
-        (msg, profile, first_party)
+    let (sid, choice) = if session.info.kind == SessionKind::Claude {
+        let select = respawn_select(ctx, &req, &session)?;
+        let how = (LaunchOp::Respawn, select, Vec::new());
+        let place = (session.host.as_str(), session.info.cwd.as_str());
+        let client = session.client.clone();
+        launch(ctx, how, place, Msg::Respawn(spec), client).await?
     } else {
-        (Msg::Respawn(spec), None, false)
+        let msg = Msg::Respawn(spec);
+        (reply_id(session.client.request(msg).await)?, None)
     };
-    let sid = reply_id(session.client.request(msg).await)?;
-    respawned(ctx, session.host, sid, profile, first_party).await
-}
-
-/// Session `sid` on `host` was respawned with `proxy`: the hub records it.
-async fn respawned(
-    ctx: &SpawnCtx,
-    host: String,
-    sid: SessionId,
-    proxy: Option<String>,
-    first_party: bool,
-) -> Result<SessionId, String> {
-    tracing::info!(op = "session.respawn", host = %host, %sid, "web op");
-    let meta = SessionMeta {
-        host: host.clone(),
-        proxy,
-        first_party,
-    };
-    ctx.hub.spawned(host, sid, meta, None).await;
+    tracing::info!(op = "session.respawn", host = %session.host, %sid, "web op");
+    let meta = meta_of(ctx, &session.host, choice.as_ref());
+    hub.spawned(session.host, sid, meta, None).await;
     Ok(sid)
 }
 
@@ -455,18 +365,6 @@ mod tests {
         r.resume = Some("0b9c-AF12".into());
         r.prompt = Some("p".repeat(64 * 1024));
         assert!(check_spawn(&r).is_ok());
-    }
-
-    #[test]
-    fn pick_profile_follows_the_wizard() {
-        let lab = ProxyArg::Profile { name: "lab".into() };
-        assert_eq!(
-            pick_profile(&ProxyArg::Default, Some("work")),
-            Some("work".into())
-        );
-        assert_eq!(pick_profile(&ProxyArg::Default, None), None);
-        assert_eq!(pick_profile(&ProxyArg::Direct, Some("work")), None);
-        assert_eq!(pick_profile(&lab, Some("work")), Some("lab".into()));
     }
 
     #[test]

@@ -14,11 +14,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::addons::vocdoni::daemon::{applied_of, retry_secs, Applied};
+use crate::addons::vocdoni::daemon::{retry_secs, Applied};
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
-use crate::proto::{Msg, MAX_PLUGIN_INSTRUCTIONS};
+use crate::proto::MAX_PLUGIN_INSTRUCTIONS;
 
 /// `--agents`, `--mcp-config` (the daemon drops them for a claude without).
 const AGENTS: &str = "--agents";
@@ -72,17 +72,6 @@ pub enum ApplyState {
     Failed(String),
     /// The daemon does not know `Manifest`.
     TooOld,
-}
-
-impl ApplyState {
-    /// The state a host's reply to `vocdoni/apply` gives: `Ready` with its
-    /// `Applied`, else `Failed`.
-    pub fn of_reply(reply: Msg) -> ApplyState {
-        match applied_of(reply) {
-            Ok(applied) => ApplyState::Ready(Box::new(applied)),
-            Err(why) => ApplyState::Failed(why),
-        }
-    }
 }
 
 /// One host's state for one plugin's manifest.
@@ -250,15 +239,6 @@ pub fn layer_env(
     out
 }
 
-/// `msg` (a `Spawn` or `Respawn`) with the plugins' share: their flags
-/// after its args (a `Spawn`'s; a `Respawn` keeps the journaled ones),
-/// their env and their instructions.
-pub fn with_plugins(msg: Msg, c: Composed) -> Msg {
-    msg.with_plugin_args(&c.args)
-        .with_instructions(c.instructions)
-        .with_env(c.env)
-}
-
 /// How long after its last ask a host that answered `a` is asked again, if
 /// it is: [`REASK_EVERY`] while a plugin installs, else a second after the
 /// soonest retry (no sooner than [`REASK_EVERY`]).
@@ -341,6 +321,30 @@ mod tests {
         let a = bare.applied.as_mut().unwrap();
         (a.agents, a.mcp_config) = (None, None);
         assert!(compose(&[bare]).args.is_empty());
+    }
+
+    #[test]
+    fn layer_env_puts_the_lower_layer_first_and_lets_the_upper_win() {
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let lower = [
+            pair("KB_TOKEN", "kb"),
+            pair("API_TIMEOUT_MS", "1"),
+            pair("KB_TOKEN", "x"),
+        ];
+        let upper = vec![
+            pair("ANTHROPIC_AUTH_TOKEN", "tok"),
+            pair("API_TIMEOUT_MS", "30000"),
+        ];
+        assert_eq!(
+            layer_env(&lower, upper.clone()),
+            [
+                pair("KB_TOKEN", "kb"),
+                pair("ANTHROPIC_AUTH_TOKEN", "tok"),
+                pair("API_TIMEOUT_MS", "30000"),
+            ]
+        );
+        assert_eq!(layer_env(&[], upper.clone()), upper);
+        assert_eq!(layer_env(&lower[..1], Vec::new()), [pair("KB_TOKEN", "kb")]);
     }
 
     #[test]

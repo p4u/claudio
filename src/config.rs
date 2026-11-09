@@ -185,30 +185,6 @@ pub struct Config {
     pub update: UpdateSection,
     pub claude: ClaudeSection,
     pub extensions: ExtensionsSection,
-    /// The tables the core does not parse (the addons' sections).
-    pub others: OtherTables,
-}
-
-/// The top-level tables of `config.toml` the core does not parse, as read:
-/// the addons' sections. `Debug` shows their names only (`[proxy]` holds
-/// tokens).
-#[derive(Clone, Default)]
-pub struct OtherTables(toml::Table);
-
-impl OtherTables {
-    /// Top-level table `name` (empty when missing or not a table).
-    pub fn section(&self, name: &str) -> toml::Table {
-        match self.0.get(name) {
-            Some(toml::Value::Table(t)) => t.clone(),
-            _ => toml::Table::new(),
-        }
-    }
-}
-
-impl std::fmt::Debug for OtherTables {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.0.keys()).finish()
-    }
 }
 
 // ── Loading ───────────────────────────────────────────────────────────────────
@@ -263,7 +239,6 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
         update: file.update.unwrap_or_default(),
         claude: file.claude.unwrap_or_default(),
         extensions: file.extensions.unwrap_or_default(),
-        others: OtherTables(file.extra),
     })
 }
 

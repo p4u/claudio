@@ -3,8 +3,10 @@
 //! Serde-identical to the `Manifest`/`Applied` messages it replaces.
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 
+#[cfg(test)]
 use crate::proto::Msg;
 
 /// The Vocdoni addon's daemon op that applies a plugin manifest.
@@ -81,9 +83,10 @@ pub fn serves_apply(features: &[String]) -> bool {
     features.contains(&crate::addon::feature(super::super::NAME))
 }
 
-/// The `AddonOp` that asks a host to apply `req`. Its body names secrets,
-/// never their values.
-pub fn apply_msg(req: &ApplyRequest) -> Msg {
+/// The `AddonOp` that asks a host to apply `req` (tests; the runner asks
+/// through `AddonCtx::request`). Its body names secrets, never their values.
+#[cfg(test)]
+pub(crate) fn apply_msg(req: &ApplyRequest) -> Msg {
     Msg::AddonOp {
         addon: super::super::NAME.to_owned(),
         op: OP_APPLY.to_owned(),
@@ -91,9 +94,10 @@ pub fn apply_msg(req: &ApplyRequest) -> Msg {
     }
 }
 
-/// The `Applied` of a host's reply to [`apply_msg`]: `Err` (a reason for
-/// the member) for any other message or a body that is not one.
-pub fn applied_of(reply: Msg) -> Result<Applied, String> {
+/// The `Applied` of a host's reply to [`apply_msg`] (tests): `Err` (a
+/// reason) for any other message or a body that is not one.
+#[cfg(test)]
+pub(crate) fn applied_of(reply: Msg) -> Result<Applied, String> {
     match reply {
         Msg::AddonReply { body } => {
             serde_json::from_value(body).map_err(|_| "unexpected reply".to_owned())

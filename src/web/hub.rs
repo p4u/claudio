@@ -499,20 +499,12 @@ pub(crate) fn on_attached(view: &mut SessionView, rows: u16, cols: u16) {
     view.lens_seq = 0;
 }
 
-/// What other parts of the server (the plugins) follow.
+/// What other parts of the server (the addon runtime's feed) follow.
 #[derive(Debug, Clone)]
 pub(crate) enum HubEvent {
-    HostUp {
-        host: String,
-        features: Vec<String>,
-        has_claude: bool,
-    },
-    HostDown {
-        host: String,
-    },
-    ClaudeInstalled {
-        host: String,
-    },
+    HostUp { host: String },
+    HostDown { host: String },
+    ClaudeInstalled { host: String },
 }
 
 pub(crate) struct HubConfig {
@@ -1757,7 +1749,6 @@ impl Hub {
         let now = now_secs();
         let welcome = client.welcome().clone();
         let features = welcome.features.clone();
-        let has_claude = welcome.host.claude.is_some();
         if host == "local" {
             self.local_claude = welcome.host.claude.as_ref().map(|c| c.version.clone());
         }
@@ -1773,7 +1764,7 @@ impl Hub {
         h.connecting = false;
         h.error = None;
         h.welcome = Some(welcome);
-        h.features = features.clone();
+        h.features = features;
         h.retry = true;
         tracing::info!(host, "web: connected");
 
@@ -1840,11 +1831,10 @@ impl Hub {
                 });
             }
         }
-        let _ = self.events.send(HubEvent::HostUp {
+        let host_up = HubEvent::HostUp {
             host: host.to_owned(),
-            features,
-            has_claude,
-        });
+        };
+        let _ = self.events.send(host_up);
 
         // A remote host is remembered, and moved up in the MRU list.
         let waiters = self.connect_waiters.remove(host).unwrap_or_default();

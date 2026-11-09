@@ -6,13 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::addon::AddonError;
-use crate::addons::vocdoni::daemon::{apply_msg, Applied};
+use crate::addons::vocdoni::daemon::applied::apply_msg;
+use crate::addons::vocdoni::daemon::Applied;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
-use crate::addons::vocdoni::plugins::state::{
-    applied, compose, with_plugins, ApplyState, PluginsFetch,
-};
+use crate::addons::vocdoni::plugins::state::{applied, compose, ApplyState, PluginsFetch};
 use crate::addons::vocdoni::proxy::plugins::{sample, Plugin};
-use crate::proto::{Msg, RespawnSpec, SpawnSpec};
 
 fn list(profile: &str, plugins: Vec<Plugin>) -> PluginList {
     PluginList {
@@ -365,16 +363,10 @@ fn spawn_with(s: &State, profile: Option<&str>) -> Spawned {
     let (parts, pending) = profile
         .map(|p| s.plugin_parts("local", p, &[]))
         .unwrap_or_default();
-    let msg = Msg::Spawn(SpawnSpec {
-        args: vec!["-c".into()],
-        ..SpawnSpec::default()
-    });
-    let Msg::Spawn(spec) = with_plugins(msg, compose(&parts)) else {
-        panic!("a spawn")
-    };
-    let ext = spec.extensions.unwrap_or_default();
+    let c = compose(&parts);
+    let args = std::iter::once("-c".to_owned()).chain(c.args).collect();
     let waits = pending.into_iter().map(|(name, _)| name).collect();
-    (spec.args, spec.env, ext.instructions, waits)
+    (args, c.env, c.instructions, waits)
 }
 
 #[test]
@@ -461,13 +453,12 @@ fn failed_too_old_or_off_plugins_bring_no_flags() {
 #[test]
 fn a_reset_sends_the_current_plugin_env_and_instructions_and_no_args() {
     let s = state_with_kb(Some(ok(applied("kb"))));
+    // The composer drops a respawn's args (app::launch); the share's env
+    // and instructions are the plugins' now.
     let (parts, pending) = s.plugin_parts("local", "work", &[]);
-    let msg = Msg::Respawn(RespawnSpec::default());
-    let Msg::Respawn(spec) = with_plugins(msg, compose(&parts)) else {
-        panic!("a respawn")
-    };
-    assert_eq!(spec.env.len(), 2);
-    assert_eq!(spec.extensions.unwrap().instructions, "Use kb.");
+    let c = compose(&parts);
+    assert_eq!(c.env.len(), 2);
+    assert_eq!(c.instructions, "Use kb.");
     assert!(pending.is_empty());
 }
 

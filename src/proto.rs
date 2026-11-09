@@ -433,53 +433,6 @@ pub struct ClaudeInfo {
 /// (or a plugin install) runs on the host.
 pub const UPDATE_BUSY: &str = "a claude update or plugin install is already running on this host";
 
-impl Msg {
-    /// `self` with the session env set, if it is a `Spawn` or `Respawn`; any
-    /// other message is returned unchanged.
-    pub fn with_env(mut self, env: Vec<(String, String)>) -> Msg {
-        match &mut self {
-            Msg::Spawn(spec) => spec.env = env,
-            Msg::Respawn(spec) => spec.env = env,
-            _ => {}
-        }
-        self
-    }
-
-    /// `self` with the proxy env added after the plugin env it carries
-    /// ([`crate::envmerge::merge_env_pairs`]: the proxy wins, no key twice).
-    pub fn merge_env(self, proxy: Vec<(String, String)>) -> Msg {
-        let plugin = match &self {
-            Msg::Spawn(spec) => spec.env.clone(),
-            Msg::Respawn(spec) => spec.env.clone(),
-            _ => return self,
-        };
-        self.with_env(crate::envmerge::merge_env_pairs(&plugin, proxy))
-    }
-
-    /// `self` with the plugins' flags (`--agents <json>`, `--mcp-config
-    /// <json>`…) after its args, if it is a `Spawn` (a `Respawn` keeps the
-    /// journaled args).
-    pub fn with_plugin_args(mut self, args: &[String]) -> Msg {
-        if let Msg::Spawn(spec) = &mut self {
-            spec.args.extend(args.iter().cloned());
-        }
-        self
-    }
-
-    /// `self` with the plugins' instructions, if it is a `Spawn` or a
-    /// `Respawn` (which then carries extensions).
-    pub fn with_instructions(mut self, instructions: String) -> Msg {
-        let ext = match &mut self {
-            Msg::Spawn(spec) => &mut spec.extensions,
-            Msg::Respawn(spec) => &mut spec.extensions,
-            _ => return self,
-        };
-        ext.get_or_insert_with(SessionExtensions::default)
-            .instructions = instructions;
-        self
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
@@ -1059,39 +1012,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_env_keeps_plugin_keys_the_proxy_does_not_set() {
-        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        let spawn = Msg::Spawn(SpawnSpec {
-            id: Uuid::nil(),
-            cwd: "/w".into(),
-            name: None,
-            args: vec!["--resume".into(), "c1".into()],
-            env: vec![pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "1")],
-            rows: 24,
-            cols: 80,
-            ephemeral: false,
-            extensions: None,
-            env_remove: None,
-            optional: vec![],
-        });
-        let merged = spawn
-            .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
-            .with_plugin_args(&["--agents".to_owned(), "{}".to_owned()])
-            .with_instructions("Rules.".to_owned());
-        let Msg::Spawn(spec) = merged else {
-            panic!("a spawn")
-        };
-        assert_eq!(
-            spec.env,
-            [pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "30000")]
-        );
-        assert_eq!(spec.args, ["--resume", "c1", "--agents", "{}"]);
-        assert_eq!(spec.extensions.unwrap().instructions, "Rules.");
-        assert_eq!(Msg::Ping.merge_env(vec![pair("A", "b")]), Msg::Ping);
-        assert_eq!(Msg::Ping.with_instructions("x".into()), Msg::Ping);
-    }
-
-    #[test]
     fn respawn_roundtrips_and_keeps_secrets_out_of_debug() {
         let respawn = Msg::Respawn(RespawnSpec {
             id: Uuid::nil(),
@@ -1108,18 +1028,6 @@ mod tests {
         assert_eq!(back.msg, respawn);
         let debug = format!("{respawn:?}");
         assert!(debug.contains("ANTHROPIC_AUTH_TOKEN") && !debug.contains("sekrit"));
-        assert_eq!(
-            respawn.with_env(vec![]),
-            Msg::Respawn(RespawnSpec {
-                id: Uuid::nil(),
-                fresh: true,
-                env: vec![],
-                rows: 24,
-                cols: 80,
-                extensions: None,
-                env_remove: None,
-            })
-        );
     }
 
     #[test]

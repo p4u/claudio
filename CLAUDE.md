@@ -102,8 +102,7 @@ and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
 (`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
 by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
 `version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
-`proto`) and `envmerge.rs` (`merge_env_pairs`: the rule behind
-`Msg::merge_env`, also used by `plugins::state`).
+`proto`).
 
 **`proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
@@ -393,9 +392,10 @@ Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok
   profile env; the instructions in `SessionExtensions.instructions`, cut at
   just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
   A new session whose host has not answered waits ≤ 20 s for it in the
-  Vocdoni launch's `prepare` (`addons/vocdoni/launch.rs`). Shared by the addon's state machine (`addons/vocdoni/state/`,
-  driven by `runner.rs`, which the TUI reads through `bridge.rs`) and the
-  web (`web/plugins.rs`, until P3.10).
+  Vocdoni launch's `prepare` (`addons/vocdoni/launch.rs`); a plugin
+  without saved choices is left out whole. Used by the addon's state
+  machine (`addons/vocdoni/state/`, driven by `runner.rs`, which the TUI
+  and the web read through `bridge.rs`).
 - `choices.rs` — `PluginChoices` (`[plugins.<name>]`, the addon's section:
   `from_table`, `set`) and `choices_for`, what a plugin's setup screen saves.
 - `stats.rs` — the proxy stats `Window` (24h/7d/30d).
@@ -450,10 +450,12 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
   controls stripped, 64 KiB).
 - `state.rs` — `web-state.json` (layout, order, per-session proxy name, remote hosts); reads
   the TUI's `state.json`, never writes it.
-- `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — spawns composed as the TUI does
-  (`plugins::state::compose`, `Msg::merge_env`), proxy stats/credential/switch, the plugin
-  state machine re-expressed async, and the extension registry, external host, snippets and
-  config.toml toggles.
+- `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — every claude spawn and respawn through
+  the launch composer (`app::launch`, as the TUI's), proxy stats/credential/switch, the v1
+  adapter of the Vocdoni addon (`plugins.rs`: `proxy.*`/`plugins.*` ops in `dispatch_v1`,
+  `ProxyArg` → `LaunchSelect`, the `plugin_status`/`profiles`/`extensions_changed` events
+  from the addon's `Changed`; no plugin state or proxy cache of its own; gone with v1 in
+  P3.16), and the extension registry, external host, snippets and config.toml toggles.
 - `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.
 
 **`web/`** (no build step; ES modules through the import map):

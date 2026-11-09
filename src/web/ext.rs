@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 
 use super::hub::HubHandle;
-use super::plugins::{extensions_changed, notice_event, Plugins};
+use super::plugins::{extensions_changed, notice_event};
+use crate::addons::vocdoni::bridge::Bridge;
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::host::ExtensionHost;
 use crate::app::extensions::protocol::SessionContext;
@@ -42,8 +43,6 @@ pub(crate) struct Extensions {
     host: Arc<ExtensionHost>,
     config_path: PathBuf,
     last: Mutex<Stamp>,
-    /// The proxy profiles as last sent to the hub.
-    profiles: Mutex<(Vec<String>, Option<String>)>,
     /// Held by a toggle (registry, then config.toml) and by a re-read, so a
     /// re-read never sees the registry ahead of the file.
     edit: tokio::sync::Mutex<()>,
@@ -56,11 +55,10 @@ impl Extensions {
     pub(crate) async fn load(config: &Config, hub: &HubHandle) -> Arc<Extensions> {
         let config_path = crate::paths::config_file();
         let path = config_path.clone();
-        let (external, mut notices, last, profiles) = tokio::task::spawn_blocking(move || {
+        let (external, mut notices, last) = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let external = manifest::load(&manifest::dir(), &mut notices);
-            let profiles = crate::addons::vocdoni::proxy::resolve::load_proxy_profiles();
-            (external, notices, stamp(&path), profiles)
+            (external, notices, stamp(&path))
         })
         .await
         .unwrap_or_default();
@@ -86,7 +84,6 @@ impl Extensions {
             host: Arc::new(host),
             config_path,
             last: Mutex::new(last),
-            profiles: Mutex::new(profiles),
             edit: tokio::sync::Mutex::new(()),
         })
     }
@@ -108,7 +105,7 @@ impl Extensions {
 
     pub(crate) async fn toggle(
         &self,
-        plugins: &Plugins,
+        addons: &AddonRuntime,
         hub: &HubHandle,
         name: &str,
         on: bool,
@@ -133,7 +130,11 @@ impl Extensions {
         };
         match source {
             Source::External(_) => self.host.set_enabled(name, on).await,
-            Source::Plugin { .. } => plugins.toggle(name, on),
+            Source::Plugin { .. } => {
+                if let Some(bridge) = Bridge::of(addons.addons()) {
+                    bridge.set_enabled(name, on);
+                }
+            }
             Source::BuiltIn => {}
         }
         let (path, owned) = (self.config_path.clone(), name.to_owned());
@@ -214,14 +215,10 @@ impl Extensions {
     }
 
     /// Every 5 s: config.toml's mtime (spawn_blocking); on a change, `config::load`
-    /// (spawn_blocking) and apply [extensions], [plugins.*], [claude] and the proxy
-    /// profiles; then `extensions_changed` (and `profiles` if they changed).
-    pub(crate) fn watch_config(
-        self: &Arc<Self>,
-        plugins: Plugins,
-        hub: HubHandle,
-        addons: AddonRuntime,
-    ) {
+    /// (spawn_blocking) and apply [extensions] and [claude], then
+    /// `extensions_changed`; the addons re-read their sections (the runtime's
+    /// `ConfigChanged`: the Vocdoni addon's profiles and `[plugins]`).
+    pub(crate) fn watch_config(self: &Arc<Self>, hub: HubHandle, addons: AddonRuntime) {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(CONFIG_POLL);
@@ -229,7 +226,7 @@ impl Extensions {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                if this.reread(&plugins, &hub).await {
+                if this.reread(&hub).await {
                     addons.config_changed();
                 }
             }
@@ -237,7 +234,7 @@ impl Extensions {
     }
 
     /// Re-read config.toml if it changed since the last look; whether it did.
-    async fn reread(&self, plugins: &Plugins, hub: &HubHandle) -> bool {
+    async fn reread(&self, hub: &HubHandle) -> bool {
         let _edit = self.edit.lock().await;
         let path = self.config_path.clone();
         let now = tokio::task::spawn_blocking(move || stamp(&path))
@@ -251,13 +248,7 @@ impl Extensions {
             *last = now;
         }
         let path = self.config_path.clone();
-        let Ok((config, profiles)) = tokio::task::spawn_blocking(move || {
-            (
-                crate::config::load_from(&path),
-                crate::addons::vocdoni::proxy::resolve::load_proxy_profiles(),
-            )
-        })
-        .await
+        let Ok(config) = tokio::task::spawn_blocking(move || crate::config::load_from(&path)).await
         else {
             return false;
         };
@@ -284,19 +275,7 @@ impl Extensions {
         for (name, on) in flips {
             self.host.set_enabled(&name, on).await;
         }
-        let choices =
-            crate::addons::vocdoni::plugins::choices::from_table(&config.others.section("plugins"));
-        plugins.set_config(config.extensions.clone(), choices);
         hub.set_claude_policy(config.claude.clone()).await;
-        let changed = {
-            let mut last = lock(&self.profiles);
-            let changed = *last != profiles;
-            *last = profiles.clone();
-            changed
-        };
-        if changed {
-            hub.set_profiles(profiles.0, profiles.1).await;
-        }
         if *lock(&self.registry) != before {
             hub.broadcast(extensions_changed());
         }

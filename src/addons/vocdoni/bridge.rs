@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::plugins::choices::PluginChoices;
-use super::plugins::state::ManifestState;
+use super::plugins::manifest::Manifest;
+use super::plugins::state::{Apply, ManifestState};
 use super::proxy::plugins::PluginList;
 use super::runner::Runner;
 use super::{Vocdoni, NAME};
@@ -44,8 +45,43 @@ impl Bridge {
 
     /// Plugin `name`'s manifest, as fetched.
     pub fn manifest(&self, name: &str) -> Option<ManifestState> {
+        self.manifest_at(name).map(|(_, m)| m)
+    }
+
+    /// Plugin `name`'s manifest, as fetched, and the hash it was fetched at.
+    pub fn manifest_at(&self, name: &str) -> Option<(String, ManifestState)> {
+        self.0.state().plugins.manifests.get(name).cloned()
+    }
+
+    /// Plugin `name`'s manifest, once fetched, and its saved choices.
+    pub fn items(&self, name: &str) -> Result<(Manifest, Option<PluginChoices>), String> {
         let state = self.0.state();
-        state.plugins.manifests.get(name).map(|(_, m)| m.clone())
+        let m = match state.plugins.manifests.get(name) {
+            Some((_, ManifestState::Ready(m))) => Manifest::clone(m),
+            Some((_, ManifestState::Fetching)) => {
+                return Err("the manifest is still being fetched".to_owned())
+            }
+            Some((_, ManifestState::Failed(why))) => {
+                let why: String = crate::text::sanitize(why).chars().take(300).collect();
+                return Err(format!("manifest: {why}"));
+            }
+            None => return Err("no such plugin".to_owned()),
+        };
+        Ok((m, state.plugins.choices.get(name).cloned()))
+    }
+
+    /// What each connected host answered for each plugin, by
+    /// `(host, plugin)` in order.
+    pub fn apply_states(&self) -> Vec<(String, String, Apply)> {
+        let state = self.0.state();
+        let mut all: Vec<(String, String, Apply)> = state
+            .plugins
+            .applies
+            .iter()
+            .map(|((host, name), a)| (host.clone(), name.clone(), a.clone()))
+            .collect();
+        all.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        all
     }
 
     /// Plugin `name`'s saved choices.
@@ -75,6 +111,13 @@ impl Bridge {
     /// The member saved `choices` for plugin `name`.
     pub fn save_choices(&self, name: &str, choices: PluginChoices) {
         self.0.transition(|s| s.save_choices(name, choices));
+    }
+
+    /// The member saved `choices` for plugin `name`: written to
+    /// `[plugins.<name>]` (awaited: `Err` says why not), then every host is
+    /// asked again.
+    pub async fn save(&self, name: &str, choices: PluginChoices) -> Result<(), String> {
+        self.0.save(name, choices).await
     }
 
     /// The member put plugin `name`'s first-sight setup off for this run.

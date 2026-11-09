@@ -7,21 +7,28 @@ use tokio::sync::broadcast;
 
 use super::events::ev;
 use super::hub::{HubEvent, HubHandle, SessionView};
+use super::plugins::Feed;
 use crate::addon::SessionSnap;
 use crate::app::addons::{AddonRuntime, RuntimeOut, RuntimeRx};
 
 /// Follow the hub's host events into `runtime` (from a resync of the hosts
-/// connected already), and send the runtime's notices to every tab.
-pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx) {
+/// connected already), send the runtime's notices to every tab, and an
+/// addon's change through `feed` (the v1 plugin events, until P3.14).
+pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, mut feed: Feed) {
     // Subscribed before the hosts are read: no HostUp is missed.
     let events = hub.subscribe();
     tokio::spawn(follow_hosts(hub.clone(), runtime, events));
     tokio::spawn(async move {
+        feed.changed().await;
         while let Some(out) = rx.recv().await {
-            if let RuntimeOut::Notice { notice, .. } = out {
-                let fields =
-                    json!({"text": notice.text, "level": notice.level, "host": null, "sid": null});
-                hub.broadcast(ev("notice", fields));
+            match out {
+                RuntimeOut::Notice { notice, .. } => {
+                    let fields = json!({"text": notice.text, "level": notice.level,
+                        "host": null, "sid": null});
+                    hub.broadcast(ev("notice", fields));
+                }
+                RuntimeOut::Changed { .. } => feed.changed().await,
+                RuntimeOut::Offer { .. } => {}
             }
         }
     });
@@ -35,7 +42,7 @@ async fn follow_hosts(
     resync(&hub, &runtime).await;
     loop {
         match events.recv().await {
-            Ok(HubEvent::HostUp { host, .. }) => host_up(&hub, &runtime, &host).await,
+            Ok(HubEvent::HostUp { host }) => host_up(&hub, &runtime, &host).await,
             Ok(HubEvent::HostDown { host }) => runtime.host_down(&host),
             Ok(HubEvent::ClaudeInstalled { host }) => runtime.claude_installed(&host),
             Err(broadcast::error::RecvError::Lagged(_)) => resync(&hub, &runtime).await,

@@ -19,7 +19,6 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
-mod envmerge;
 mod freshness;
 mod msglog;
 mod paths;
