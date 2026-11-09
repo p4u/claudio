@@ -24,6 +24,7 @@ mod plugins;
 mod print;
 mod proto;
 mod proxy;
+mod release;
 mod remote;
 mod term;
 mod text;

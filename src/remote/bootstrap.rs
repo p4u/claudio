@@ -22,11 +22,7 @@ use tokio::process::Command;
 
 use super::probe::{sha256_file, Probe};
 use super::{shell_quote, ssh_cmd, validate_host};
-
-/// The public GitHub repo where release assets are published.
-///
-/// Shared with `crate::upgrade` so both modules download from the same repo.
-pub const RELEASES_REPO: &str = "p4u/claudio";
+use crate::release::{release_arch, release_os, RELEASES_REPO};
 
 /// GitHub release base URL for the binary's own version.
 ///
@@ -107,29 +103,6 @@ pub async fn ensure_remote(host: &str) -> Result<RemoteInfo, String> {
         was_current: false,
         probe: new_probe,
     })
-}
-
-/// Map probe OS name to release asset OS name.
-///
-/// The probe reports `"macos"` but release assets are named `claudio-darwin-*`.
-pub fn release_os(probe_os: &str) -> Result<&str, String> {
-    match probe_os {
-        "linux" => Ok("linux"),
-        "macos" => Ok("darwin"),
-        other => Err(format!(
-            "unsupported remote OS {other:?} — install claudio manually on the remote host"
-        )),
-    }
-}
-
-/// Map probe arch name to release asset arch name.
-pub fn release_arch(probe_arch: &str) -> Result<&str, String> {
-    match probe_arch {
-        "x86_64" | "aarch64" => Ok(probe_arch),
-        other => Err(format!(
-            "unsupported remote arch {other:?} — install claudio manually on the remote host"
-        )),
-    }
 }
 
 /// Build the release asset name, e.g. `claudio-linux-x86_64`.
@@ -492,20 +465,6 @@ async fn download_asset(url: &str, dest: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn release_os_maps_correctly() {
-        assert_eq!(release_os("linux").unwrap(), "linux");
-        assert_eq!(release_os("macos").unwrap(), "darwin");
-        assert!(release_os("windows").is_err());
-    }
-
-    #[test]
-    fn release_arch_maps_correctly() {
-        assert_eq!(release_arch("x86_64").unwrap(), "x86_64");
-        assert_eq!(release_arch("aarch64").unwrap(), "aarch64");
-        assert!(release_arch("mips").is_err());
-    }
 
     #[test]
     fn release_asset_name_macos() {

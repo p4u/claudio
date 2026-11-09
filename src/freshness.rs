@@ -34,8 +34,8 @@ use std::time::{Duration, Instant};
 
 use crate::client;
 use crate::proto::{Msg, SessionInfo, SessionKind, SessionState, Welcome};
+use crate::release::SemVer;
 use crate::remote::probe::Probe;
-use crate::upgrade::SemVer;
 
 /// What the bridge prints on stderr when it left an outdated daemon running.
 pub const DEFERRED: &str = "daemon-update-deferred";
