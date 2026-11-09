@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions, Permissions, TryLockError};
+use std::future::Future;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -26,13 +27,13 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use super::session::{ClientId, Cmd};
-use super::{git, host, manifest, update, Config, Daemon};
+use super::{addon_ops, git, host, update, Config, Daemon};
 use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
 use crate::proto::{
-    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome,
-    DAEMON_FEATURES, MAX_FRAME, PROTO,
+    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
+    PROTO,
 };
 
 /// Deadline for a connection's first frame.
@@ -66,7 +67,7 @@ pub struct Listening {
 /// Take the startup lock, bind the socket (mode 0600) and load the journal.
 /// `Ok(None)` means another daemon holds the lock. Must run inside a tokio
 /// runtime.
-pub fn start(config: Config) -> io::Result<Option<Listening>> {
+pub fn start(config: Config, addons: Arc<crate::addon::Addons>) -> io::Result<Option<Listening>> {
     for dir in [config.socket.parent(), config.lock.parent()]
         .into_iter()
         .flatten()
@@ -94,7 +95,7 @@ pub fn start(config: Config) -> io::Result<Option<Listening>> {
     let listener = bind(&socket_path)?;
     tracing::info!(socket = %config.socket.display(), "daemon listening");
 
-    let daemon = Arc::new(Daemon::new(config));
+    let daemon = Arc::new(Daemon::new(config, addons));
     // Warm the host probe (`claude --version`) so the first Welcome is quick,
     // and the `claude --help` flag check so the first spawn is.
     let warm = Arc::clone(&daemon);
@@ -280,7 +281,7 @@ async fn client_loop(
         host: client.daemon.host().await,
         build: build.map(|b| b.build.clone()),
         build_time: build.and_then(|b| b.mtime),
-        features: DAEMON_FEATURES.iter().map(|f| f.to_string()).collect(),
+        features: addon_ops::features(&client.daemon),
     };
     // Queued directly (no event flush): Welcome is always the first frame.
     let welcome = Envelope {
@@ -434,12 +435,9 @@ impl Client {
                     id: shell.id,
                     cwd: shell.cwd,
                     name: shell.name,
-                    args: Vec::new(),
-                    env: Vec::new(),
                     rows: shell.rows,
                     cols: shell.cols,
-                    ephemeral: false,
-                    extensions: None,
+                    ..Default::default()
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }
@@ -500,24 +498,15 @@ impl Client {
             Msg::ListDir { path } => list_dir(path).await,
             Msg::ListClaudeSessions { cwd } => list_claude_sessions(cwd).await,
             Msg::Answers { id } => {
-                // A transcript read: run beside the client loop and reply
-                // from the task, like `UpdateClaude`.
+                // A transcript read.
                 let conversation = self.daemon.conversation(id);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = answers(id, conversation).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, answers(id, conversation));
                 return;
             }
             Msg::LastPrompt { id } => {
-                // A transcript read, like `Answers`.
+                // A transcript read.
                 let conversation = self.daemon.conversation(id);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = last_prompt(id, conversation).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, last_prompt(id, conversation));
                 return;
             }
             Msg::RecentProjects { limit } => recent_projects(limit).await,
@@ -550,35 +539,18 @@ impl Client {
                 Msg::Ok
             }
             Msg::UpdateClaude { install } => {
-                // Minutes long: run beside the client loop and reply from
-                // the task, like `Attach`.
+                // Minutes long.
                 let daemon = Arc::clone(&self.daemon);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = update::run(&daemon, install).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, async move { update::run(&daemon, install).await });
                 return;
             }
             Msg::Search { query, limit } => match self.spawn_search(req, query, limit) {
                 Ok(()) => return,
                 Err(refused) => refused,
             },
-            Msg::Manifest {
-                name,
-                url,
-                sha256,
-                secrets,
-                disabled,
-            } => {
-                // A download (up to minutes): reply from a task, like
-                // `UpdateClaude`. The installs run after the reply.
+            Msg::AddonOp { addon, op, body } => {
                 let daemon = Arc::clone(&self.daemon);
-                let queue = self.queue.clone();
-                tokio::spawn(async move {
-                    let msg = manifest::handle(&daemon, name, url, sha256, secrets, disabled).await;
-                    let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
-                });
+                self.reply_later(req, addon_ops::run(daemon, addon, op, body));
                 return;
             }
             other => Msg::Error {
@@ -678,6 +650,16 @@ impl Client {
             let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
         });
         Ok(())
+    }
+
+    /// Run a slow request's `work` beside the client loop and queue its
+    /// reply to `req` when done, so the loop keeps answering meanwhile.
+    fn reply_later(&self, req: Option<u64>, work: impl Future<Output = Msg> + Send + 'static) {
+        let queue = self.queue.clone();
+        tokio::spawn(async move {
+            let msg = work.await;
+            let _ = queue.send(Frame::Control(Envelope { req, msg })).await;
+        });
     }
 
     /// Send `cmd` to a live session; the reply is `Ok` or `Error`.

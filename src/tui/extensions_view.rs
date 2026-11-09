@@ -1,18 +1,21 @@
 //! The extensions screen (Alt+i, or `e` in the leader popup): one row per
 //! extension (built-ins first, then the external ones that loaded, then the
-//! proxy plugins, on or off) with its kind, keys and lenses; below the list,
-//! the selected one's description, actions and lenses (for a plugin, its
-//! manifest and its state on each host). Space turns it on or off, as
-//! Enter does on every row but a plugin's, where Enter opens its setup
-//! screen (`plugin_setup.rs`); `r` fetches the plugin lists again.
+//! addons' rows, on or off) with its kind, keys and lenses; below the list,
+//! the selected one's description, actions and lenses (for an addon's row,
+//! the addon's lines about it). Space turns it on or off, as Enter does on
+//! every row but an addon's with a setup, where Enter opens that checklist
+//! (`checklist.rs`); `r` has every addon refresh its rows.
 //!
 //! Pure, like `app.rs`: a toggle changes the registry at once and returns
 //! [`Effect::SaveExtension`] (the event loop writes `config.toml`) and, for
 //! an external extension, [`Effect::SetExtension`] (the extension host
-//! refuses or stops its program). Drawn by `ui/extensions.rs`.
+//! refuses or stops its program); an addon's row is
+//! [`AddonCall::ToggleRow`] (written, then the addon told). Drawn by
+//! `ui/extensions.rs`.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use super::addon_calls::AddonCall;
 use super::app::{App, Effect, Mode};
 use super::interaction::Modal;
 use super::keymap::Action;
@@ -184,7 +187,8 @@ impl App {
                 let kind = match ext.source {
                     Source::BuiltIn => "built-in",
                     Source::External(_) => "external",
-                    Source::Plugin { .. } => "plugin",
+                    // The addon that lists it (`web`, a plugin's addon).
+                    Source::Addon { addon, .. } => addon,
                 };
                 Row {
                     name: clean(&ext.name),
@@ -199,8 +203,8 @@ impl App {
     }
 
     /// What the screen says about extension `index`: its description, a
-    /// line per action (`Alt+z <key>  <title>`), a line per lens with its
-    /// kind, and for latex turned off by `[claude] latex = false`, that.
+    /// line per action (`Alt+z <key>  <title>`) and a line per lens with
+    /// its kind.
     pub fn extension_details(&self, index: usize) -> Vec<String> {
         let Some(ext) = self.extensions.extensions.get(index) else {
             return Vec::new();
@@ -223,12 +227,18 @@ impl App {
             };
             lines.push(format!("{}  {kind}", lens_label(&lens.name, lens.kind)));
         }
-        if ext.name == "latex" && !self.claude_policy.latex {
-            lines.push("also off by [claude] latex = false".to_owned());
-        }
-        if let Source::Plugin { profile, refused } = &ext.source {
-            let details = self.plugin_details(&ext.name, profile, refused.as_deref());
-            lines.extend(details.iter().map(|l| clean(l)));
+        if let Source::Addon {
+            refused, details, ..
+        } = &ext.source
+        {
+            // Refused by the core (a name taken): the addon's lines do not
+            // say so, the screen does.
+            match refused {
+                Some(why) if !details.iter().any(|l| l.contains(why.as_str())) => {
+                    lines.push(format!("refused: {}", clean(why)))
+                }
+                _ => lines.extend(details.iter().map(|l| clean(l))),
+            }
         }
         lines
     }
@@ -245,12 +255,21 @@ impl App {
             Outcome::Close => self.modal = None,
             Outcome::Toggle(index) => self.toggle_extension(index),
             Outcome::Enter(index) => match self.extensions.extensions.get(index) {
-                Some(ext) if ext.is_plugin() => self.open_plugin_setup(index, back),
+                Some(Extension {
+                    source: Source::Addon { setup: Some(_), .. },
+                    ..
+                }) => self.open_plugin_setup(index, back),
                 _ => self.toggle_extension(index),
             },
-            Outcome::Refresh => self.refresh_plugins(),
+            Outcome::Refresh => self.refresh_rows(),
         }
         self.redraw = true;
+    }
+
+    /// `r` on the extensions screen: every addon refreshes its rows.
+    pub(super) fn refresh_rows(&mut self) {
+        self.emit(Effect::Addon(AddonCall::RefreshRows));
+        self.notify("refreshing plugins…");
     }
 
     /// Turn extension `index` on or off: the registry at once (the leader,
@@ -261,24 +280,21 @@ impl App {
             return;
         };
         let (name, on, external) = (ext.name.clone(), !ext.enabled, ext.is_external());
-        if let Source::Plugin { refused, .. } = &ext.source {
+        if let Source::Addon { addon, refused, .. } = &ext.source {
             if let Some(why) = refused {
-                self.notify(format!("plugin {} is refused: {why}", clean(&name)));
+                self.notify(format!(
+                    "extension {} is refused: {}",
+                    clean(&name),
+                    clean(why)
+                ));
                 return;
             }
-            // Kept for a list that comes later; on: the hosts get its
-            // manifest (unless they answered for it already).
-            self.plugins.config.insert(name.clone(), on);
+            // Written to `[extensions]` first, then the addon is told: it
+            // keeps it for rows that come later.
+            let addon = *addon;
             self.extensions.extensions[index].enabled = on;
-            if on {
-                // Its setup if it was never set up, else its manifest.
-                let sha = self.plugins.manifests.get(&name).map(|(s, _)| s.clone());
-                if let Some(sha) = sha {
-                    self.on_manifest_ready(&name, &sha);
-                }
-                self.request_all();
-            }
-            self.emit(Effect::SaveExtension { name, on });
+            self.extension_config.insert(name.clone(), on);
+            self.emit(Effect::Addon(AddonCall::ToggleRow { addon, name, on }));
             self.redraw = true;
             return;
         }
@@ -298,8 +314,6 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::extensions::{manifest::Program, Lens, Registry};
-    use crate::proto::Msg;
-    use crate::tui::app::ReplyTo;
     use crate::tui::test_support::{alt, app_with, info, press};
 
     /// An app with one session and an external extension `fake` (a tag
@@ -326,7 +340,7 @@ mod tests {
                 command: vec!["p".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), true, vec![fake], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![fake]);
         app.activate(0);
         app.take_effects();
         app
@@ -339,6 +353,7 @@ mod tests {
             .map(|e| match e {
                 Effect::SetExtension { name, on } => ("host", name, on),
                 Effect::SaveExtension { name, on } => ("save", name, on),
+                Effect::Addon(AddonCall::ToggleRow { addon, name, on }) => (addon, name, on),
                 other => ("other", format!("{other:?}"), false),
             })
             .collect()
@@ -374,15 +389,13 @@ mod tests {
         assert_eq!(
             row_lines(&app.extension_rows()),
             [
-                "[x] latex     built-in  —          <latex>",
-                "[x] diagram   built-in  —          ```mermaid",
                 "[x] search    built-in  Alt+z s    —",
                 "[x] snippets  built-in  Alt+z p/P  —",
                 "[x] fake      external  Alt+z k    <keys>",
             ]
         );
         assert_eq!(
-            app.extension_details(3),
+            app.extension_details(1),
             [
                 "saved prompts",
                 "Alt+z p  insert snippet",
@@ -390,14 +403,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            app.extension_details(1),
-            [
-                "Mermaid diagrams drawn in the web UI",
-                "```mermaid  fence lens (the web UI)",
-            ]
-        );
-        assert_eq!(
-            app.extension_details(4),
+            app.extension_details(2),
             [
                 "(no description)",
                 "Alt+z k  do it",
@@ -416,13 +422,13 @@ mod tests {
         app.on_terminal(press(KeyCode::Down));
         assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::End));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::Down));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::Home));
         assert_eq!(selected(&app), 0);
         app.on_terminal(press(KeyCode::PageDown));
-        assert_eq!(selected(&app), 4);
+        assert_eq!(selected(&app), 2);
         app.on_terminal(press(KeyCode::PageUp));
         assert_eq!(selected(&app), 0);
         let wheel = |kind| {
@@ -454,14 +460,11 @@ mod tests {
             let ext = app.extensions.session_extensions();
             ext.lenses.into_iter().map(|l| l.name).collect()
         };
-        assert!(
-            !lenses(&app).contains(&"mermaid".to_owned()),
-            "diagram is off"
-        );
-        assert!(row_lines(&app.extension_rows())[1].starts_with("[ ] diagram"));
+        assert!(!app.leader_entries().iter().any(|e| e.key == 'p'));
+        assert!(row_lines(&app.extension_rows())[1].starts_with("[ ] snippets"));
         assert_eq!(
             toggles(&mut app),
-            [("save", "diagram".to_owned(), false)],
+            [("save", "snippets".to_owned(), false)],
             "a built-in needs no host"
         );
         // An external one: the host follows, and it leaves the leader.
@@ -476,7 +479,7 @@ mod tests {
         );
         assert!(!lenses(&app).contains(&"keys".to_owned()));
         assert!(!app.leader_entries().iter().any(|e| e.key == 'k'));
-        assert_eq!(app.extensions.session_extensions().lenses.len(), 1);
+        assert!(app.extensions.session_extensions().lenses.is_empty());
         // Again: back on.
         app.on_terminal(press(KeyCode::Char(' ')));
         assert!(lenses(&app).contains(&"keys".to_owned()));
@@ -492,37 +495,22 @@ mod tests {
     }
 
     #[test]
-    fn latex_turned_off_in_claude_config_says_so() {
-        let mut app = app_with_fake("");
-        assert!(!app
-            .extension_details(0)
-            .iter()
-            .any(|l| l.contains("[claude] latex")));
-        app.claude_policy.latex = false;
-        let details = app.extension_details(0);
-        assert_eq!(
-            details.last().map(String::as_str),
-            Some("also off by [claude] latex = false")
-        );
-    }
-
-    #[test]
     fn an_extension_disabled_after_failures_says_so_in_its_row() {
         let mut app = app_with_fake("");
         app.failed_extensions = vec!["fake".into()];
         let lines = row_lines(&app.extension_rows());
         assert_eq!(
-            lines[4],
+            lines[2],
             "[x] fake      external  Alt+z k    <keys>  (disabled after failures)"
         );
-        assert!(!lines[3].contains("failures"));
+        assert!(!lines[1].contains("failures"));
     }
 
     #[test]
     fn a_hostile_description_and_title_are_cleaned() {
         let mut app = app_with_fake("evil\u{1b}[31m red\nnext\u{202e}line\u{7}");
-        app.extensions.extensions[4].actions[0].title = "do\u{1b}]52;c;eA==\u{7} it".into();
-        let details = app.extension_details(4);
+        app.extensions.extensions[2].actions[0].title = "do\u{1b}]52;c;eA==\u{7} it".into();
+        let details = app.extension_details(2);
         for line in &details {
             assert!(
                 !line
@@ -535,128 +523,122 @@ mod tests {
         assert!(details[0].contains("next"), "on one line: {details:?}");
     }
 
-    /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
-    /// and `latex` (a taken name), and `local` connected.
-    fn app_with_plugins() -> App {
-        use crate::plugins::state::PluginsFetch;
-        use crate::proxy::plugins::{sample, PluginList};
+    /// [`app_with_fake`] with addon `team`'s rows `kb` and `search` (a
+    /// name the core holds, refused by the registry).
+    fn app_with_rows(details: &[&str]) -> App {
+        use crate::tui::test_support::rows;
         let mut app = app_with_fake("");
-        app.on_plugin_host("local");
-        let list = PluginList {
-            profile: "work".into(),
-            fetched_at: 1,
-            plugins: vec![sample("kb"), sample("latex")],
-        };
-        app.on_plugins("work", PluginsFetch::Listed(list));
+        rows(&mut app, "team", &[("kb", None), ("search", None)], details);
         app.take_effects();
         app
     }
 
+    /// A misspelt `[extensions]` key is named once the addons have started
+    /// (their rows are known then); a name the rows hold is not.
     #[test]
-    fn plugins_are_listed_with_their_state_on_each_host() {
-        let mut app = app_with_plugins();
-        let lines = row_lines(&app.extension_rows());
-        assert_eq!(lines[5], "[x] kb        plugin    —          —");
-        assert_eq!(lines[6], "[ ] latex     plugin    —          —");
-        let details = |app: &App, i| app.extension_details(i);
-        assert_eq!(
-            details(&app, 5),
-            [
-                "1.4.0 · work",
-                "turning it on or off applies to new sessions",
-                "manifest: fetching",
-            ]
-        );
-        let src = "format = 1\nname = \"kb\"\nversion = \"1.4.0\"\ndescription = \"KB\"";
-        let manifest = crate::plugins::manifest::Manifest::parse(src).unwrap();
-        let sha = "a".repeat(64);
-        app.plugins.choices.insert("kb".into(), Default::default());
-        app.on_manifest("kb", &sha, Ok(manifest));
-        assert_eq!(
-            details(&app, 5)[2..],
-            [
-                "KB",
-                "0 items disabled (Enter to change)",
-                "local: applying"
-            ]
-        );
-        let ready = Msg::Applied(crate::proto::Applied {
+    fn an_extensions_key_that_names_nothing_is_said_once_the_addons_started() {
+        use crate::tui::addon_calls::AddonResult;
+        let mut app = app_with_fake("");
+        app.extension_config = [("kb".to_owned(), false), ("latx".to_owned(), false)].into();
+        let kb = crate::addon::ExtensionRow {
             name: "kb".into(),
-            version: "1.4.0".into(),
-            ..Default::default()
-        });
-        let to = ReplyTo::Manifest {
-            host: "local".into(),
-            name: "kb".into(),
-            sha256: sha,
+            description: String::new(),
+            default_on: true,
+            refused: None,
+            details: Vec::new(),
+            setup: None,
         };
-        app.on_reply(to.clone(), Ok(ready));
+        // A row change before the start says nothing.
+        app.on_addon(AddonResult::Rows(Vec::new()));
+        assert!(app.notice.is_none());
+        app.on_addon(AddonResult::Started(vec![("team", kb)]));
         assert_eq!(
-            details(&app, 5)[4],
-            "local: ready · 0 installed, 0 present, 0 installing, 0 skipped"
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("config.toml [extensions]: no extension named 'latx'")
         );
-        app.on_reply(
-            to,
-            Err(std::io::Error::other(
-                "manifest kb: download failed: HTTP 404",
-            )),
-        );
-        assert_eq!(
-            details(&app, 5)[4],
-            "local: failed: download failed: HTTP 404"
-        );
-        assert!(
-            app.notice.is_none(),
-            "a manifest error is shown here, not as a notice"
-        );
-        assert_eq!(
-            details(&app, 6),
-            [
-                "1.4.0 · work",
-                "turning it on or off applies to new sessions",
-                "refused: name taken",
-            ]
-        );
+        assert!(app
+            .extensions
+            .extensions
+            .iter()
+            .any(|e| e.name == "kb" && !e.enabled));
     }
 
     #[test]
-    fn a_plugin_toggle_is_saved_and_kept_for_later_lists() {
-        let mut app = app_with_plugins();
+    fn addon_rows_are_listed_with_the_addons_details() {
+        let details = [
+            "turning it on or off applies to new sessions",
+            "local: applying",
+        ];
+        let app = app_with_rows(&details);
+        let lines = row_lines(&app.extension_rows());
+        assert_eq!(lines[3], "[x] kb        team      —          —");
+        assert_eq!(lines[4], "[ ] search    team      —          —");
+        assert_eq!(
+            app.extension_details(3),
+            [
+                "1.4.0 · work",
+                "turning it on or off applies to new sessions",
+                "local: applying",
+            ]
+        );
+        // Refused by the core: the addon's lines do not apply.
+        assert_eq!(
+            app.extension_details(4),
+            ["1.4.0 · work", "refused: name taken"]
+        );
+        // The addon's own refusal is in its lines.
+        let mut app = app_with_fake("");
+        let own = ["refused: bundle URL is not https"];
+        crate::tui::test_support::rows(
+            &mut app,
+            "team",
+            &[("evil", Some("bundle URL is not https"))],
+            &own,
+        );
+        assert_eq!(app.extension_details(3), ["1.4.0 · work", own[0]]);
+    }
+
+    #[test]
+    fn a_row_toggle_is_kept_for_later_rows_and_told_to_the_addon() {
+        use crate::tui::test_support::rows;
+        let mut app = app_with_rows(&[]);
         app.on_terminal(alt('i'));
-        for _ in 0..5 {
+        for _ in 0..3 {
             app.on_terminal(press(KeyCode::Down));
         }
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), false)]);
-        assert!(app.plugin_parts("local", "work").0.is_empty());
-        assert_eq!(app.plugins.config.get("kb"), Some(&false));
-        // Back on: saved, and the hosts are asked for its manifest again
-        // only when they have no answer at its hash (here: no manifest).
+        // One call: the runner writes `[extensions]`, then tells the addon.
+        assert_eq!(toggles(&mut app), [("team", "kb".to_owned(), false)]);
+        assert_eq!(app.extension_config.get("kb"), Some(&false));
+        // Kept for rows that come later.
+        rows(&mut app, "team", &[("kb", None), ("search", None)], &[]);
+        assert!(!app
+            .extensions
+            .extensions
+            .iter()
+            .any(|e| e.name == "kb" && e.enabled));
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert_eq!(toggles(&mut app), [("save", "kb".to_owned(), true)]);
+        assert_eq!(toggles(&mut app), [("team", "kb".to_owned(), true)]);
         // A refused one does not toggle.
         app.on_terminal(press(KeyCode::Down));
         app.on_terminal(press(KeyCode::Char(' ')));
         assert!(app.take_effects().is_empty());
         let notice = app.notice.as_ref().unwrap().text.clone();
-        assert_eq!(notice, "plugin latex is refused: name taken");
+        assert_eq!(notice, "extension search is refused: name taken");
     }
 
     #[test]
-    fn r_fetches_the_plugin_lists_again() {
-        let mut app = app_with_plugins();
-        app.proxy_default = Some("home".into());
+    fn r_refreshes_the_addons_rows() {
+        let mut app = app_with_rows(&[]);
         app.on_terminal(alt('i'));
         app.on_terminal(press(KeyCode::Char('r')));
-        let fetched: Vec<String> = app
+        let calls: Vec<String> = app
             .take_effects()
             .into_iter()
-            .filter_map(|e| match e {
-                Effect::FetchPlugins { profile } => Some(profile),
-                _ => None,
-            })
+            .map(|e| format!("{e:?}"))
             .collect();
-        assert_eq!(fetched, ["home", "work"]);
+        assert_eq!(calls, ["Addon(RefreshRows)"]);
+        assert_eq!(app.notice.as_ref().unwrap().text, "refreshing plugins…");
         assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
     }
 
@@ -669,7 +651,7 @@ mod tests {
         });
         let lines = row_lines(&app.extension_rows());
         assert!(
-            lines[2].starts_with("[x] search    built-in  —"),
+            lines[0].starts_with("[x] search    built-in  —"),
             "{lines:?}"
         );
     }

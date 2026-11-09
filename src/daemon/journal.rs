@@ -57,6 +57,11 @@ pub struct Entry {
     /// entry gets the legacy value at its next launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<SessionExtensions>,
+    /// The flags of `args` the session can do without ([`SpawnSpec::optional`]):
+    /// every launch from this entry drops them again when its claude lacks
+    /// them. Absent in journals from before generic optional flags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional: Vec<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -150,8 +155,8 @@ impl Journal {
 
     /// Update in-memory only (no disk write). A re-spawn of a known id keeps
     /// its `created_at`, last claude session id, `kind` and `ephemeral` (those
-    /// only apply to a new entry); cwd, name, args and extensions follow the
-    /// new spec.
+    /// only apply to a new entry); cwd, name, args, extensions and optional
+    /// flags follow the new spec.
     /// Returns the (possibly updated) entry.
     pub fn upsert_entry(&mut self, spec: &SpawnSpec, kind: SessionKind) -> Entry {
         match self.sessions.iter_mut().find(|e| e.id == spec.id) {
@@ -160,6 +165,7 @@ impl Journal {
                 e.name = spec.name.clone();
                 e.args = spec.args.clone();
                 e.extensions = spec.extensions.clone();
+                e.optional = spec.optional.clone();
                 e.clone()
             }
             None => {
@@ -173,6 +179,7 @@ impl Journal {
                     created_at: crate::paths::unix_now(),
                     ephemeral: spec.ephemeral,
                     extensions: spec.extensions.clone(),
+                    optional: spec.optional.clone(),
                 };
                 self.sessions.push(e.clone());
                 e
@@ -293,6 +300,8 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
+            optional: vec![],
         }
     }
 

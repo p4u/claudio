@@ -6,7 +6,7 @@ const NOW = 2_000_000;
 const S = (o = {}) => ({
   id: 'a', label: 'api', host: 'local', kind: 'claude', cwd: '/w/api', state: 'idle', state_since: NOW - 125, created_at: NOW - 7300,
   branch: 'main', git: { staged: 1, unstaged: 2, untracked: 0, conflicts: 0, ahead: 3, behind: 0 }, model: 'opus', context_tokens: 50_000,
-  output_tokens: 1200, turns: 4, proxy: 'team', proxy_known: true, first_party: false, attention: null, ...o,
+  output_tokens: 1200, turns: 4, launch: { known: true, choice: { addon: 'vocdoni', option: 'team', flags: [] } }, attention: null, ...o,
 });
 const get = (rows, k) => rows.find((r) => r.k === k)?.v;
 
@@ -26,7 +26,7 @@ test('infoRows lists the facts of a claude session', () => {
   assert.equal(get(r, 'Turns'), '4');
   assert.equal(get(r, 'Uptime'), '2h 1m');
   assert.equal(get(r, 'In this state'), '2m');
-  assert.equal(get(r, 'Proxy'), 'team');
+  assert.equal(get(r, 'Launch'), 'team');
   assert.equal(get(r, 'Kind'), 'claude');
 });
 
@@ -35,12 +35,13 @@ test('a waiting session shows what it asks', () => {
   assert.equal(get(infoRows(s, 'waiting', NOW), 'State'), 'waiting for you: needs Bash · Bash · ls -la');
 });
 
-test('a shell has no model, context or proxy rows, and missing values are left out', () => {
+test('a shell has no model, context or launch rows, and missing values are left out', () => {
   const r = infoRows(S({ kind: 'shell', branch: null, git: null }), 'stopped', NOW);
-  for (const k of ['Model', 'Context', 'Output', 'Turns', 'Proxy', 'Branch']) assert.equal(get(r, k), undefined, k);
+  for (const k of ['Model', 'Context', 'Output', 'Turns', 'Launch', 'Branch']) assert.equal(get(r, k), undefined, k);
   assert.equal(get(r, 'Kind'), 'terminal');
-  assert.equal(get(infoRows(S({ proxy_known: false }), 'stopped', NOW), 'Proxy'), 'unknown');
-  assert.equal(get(infoRows(S({ proxy: null }), 'stopped', NOW), 'Proxy'), 'direct');
+  assert.equal(get(infoRows(S({ launch: { known: false, choice: null } }), 'stopped', NOW), 'Launch'), 'unknown');
+  assert.equal(get(infoRows(S({ launch: { known: true, choice: null } }), 'stopped', NOW), 'Launch'), 'direct');
+  assert.equal(get(infoRows(S({ launch: { known: true, choice: { addon: 'vocdoni', option: 'team', flags: ['first-party'] } } }), 'stopped', NOW), 'Launch'), 'team (first-party)');
 });
 
 test('server text stays text: values are plain strings', () => {

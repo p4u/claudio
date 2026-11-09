@@ -2,6 +2,8 @@
 
 A terminal-native session manager for [Claude Code](https://claude.ai/claude-code). Run many Claude Code sessions, local and over SSH, in one terminal window. Sessions survive closing the UI or an SSH drop, and pick up where they left off.
 
+claudio is a small core (the session manager, `--plain`, the daemon, SSH hosts, the claude installer and the plain `claude` passthrough) that works with your own `claude` login, plus **addons** built into the same binary: the **web UI** (`claudio web`), the **API addon** (`claudio -p` and the OpenAI-compatible `claudio --api`) and the **Vocdoni addon** (the claude-proxy client and the team plugins, `claudio vocdoni …`). [docs/addons.md](docs/addons.md) is the addon API.
+
 ---
 
 ## Screenshots
@@ -34,7 +36,7 @@ A terminal-native session manager for [Claude Code](https://claude.ai/claude-cod
 
 ![Proxy stats popup](docs/screenshots/stats.png)
 
-*Alt+s: the proxy stats popup, here on its Overview page (account, pool health, usage, top models, this session's credential).*
+*Alt+s: the Vocdoni addon's proxy stats panel, here on its Overview page (account, pool health, usage, top models, this session's credential).*
 
 ![Terminal tab](docs/screenshots/terminal.png)
 
@@ -63,7 +65,7 @@ curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | 
 
 ## Quick start
 
-### Without a proxy
+### With your own claude login
 
 **Requirements:** a [Claude Code](https://claude.ai/claude-code) account, and `~/.local/bin` on your `PATH`. Where claude is missing, claudio installs it (see [Keeping claude up to date](#keeping-claude-up-to-date)); you log in the first time it starts.
 
@@ -75,22 +77,23 @@ curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | 
 
 **SSH:** pick a host under *Remote* (key-based `ssh <host>` must work without a password). claudio installs itself on the remote, and those sessions survive disconnects too.
 
-### With claude-proxy
+### The Vocdoni addon: claude-proxy and team plugins
 
-[claude-proxy](https://github.com/p4u/claude-proxy) is a multi-subscription credential proxy for Claude Code: sessions authenticate through it instead of a local `claude` login.
+[claude-proxy](https://github.com/p4u/claude-proxy) is a multi-subscription credential proxy for Claude Code: sessions authenticate through it instead of a local `claude` login. The Vocdoni addon is its client.
 
 ```bash
-claudio proxy login https://proxy.example.com   # sign in through the browser
+claudio vocdoni login                           # sign in to https://claude.vocdoni.net through the browser
+claudio vocdoni login https://proxy.example.com # or to another claude-proxy
 claudio                                         # new sessions now use the proxy by default
 ```
 
-`claudio proxy login` prints a page and a one-time code, opens the page in a browser when there is a display (`CLAUDIO_NO_BROWSER=1` only prints it), and waits while you sign in and type the code there. The proxy then hands claudio your own token, saved with your e-mail in the profile (`claudio proxy status` shows it). Without a URL it signs in again to the default profile's proxy. `--token`, or a proxy without browser sign-in, asks for a pasted token instead; a token is never an argument.
+`claudio proxy …` is an alias of `claudio vocdoni …`, with the same subcommands (`login`, `status`, `use`, `logout`). `claudio vocdoni login` prints a page and a one-time code, opens the page in a browser when there is a display (`CLAUDIO_NO_BROWSER=1` only prints it), and waits while you sign in and type the code there. The proxy then hands claudio your own token, saved with your e-mail in the profile (`claudio vocdoni status` shows it). Without a URL it signs in again to the default profile's proxy, or, with no profile yet, to `https://claude.vocdoni.net`. `--token`, or a proxy without browser sign-in, asks for a pasted token instead (read from stdin when it is not a terminal); a token is never an argument.
 
-The proxy can also serve **plugins**: a pinned manifest (a TOML file, hash-checked) that says what a member needs: marketplaces and the Claude Code plugins to install from them, MCP servers (with the secrets they need, which the proxy serves as env), subagents, instructions for every session and env. The first time claudio sees a manifest it shows every item in a setup screen, all on; you turn off what you don't want and press Enter (the choice is saved under `[plugins.<name>]` in `config.toml`; Esc asks again at the next start). Then each host's daemon installs the plugins in your user scope with `claude plugin install` (never with `-y`: a plugin whose marketplace runs a command is left for you to install by hand), and every session claudio opens with that proxy profile (manager, `--plain`, SSH hosts) gets the servers (`--mcp-config`, secrets only in its env), the agents (`--agents`) and the instructions. What you already have stays yours: an installed plugin, a marketplace, an MCP server or an agent of the same name is left alone. The list and its env are cached in `~/.config/claudio/plugins.json` (mode 0600), so a session still gets them when the proxy is unreachable, and refreshed every 15 minutes. `claudio proxy logout` deletes them. Plugins are listed in the extensions screen (`Alt+i`): `Space` turns one off for new sessions, `Enter` opens its setup screen again, and its details say, per host, what was installed, what was already there, what is still installing and what was skipped and why. A failed install is tried again after 15 seconds, then twice as long each time it fails again, up to every 5 minutes (the details say `retrying in N s`). Installed plugins stay until you remove them (`claude plugin uninstall <id>`).
+The proxy can also serve **plugins**: a pinned manifest (a TOML file, hash-checked) that says what a member needs: marketplaces and the Claude Code plugins to install from them, MCP servers (with the secrets they need, which the proxy serves as env), subagents, instructions for every session and env. The first time claudio sees a manifest it shows every item in a setup screen, all on; you turn off what you don't want and press Enter (the choice is saved under `[plugins.<name>]` in `config.toml`; Esc asks again at the next start). Then each host's daemon installs the plugins in your user scope with `claude plugin install` (never with `-y`: a plugin whose marketplace runs a command is left for you to install by hand), and every session claudio opens with that proxy profile (manager, `--plain`, SSH hosts) gets the servers (`--mcp-config`, secrets only in its env), the agents (`--agents`) and the instructions. What you already have stays yours: an installed plugin, a marketplace, an MCP server or an agent of the same name is left alone. The list and its env are cached in `~/.config/claudio/plugins.json` (mode 0600), so a session still gets them when the proxy is unreachable, and refreshed every 15 minutes. `claudio vocdoni logout` deletes them. Plugins are listed in the extensions screen (`Alt+i`): `Space` turns one off for new sessions, `Enter` opens its setup screen again, and its details say, per host, what was installed, what was already there, what is still installing and what was skipped and why. A failed install is tried again after 15 seconds, then twice as long each time it fails again, up to every 5 minutes (the details say `retrying in N s`). Installed plugins stay until you remove them (`claude plugin uninstall <id>`).
 
 - `claudio --no-proxy` or `claudio --proxy <profile>` overrides the default for one run.
 - `CLAUDIO_PROXY_URL=<token>@proxy.example.com claudio` uses a proxy for one run without saving a profile.
-- The status bar shows which upstream credential the session is running on, and `Alt+s` opens the proxy stats.
+- The status bar shows which upstream credential the session is running on (the addon's segments), and `Alt+s` opens the proxy stats (the addon's panel).
 - Proxy sessions use gateway mode by default: `ANTHROPIC_BASE_URL` points at the proxy, and Claude Code gets `CLAUDE_CODE_USE_GATEWAY=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Claude Code turns its feature flags off in that mode, so Monitor, `/advisor`, WebSearch and PushNotification are unavailable.
 - First-party mode is opt-in, for a profile (`first_party = true` in `config.toml`, under `[proxy.profiles.<name>]`) or for one run (`claudio --first-party`, also with `--proxy` and `--plain`). The session then runs as a first-party Claude Code client: the gateway variables are left out, so the feature flags stay on and Monitor, `/advisor`, WebSearch, PushNotification and the other flag-gated features work. WebSearch works only if the proxy passes Anthropic's server-side web search tool through. The session also gets `DISABLE_AUTOUPDATER=1`, so claude does not update itself behind claudio's `[claude] update_check`, and `ENABLE_TOOL_SEARCH=true`, which keeps tool search on (Claude Code turns it off for a non-Anthropic base URL; claude-proxy passes the `tool_reference` blocks through).
 - The cost of first-party mode: Claude Code's telemetry and feature-flag requests go to api.anthropic.com, not only to the proxy, and on a host where claude has never been set up, the onboarding screens may appear once.
@@ -115,7 +118,8 @@ One full-screen claude session with the proxy configured: no tabs, no status bar
 | `claudio --plain …` | One plain claude session with the proxy configured |
 | `claudio sessions` | List sessions as a table (for scripts) |
 | `claudio daemon status\|stop\|restart` | Inspect or control the background daemon |
-| `claudio proxy login\|status\|use\|logout` | Manage proxy profiles |
+| `claudio vocdoni login\|status\|use\|logout` | Manage proxy profiles (Vocdoni addon; `claudio proxy …` is an alias) |
+| `claudio web` | The session manager in a browser (web addon) |
 | `claudio upgrade [--check]` | Install the latest release, or only check for one |
 | `claudio -p "…"` | Drop-in for `claude -p` ([details](docs/print-and-api.md)) |
 | `claudio --api` | OpenAI-compatible API server ([details](docs/print-and-api.md)) |
@@ -186,11 +190,11 @@ Gauges turn yellow above 60% and red above 85%. A narrow terminal drops whole se
 
 ### Restart a session (`Alt+e`)
 
-`Alt+e` restarts the active session in its tab. `r` restarts claude and resumes the same conversation, which picks up a claude update or proxy change or unsticks a wedged process. `n` starts a new conversation in the same directory. In a terminal tab it restarts the shell.
+`Alt+e` restarts the active session in its tab. `r` restarts claude and resumes the same conversation, which picks up a claude update or proxy change or unsticks a wedged process. `n` starts a new conversation in the same directory. In a terminal tab it restarts the shell. A session started from another window (the web UI, or a manager with its own saved state) has a route this one does not know: `Alt+e` refuses rather than restart it without its proxy, and its status bar says `route unknown`. Restart it where it was started, or start a new session.
 
 ### Proxy stats (`Alt+s`)
 
-A multi-page popup for the session's claude-proxy profile:
+The Vocdoni addon's panel, a multi-page popup for the session's claude-proxy profile:
 
 - **Overview:** requests, tokens, cache hit rate, your limit, top models, and this session's credential.
 - **Models:** per-model usage.
@@ -202,7 +206,7 @@ A multi-page popup for the session's claude-proxy profile:
 
 ### Formulas and the reader view (`Alt+u`)
 
-Each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags. This is on by default; `latex = false` under `[claude]` in `config.toml` turns it off. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
+Each claude session is told (by a `SessionStart` hook) to write math as LaTeX inside `<latex>…</latex>` tags: the web addon asks for it at every launch, whichever window starts the session. This is on by default; `latex = false` under `[extensions]` (or its older spelling, under `[claude]`) in `config.toml` turns it off. The setting belongs to the host that runs the session, and its daemon reads it when it starts: after changing it, run `claudio daemon restart` on that host.
 
 Formulas are rendered in the web UI ([`claudio web`](#web-ui)), with KaTeX, in its reader (Answers and Formulas). The console shows claude's screen exactly as claude drew it, so there a formula stays as its `<latex>…</latex>` text. The formulas come from the conversation's transcript, not from the screen (Claude Code's markdown drops backslashes there), so they render too when you ask claude for the tags yourself, without the setting.
 
@@ -212,14 +216,14 @@ Formulas are rendered in the web UI ([`claudio web`](#web-ui)), with KaTeX, in i
 
 `Alt+z` opens a small popup of extension actions; the next key runs one, and `Esc` closes it. The built-in extensions:
 
-- **diagram**: claude is asked to draw diagrams as ```` ```mermaid ```` blocks, and the web UI draws them. The console's reader view (`Alt+u`) shows them as their code block.
 - **search** (`Alt+z s`): searches every claude conversation on the active session's host (prompts and answers, not tool output) and lists the matches, newest first. Enter resumes the chosen one in a new tab, or switches to the tab that has it.
 - **snippets** (`Alt+z p`): a filterable list of the prompts saved in `~/.config/claudio/snippets/` (`*.md`, `*.txt`); Enter pastes one into claude's prompt without sending it. `Alt+z P` saves the session's last prompt as a new snippet.
-- **latex**: the formulas above (rendered in the web UI).
+
+The web addon adds two rows: **latex** (the formulas above) and **diagram** (claude is asked to draw diagrams as ```` ```mermaid ```` blocks, and the web UI draws them; the console's reader view shows them as their code block).
 
 `Alt+z u` opens the reader view too. You can write your own extensions in any language: a directory in `~/.config/claudio/extensions/` with a manifest and a program that claudio runs and talks to over JSON lines. See [docs/extensions.md](docs/extensions.md) and the example in [`examples/extensions/keys/`](examples/extensions/keys/). Each extension can be turned off under `[extensions]` in `config.toml`.
 
-`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or proxy plugin, with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile, setup and state on each host). `Space` turns it on or off, and so does `Enter` except on a plugin's row, where it opens the plugin's setup screen; `r` fetches the plugin lists and manifests again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering in the web UI) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
+`Alt+i` (or `Alt+z e`) opens the extensions screen: one row per extension, built-in, external or an addon's (the web addon's latex and diagram, the Vocdoni addon's proxy plugins), with its keys and lenses, and below the list the selected one's description, actions and lenses (for a plugin, its version, profile, setup and state on each host). `Space` turns it on or off, and so does `Enter` except on a plugin's row, where it opens the plugin's setup screen; `r` fetches the plugin lists and manifests again. The change applies at once (its keys leave the `Alt+z` popup, its lenses stop rendering in the web UI) and is saved as `name = true|false` under `[extensions]` in `config.toml`, the rest of the file untouched. claude's instructions change for new sessions; `Alt+e` restarts one with them. `Esc` or `Alt+i` closes the screen.
 
 ### Keeping claude up to date
 
@@ -310,13 +314,14 @@ allow_skip_permissions = true   # start claude with --allow-dangerously-skip-per
 update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
 remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
 install = "auto"                # install claude where a host has none: "auto" | "ask" | "off"
-latex = true                    # ask claude to write math in <latex> tags, rendered in the web UI
-                                # (this host's sessions; `claudio daemon restart` after a change)
+latex = true                    # this host's sessions may carry the <latex> instruction (the web
+                                # addon's; `claudio daemon restart` after a change); on the client,
+                                # an alias of `[extensions] latex`, which wins when set
 
 [extensions]                    # every extension is on unless turned off here
-diagram = false                 # e.g. no Mermaid instruction or drawing
+diagram = false                 # e.g. no Mermaid instruction or drawing (the web addon's row)
                                 # (Alt+i turns them on and off and writes this table;
-                                # proxy plugins too, by name)
+                                # the addons' rows too, proxy plugins by name)
 
 [plugins.vocdoni-internal]      # a proxy plugin's setup (written by its setup screen)
 disabled = ["mcp:jina-mcp-server"]  # item ids left out: plugin:<name>@<market>, mcp:<name>,
@@ -334,7 +339,9 @@ extensions  = "alt+z"           # the extensions' leader key
 extensions_menu = "alt+i"       # the extensions screen
 ```
 
-`CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks. `CLAUDIO_NO_BROWSER=1` keeps `claudio proxy login` from opening a browser.
+`CLAUDIO_NO_UPDATE_CHECK=1` disables both the claudio and the claude release checks. `CLAUDIO_NO_BROWSER=1` keeps `claudio vocdoni login` from opening a browser.
+
+The `[proxy]` and `[plugins.*]` tables are the Vocdoni addon's: it reads and edits only those.
 
 ---
 

@@ -19,7 +19,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+mod git;
+mod spawn;
+
 pub use crate::version::PROTO;
+pub use git::*;
+pub use spawn::*;
 
 /// Hard cap on a single frame (tag + payload).
 pub const MAX_FRAME: usize = 1 << 20;
@@ -225,21 +230,16 @@ pub enum Msg {
         #[serde(default)]
         limit: u32,
     },
-    /// Apply proxy plugin `name`'s manifest on this host: the TOML at `url`
-    /// (https) whose SHA-256 is `sha256`, cached once downloaded. `secrets`
-    /// are the names (never the values) of the plugin's proxy env, which
-    /// the sessions get; `disabled` the item ids the member turned off.
-    /// Answered by `Applied` as soon as the manifest is parsed (plugin
-    /// installs run after the reply), or `Error "manifest <name>: …"`. An
-    /// older daemon answers `Error "unsupported op…"`.
-    Manifest {
-        name: String,
-        url: String,
-        sha256: String,
+    /// Run addon `addon`'s daemon op `op` (docs/daemon-protocol.md). Sent
+    /// only to a daemon whose `Welcome.features` lists `addon:<addon>`; an
+    /// older one answers `Error "unsupported op…"`. `op` is `name` on the
+    /// wire (`op` is this enum's tag). Answered by `AddonReply` or `Error`.
+    AddonOp {
+        addon: String,
+        #[serde(rename = "name")]
+        op: String,
         #[serde(default)]
-        secrets: Vec<String>,
-        #[serde(default)]
-        disabled: Vec<String>,
+        body: serde_json::Value,
     },
 
     // ── daemon → client replies ──────────────────────────────────────────
@@ -307,8 +307,10 @@ pub enum Msg {
         total: u32,
         truncated: bool,
     },
-    /// Reply to `Manifest`.
-    Applied(Applied),
+    /// The reply to `AddonOp`.
+    AddonReply {
+        body: serde_json::Value,
+    },
     Ok,
     Error {
         message: String,
@@ -366,6 +368,36 @@ pub struct Welcome {
     pub features: Vec<String>,
 }
 
+/// The most an `AddonOp` or `AddonReply` body may take, JSON-encoded.
+pub const ADDON_BODY_MAX: usize = 512 * 1024;
+
+/// Whether `body` fits [`ADDON_BODY_MAX`] encoded (checked by both peers).
+pub fn addon_body_ok(body: &serde_json::Value) -> Result<(), String> {
+    if addon_body_len(body) > ADDON_BODY_MAX {
+        return Err("body over 512 KiB".into());
+    }
+    Ok(())
+}
+
+/// `body`'s JSON-encoded length, counted without building the text.
+pub fn addon_body_len(body: &serde_json::Value) -> usize {
+    struct Count(usize);
+    impl io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    match serde_json::to_writer(&mut count, body) {
+        Ok(()) => count.0,
+        Err(_) => usize::MAX,
+    }
+}
+
 /// The features a daemon of this build reports in [`Welcome::features`]:
 /// `lens` — it takes [`SpawnSpec::extensions`] and sends
 /// [`SessionEvent::Lens`]; `search` — it answers [`Msg::Search`];
@@ -397,327 +429,9 @@ pub struct ClaudeInfo {
     pub version: String,
 }
 
-/// How to start a session. `args` are extra claude arguments (e.g.
-/// `["--resume", "<uuid>"]`); the daemon adds the claude binary and its own
-/// hook settings. `env` may carry secrets and is redacted from `Debug`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct SpawnSpec {
-    pub id: SessionId,
-    pub cwd: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    pub rows: u16,
-    pub cols: u16,
-    /// Not the manager's: the session lives only as long as the client that
-    /// started it (`claudio --plain`). The daemon does not journal it, and
-    /// reports it with [`SessionInfo::ephemeral`] so a manager leaves it out.
-    /// An old daemon ignores the field and treats it as any other session.
-    #[serde(default)]
-    pub ephemeral: bool,
-    /// The session's extension lenses (the client's registry): what claude
-    /// is told through the context hook and which tags the daemon extracts.
-    /// `None` (an old client) keeps the journaled value. Ignored by an old
-    /// daemon, which goes by its own `[claude] latex`.
-    #[serde(default)]
-    pub extensions: Option<SessionExtensions>,
-}
-
-/// How to restart a session. Everything else (cwd, name, claude arguments,
-/// kind) comes from the daemon's journal. `env` may carry secrets and is
-/// redacted from `Debug`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct RespawnSpec {
-    pub id: SessionId,
-    /// Start a new conversation instead of resuming the journaled one.
-    #[serde(default)]
-    pub fresh: bool,
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    pub rows: u16,
-    pub cols: u16,
-    /// Replaces the journaled extensions when `Some` (see
-    /// [`SpawnSpec::extensions`]).
-    #[serde(default)]
-    pub extensions: Option<SessionExtensions>,
-}
-
-/// What a host made of a proxy plugin's manifest ([`Msg::Manifest`]): what
-/// every new session there gets from it, and each item's outcome by item id
-/// (`plugin:<name>@<marketplace>`, `mcp:<name>`, `agent:<name>`…). A
-/// disabled id is in no list.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Applied {
-    pub name: String,
-    pub version: String,
-    /// `{"mcpServers": {...}}` for `--mcp-config` (≤ 64 KiB): `${NAME}`
-    /// placeholders, never a secret.
-    #[serde(default)]
-    pub mcp_config: Option<String>,
-    /// The `--agents` JSON (≤ 32 KiB).
-    #[serde(default)]
-    pub agents: Option<String>,
-    /// For the session context: sanitized, ≤ 8 KiB, empty when none.
-    #[serde(default)]
-    pub instructions: String,
-    /// The manifest's `[env]`.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-    /// Plugin ids this daemon installed (under this manifest's hash).
-    #[serde(default)]
-    pub installed: Vec<String>,
-    /// Plugin ids Claude Code had installed already.
-    #[serde(default)]
-    pub present: Vec<String>,
-    /// `(id, reason)`: `installing`, `yours`, `missing secret X`, a
-    /// failure…
-    #[serde(default)]
-    pub skipped: Vec<(String, String)>,
-    /// `--mcp-config` and/or `--agents` when this host's claude lacks them.
-    #[serde(default)]
-    pub dropped: Vec<String>,
-}
-
 /// The daemon's error for a claude update or install asked while another
 /// (or a plugin install) runs on the host.
 pub const UPDATE_BUSY: &str = "a claude update or plugin install is already running on this host";
-
-/// The reason in [`Applied::skipped`] of a failed plugin install the daemon
-/// tries again in `secs` seconds.
-pub fn retrying(why: &str, secs: u64) -> String {
-    format!("{why} (retrying in {secs} s)")
-}
-
-/// The seconds of a [`retrying`] reason.
-pub fn retry_secs(reason: &str) -> Option<u64> {
-    let (_, secs) = reason.strip_suffix(" s)")?.rsplit_once(" (retrying in ")?;
-    secs.parse().ok()
-}
-
-/// The lenses of a claude session, in the client's registry order, and
-/// the proxy plugins' instructions. The daemon checks the caps
-/// ([`SessionExtensions::validate`]), writes the instructions to the
-/// session's context file and extracts the tag lenses' tags from the
-/// transcript.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SessionExtensions {
-    #[serde(default)]
-    pub lenses: Vec<LensSpec>,
-    /// The enabled proxy plugins' instructions, joined by a blank line:
-    /// at most [`MAX_PLUGIN_INSTRUCTIONS`] bytes after `sanitize`, counted
-    /// apart from the lenses. An old daemon ignores it.
-    #[serde(default)]
-    pub instructions: String,
-}
-
-/// One lens: its name (the tag, or the fence's info word), its kind, and
-/// the instruction claude gets for it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LensSpec {
-    pub name: String,
-    pub kind: LensKind,
-    #[serde(default)]
-    pub instruction: String,
-}
-
-/// A tag lens (`<name>…</name>` in claude's text) or a fence lens (a fenced
-/// code block whose info string starts with the name).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LensKind {
-    Tag,
-    Fence,
-    /// A kind from a newer client: the daemon drops the lens.
-    #[serde(other)]
-    Unknown,
-}
-
-/// At most this many lenses per session.
-pub const MAX_LENSES: usize = 16;
-/// One instruction's cap, in bytes after `sanitize`.
-pub const MAX_INSTRUCTION: usize = 2048;
-/// All instructions together, in bytes after `sanitize`.
-pub const MAX_INSTRUCTIONS: usize = 8192;
-/// The plugins' instructions, in bytes after `sanitize`. With the lenses'
-/// and the blank lines `context()` puts between the parts, they always fit
-/// the context hook's 16 KiB read.
-pub const MAX_PLUGIN_INSTRUCTIONS: usize = 8192 - 2 * (MAX_LENSES + 1);
-
-impl SessionExtensions {
-    /// Why this value breaks the caps: more than [`MAX_LENSES`] lenses, a
-    /// name that is not `^[a-z][a-z0-9-]{0,23}$` or is repeated, or
-    /// instructions over [`MAX_INSTRUCTION`] / [`MAX_INSTRUCTIONS`], or
-    /// plugin instructions over [`MAX_PLUGIN_INSTRUCTIONS`].
-    pub fn validate(&self) -> Result<(), String> {
-        if self.lenses.len() > MAX_LENSES {
-            return Err(format!("more than {MAX_LENSES} lenses"));
-        }
-        let mut total = 0;
-        for (i, lens) in self.lenses.iter().enumerate() {
-            if !lens_name_ok(&lens.name) {
-                return Err(format!("bad lens name {:?}", lens.name));
-            }
-            if self.lenses[..i].iter().any(|l| l.name == lens.name) {
-                return Err(format!("lens {} given twice", lens.name));
-            }
-            let len = crate::text::sanitize(&lens.instruction).len();
-            if len > MAX_INSTRUCTION {
-                return Err(format!(
-                    "lens {} instruction over {MAX_INSTRUCTION} bytes",
-                    lens.name
-                ));
-            }
-            total += len;
-        }
-        if total > MAX_INSTRUCTIONS {
-            return Err(format!("instructions over {MAX_INSTRUCTIONS} bytes"));
-        }
-        if crate::text::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
-            return Err(format!(
-                "plugin instructions over {MAX_PLUGIN_INSTRUCTIONS} bytes"
-            ));
-        }
-        Ok(())
-    }
-
-    /// The names of the tag lenses: the tags the daemon extracts.
-    pub fn tags(&self) -> Vec<String> {
-        self.lenses
-            .iter()
-            .filter(|l| l.kind == LensKind::Tag)
-            .map(|l| l.name.clone())
-            .collect()
-    }
-
-    /// What claude is told: the non-empty instructions, sanitized, joined
-    /// by a blank line; the plugins' after the lenses'.
-    pub fn context(&self) -> String {
-        let parts: Vec<String> = self
-            .lenses
-            .iter()
-            .map(|l| l.instruction.as_str())
-            .chain([self.instructions.as_str()])
-            .map(|i| crate::text::sanitize(i).trim().to_owned())
-            .filter(|i| !i.is_empty())
-            .collect();
-        parts.join("\n\n")
-    }
-
-    /// The lens names, for `Debug` and logs (never the instructions).
-    pub fn names(&self) -> Vec<&str> {
-        self.lenses.iter().map(|l| l.name.as_str()).collect()
-    }
-}
-
-/// `^[a-z][a-z0-9-]{0,23}$`.
-pub fn lens_name_ok(name: &str) -> bool {
-    let mut chars = name.chars();
-    name.len() <= 24
-        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-/// How to start a terminal tab: the login shell, in `cwd`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ShellSpec {
-    pub id: SessionId,
-    pub cwd: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    pub rows: u16,
-    pub cols: u16,
-}
-
-/// What a session runs. The daemon journal's value is authoritative.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionKind {
-    #[default]
-    Claude,
-    /// A plain terminal: the user's login shell.
-    Shell,
-}
-
-impl Msg {
-    /// `self` with the session env set, if it is a `Spawn` or `Respawn`; any
-    /// other message is returned unchanged.
-    pub fn with_env(mut self, env: Vec<(String, String)>) -> Msg {
-        match &mut self {
-            Msg::Spawn(spec) => spec.env = env,
-            Msg::Respawn(spec) => spec.env = env,
-            _ => {}
-        }
-        self
-    }
-
-    /// `self` with the proxy env added after the plugin env it carries
-    /// ([`crate::envmerge::merge_env_pairs`]: the proxy wins, no key twice).
-    pub fn merge_env(self, proxy: Vec<(String, String)>) -> Msg {
-        let plugin = match &self {
-            Msg::Spawn(spec) => spec.env.clone(),
-            Msg::Respawn(spec) => spec.env.clone(),
-            _ => return self,
-        };
-        self.with_env(crate::envmerge::merge_env_pairs(&plugin, proxy))
-    }
-
-    /// `self` with the plugins' flags (`--agents <json>`, `--mcp-config
-    /// <json>`…) after its args, if it is a `Spawn` (a `Respawn` keeps the
-    /// journaled args).
-    pub fn with_plugin_args(mut self, args: &[String]) -> Msg {
-        if let Msg::Spawn(spec) = &mut self {
-            spec.args.extend(args.iter().cloned());
-        }
-        self
-    }
-
-    /// `self` with the plugins' instructions, if it is a `Spawn` or a
-    /// `Respawn` (which then carries extensions).
-    pub fn with_instructions(mut self, instructions: String) -> Msg {
-        let ext = match &mut self {
-            Msg::Spawn(spec) => &mut spec.extensions,
-            Msg::Respawn(spec) => &mut spec.extensions,
-            _ => return self,
-        };
-        ext.get_or_insert_with(SessionExtensions::default)
-            .instructions = instructions;
-        self
-    }
-}
-
-impl std::fmt::Debug for RespawnSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
-        f.debug_struct("RespawnSpec")
-            .field("id", &self.id)
-            .field("fresh", &self.fresh)
-            .field("env", &env_keys)
-            .field("rows", &self.rows)
-            .field("cols", &self.cols)
-            .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for SpawnSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
-        f.debug_struct("SpawnSpec")
-            .field("id", &self.id)
-            .field("cwd", &self.cwd)
-            .field("name", &self.name)
-            .field("args", &self.args)
-            .field("env", &env_keys)
-            .field("rows", &self.rows)
-            .field("cols", &self.cols)
-            .field("ephemeral", &self.ephemeral)
-            .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
-            .finish()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -1136,119 +850,6 @@ pub fn search_reply(
     msg
 }
 
-/// The most commits one `GitLog` request may ask for.
-pub const GIT_LOG_MAX: u32 = 500;
-
-/// Reply to `GitLog`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitLogPage {
-    /// The repository's top-level directory.
-    pub root: String,
-    /// The checked-out branch; `None` for a detached HEAD.
-    #[serde(default)]
-    pub head: Option<String>,
-    pub commits: Vec<GitLogEntry>,
-    /// Whether commits exist beyond this page.
-    #[serde(default)]
-    pub more: bool,
-}
-
-/// One log row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitLogEntry {
-    /// Full object id.
-    pub id: String,
-    pub parents: Vec<String>,
-    pub author: String,
-    /// Author time, Unix seconds.
-    pub time: i64,
-    /// Decorations as `--decorate=full` prints them, one per entry:
-    /// `HEAD -> refs/heads/main`, `refs/remotes/origin/main`, `tag: refs/tags/v1`.
-    pub refs: Vec<String>,
-    pub subject: String,
-}
-
-/// Reply to `GitCommit`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitCommitInfo {
-    pub id: String,
-    pub parents: Vec<String>,
-    pub author: String,
-    pub email: String,
-    pub time: i64,
-    pub committer_time: i64,
-    pub refs: Vec<String>,
-    /// The full message, subject first.
-    pub message: String,
-    pub files: Vec<GitFile>,
-    /// Set for merges: `files` and patches are against the first parent only.
-    #[serde(default)]
-    pub first_parent: bool,
-}
-
-/// A file changed by a commit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitFile {
-    pub path: String,
-    /// The previous name, for a rename.
-    #[serde(default)]
-    pub old_path: Option<String>,
-    /// Lines added; `None` for a binary file.
-    #[serde(default)]
-    pub added: Option<u32>,
-    /// Lines removed; `None` for a binary file.
-    #[serde(default)]
-    pub removed: Option<u32>,
-}
-
-/// Reply to `GitDiff`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitPatch {
-    pub id: String,
-    pub path: Option<String>,
-    pub patch: String,
-    /// Set when the patch was cut to fit the size limits.
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-/// The most files a `GitWorktreeStatus` lists.
-pub const GIT_WORKTREE_MAX: usize = 2000;
-
-/// Reply to `GitWorktree`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitWorktreeStatus {
-    /// The repository's top-level directory.
-    pub root: String,
-    /// The checked-out branch; `None` for a detached HEAD.
-    #[serde(default)]
-    pub branch: Option<String>,
-    pub files: Vec<GitWorktreeFile>,
-    /// More than [`GIT_WORKTREE_MAX`] files, or git's output was cut.
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-/// A changed path of the working tree, relative to the root.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GitWorktreeFile {
-    pub path: String,
-    /// The name before a rename in the index.
-    #[serde(default)]
-    pub old_path: Option<String>,
-    /// One status letter for the index: `.` unchanged, `M`, `T`, `A`, `D`,
-    /// `R`, `C`, `U` (unmerged), `?` (untracked).
-    pub index: String,
-    /// The same for the working tree.
-    pub worktree: String,
-    /// Lines added, staged and unstaged together; `None` for a binary or
-    /// untracked file.
-    #[serde(default)]
-    pub added: Option<u32>,
-    #[serde(default)]
-    pub removed: Option<u32>,
-}
-
 impl Frame {
     /// Serialize into `[len][tag][payload]`.
     pub fn encode(&self) -> Vec<u8> {
@@ -1338,21 +939,6 @@ mod tests {
     }
 
     #[test]
-    fn a_retrying_reason_carries_its_seconds() {
-        let why = retrying("marketplace m: down (503)", 15);
-        assert_eq!(why, "marketplace m: down (503) (retrying in 15 s)");
-        assert_eq!(retry_secs(&why), Some(15));
-        for other in [
-            "installing",
-            "network down",
-            "x (retrying in s)",
-            "(retrying in 5 s",
-        ] {
-            assert_eq!(retry_secs(other), None, "{other}");
-        }
-    }
-
-    #[test]
     fn welcome_from_an_old_daemon_has_no_build() {
         let old = r#"{"claudio_version":"0.2.0","proto":1,
             "host":{"hostname":"h","os":"linux","arch":"x86_64","home":"/h"}}"#;
@@ -1410,87 +996,19 @@ mod tests {
         assert_eq!(back.msg, shell);
     }
 
+    /// compat(v0.10): the `manifest` op of the releases before addons and
+    /// its `applied` reply decode as unknown: the daemon refuses an old
+    /// client's request as an unsupported op (docs/daemon-protocol.md,
+    /// "Refused ops").
     #[test]
-    fn manifest_and_applied_roundtrip_and_are_unknown_to_older_peers() {
-        #[derive(Debug, PartialEq, Deserialize)]
-        #[serde(tag = "op", rename_all = "snake_case")]
-        enum Old {
-            Ping,
-            #[serde(other)]
-            Unknown,
+    fn manifest_and_applied_are_unknown_now() {
+        for json in [
+            r#"{"req":4,"op":"manifest","name":"t","url":"https://e.org","sha256":"x"}"#,
+            r#"{"req":4,"op":"applied","name":"team","version":"1"}"#,
+        ] {
+            let env: Envelope = serde_json::from_str(json).unwrap();
+            assert_eq!(env.msg, Msg::Unknown, "{json}");
         }
-        let request = Msg::Manifest {
-            name: "team".into(),
-            url: "https://e.org/team.toml".into(),
-            sha256: "a".repeat(64),
-            secrets: vec!["KB_TOKEN".into()],
-            disabled: vec!["mcp:jina".into()],
-        };
-        let reply = Msg::Applied(Applied {
-            name: "team".into(),
-            version: "1.0.0".into(),
-            mcp_config: Some(r#"{"mcpServers":{}}"#.into()),
-            agents: None,
-            instructions: "Rules.".into(),
-            env: vec![("REGION".into(), "eu".into())],
-            installed: vec!["plugin:a@m".into()],
-            present: vec!["plugin:b@m".into()],
-            skipped: vec![("plugin:c@m".into(), "installing".into())],
-            dropped: vec!["--agents".into()],
-        });
-        for msg in [request, reply] {
-            let json = serde_json::to_string(&Envelope::request(4, msg.clone())).unwrap();
-            assert_eq!(serde_json::from_str::<Old>(&json).unwrap(), Old::Unknown);
-            assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap().msg, msg);
-        }
-        let json = serde_json::to_value(Msg::Applied(Applied::default())).unwrap();
-        assert_eq!(json["op"], "applied");
-        // Every list may be left out; so may a request's secrets and ids.
-        let minimal = r#"{"op":"applied","name":"team","version":"1"}"#;
-        assert_eq!(
-            serde_json::from_str::<Msg>(minimal).unwrap(),
-            Msg::Applied(Applied {
-                name: "team".into(),
-                version: "1".into(),
-                ..Applied::default()
-            })
-        );
-        let minimal = r#"{"op":"manifest","name":"t","url":"https://e.org","sha256":"x"}"#;
-        assert!(matches!(
-            serde_json::from_str::<Msg>(minimal).unwrap(),
-            Msg::Manifest { secrets, disabled, .. } if secrets.is_empty() && disabled.is_empty()
-        ));
-    }
-
-    #[test]
-    fn merge_env_keeps_plugin_keys_the_proxy_does_not_set() {
-        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        let spawn = Msg::Spawn(SpawnSpec {
-            id: Uuid::nil(),
-            cwd: "/w".into(),
-            name: None,
-            args: vec!["--resume".into(), "c1".into()],
-            env: vec![pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "1")],
-            rows: 24,
-            cols: 80,
-            ephemeral: false,
-            extensions: None,
-        });
-        let merged = spawn
-            .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
-            .with_plugin_args(&["--agents".to_owned(), "{}".to_owned()])
-            .with_instructions("Rules.".to_owned());
-        let Msg::Spawn(spec) = merged else {
-            panic!("a spawn")
-        };
-        assert_eq!(
-            spec.env,
-            [pair("KB_TOKEN", "kb"), pair("API_TIMEOUT_MS", "30000")]
-        );
-        assert_eq!(spec.args, ["--resume", "c1", "--agents", "{}"]);
-        assert_eq!(spec.extensions.unwrap().instructions, "Rules.");
-        assert_eq!(Msg::Ping.merge_env(vec![pair("A", "b")]), Msg::Ping);
-        assert_eq!(Msg::Ping.with_instructions("x".into()), Msg::Ping);
     }
 
     #[test]
@@ -1502,6 +1020,7 @@ mod tests {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         });
         let json = serde_json::to_string(&Envelope::request(4, respawn.clone())).unwrap();
         assert!(json.contains(r#""op":"respawn""#) && json.contains(r#""fresh":true"#));
@@ -1509,17 +1028,6 @@ mod tests {
         assert_eq!(back.msg, respawn);
         let debug = format!("{respawn:?}");
         assert!(debug.contains("ANTHROPIC_AUTH_TOKEN") && !debug.contains("sekrit"));
-        assert_eq!(
-            respawn.with_env(vec![]),
-            Msg::Respawn(RespawnSpec {
-                id: Uuid::nil(),
-                fresh: true,
-                env: vec![],
-                rows: 24,
-                cols: 80,
-                extensions: None,
-            })
-        );
     }
 
     #[test]
@@ -1606,6 +1114,8 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
+            optional: vec![],
         };
         let dbg = format!("{spec:?}");
         assert!(dbg.contains("ANTHROPIC_AUTH_TOKEN"));
@@ -2202,6 +1712,8 @@ mod tests {
             cols: 1,
             ephemeral: false,
             extensions: Some(ext.clone()),
+            env_remove: None,
+            optional: vec![],
         };
         let shown = format!("{spec:?}");
         assert!(
@@ -2216,6 +1728,7 @@ mod tests {
             rows: 1,
             cols: 1,
             extensions: Some(ext),
+            env_remove: None,
         };
         assert!(!format!("{respawn:?}").contains("Keys."));
     }
@@ -2252,5 +1765,47 @@ mod tests {
             serde_json::from_str::<OldEvent>(&json),
             Ok(OldEvent::Unknown)
         ));
+    }
+
+    #[test]
+    fn addon_op_json_shape() {
+        use serde_json::json;
+        let msg = Msg::AddonOp {
+            addon: "echo".into(),
+            op: "sleep".into(),
+            body: json!({"secs": 2}),
+        };
+        let wire = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            wire,
+            json!({"op": "addon_op", "addon": "echo", "name": "sleep", "body": {"secs": 2}})
+        );
+        assert_eq!(serde_json::from_value::<Msg>(wire).unwrap(), msg);
+        // A missing body is null.
+        let bare: Msg =
+            serde_json::from_value(json!({"op": "addon_op", "addon": "a", "name": "x"})).unwrap();
+        assert_eq!(
+            bare,
+            Msg::AddonOp {
+                addon: "a".into(),
+                op: "x".into(),
+                body: serde_json::Value::Null
+            }
+        );
+        let reply = Msg::AddonReply { body: json!([1]) };
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            json!({"op": "addon_reply", "body": [1]})
+        );
+        // The cap counts the encoded body: a string's quotes too.
+        assert_eq!(addon_body_len(&json!({"a": 1})), 7);
+        let at_cap = json!("x".repeat(ADDON_BODY_MAX - 2));
+        assert_eq!(addon_body_len(&at_cap), ADDON_BODY_MAX);
+        assert_eq!(addon_body_ok(&at_cap), Ok(()));
+        let over = json!("x".repeat(ADDON_BODY_MAX - 1));
+        assert_eq!(addon_body_ok(&over), Err("body over 512 KiB".into()));
+        // A body at the cap still fits one frame.
+        let framed = Frame::Control(Envelope::request(1, Msg::AddonReply { body: at_cap }));
+        assert!(framed.encode().len() <= MAX_FRAME);
     }
 }

@@ -66,7 +66,7 @@ export const TUI_BINDINGS = [
   A('Alt+e', 'KeyE', 'restart-focused', 'restart the focused session'),
   A('Alt+a', 'KeyA', 'next-attention', 'next session that needs you'),
   A('Alt+g', 'KeyG', 'board', 'the board (overview)'),
-  A('Alt+s', 'KeyS', 'stats', 'stats drawer'),
+  A('Alt+s', 'KeyS', 'stats', 'addon panel (proxy stats)'),
   A('Alt+l', 'KeyL', 'history', 'history drawer'),
   A('Alt+u', 'KeyU', 'reader', 'reader drawer'),
   A('Alt+i', 'KeyI', 'extensions', 'extensions screen'),

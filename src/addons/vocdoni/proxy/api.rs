@@ -1,0 +1,926 @@
+//! HTTP client for the `GET /v1/claudio/*` proxy endpoints.
+//!
+//! A short 5-second timeout is used on every request. All response structs
+//! are lenient (`#[serde(default)]`) so an older proxy that omits new fields
+//! still parses without error.
+//!
+//! The client is async (reqwest) and intended to be called from tokio tasks,
+//! never blocking the UI event loop.
+
+use std::time::Duration;
+
+use reqwest::Client;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use thiserror::Error;
+
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most bytes of a proxy reply that are read (the config, the plugin
+/// list, stats, …), like a plugin manifest's cap: a larger one is refused
+/// by its `Content-Length`, or while it is read, and never parsed.
+pub const MAX_REPLY_BYTES: usize = 256 * 1024;
+
+/// The most env keys a proxy config may recommend (as a plugin's env).
+pub const MAX_CONFIG_ENV: usize = 64;
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+/// Errors returned by the proxy API client.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    /// Network or transport failure.
+    #[error("request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    /// The proxy returned an unexpected HTTP status.
+    #[error("proxy returned {0}")]
+    Http(reqwest::StatusCode),
+    /// The reply is over a cap or not the expected JSON; the reason names
+    /// no value.
+    #[error("bad reply from the proxy: {0}")]
+    Reply(String),
+}
+
+/// `resp`'s body as `T`, at most [`MAX_REPLY_BYTES`]: refused by its
+/// `Content-Length`, and while a chunked body is read, before parsing.
+pub async fn read_json<T: DeserializeOwned>(mut resp: reqwest::Response) -> Result<T, ApiError> {
+    let over = || ApiError::Reply(format!("over {} KiB", MAX_REPLY_BYTES / 1024));
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_REPLY_BYTES as u64)
+    {
+        return Err(over());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() + chunk.len() > MAX_REPLY_BYTES {
+            return Err(over());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    // serde's message may quote the reply: say where, never what.
+    serde_json::from_slice(&body).map_err(|e| {
+        ApiError::Reply(format!(
+            "not the expected JSON (line {}, column {})",
+            e.line(),
+            e.column()
+        ))
+    })
+}
+
+// ── Response types ────────────────────────────────────────────────────────────
+
+/// `GET /v1/claudio/config` — recommended env vars for spawning claude.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ConfigResponse {
+    pub version: u32,
+    pub env: std::collections::HashMap<String, String>,
+    pub models_refreshed_at: Option<String>,
+}
+
+/// `GET /v1/claudio/me/stats?period=24h`
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct StatsResponse {
+    pub version: u32,
+    pub user_name: String,
+    pub period: String,
+    pub totals: StatsTotals,
+    pub by_model: Vec<StatsModel>,
+    pub limit: Option<LimitInfo>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct StatsTotals {
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct StatsModel {
+    pub model: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct LimitInfo {
+    pub output_tokens: i64,
+    pub window_seconds: i64,
+    pub used_output_tokens: i64,
+    pub used_pct: f64,
+    pub blocked: bool,
+    pub blocked_until: Option<String>,
+}
+
+/// `GET /v1/claudio/models` — the proxy's augmented model catalogue.
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ModelsResponse {
+    pub version: u32,
+    pub data: Vec<ModelEntry>,
+    pub refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ModelEntry {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    /// `fable`, `opus`, `sonnet`, `haiku` or empty when unrecognised.
+    pub family: String,
+    /// 0 when the proxy does not know the context size.
+    pub max_input_tokens: i64,
+    /// The proxy's recommended default for this family.
+    pub recommended_default: bool,
+}
+
+/// `GET /v1/claudio/pool/health`
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct PoolHealthResponse {
+    pub version: u32,
+    pub providers: Vec<ProviderHealth>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ProviderHealth {
+    pub name: String,
+    pub status: String,
+}
+
+/// `GET /v1/claudio/session?id=<claude_session_id>` — the upstream credential
+/// the proxy last used for one conversation.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SessionCredential {
+    pub session_id: String,
+    pub credential: CredentialInfo,
+    pub bound_at: Option<String>,
+    pub last_seen: Option<String>,
+    /// When the proxy last moved the conversation to another credential.
+    pub switched_at: Option<String>,
+    pub utilization: Option<CredentialUtilization>,
+}
+
+/// How long after a switch the UI keeps saying so.
+pub const SWITCH_NOTICE_SECS: u64 = 600;
+
+impl SessionCredential {
+    /// The credential's name for display: its label, else its id; `None`
+    /// when the proxy sent neither.
+    pub fn name(&self) -> Option<&str> {
+        let c = &self.credential;
+        [c.label.as_str(), c.id.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+    }
+
+    /// The plan (`max`, `pro`…), if known.
+    pub fn plan(&self) -> Option<&str> {
+        Some(self.credential.plan.as_str()).filter(|p| !p.is_empty())
+    }
+
+    /// The 5-hour window utilization in percent, if reported.
+    pub fn five_hour_pct(&self) -> Option<f64> {
+        self.utilization.as_ref()?.five_hour_pct
+    }
+
+    /// The 7-day window utilization in percent, if reported.
+    pub fn seven_day_pct(&self) -> Option<f64> {
+        self.utilization.as_ref()?.seven_day_pct
+    }
+
+    /// Seconds since the proxy moved the conversation to this credential,
+    /// while that is recent enough (see [`SWITCH_NOTICE_SECS`]) to mention.
+    pub fn recent_switch_age(&self, now: u64) -> Option<u64> {
+        let at = crate::text::parse_rfc3339(self.switched_at.as_deref()?)?;
+        Some(now.saturating_sub(at)).filter(|age| *age < SWITCH_NOTICE_SECS)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct CredentialInfo {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub plan: String,
+}
+
+/// How much of the credential's rate-limit windows is used (0..=100).
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct CredentialUtilization {
+    pub five_hour_pct: Option<f64>,
+    pub seven_day_pct: Option<f64>,
+    pub captured_at: Option<String>,
+}
+
+/// Overall pool status derived from individual providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolStatus {
+    Ok,
+    Busy,
+    Saturated,
+    Unavailable,
+    /// Could not reach the proxy.
+    Unknown,
+}
+
+impl PoolStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PoolStatus::Ok => "ok",
+            PoolStatus::Busy => "busy",
+            PoolStatus::Saturated => "saturated",
+            PoolStatus::Unavailable => "unavailable",
+            PoolStatus::Unknown => "?",
+        }
+    }
+}
+
+impl PoolHealthResponse {
+    /// Aggregate all providers into one coarse status.
+    pub fn overall(&self) -> PoolStatus {
+        if self.providers.is_empty() {
+            return PoolStatus::Unknown;
+        }
+        let statuses: Vec<&str> = self.providers.iter().map(|p| p.status.as_str()).collect();
+        if statuses.iter().all(|s| *s == "saturated") {
+            PoolStatus::Saturated
+        } else if statuses.iter().any(|s| *s == "saturated" || *s == "busy") {
+            PoolStatus::Busy
+        } else if statuses.iter().all(|s| *s == "unavailable") {
+            PoolStatus::Unavailable
+        } else {
+            PoolStatus::Ok
+        }
+    }
+}
+
+// ── HTTP client ───────────────────────────────────────────────────────────────
+
+/// Build a reqwest Client with rustls-tls and our short timeout.
+pub fn build_client() -> Result<Client, ApiError> {
+    Ok(Client::builder().timeout(TIMEOUT).build()?)
+}
+
+/// `GET /v1/claudio` — check that the proxy speaks the Claudio API.
+/// Returns `Ok(false)` when the endpoint returns 404 (older proxy without
+/// Claudio API support). Returns `Err` on network/auth errors.
+pub async fn check_root(base_url: &str, token: &str) -> Result<bool, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().as_u16() == 404 {
+        return Ok(false);
+    }
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    Ok(true)
+}
+
+/// `GET /v1/models` — verify that a token is accepted (fallback when
+/// `/v1/claudio` is not available). Requires a 2xx response; 404 is treated
+/// as an auth failure (the endpoint is present but the token is rejected).
+pub async fn check_models_fallback(base_url: &str, token: &str) -> Result<(), ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/models"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(ApiError::Http(resp.status()))
+}
+
+/// `GET /v1/claudio/config` — fetch recommended env vars.
+/// Returns `None` when the endpoint is not available (404), allowing
+/// the caller to fall back to built-in defaults.
+pub async fn fetch_config(base_url: &str, token: &str) -> Result<Option<ConfigResponse>, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/config"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    let cfg: ConfigResponse = read_json(resp).await?;
+    if cfg.env.len() > MAX_CONFIG_ENV {
+        return Err(ApiError::Reply(format!(
+            "more than {MAX_CONFIG_ENV} env keys"
+        )));
+    }
+    Ok(Some(cfg))
+}
+
+/// `GET /v1/claudio/me/stats?period=<period>` — per-user statistics.
+pub async fn fetch_stats(
+    base_url: &str,
+    token: &str,
+    period: &str,
+) -> Result<StatsResponse, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/me/stats"))
+        .query(&[("period", period)])
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    read_json(resp).await
+}
+
+/// `GET /v1/claudio/pool/health` — pool availability.
+pub async fn fetch_pool_health(
+    base_url: &str,
+    token: &str,
+) -> Result<PoolHealthResponse, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/pool/health"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    read_json(resp).await
+}
+
+/// `GET /v1/claudio/models` — the augmented model catalogue.
+pub async fn fetch_models(base_url: &str, token: &str) -> Result<ModelsResponse, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/models"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    read_json(resp).await
+}
+
+/// `GET /v1/claudio/session?id=<claude_session_id>` — the credential the proxy
+/// last used for a conversation. `Ok(None)` for 404: unknown yet, another
+/// user's session, a deleted credential, or a proxy without the endpoint.
+pub async fn fetch_session(
+    base_url: &str,
+    token: &str,
+    claude_session_id: &str,
+) -> Result<Option<SessionCredential>, ApiError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{base_url}/v1/claudio/session"))
+        .query(&[("id", claude_session_id)])
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(ApiError::Http(resp.status()));
+    }
+    Ok(Some(read_json(resp).await?))
+}
+
+/// One side of a switch: the credential a session leaves or moves to.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SwitchCredential {
+    pub id: String,
+    pub label: String,
+    pub provider: String,
+    pub plan: String,
+}
+
+impl SwitchCredential {
+    /// The label for display, else the id; `None` when neither was sent.
+    pub fn name(&self) -> Option<&str> {
+        [self.label.as_str(), self.id.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+    }
+}
+
+/// `202` body of `POST /v1/claudio/session/switch`.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SwitchOutcome {
+    pub session_id: String,
+    pub from: SwitchCredential,
+    /// `None` when the proxy has not chosen the target yet.
+    pub to: Option<SwitchCredential>,
+    pub state: String,
+}
+
+/// Why a switch was not scheduled.
+#[derive(Debug, Error)]
+pub enum SwitchError {
+    /// 404: the proxy does not know the session (yet), or it is not yours.
+    #[error("the proxy does not know this session yet — send a message first")]
+    UnknownSession,
+    /// 409: no other subscription to move to; the proxy's reason.
+    #[error("{0}")]
+    NoAlternative(String),
+    /// A proxy without the switch route (it answers 404 or 405 and does not
+    /// list the `session_switch` capability).
+    #[error("proxy too old for switching")]
+    TooOld,
+    #[error("{0}")]
+    Api(#[from] ApiError),
+}
+
+/// `POST /v1/claudio/session/switch` — ask the proxy to move a conversation
+/// to its next subscription. It takes effect on the session's next request.
+pub async fn switch_session(
+    base_url: &str,
+    token: &str,
+    claude_session_id: &str,
+) -> Result<SwitchOutcome, SwitchError> {
+    let client = build_client()?;
+    let resp = client
+        .post(format!("{base_url}/v1/claudio/session/switch"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "id": claude_session_id }))
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    match resp.status().as_u16() {
+        // An older proxy answers its unknown routes with 404 too.
+        404 if !has_capability(&client, base_url, token, "session_switch").await => {
+            Err(SwitchError::TooOld)
+        }
+        404 => Err(SwitchError::UnknownSession),
+        409 => {
+            let body: serde_json::Value = read_json(resp).await.unwrap_or_default();
+            let reason = body["error"]["message"]
+                .as_str()
+                .map(|m| m.trim_start_matches("claudio: ").to_owned())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "no other subscription available".to_owned());
+            Err(SwitchError::NoAlternative(reason))
+        }
+        405 => Err(SwitchError::TooOld),
+        _ if resp.status().is_success() => Ok(read_json(resp).await?),
+        _ => Err(ApiError::Http(resp.status()).into()),
+    }
+}
+
+/// Whether the proxy's `/v1/claudio` discovery lists `capability`. Any
+/// failure counts as "no".
+async fn has_capability(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    capability: &str,
+) -> bool {
+    #[derive(Deserialize)]
+    struct Discovery {
+        #[serde(default)]
+        capabilities: Vec<String>,
+    }
+    let Ok(resp) = client
+        .get(format!("{base_url}/v1/claudio"))
+        .bearer_auth(token)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    match resp.error_for_status() {
+        Ok(resp) => read_json::<Discovery>(resp)
+            .await
+            .is_ok_and(|d| d.capabilities.iter().any(|c| c == capability)),
+        Err(_) => false,
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    /// Spin up a local axum server serving the given router. Returns the base URL.
+    async fn serve(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn fetch_config_200() {
+        let router = Router::new().route(
+            "/v1/claudio/config",
+            get(|| async {
+                Json(serde_json::json!({
+                    "version": 1,
+                    "env": {
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5[1m]",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "claude-haiku-5-5[1m]"
+                    }
+                }))
+            }),
+        );
+        let base = serve(router).await;
+        let cfg = fetch_config(&base, "tok").await.unwrap().unwrap();
+        assert_eq!(
+            cfg.env
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .map(String::as_str),
+            Some("claude-sonnet-5-5[1m]")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_config_404_returns_none() {
+        // No route registered → axum returns 404.
+        let router = Router::new();
+        let base = serve(router).await;
+        let result = fetch_config(&base, "tok").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_config_timeout() {
+        // Bind a port, then close the listener — any connection attempt will
+        // get ECONNREFUSED immediately (faster than a real timeout test).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let result = fetch_config(&base, "tok").await;
+        assert!(result.is_err(), "should fail on connection refused");
+    }
+
+    #[tokio::test]
+    async fn pool_health_overall_status() {
+        let ok = PoolHealthResponse {
+            version: 1,
+            providers: vec![
+                ProviderHealth {
+                    name: "anthropic".into(),
+                    status: "ok".into(),
+                },
+                ProviderHealth {
+                    name: "google".into(),
+                    status: "ok".into(),
+                },
+            ],
+        };
+        assert_eq!(ok.overall(), PoolStatus::Ok);
+
+        let busy = PoolHealthResponse {
+            version: 1,
+            providers: vec![
+                ProviderHealth {
+                    name: "anthropic".into(),
+                    status: "busy".into(),
+                },
+                ProviderHealth {
+                    name: "google".into(),
+                    status: "ok".into(),
+                },
+            ],
+        };
+        assert_eq!(busy.overall(), PoolStatus::Busy);
+
+        let saturated = PoolHealthResponse {
+            version: 1,
+            providers: vec![ProviderHealth {
+                name: "anthropic".into(),
+                status: "saturated".into(),
+            }],
+        };
+        assert_eq!(saturated.overall(), PoolStatus::Saturated);
+    }
+
+    /// check_models_fallback must NOT accept 404 as success.
+    #[tokio::test]
+    async fn check_models_fallback_404_is_failure() {
+        // No routes → 404 for /v1/models.
+        let router = Router::new();
+        let base = serve(router).await;
+        let result = check_models_fallback(&base, "tok").await;
+        assert!(
+            result.is_err(),
+            "404 from /v1/models must not count as auth success"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_models_200() {
+        let router = Router::new().route(
+            "/v1/claudio/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "version": 1,
+                    "refreshed_at": "2026-10-09T10:00:00Z",
+                    "data": [
+                        {"id": "claude-opus-5-5[1m]", "display_name": "Claude Opus 5.5",
+                         "provider": "anthropic", "family": "opus",
+                         "max_input_tokens": 1000000, "recommended_default": true},
+                        // An older proxy may omit optional fields entirely.
+                        {"id": "claude-glm-5", "provider": "glm", "recommended_default": false}
+                    ]
+                }))
+            }),
+        );
+        let base = serve(router).await;
+        let models = fetch_models(&base, "tok").await.unwrap();
+        assert_eq!(models.refreshed_at.as_deref(), Some("2026-10-09T10:00:00Z"));
+        assert_eq!(models.data.len(), 2);
+        assert_eq!(models.data[0].family, "opus");
+        assert_eq!(models.data[0].max_input_tokens, 1_000_000);
+        assert!(models.data[0].recommended_default);
+        assert_eq!(models.data[1].family, "");
+        assert_eq!(models.data[1].max_input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_403_is_error() {
+        let router = Router::new().route(
+            "/v1/claudio/models",
+            get(|| async { (axum::http::StatusCode::FORBIDDEN, "nope") }),
+        );
+        let base = serve(router).await;
+        assert!(matches!(
+            fetch_models(&base, "tok").await,
+            Err(ApiError::Http(s)) if s.as_u16() == 403
+        ));
+    }
+
+    /// An old proxy that omits `limit`, `errors` and `by_model` still parses.
+    #[test]
+    fn stats_parses_with_missing_fields() {
+        let s: StatsResponse = serde_json::from_str(
+            r#"{"version":1,"user_name":"pau","period":"24h",
+                "totals":{"requests":12,"input_tokens":100,"output_tokens":50}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.totals.requests, 12);
+        assert_eq!(s.totals.errors, 0);
+        assert_eq!(s.totals.cache_read, 0);
+        assert!(s.by_model.is_empty());
+        assert!(s.limit.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_models_fallback_200_is_success() {
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"models": []})) }),
+        );
+        let base = serve(router).await;
+        assert!(check_models_fallback(&base, "tok").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fetch_session_200_full() {
+        use axum::extract::Query;
+        use axum::http::HeaderMap;
+        let router = Router::new().route(
+            "/v1/claudio/session",
+            get(
+                |Query(q): Query<std::collections::HashMap<String, String>>, h: HeaderMap| async move {
+                    // The id and the bearer token must reach the proxy.
+                    assert_eq!(q.get("id").map(String::as_str), Some("0a1b"));
+                    assert_eq!(h["authorization"], "Bearer tok");
+                    Json(serde_json::json!({
+                        "session_id": "0a1b",
+                        "credential": {"id": "cred_ab12", "label": "work-max",
+                                       "provider": "anthropic", "plan": "max"},
+                        "bound_at": "2026-10-09T10:00:00Z",
+                        "last_seen": "2026-10-09T10:12:31Z",
+                        "switched_at": "2026-10-09T10:07:02Z",
+                        "utilization": {"five_hour_pct": 37.5, "seven_day_pct": 12,
+                                        "captured_at": "2026-10-09T10:11:00Z"}
+                    }))
+                },
+            ),
+        );
+        let base = serve(router).await;
+        let s = fetch_session(&base, "tok", "0a1b").await.unwrap().unwrap();
+        assert_eq!(s.credential.label, "work-max");
+        assert_eq!(s.credential.plan, "max");
+        assert_eq!(s.switched_at.as_deref(), Some("2026-10-09T10:07:02Z"));
+        let u = s.utilization.unwrap();
+        assert_eq!(u.five_hour_pct, Some(37.5));
+        assert_eq!(u.seven_day_pct, Some(12.0));
+    }
+
+    #[tokio::test]
+    async fn fetch_session_200_minimal() {
+        let router = Router::new().route(
+            "/v1/claudio/session",
+            get(|| async {
+                Json(serde_json::json!({
+                    "session_id": "0a1b",
+                    "credential": {"id": "cred_1", "label": "personal"}
+                }))
+            }),
+        );
+        let base = serve(router).await;
+        let s = fetch_session(&base, "tok", "0a1b").await.unwrap().unwrap();
+        assert_eq!(s.credential.label, "personal");
+        assert_eq!(s.credential.plan, "");
+        assert!(s.switched_at.is_none());
+        assert!(s.utilization.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_session_404_is_none() {
+        let base = serve(Router::new()).await;
+        assert_eq!(fetch_session(&base, "tok", "0a1b").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_session_429_and_401_are_errors() {
+        for code in [429u16, 401] {
+            let router = Router::new().route(
+                "/v1/claudio/session",
+                get(move || async move { (axum::http::StatusCode::from_u16(code).unwrap(), "no") }),
+            );
+            let base = serve(router).await;
+            assert!(matches!(
+                fetch_session(&base, "tok", "x").await,
+                Err(ApiError::Http(s)) if s.as_u16() == code
+            ));
+        }
+    }
+
+    fn switch_router(code: u16, body: serde_json::Value) -> Router {
+        use axum::routing::post;
+        Router::new().route(
+            "/v1/claudio/session/switch",
+            post(
+                move |h: axum::http::HeaderMap, Json(req): Json<serde_json::Value>| async move {
+                    assert_eq!(h["authorization"], "Bearer tok");
+                    assert_eq!(req, serde_json::json!({"id": "0a1b"}));
+                    (axum::http::StatusCode::from_u16(code).unwrap(), Json(body))
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn switch_session_202_full() {
+        let base = serve(switch_router(
+            202,
+            serde_json::json!({
+                "session_id": "0a1b",
+                "from": {"id": "c1", "label": "work-max", "provider": "anthropic", "plan": "max"},
+                "to": {"id": "c2", "label": "personal", "provider": "anthropic", "plan": "pro"},
+                "state": "pending"
+            }),
+        ))
+        .await;
+        let o = switch_session(&base, "tok", "0a1b").await.unwrap();
+        assert_eq!(o.from.name(), Some("work-max"));
+        assert_eq!(o.to.unwrap().name(), Some("personal"));
+        assert_eq!(o.state, "pending");
+    }
+
+    #[tokio::test]
+    async fn switch_session_202_to_null() {
+        let base = serve(switch_router(
+            202,
+            serde_json::json!({"session_id": "0a1b", "from": {"id": "c1"},
+                               "to": null, "state": "pending"}),
+        ))
+        .await;
+        let o = switch_session(&base, "tok", "0a1b").await.unwrap();
+        assert_eq!(o.from.name(), Some("c1"));
+        assert!(o.to.is_none());
+    }
+
+    /// `switch_router` plus the `/v1/claudio` discovery, listing `capabilities`.
+    fn switch_router_with(code: u16, body: serde_json::Value, capabilities: &[&str]) -> Router {
+        let discovery = serde_json::json!({"version": "1", "capabilities": capabilities});
+        switch_router(code, body).route("/v1/claudio", get(move || async move { Json(discovery) }))
+    }
+
+    #[tokio::test]
+    async fn switch_session_error_statuses() {
+        let e = |code| async move {
+            let base = serve(switch_router_with(
+                code,
+                serde_json::json!({"error": {"type": "x"}}),
+                &["session", "session_switch"],
+            ))
+            .await;
+            switch_session(&base, "tok", "0a1b").await.unwrap_err()
+        };
+        assert!(matches!(e(404).await, SwitchError::UnknownSession));
+        assert!(
+            matches!(e(409).await, SwitchError::NoAlternative(r) if r == "no other subscription available")
+        );
+        assert!(matches!(e(405).await, SwitchError::TooOld));
+        for code in [400u16, 401, 429] {
+            assert!(matches!(
+                e(code).await,
+                SwitchError::Api(ApiError::Http(s)) if s.as_u16() == code
+            ));
+        }
+    }
+
+    /// A proxy without the route answers 404 like an unknown session; its
+    /// discovery (missing `session_switch`) tells them apart.
+    #[tokio::test]
+    async fn switch_session_404_from_an_older_proxy_is_too_old() {
+        let not_found = serde_json::json!({"error": {"type": "not_found"}});
+        let base = serve(switch_router_with(404, not_found.clone(), &["session"])).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert!(matches!(err, SwitchError::TooOld), "{err:?}");
+        // No discovery at all: also too old.
+        let base = serve(switch_router(404, not_found)).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert!(matches!(err, SwitchError::TooOld), "{err:?}");
+    }
+
+    /// The proxy's reason for a 409 is shown, without its `claudio: ` prefix.
+    #[tokio::test]
+    async fn switch_session_409_carries_the_reason() {
+        let body = serde_json::json!({"type": "error", "error": {"type": "no_alternative",
+            "message": "claudio: this session uses account-scoped resources and must keep its credential"}});
+        let base = serve(switch_router_with(409, body, &["session_switch"])).await;
+        let err = switch_session(&base, "tok", "0a1b").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "this session uses account-scoped resources and must keep its credential"
+        );
+    }
+
+    /// R21: a config reply over 256 KiB is refused, never parsed: by its
+    /// `Content-Length` at once, and while reading a chunked one.
+    #[tokio::test]
+    async fn fetch_config_refuses_a_reply_over_its_cap() {
+        use crate::addons::vocdoni::test_support::{padded_json, serve_chunked, serve_declaring};
+        const CAP: usize = 256 * 1024;
+        let started = std::time::Instant::now();
+        let err = fetch_config(&serve_declaring(CAP + 1).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "it waited");
+        let body = padded_json(r#""version":1,"env":{"A":"b"},"#, CAP + 1);
+        let err = fetch_config(&serve_chunked(body).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("over 256 KiB"), "{err}");
+        // At the cap it is read.
+        let body = padded_json(r#""version":1,"env":{"A":"b"},"#, CAP);
+        let cfg = fetch_config(&serve_chunked(body).await, "tok").await;
+        assert_eq!(cfg.unwrap().unwrap().env["A"], "b");
+    }
+
+    /// R21: a config with more env keys than a session takes is refused.
+    #[tokio::test]
+    async fn fetch_config_refuses_too_many_env_keys() {
+        use crate::addons::vocdoni::test_support::serve_chunked;
+        let env: Vec<String> = (0..65).map(|i| format!("\"K{i}\":\"v\"")).collect();
+        let body = format!("{{\"version\":1,\"env\":{{{}}}}}", env.join(","));
+        let err = fetch_config(&serve_chunked(body).await, "tok")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("more than 64 env keys"), "{err}");
+    }
+}

@@ -17,6 +17,7 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -43,7 +44,7 @@ const INSTALLER: &str = "{ curl -fsSL https://claude.ai/install.sh | bash; } 2>&
 /// Run the update (or the install) and answer `ClaudeUpdated`. Only one runs
 /// at a time per daemon, and never beside a plugin install (which waits
 /// for the same lock).
-pub async fn run(daemon: &Daemon, install: bool) -> Msg {
+pub async fn run(daemon: &Arc<Daemon>, install: bool) -> Msg {
     if install {
         let path = daemon
             .config
@@ -84,8 +85,9 @@ pub async fn run(daemon: &Daemon, install: bool) -> Msg {
     };
     let version = daemon.refresh_host().await.claude.map(|c| c.version);
     if install && ok && version.is_some() {
-        // Plugin installs that failed for want of claude go at once.
-        daemon.manifests.forget_failures();
+        // Every daemon-side addon hears it (plugin installs that failed
+        // for want of claude go at once).
+        super::addon_ops::claude_installed(daemon);
     }
     Msg::ClaudeUpdated { version, ok, tail }
 }

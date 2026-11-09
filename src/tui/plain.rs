@@ -43,40 +43,34 @@ impl Exit {
 }
 
 impl App {
-    /// Start the plain UI's session on the local daemon, with the proxy
-    /// profile the startup choice picks (like the wizard's default). The app
-    /// is one made in [`Mode::Plain`].
-    ///
-    /// With a proxy profile whose enabled plugins include one never set up
-    /// (no `[plugins.<name>]`), the start waits until each such manifest
-    /// has arrived or failed (at most 20 s) and every setup screen they
-    /// open has closed (`plugin_setup.rs`).
+    /// Start the plain UI's session on the local daemon, routed as the
+    /// run's launch flags ask (the addons' default without any). The app
+    /// is one made in [`Mode::Plain`]. Without claude on this machine the
+    /// start waits for its install (or the question).
     pub fn start_plain(&mut self, start: PlainStart) {
         debug_assert_eq!(self.mode, Mode::Plain);
-        let proxy = self
-            .proxy_override
-            .pick(self.proxy_default.as_deref())
-            .map(str::to_owned);
-        let deadline = self.now + super::MANIFEST_WAIT.as_secs();
-        self.plain_pending = Some((start, proxy, deadline));
+        self.plain_pending = Some(start);
         self.plain_try_start();
     }
 
-    /// Start the plain UI's session now, with `proxy`.
-    pub(super) fn start_plain_now(&mut self, start: PlainStart, proxy: Option<String>) {
-        let PlainStart { id, args, cwd } = start;
-        let started = self.start(
+    /// Start `--plain`'s held session once claude's install no longer holds it.
+    pub(super) fn plain_try_start(&mut self) {
+        if self.mode != Mode::Plain || self.claude_install_pending("local") {
+            return;
+        }
+        let Some(PlainStart { id, args, cwd }) = self.plain_pending.take() else {
+            return;
+        };
+        let select = self.launch_default.clone();
+        self.start(
             id,
             "local".to_owned(),
             cwd,
             SessionKind::Claude,
             args,
-            proxy,
+            select,
             0,
         );
-        if let Err(e) = started {
-            self.plain_failed(format!("cannot start claude: {e}"));
-        }
     }
 
     /// The plain UI cannot go on: leave with a failure and say why.
@@ -128,9 +122,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::{LaunchOp, LaunchSelect};
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
-    use crate::proxy::ProxyChoice;
     use crate::tui::app::{AppConfig, Effect, ReplyTo};
     use crate::tui::interaction::Modal;
     use crate::tui::keymap::Keymap;
@@ -140,13 +134,18 @@ mod tests {
     use ratatui::Terminal;
     use uuid::Uuid;
 
+    /// The registered addons' panel keys (the test addon's Alt+s).
+    fn proxy_key() -> Vec<crate::tui::keymap::PanelBinding> {
+        crate::tui::panel_view::panel_bindings(&test_support::addons())
+    }
+
     fn plain_app(args: &[&str]) -> (App, SessionId) {
         let mut notices = Vec::new();
         let mut app = App::new(AppConfig {
             mode: Mode::Plain,
-            keymap: Keymap::build_plain(&Default::default(), &mut notices),
+            keymap: Keymap::build_plain(&Default::default(), &mut notices, &proxy_key()),
             notify: false,
-            proxy_override: ProxyChoice::Direct,
+            launch_default: LaunchSelect::of(None),
             ..test_support::config()
         });
         let id = Uuid::new_v4();
@@ -181,23 +180,24 @@ mod tests {
     fn spawns_one_local_session_in_the_cwd_with_the_given_args() {
         let (mut app, id) = plain_app(&["--resume", "abc"]);
         let effects = app.take_effects();
+        // A direct session goes through the launch composer.
         let spawn = effects.iter().find_map(|e| match e {
-            Effect::Request {
-                host,
-                msg: Msg::Spawn(spec),
-                to,
-            } => Some((host, spec, to)),
+            Effect::Launch(call) => match &call.base {
+                Msg::Spawn(spec) => Some((call, spec)),
+                _ => None,
+            },
             _ => None,
         });
-        let (host, spec, to) = spawn.expect("a Spawn request");
-        assert_eq!(host, "local");
+        let (call, spec) = spawn.expect("a launch of a Spawn");
+        assert_eq!(call.host, "local");
+        assert_eq!((call.op, call.sid), (LaunchOp::Resume, id));
+        assert_eq!(call.select, LaunchSelect::of(None), "direct");
         assert_eq!((spec.id, spec.cwd.as_str()), (id, "/work"));
         assert_eq!(spec.args, ["--resume", "abc"]);
         assert!(spec.env.is_empty(), "no proxy, no env");
         assert!(spec.ephemeral, "not a session for a manager to show");
         // The pane is the whole screen.
         assert_eq!((spec.rows, spec.cols), (30, 100));
-        assert_eq!(*to, ReplyTo::Spawned(id));
         assert_eq!(app.sessions.len(), 1);
         assert!(app.modal.is_none(), "no wizard");
     }
@@ -213,9 +213,9 @@ mod tests {
             let mut notices = Vec::new();
             let mut app = App::new(AppConfig {
                 mode: Mode::Plain,
-                keymap: Keymap::build_plain(&Default::default(), &mut notices),
+                keymap: Keymap::build_plain(&Default::default(), &mut notices, &proxy_key()),
                 notify: false,
-                proxy_override: ProxyChoice::Direct,
+                launch_default: LaunchSelect::of(None),
                 ..test_support::config()
             });
             app.claude_policy.install = install;
@@ -228,18 +228,9 @@ mod tests {
             app
         };
         let spawns = |app: &mut App| {
-            app.take_effects()
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e,
-                        Effect::Request {
-                            msg: Msg::Spawn(_),
-                            ..
-                        }
-                    )
-                })
-                .count()
+            let effects = app.take_effects();
+            let msgs = test_support::messages(&effects);
+            msgs.iter().filter(|m| matches!(m, Msg::Spawn(_))).count()
         };
         let reply = |app: &mut App, ok: bool, tail: &str| {
             let msg = Msg::ClaudeUpdated {
@@ -311,7 +302,9 @@ mod tests {
     #[test]
     fn manager_keys_go_to_claude_and_only_the_plain_keys_act() {
         let (mut app, id) = plain_app(&[]);
-        app.take_effects();
+        // The session runs: its launch ended.
+        let launched = app.take_effects();
+        test_support::finish_launches(&mut app, &launched);
         for c in ['n', 'x', 'r', 'g', 'c', 'a', 'q'] {
             app.on_terminal(alt(c));
             let effects = app.take_effects();
@@ -447,7 +440,9 @@ mod tests {
     #[test]
     fn foreign_sessions_never_appear() {
         let (mut app, _) = plain_app(&[]);
-        app.take_effects();
+        // The session runs: its launch ended.
+        let launched = app.take_effects();
+        test_support::finish_launches(&mut app, &launched);
         let other = test_support::info(Some(1), None);
         event(
             &mut app,

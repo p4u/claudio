@@ -11,6 +11,8 @@ import { toast } from './toasts.js';
 import { narrow } from './narrow.js';
 import { openCompose } from './composer.js';
 import { maximized, toggleMaximize } from './maximize.js';
+import { addonDecls, loadAddonDecls } from './panel.js';
+import { optionsByGroup, groupChoices, selectFrom } from '../launch.js';
 
 // Monoline icons (stroke = currentColor, 1.5 wide), like the rest of the header's glyphs.
 const svg = (d) => html`<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" aria-hidden="true"><path d=${d} /></svg>`;
@@ -114,8 +116,9 @@ export async function killSession(s) {
 
 export const chooser = signal(null); // {s, fresh}
 
-async function respawn(s, fresh, proxy) {
-  const args = { sid: s.id, fresh, ...sizeOf(s.id), ...(proxy ? { proxy } : {}) };
+// A respawn names its `launch` (LaunchSelect) only when the server did not know the session's.
+async function respawn(s, fresh, launch) {
+  const args = { sid: s.id, fresh, ...sizeOf(s.id), ...(launch ? { launch } : {}) };
   try {
     const { sid } = await reqQuiet('session.respawn', args);
     chooser.value = null;
@@ -124,7 +127,7 @@ async function respawn(s, fresh, proxy) {
       saveLayout({ ...lay, panes: lay.panes.map((p) => (p === s.id ? sid : p)) });
     }
   } catch (e) {
-    if (e.message === 'proxy unknown') chooser.value = { s, fresh };
+    if (e.message === 'launch unknown') { loadAddonDecls(); chooser.value = { s, fresh }; }
     else toast({ text: `restart: ${e.message}`, level: 'error' });
   }
 }
@@ -153,26 +156,22 @@ export async function openTerminalTab(s) {
   } catch { /* req already told the person */ }
 }
 
+// The launch options to restart a session whose launch the server does not know (default first).
 function ProxyChooser() {
   const c = chooser.value;
   const [choice, setChoice] = useState('default');
   if (!c) return null;
-  const names = model.value.profiles.names;
-  const def = model.value.profiles.default;
-  const go = () => {
-    const proxy = choice === 'default' ? { kind: 'default' } : choice === 'direct' ? { kind: 'direct' } : { kind: 'profile', name: choice.slice(8) };
-    respawn(c.s, c.fresh, proxy);
-  };
-  return html`<${Dialog} title="Which proxy?" testid="proxy-chooser" onClose=${() => { chooser.value = null; }}>
-    <p class="dialog-body">claudio does not know how ${c.s.label} was started. Pick the proxy it should use.</p>
+  const decls = addonDecls.value;
+  const groups = optionsByGroup(decls);
+  const choices = groupChoices({ options: groups.flatMap((g) => g.options.map((o) => ({ ...o, label: groups.length > 1 ? `${g.group}: ${o.label}` : o.label }))) }, decls);
+  return html`<${Dialog} title="How should it start?" testid="proxy-chooser" onClose=${() => { chooser.value = null; }}>
+    <p class="dialog-body">claudio does not know how ${c.s.label} was started. Pick the launch option it should use.</p>
     <select class="select" data-testid="proxy-choice" data-autofocus value=${choice} onChange=${(e) => setChoice(e.target.value)}>
-      <option value="default" selected=${choice === 'default'}>${def ? `Default (${def})` : 'Default (direct)'}</option>
-      <option value="direct" selected=${choice === 'direct'}>Direct, no proxy</option>
-      ${names.map((n) => html`<option value=${`profile:${n}`} selected=${choice === `profile:${n}`}>${n}</option>`)}
+      ${choices.map((o) => html`<option value=${o.value} selected=${choice === o.value}>${o.label}</option>`)}
     </select>
     <div class="dialog-actions">
       <button class="btn" data-testid="confirm-no" onClick=${() => { chooser.value = null; }}>Cancel</button>
-      <button class="btn btn-primary" data-testid="confirm-yes" onClick=${go}>Restart</button>
+      <button class="btn btn-primary" data-testid="confirm-yes" onClick=${() => respawn(c.s, c.fresh, selectFrom(choice))}>Restart</button>
     </div>
   <//>`;
 }

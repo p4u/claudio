@@ -1,48 +1,26 @@
-// New-session wizard, pure part. Imports only the fuzzy matcher.
+// New-session wizard, pure part. Imports only the fuzzy matcher and the launch options.
 import { filter } from './fuzzy.js';
+import { flagsAllowed, selectFrom } from './launch.js';
 
-export function initialWizard({ hosts, profiles, recent, focusedHost, kind = 'claude', cwd = '', resume = null }) {
+// `decls`: the addons' declarations (addons.list), for the launch options and flags.
+export function initialWizard({ hosts, decls = [], recent, focusedHost, kind = 'claude', cwd = '', resume = null }) {
   const names = [...hosts];
   const host = names.includes(focusedHost) ? focusedHost : (names.includes('local') ? 'local' : names[0] ?? 'local');
-  return { hosts: names, host, kind, cwd, resume, proxy: 'default', firstParty: false, name: '', prompt: '', skip: [], recent: recent ?? [], profiles };
+  return { hosts: names, host, kind, cwd, resume, launch: 'default', flags: [], name: '', prompt: '', recent: recent ?? [], decls };
 }
 
-export function proxyOptions(profiles) {
-  return [
-    { value: 'default', label: `default (${profiles.default ?? 'direct'})` },
-    { value: 'direct', label: 'direct (no proxy)' },
-    ...(profiles.names ?? []).map((n) => ({ value: `profile:${n}`, label: n })),
-  ];
-}
-
-export function proxyArg(value) {
-  if (value === 'direct') return { kind: 'direct' };
-  if (typeof value === 'string' && value.startsWith('profile:')) return { kind: 'profile', name: value.slice(8) };
-  return { kind: 'default' };
-}
-
-// The profile a choice resolves to, or null for direct.
-export function resolvedProfile(value, profiles) {
-  const a = proxyArg(value);
-  if (a.kind === 'profile') return a.name;
-  if (a.kind === 'default') return profiles.default ?? null;
-  return null;
-}
-
-export function firstPartyAllowed(value, profiles) {
-  return resolvedProfile(value, profiles) !== null;
-}
-
-export function spawnRequest(state, size) {
+// The request that starts what the wizard holds. `defer`: the checklists a review put off for
+// this launch ([{addon, id}], docs/web-protocol.md §5 "Review").
+export function spawnRequest(state, size, defer = []) {
   const base = { host: state.host, cwd: state.cwd, rows: size.rows, cols: size.cols };
   const name = String(state.name ?? '').trim();
   if (state.kind === 'shell') return { op: 'session.shell', args: { ...base, ...(name ? { name } : {}) } };
-  const args = { ...base, proxy: proxyArg(state.proxy) };
-  if (state.firstParty && firstPartyAllowed(state.proxy, state.profiles ?? { names: [], default: null })) args.first_party = true;
+  const flags = flagsAllowed(state.launch, state.decls ?? []) ? state.flags ?? [] : [];
+  const args = { ...base, launch: selectFrom(state.launch, flags) };
+  if (defer.length) args.defer = defer.map((d) => ({ addon: d.addon, id: d.id }));
   if (state.resume) args.resume = state.resume;
   if (name) args.name = name;
   if (state.prompt && state.prompt.trim() !== '') args.prompt = state.prompt;
-  if (state.skip?.length) args.skip_plugins = [...state.skip];
   return { op: 'session.spawn', args };
 }
 

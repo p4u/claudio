@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`claudio` is a session manager TUI and drop-in wrapper for the `claude` CLI. It has four modes, chosen in `src/main.rs`:
+`claudio` is a session manager TUI and drop-in wrapper for the `claude` CLI: a generic core
+plus addons built into the same binary (the web UI, the API, the Vocdoni proxy client; see
+"Core and addons" below). It has four modes; `src/main.rs` only routes argv to the core's
+words or an addon's (`Addons::relay`, the core words, `Addons::dispatch`, `--help`,
+passthrough):
 
 - **No arguments (bare `claudio`)**: it opens the **session manager** TUI — a terminal multiplexer for many Claude Code sessions, local and over SSH.
 - **No `-p`/`--print`**: it `exec`s the real `claude` unchanged (passthrough).
-- **`-p`**: it emulates print mode by driving the *interactive* TUI under a PTY. It types the prompt, waits for the `Stop` hook, then reads the answer and real token usage from the session JSONL.
-- **`--api`**: it serves an OpenAI-compatible server (axum) on the same PTY backend, using a pool of persistent interactive sessions.
+- **`-p`** (the API addon): it emulates print mode by driving the *interactive* TUI under a PTY. It types the prompt, waits for the `Stop` hook, then reads the answer and real token usage from the session JSONL.
+- **`--api`** (the API addon): it serves an OpenAI-compatible server (axum) on the same PTY backend, using a pool of persistent interactive sessions.
 
 **claudio never invokes `claude -p`.** Every path goes through the interactive TUI. Don't install the binary *as* `claude`, because it has to find the real one on `PATH` (or `$CLAUDIO_CLAUDE_PATH`).
 
@@ -93,6 +97,59 @@ claude), so it never touches your own daemon or `~/.claude`. Needs Chromium in
 
 ## Architecture
 
+### Core and addons
+
+The core (everything outside `src/addons/`) wraps claude: the manager, `--plain`, the
+daemon, SSH hosts, the installer, the passthrough. Addons add the rest through one API.
+`docs/addons.md` is that API; `docs/daemon-protocol.md` is the daemon protocol (addon ops,
+`env_remove`, `optional`, `Welcome.features`); `docs/web-protocol.md` (v2) is the page's.
+
+**`addon/`** — the addon API: `mod.rs` (`Addon` and its capabilities, `Commands`,
+`AddonCtx`, `AddonEvent`, `AddonError`, `name_ok`), `launch.rs` (`Launch`, `LaunchSelect`,
+`LaunchChoice`, `LaunchPart` with a C1 `Debug`, `Routing`, `LegacyChoice`), `ui.rs`
+(`Ui`, segments, panels, checklists, extension rows, notices), `daemon.rs` (`DaemonOps`,
+`DaemonCtx`, `ClaudeFlags`), `clean.rs` (the C2 sanitising and caps every addon string
+goes through before a front-end sees it, applied by the runtime), `registry.rs` (`Addons`:
+the immutable registry, its refusals — reserved words, core sections, shared flags or
+panel keys — and `relay`/`dispatch`/`help`), `test_support.rs` (`TestAddon`, cfg(test)).
+
+**`addons/`** — the addons this build registers (`mod.rs`: `all()`, in registry order
+vocdoni, web, api; the API addon parses whatever argv is left, so it is last):
+- `api/` — `Commands` only: the print relays (`is_relay`), `-p`/`--print` and `--api`
+  (decided by `cli::parse`), `--help`'s `HELP_APPENDIX`. `print/`, `api/`, `cli.rs`,
+  `msglog.rs` as described under "Print-mode pipeline" and "API server" below.
+- `web/` — `claudio web` (below), plus `addon.rs` (`WebAddon`: `Commands` for `web …`;
+  `Launch` gives every session the `latex` and `mermaid` lenses while `[extensions]
+  latex`/`diagram` are on (`[claude] latex = false` is the alias the runtime maps); `Ui`
+  lists those two rows; `DIAGRAM_CONTEXT`).
+- `vocdoni/` — the claude-proxy client and the team plugins: `mod.rs` (`Vocdoni`, `NAME`,
+  `DEFAULT_URL`, `Commands` for `vocdoni …` and its alias `proxy …`), `cmd.rs`
+  (`login|status|use|logout`), `proxy/` (`profile.rs` `[proxy]` profiles and
+  `CLAUDIO_PROXY_URL`, `resolve.rs`, `env.rs` the session env and `env_diff`, `login.rs`
+  the browser sign-in, `plugins.rs` `GET /v1/claudio/plugins`, `admit`, the `plugins.json`
+  cache, `test_http_ok`, `api.rs` the HTTP client (`read_json` ≤ 256 KiB), `stats.rs` the
+  stats `Window`), `plugins/` (`manifest.rs` the one manifest parser, `names.rs`,
+  `choices.rs` `[plugins.<name>]`, `state.rs` the plugin state's types and `plugins_part`,
+  a launch's plugin share), `state/` (the one plugin state machine and proxy cache, pure),
+  `runner.rs` (its I/O on the runtime: lists every 15 min, manifests, `vocdoni/apply`
+  re-asked on `HostUp`/`ClaudeInstalled`, credential polls), `launch.rs` (`impl Launch`:
+  profiles as options, `--proxy`/`--no-proxy`/`--first-party`, a default profile is
+  `Required`, `prepare` gives the profile env, the plugins' optional args and secrets,
+  `env_remove`), `ui.rs` + `panel/` (segments, the "Proxy stats" panel on Alt+s with its
+  switch action, one checklist per manifest), `rows.rs` (a row per plugin), `profiles.rs`,
+  `daemon/` (`vocdoni/apply`, was the daemon's `Manifest` op: download, verify, install
+  with `claude plugin … --json`, back-off, `Applied`; cache `<cache>/vocdoni/`), `diag.rs`
+  (`__remote-manifest`, `--features diag`).
+
+**`app/`** (below) holds the addon runtime and the launch composer the front-ends share.
+
+**A3 inside one crate (until P4 makes crates):** core code never imports `crate::addons`
+(only `main.rs` calls `crate::addons::all()`) and never branches on an addon's name; an addon
+imports `crate::addon`, the documented core services (`proto`, `paths`, `text`, `version`,
+`release`, `client::Client`, `claude::{binary, SESSION_MARKERS}`, `app::label`,
+`app::browser`) and its own modules, and reads and writes only the `config.toml` tables it
+declares (the web addon, being the old `src/web`, still uses more of `app`).
+
 ### Session manager (bare `claudio`)
 
 A bare `claudio` calls `tui::run()`. The manager's architecture spans:
@@ -102,8 +159,7 @@ and `is_unsafe`/`is_combining`, `parse_rfc3339`, `fmt_tokens`), `release.rs`
 (`SemVer`, `http_client`, `RELEASES_REPO`, `release_os`/`release_arch`: used
 by `upgrade`, `remote::bootstrap`, `freshness` and `claude::update`) and
 `version.rs` (`PROTO`, re-exported by `proto`, so `paths` does not import
-`proto`) and `envmerge.rs` (`merge_env_pairs`: the rule behind
-`Msg::merge_env`, also used by `plugins::state`).
+`proto`).
 
 **`proto.rs`** — wire framing shared by daemon and client. Frames are
 `[u32-BE length][u8 tag][payload]`. Tag `J` carries JSON control messages
@@ -174,34 +230,25 @@ daemons coexist.
   own process group, killed as a group on timeout. The installer needs
   `curl` and `bash` on `Config::path` and is refused when
   `CLAUDIO_CLAUDE_PATH` names a path (the reply's tail says why, nothing
-  runs); a successful install calls `Manifests::forget_failures`.
-- `manifest.rs` — `Manifest` (a proxy plugin's manifest, parsed by
-  `crate::plugins::manifest`): checks the op itself (name `[a-z0-9-]{1,40}`,
-  64-hex hash, https, ≤ 64 secret names by `key_ok`, ≤ 256 disabled item
-  ids), keeps `<cache>/plugins/<name>.toml` + `.sha256` (downloaded once:
-  30 s connect, 120 s, 256 KiB, https redirects only, temp file, verified,
-  renamed; 0700 dir, ≤ 32 manifests, one download per name), and
-  replies `Applied` before any install runs: the `--mcp-config` and
-  `--agents` JSON (placeholders only), the sanitized instructions, the
-  `[env]`, and per id `installed` / `present` / `skipped` (`installing`,
-  `yours`, `missing secret X`, a failure). It reads Claude Code's files
-  under `$CLAUDE_CONFIG_DIR` else `~/.claude` (`.claude.json`,
-  `plugins/known_marketplaces.json`, `plugins/installed_plugins.json`,
-  `agents/`; regular files of this uid, ≤ 16 MiB, never logged) and never
-  writes there itself: one task per manifest hash runs `claude plugin
-  marketplace add … --json` / `claude plugin install … --json` (never `-y`),
-  each holding `Daemon::updating` (shared with `claude update`), stdin null,
-  output capped, markers scrubbed, `GIT_TERMINAL_PROMPT=0`, own process
-  group, 120 s. Outcomes are remembered per (hash, id): installed (daemon's
-  life), `needs manual install` (daemon's life), a failure (retried after
-  15 s, doubling per failure in a row up to 300 s, reset by a success;
-  `forget_failures` drops them all; meanwhile the reason ends `(retrying
-  in N s)`, `proto::retrying`). Without a claude, `run_claude` fails at
-  once (`claude is not installed`), never taking the lock.
-  `Daemon::claude_flags` (one `claude --help`) says whether claude knows
-  `--plugin-dir`, `--agents`, `--mcp-config`; `command()` drops such a pair
-  when it does not, and `Applied.dropped` names them. Stale zips of a
-  pre-manifest build are removed at daemon start.
+  runs); a successful install calls every daemon-side addon's
+  `on_claude_installed`.
+- `addon_ops.rs` — `Msg::AddonOp` for the registered addons' `DaemonOps`
+  (`DaemonCtx`: claude binary, PATH, `ClaudeFlags`, `<cache>/<addon>`): run off
+  the client loop through `reply_later`, ≤ 8 in flight per addon, 150 s, bodies
+  ≤ 512 KiB both ways and never logged; `on_claude_installed` after an
+  install. `Welcome.features` lists `addon:<name>` for each.
+- `admit.rs` — what a spawn or respawn is admitted as: the caps, the effective
+  extensions (the request's, the journal's, else (compat(v0.10)) the latex
+  lens), and `session_env`, the spawn env kept in memory only for a retry.
+- `command.rs` — the session's command line and env: claude with the hook
+  settings, `--allow-dangerously-skip-permissions` when allowed and known,
+  the spec's `optional` flags (and, compat(v0.10), `--plugin-dir`, `--agents`,
+  `--mcp-config`) dropped when this claude's `--help` lacks them; the env
+  scrub: `env_remove: Some(list)` removes `SESSION_MARKERS` plus the list,
+  `None` (an old client) the previous release's rule (compat(v0.10)); a shell
+  gets the markers removed only.
+- `lifecycle.rs` — `respawn`, `retry_spawn_fresh` (with the kept env, never
+  direct) and `close_exited`.
 - `host.rs`, `stats.rs` — host facts for `Welcome`, directory listing, CPU and
   memory samples. `ctl.rs` — `claudio daemon status|stop|restart` (status
   shows the claude path and version the daemon uses).
@@ -220,17 +267,36 @@ is left running, the client is flagged `daemon_outdated` (over SSH the
 bridge prints `DEFERRED` on stderr), and the TUI reconnects that host once it
 is idle (checked every 2 min).
 
-**`app/`** — the layer both front-ends share (the TUI and `src/web`), with no
-ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
-- `state.rs` — `ClientState`: persisted session order, names and recent dirs
-  (`state.json`).
+**`app/`** — the layer both front-ends share (the TUI and the web addon), with no
+ratatui, crossterm or axum. The web imports nothing from `src/tui`:
+- `addons/` — `AddonRuntime`, the one `AddonCtx` implementation (one per addon, D2):
+  events (`Started`, `Tick` 1 s, hosts, sessions, `ClaudeInstalled`, `ConfigChanged`),
+  `ctx.spawn` (≤ 64 tasks per addon, 300 s), `ctx.request` (`AddonOp`, 170 s), config
+  sections read and edited (`reload.rs`, single-flight re-reads), the extension rows
+  (`rows.rs`: `toggle_row` writes `[extensions]` then tells the addon), `extension_on`
+  (with the `[claude] latex` alias), and what it tells its front-end (`RuntimeOut`:
+  notices, coalesced `Changed`, offers; a bounded queue).
+- `launch/` — the launch composer, the one path of a claude session's `Spawn`/`Respawn`
+  from the TUI, `--plain` and the web: resolve (every `Launch` addon's `Routing`; a
+  `Required` addon that fails fails the launch, never direct) → prepare (25 s budget) →
+  review (`NeedsReview` parks the launch, the clock stopped) → `compose.rs` (the one
+  `compose`: env layered, `env_remove` unioned, optional args, lenses merged, the
+  instructions cut at 8158 bytes, the frame cap). `adopt_legacy`/`legacy` convert the
+  pre-addon `proxy`/`first_party`.
+- `config_edit.rs` — the minimal, atomic `config.toml` section edit under one
+  process-wide lock (every writer goes through it).
+- `state.rs` — `ClientState` (`state.json`): session order, names, recent dirs, and each
+  session's `launch` (`SavedRoute`: `launch` wins, else the legacy `proxy`/`first_party`
+  as an addon adopts them, which are still written (compat(v0.10)); a route this build
+  cannot make is kept and fails its launches, never direct; `route_unknown` for one
+  started elsewhere, R19).
 - `connections.rs` — local + SSH connections, reconnect backoff.
 - `snippets.rs` — the saved prompts of `~/.config/claudio/snippets/`; the TUI
-  (`tui/mod.rs`) and the web (`web/ext.rs`) both call its async functions
+  (`tui/mod.rs`) and the web (`ext.rs`) both call its async functions
   (`load_all`, `save_text`, `save_text_named`, `delete_named`).
-- `extensions/` — the extension registry (`mod.rs`: built-ins latex,
-  diagram, search, snippets; `Registry`, `ActionResult`; the proxy plugins
-  as `Source::Plugin` rows, `Registry::set_plugins`), external
+- `extensions/` — the extension registry (`mod.rs`: built-ins search and snippets;
+  `Registry`, `ActionResult`, `core_choices`; the addons' rows as `Source::Addon`,
+  `Registry::set_addon_rows`), external
   manifests (`manifest.rs`: `~/.config/claudio/extensions/<name>/`, the
   HTML-tag rule, admission, at most 16), protocol v1 (`protocol.rs`: request
   lines, result caps and sanitizing; `render` serves only the web UI's
@@ -242,7 +308,7 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   never by `App`).
 - `label.rs` — `sanitize_label`, for text that leaves the process as a label.
 - `browser.rs` — `browser_wanted` and `open_browser`, the sign-in page opener
-  (`claudio proxy login`, `claudio web`).
+  (`claudio vocdoni login`, `claudio web`).
 - `test_support.rs` — session fixtures for unit tests.
 
 **`tui/`** — the manager UI, driven by tokio + ratatui:
@@ -256,16 +322,28 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   state transitions and returns `Effect` values. No I/O here; all I/O is in
   `mod.rs`. `Mode::Manager` or `Mode::Plain`.
 - `sessions.rs` — `SessionView` (labels go through `app::label::sanitize_label`)
-  and spawning (`send_spawn`/`send_with_proxy`,
-  the one path that builds spawns, respawns and their proxy env), recovery,
-  the wizard's opening.
+  and spawning (`send_spawn`, the one path that builds spawns and
+  respawns: a claude session is an `Effect::Launch` with a `LaunchSelect`,
+  composed by `app::launch` in `addon_runner.rs`; `SessionView.launch` is
+  its `LaunchChoice`, state.json's legacy `proxy`/`first_party` adopted
+  through the addons, an unadopted one failing its launches), recovery,
+  the wizard's opening (its route row: `wizard_route.rs`, from
+  `App.launch_options`).
 - `interaction.rs` — keys, mouse, modals (`Modal`), daemon events and replies.
 - `wizard.rs` — the new-session wizard (start screen → directory browser →
   resume?), a pure state machine.
 - `git_view.rs` + `git_app.rs` — the git viewer (Alt+l): pure view state
   machine, and its `App` glue.
-- `stats_view.rs` — the multi-page proxy stats popup (Alt+s); its time
-  `Window` is `proxy::stats::Window`.
+- `addon_runner.rs` — the TUI's edge of the addon runtime (built in `main`, fed
+  from the event loop: hosts, sessions, focus, installs) and of the launch
+  composer (`Effect::Launch` → `app::launch`, parked launches for a review kept
+  here, never in `App`); runs `App`'s `AddonCall`s (`addon_calls.rs`: panel
+  10 s, action 15 s, row toggles, checklist saves), cleaning every addon string.
+- `panel_view.rs` + `ui/panel.rs` — the generic addon panel (pages, blocks,
+  windows, actions with a confirm; Alt+s is the Vocdoni addon's `PanelDecl.key`).
+- `checklist.rs` + `ui/checklist.rs` — the generic addon checklist (a plugin's
+  setup): offered at first sight (`AddonCtx::offer_checklist`) or a launch's
+  review; Space, `a`, `n`, Enter saves, Skip/Esc never reach the addon.
 - `reader/` — the reader view (Alt+u): `doc.rs` (an answer as markdown
   blocks; a `<latex>` tag is kept as written, as inline code, through
   placeholders; parsed off the UI thread), `layout.rs` (a `Doc` wrapped to
@@ -277,21 +355,13 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   details, toggles. A toggle flips the registry at once and emits
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
   (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
-  a minimal line edit of config.toml, never a whole-file rewrite); a
-  plugin's toggle (Space) also updates `App::plugins.config`, Enter on a
-  plugin's row opens its setup screen, and `r` refetches the plugin lists
-  and manifests and asks every host again. Drawn by `ui/extensions.rs`.
+  a minimal line edit of config.toml, never a whole-file rewrite); an
+  addon's row (`Source::Addon`, set by `Registry::set_addon_rows`) is
+  toggled through `AddonCall::ToggleRow` (the runtime writes
+  `[extensions]`, re-reads the file, then tells the addon), Enter on a row
+  with a setup opens that checklist, and `r` sends every addon with rows
+  `RowAction::Refresh`. Drawn by `ui/extensions.rs`.
   The leader keys `u` and `e` are reserved.
-- `plugin_setup.rs` — a proxy plugin's setup screen, pure (the saved choices
-  are `plugins::choices::choices_for`): every item of
-  its manifest with a checkbox (Space, `a`, `n`, Enter saves to
-  `[plugins.<name>]` through `Effect::SavePluginChoices` and
-  `config::save_plugin_choices`, Esc). It opens on first sight (no table
-  yet; Esc then defers for the run: nothing written or sent) and from the
-  extensions screen; it waits its turn in the confirm queue (`Queued`) and
-  swallows every key. `--plain` holds its spawn (`App::plain_pending`)
-  until the profile's new manifests arrived (≤ 20 s) and their screens
-  closed. Drawn by `ui/plugin_setup.rs`.
 - `leader.rs` — Alt+z: the leader popup, action input, list picker,
   documents (a reader view) and paste (attached claude session with
   bracketed paste on only, never Enter). `builtins.rs` — the built-in
@@ -302,25 +372,22 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   `[claude] install` (`auto` by default, `ask`, `off`): a host whose
   `Welcome` has no claude, `local` included (`check_local_install`, also in
   `--plain`, whose session waits for it), gets the installer once per run
-  (`claude_checked`). A successful install asks that host again for every
-  manifest (`reapply_host`).
+  (`claude_checked`). A successful install goes to the addon runtime
+  (`ClaudeInstalled`).
 - `plain.rs` — `claudio --plain`: `Mode::Plain` is one local, ephemeral
   session full screen (no tab/status bar, wizard or state.json).
   `Keymap::build_plain` keeps only Alt+h/s/l/e/u/z/i; the session is killed when
   the UI exits, and the UI exits with claude.
 - `ui/` — ratatui rendering: `mod.rs` (layout, tab bar, pane, popups),
   `status.rs` (two-line bottom bar; line 2 is prioritised segments — cpu,
-  ctx gauge, git, mem, 5h, conversation, 7d — dropped whole when narrow),
-  `stats.rs`, `git.rs`, `confirm.rs`, `reader.rs`, `leader.rs`,
-  `extensions.rs`.
+  ctx gauge, git, mem, conversation and the addons' segments by priority
+  (0-99 line 1, 100-255 line 2) — dropped whole when narrow),
+  `git.rs`, `confirm.rs`, `reader.rs`, `leader.rs`, `extensions.rs`,
+  `panel.rs`, `checklist.rs`.
 - `fmt.rs` — shared text and number formatting.
 - `keymap.rs` — `DEFAULT_BINDINGS` table (the single source of truth); `Keymap`
   (defaults + config overrides); `parse_key_spec`; collision detection.
   `Alt+Shift+<digit>` (go to tab N) is fixed, outside the table.
-- `proxy_state.rs` — per-profile proxy stats and per-session credential cache.
-- `plugins_glue.rs` — the `impl App` side of proxy plugins: lists, manifests
-  and host answers become state changes and `Effect`s (the pure state is
-  `plugins/state.rs`).
 - `notifications.rs` — debounce logic for attention notifications.
 - `selection.rs` — copy-on-select (`[ui] copy_on_select`, default on): the
   pure `Selection` (anchor/head spans, cell/word/line unit, `contains`),
@@ -347,53 +414,6 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
 - `probe.rs` — `__probe` subcommand: prints `{version, proto, os, arch,
   build, mtime}` as JSON (`Probe::own()`: this binary, hashed once).
 
-**`proxy/`** — claude-proxy HTTP client and profile management:
-- `profile.rs` — load/save profiles from `config.toml` (`[proxy]` section,
-  mode 0600); `from_env()` parses `CLAUDIO_PROXY_URL=<token>@host`.
-- `resolve.rs` — `ProxyChoice` and profile resolution, shared by the TUI and
-  `--plain`.
-- `env.rs` — `session_env(profile, config)`: builds the env for a
-  proxy-backed session (falls back to built-in model defaults when the
-  proxy's `/v1/claudio/config` is unreachable); `env_diff` is the one rule
-  for what a launched claude inherits (session markers scrubbed, an API key
-  dropped when a proxy token is set).
-- `cmd.rs` — `claudio proxy login|status|logout|use`.
-- `login.rs` — the browser sign-in (`/v1/claudio/login/start|poll`, device
-  style: the member types the code; `--token` pastes one instead).
-- `plugins.rs` — `GET /v1/claudio/plugins`, `admit` (https, hash, caps; names and
-  env keys through `plugins::manifest`'s `name_ok`/`key_ok`), the `plugins.json` cache
-  (0600, one entry per profile; a 401/403 drops it), `fetch_manifest`.
-  `Debug` never shows a value. `test_http_ok` lets plain http to
-  `127.0.0.1` through in a debug build run with
-  `CLAUDIO_TEST_LOOPBACK_HTTP=1` (the manager tests' fake proxy), never in
-  a release build.
-
-**`plugins/`** — `manifest.rs`, the one parser of a plugin manifest (TOML,
-≤ 256 KiB; marketplaces, plugins, MCP servers with their secret names,
-agents, instructions, env), shared by the client and the daemon: every cap,
-charset and `${NAME}` placeholder rule, item ids (`plugin:<name>@<market>`,
-`mcp:<name>`, `agent:<name>`, `instructions`, `env`), and the renderers
-(`mcp_json`, `agents_json`, checked against 64/32 KiB at parse time).
-Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok` (their code is `names.rs`).
-- `state.rs` — the pure client-side plugin state: each profile's list (`plugins.json` at
-  start, `Effect::FetchPlugins` at start, every 15 min and on `r`), each
-  plugin's manifest (`Effect::FetchManifest`: fetched by the client, 256
-  KiB, hash-checked, memory only), the registry's `Source::Plugin` rows,
-  each `(host, plugin)` `Applied` answer (`ApplyState`; asked again every
-  30 s while it lists `installing`, and a second after a `(retrying in N
-  s)` retry is due, no sooner than 30 s), and what a spawn gets
-  (`compose`: per answered plugin, ≤ 8, `--agents` then `--mcp-config`
-  after every other arg; env layers `[env]`, then the secrets, then the
-  profile env; the instructions in `SessionExtensions.instructions`, cut at
-  just under 8 KiB (8158 bytes)). A host is asked only once the member saved the plugin's choices.
-  A spawn whose host has not answered is deferred
-  (`Effect::SpawnWithProxy { plugins, pending }`; `tui/mod.rs` waits
-  ≤ 20 s). Shared by the TUI and the web (`web/plugins.rs`).
-- `choices.rs` — `choices_for`, what a plugin's setup screen saves.
-- `stats.rs` — the proxy stats `Window` (24h/7d/30d).
-- `api.rs` — HTTP client for `/v1/claudio/config`, `/models`, `/me/stats`,
-  `/pool/health` and `/session` (which credential a claude session is on).
-
 **`term/`** — terminal primitives:
 - `mod.rs` — `alacritty_terminal::Term`-based screen + snapshot logic.
 - `keys.rs` — key → byte encoding for input forwarding to the PTY.
@@ -417,14 +437,14 @@ Reasons name ids and fields, never values. It also exports `name_ok` and `key_ok
 - `state.rs` — session state tracker derived from hook events.
 - `update.rs` — version parsing and the daily release-channel check.
 
-### Web UI (`claudio web`, `src/web/`, `web/`)
+### Web UI (`claudio web`, `src/addons/web/`, `web/`)
 
-`claudio web` (`src/main.rs` routes it; flags in `docs/web.md`) serves the manager to a
+`claudio web` (the web addon's `Commands`; flags in `docs/web.md`) serves the manager to a
 browser: one more client of the daemons, like the TUI, over the same socket and ssh bridge.
-`docs/web-protocol.md` is the contract between server and page (version 1); change it first,
-in its own commit. User docs, the security model and the TUI parity table: `docs/web.md`.
+`docs/web-protocol.md` is the contract between server and page (version 2: `addons.*` ops,
+the Session's `launch` and `segments`); change it first, in its own commit. User docs, the security model and the TUI parity table: `docs/web.md`.
 
-**`src/web/`** (axum, loopback only):
+**`src/addons/web/`** (axum, loopback only):
 - `mod.rs` — args (`--listen`, `--allow-host`, `--no-open`, `--print-url`, `--rotate-token`),
   routes, startup, graceful shutdown (tabs closed 1001, `web-state.json` written).
 - `auth.rs` — token file (`<config>/web-token`, 0600, constant-time compare), cookie sessions
@@ -440,12 +460,13 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
   `SpawnSpec`, `Applied`).
 - `input.rs` — `approve_key` (state + attention kind + seq) and `paste_bytes` (bracketed,
   controls stripped, 64 KiB).
-- `state.rs` — `web-state.json` (layout, order, per-session proxy name, remote hosts); reads
-  the TUI's `state.json`, never writes it.
-- `spawn.rs`, `proxy.rs`, `plugins.rs`, `ext.rs` — spawns composed as the TUI does
-  (`plugins::state::compose`, `Msg::merge_env`), proxy stats/credential/switch, the plugin
-  state machine re-expressed async, and the extension registry, external host, snippets and
-  config.toml toggles.
+- `state.rs` — `web-state.json` (layout, order, each session's `launch` and its legacy
+  `proxy`/`first_party`, remote hosts); reads the TUI's `state.json`, never writes it.
+- `spawn.rs`, `addons.rs`, `addon_feed.rs`, `ext.rs` — every claude spawn and respawn through
+  the launch composer (`app::launch`, as the TUI's: `launch`/`defer` args, a `review` reply),
+  the `addons.*` ops and the Session's `launch`/`segments` (`addons.rs`), the runtime's
+  notices, changes and host feed (`addon_feed.rs`; no plugin state or proxy cache of its own),
+  and the extension registry, external host, snippets and config.toml toggles.
 - `build.rs` — gzips `web/` into `$OUT_DIR`, writes the import map's SHA-256 for the CSP.
 
 **`web/`** (no build step; ES modules through the import map):
@@ -453,8 +474,9 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 - `app/` — `boot.js` (login, CSP violation log `window.__claudioCsp`), `store.js` (model +
   WebSocket), `proto.js`, `term.js` (xterm.js), pure logic with node tests (`queue.js`,
   `keymap.js`, `layout.js`, `panes.js`, `wizard.js`, `model.js`, `notify.js`, ...);
-  `app/ui/` Preact components (`htm`, signals); `app/render/` markdown, KaTeX, mermaid,
-  highlight, all behind DOMPurify.
+  `app/ui/` Preact components (`htm`, signals), the addon ones generic (`panel.js`,
+  `checklist.js`, `segments.js`; pure parts in `launch.js`, `addon-view.js`); `app/render/`
+  markdown, KaTeX, mermaid, highlight, all behind DOMPurify.
 - `styles/`, `fonts/` — tokens and themes (arcade and plain, dark and light); vendored fonts.
 - `vendor/` — pinned upstream files, byte-identical, listed in `MANIFEST.txt` with version,
   URL and SHA-256; licenses in `LICENSES.md`.
@@ -482,8 +504,9 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
   ambiguous — the VT parser may interpret it as two separate `ESC` sequences.
   Use the crossterm key-event encoding instead.
 - **Secrets never go in argv or state files.** Proxy tokens and plugin env
-  are passed only through `Spawn.env` over the Unix socket; a `Manifest`
-  request carries secret names, never values. The journal and `state.json`
+  are passed only through `Spawn.env` over the Unix socket (from an addon's
+  `LaunchPart.env`, whose `Debug` shows keys only); an `AddonOp` body
+  (`vocdoni/apply`) carries secret names, never values, and is never logged. The journal and `state.json`
   never hold secrets (profile names only); `config.toml` and
   `plugins.json` do, both mode 0600. Logs and notices name keys, never
   values. The `--mcp-config` JSON on argv holds `${NAME}` placeholders
@@ -497,7 +520,8 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
   that into "run `claudio daemon restart`". Never add a field to an existing
   op that an old daemon would silently ignore into wrong behaviour (that is
   why terminals are `SpawnShell`, not `Spawn{kind}`, and plugin manifests
-  are a `Manifest` op, not a `SpawnSpec` field: an old daemon's error
+  are an `AddonOp` (`vocdoni/apply`, behind `addon:vocdoni` in
+  `Welcome.features`), not a `SpawnSpec` field: an old daemon's error
   becomes `daemon too old` and the session starts without the plugin;
   `SessionExtensions.instructions` is `#[serde(default)]`, which an old
   daemon ignores harmlessly).
@@ -560,16 +584,16 @@ in its own commit. User docs, the security model and the TUI parity table: `docs
 - **Stable `data-testid`s are the e2e's interface** (listed in the plan's Global Constraints); rename one and
   the Playwright specs break.
 
-### Print-mode pipeline (`-p`)
+### Print-mode pipeline (`-p`, the API addon: `src/addons/api/`)
 
 1. `cli.rs` handles arguments *dynamically*. It owns only a few flags (`-p`, `--api`, `--fast`, `--log-messages[-file]`, `--output-format`, `--input-format`, `--settings`, `--session-id`), drops `--bare` and `--no-session-persistence` with a warning (they would disable hooks and the JSONL), and forwards everything else verbatim. Never add a mirror of claude's flag grammar. Wrapper-only knobs belong in `CLAUDIO_*` env vars (`WrapperEnv`) so the CLI surface stays exactly claude's. `cli::HELP_APPENDIX` documents these flags and env vars and is appended to `claudio --help`; update it when you add one.
 2. `driver.rs` spawns claude under a PTY (`portable-pty`). `PtySession` is the reusable unit: spawn, then `turn(prompt)` repeatedly. `driver::run` is the single-shot `-p` path built on it.
 3. `vt.rs` answers the terminal probes that Ink sends at startup (DA1/DA2, DSR, XTVERSION, OSC colors…), byte-for-byte as xterm-380 would.
-4. `hooks.rs` signals completion. `SessionStart`/`Stop` hooks are injected via a merged `--settings` and report back over loopback TCP (default) or a watched directory (`CLAUDIO_HOOK_TRANSPORT=file`). The hook command is a copy of this binary under a random hex name in `/tmp`, so `main.rs` has to recognize relay invocations first: argv `<EventName> <port>` (concealed relay) or `__hook <Event>` (legacy).
+4. `hooks.rs` signals completion. `SessionStart`/`Stop` hooks are injected via a merged `--settings` and report back over loopback TCP (default) or a watched directory (`CLAUDIO_HOOK_TRANSPORT=file`). The hook command is a copy of this binary under a random hex name in `/tmp`, so relay invocations are recognized first (`ApiAddon::is_relay`, run by `Addons::relay` before any core word): argv `<EventName> <port>` (concealed relay) or `__hook <Event>` (legacy; the five-word `__hook` is the core's manager relay).
 5. `session.rs` reads the session JSONL, which is the source of truth for the final assistant text and usage. The terminal render is never parsed for answers.
 6. `emit.rs` formats output as `text`, `json`, or `stream-json`, shaped like `claude -p`.
 
-### API server (`--api`, `src/api/`)
+### API server (`--api`, `src/addons/api/api/`)
 
 - `routes/chat.rs` takes a request down one of two paths:
   - **plain**: `prompt.rs` flattens `messages[]`.

@@ -3,8 +3,8 @@
 //! [`ConfirmPrompt`] is generic: it carries the question and the keys that
 //! answer it, each with the [`ConfirmAction`] it runs (or none, to just close).
 //! `Esc` always closes. Prompts raised while another modal is open wait their
-//! turn in `App::confirms` (with the plugin setup screens, see
-//! `plugin_setup.rs`), and ignore keys for a moment after appearing so a
+//! turn in `App::confirms` (with the addons' checklists, see
+//! `checklist.rs`), and ignore keys for a moment after appearing so a
 //! stray keystroke meant for a session cannot answer one.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,8 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::proto::SessionId;
 
 use super::app::App;
+use super::checklist::ChecklistView;
 use super::interaction::Modal;
-use super::plugin_setup::PluginSetup;
 
 /// Ticks (250 ms each) during which a new prompt ignores the keyboard.
 const ARM_TICKS: u8 = 4;
@@ -29,12 +29,10 @@ pub enum ConfirmAction {
     Reset { id: SessionId, fresh: bool },
     /// Kill session `id` and close its tab.
     Kill(SessionId),
-    /// Ask the proxy `profile` to move conversation `claude_session_id` of
-    /// session `session` to another subscription.
-    SwitchSubscription {
-        session: SessionId,
-        profile: String,
-        claude_session_id: String,
+    /// Run one of `addon`'s panel actions.
+    AddonAction {
+        addon: &'static str,
+        req: crate::addon::ActionRequest,
     },
 }
 
@@ -84,10 +82,10 @@ impl Choice {
     }
 }
 
-/// A modal waiting its turn: a prompt or a plugin setup screen.
+/// A modal waiting its turn: a prompt or an addon's checklist.
 pub enum Queued {
     Confirm(ConfirmPrompt),
-    Setup(Box<PluginSetup>),
+    Checklist(Box<ChecklistView>),
 }
 
 pub struct ConfirmPrompt {
@@ -132,24 +130,24 @@ impl App {
         self.show_next_confirm();
     }
 
-    /// Open the first waiting prompt or setup screen if no modal is open.
+    /// Open the first waiting prompt or checklist if no modal is open.
     pub(super) fn show_next_confirm(&mut self) {
         if self.modal.is_none() {
             match self.confirms.pop_front() {
                 Some(Queued::Confirm(prompt)) => self.modal = Some(Modal::Confirm(prompt)),
-                Some(Queued::Setup(setup)) => self.modal = Some(Modal::PluginSetup(setup)),
+                Some(Queued::Checklist(view)) => self.modal = Some(Modal::Checklist(view)),
                 None => return,
             }
             self.redraw = true;
         }
     }
 
-    /// Per-tick upkeep: arm the open prompt or setup screen, open a waiting
+    /// Per-tick upkeep: arm the open prompt or checklist, open a waiting
     /// one.
     pub(super) fn confirm_tick(&mut self) {
         match &mut self.modal {
             Some(Modal::Confirm(prompt)) => prompt.armed = prompt.armed.saturating_sub(1),
-            Some(Modal::PluginSetup(setup)) => setup.armed = setup.armed.saturating_sub(1),
+            Some(Modal::Checklist(view)) => view.armed = view.armed.saturating_sub(1),
             _ => {}
         }
         self.show_next_confirm();
@@ -179,11 +177,10 @@ impl App {
             }
             Some(ConfirmAction::Reset { id, fresh }) => self.reset_session(id, fresh),
             Some(ConfirmAction::Kill(id)) => self.kill_session(id),
-            Some(ConfirmAction::SwitchSubscription {
-                session,
-                profile,
-                claude_session_id,
-            }) => self.start_switch(profile, session, claude_session_id),
+            Some(ConfirmAction::AddonAction { addon, req }) => {
+                let call = super::addon_calls::AddonCall::Action { addon, req };
+                self.emit(super::app::Effect::Addon(call));
+            }
             None => {}
         }
         self.show_next_confirm();

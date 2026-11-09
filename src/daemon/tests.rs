@@ -6,379 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tokio::net::UnixStream;
 use uuid::Uuid;
 
 use super::{server, Config, Daemon};
+use crate::addon::Addons;
 use crate::proto::{
-    self, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, SessionState, SpawnSpec, PROTO,
+    self, Envelope, Frame, Msg, SessionEvent, SessionId, SessionState, SpawnSpec, PROTO,
 };
 
-const BANNER: &str = "FAKE-CLAUDE-BANNER";
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// A variant of the fake claude that exits 3 immediately on any real invocation.
-/// Used to trigger the commit-before-exit race deterministically.
-fn fake_claude_exits_immediately() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ei-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("claude");
-        let script = "#!/bin/sh\n\
-             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
-             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
-             exit 3\n";
-        crate::daemon::host::write_executable(&bin, script);
-        bin
-    })
-}
-
-/// A variant of the fake claude that exits 1 immediately when given `--resume`
-/// (simulating a deleted conversation), and otherwise behaves like the normal
-/// fake claude (prints banner + echoes input).
-fn fake_claude_resume_fails() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-rf-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("claude");
-        // Exit 1 immediately if --resume is in the arguments, otherwise behave
-        // like the normal fake claude.
-        let script = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
-             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
-             # Check all args for --resume\n\
-             for arg in \"$@\"; do\n\
-               if [ \"$arg\" = \"--resume\" ]; then exit 1; fi\n\
-             done\n\
-             printf '%s' \"$2\" > settings.json\n\
-             echo {BANNER}\n\
-             exec cat\n"
-        );
-        crate::daemon::host::write_executable(&bin, &script);
-        bin
-    })
-}
-
-/// The fake claude, shared by all tests (written once, so no exec races with
-/// a file still open for writing). It answers `--version`, saves its
-/// `--settings` JSON into its cwd (so tests can read the hook token), prints a
-/// banner and echoes input.
-fn fake_claude() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("claude");
-        let script = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Claude Code)'; exit 0; fi\n\
-             if [ \"$1\" = \"--help\" ]; then exit 0; fi\n\
-             printf '%s' \"$2\" > settings.json\n\
-             echo {BANNER}\n\
-             exec cat\n"
-        );
-        crate::daemon::host::write_executable(&bin, &script);
-        bin
-    })
-}
-
-/// A daemon running in its own temp dir.
-struct TestDaemon {
-    dir: PathBuf,
-    config: Config,
-    daemon: Arc<Daemon>,
-}
-
-impl TestDaemon {
-    fn config(dir: &Path) -> Config {
-        Config {
-            socket: dir.join("rt/d.sock"),
-            lock: dir.join("rt/d.lock"),
-            journal: dir.join("state/journal.json"),
-            claude: fake_claude().to_path_buf(),
-            claudio: PathBuf::from("/bin/true"),
-            skip_permissions: true,
-            latex: false,
-            build: None,
-            path: None,
-        }
-    }
-
-    fn new_dir() -> PathBuf {
-        let dir = crate::paths::socket_test_dir("cl-d");
-        std::fs::create_dir_all(dir.join("work")).unwrap();
-        dir
-    }
-
-    async fn start_in(dir: PathBuf) -> TestDaemon {
-        let config = Self::config(&dir);
-        Self::start_with_config(dir, config)
-    }
-
-    fn start_with_config(dir: PathBuf, config: Config) -> TestDaemon {
-        let listening = server::start(config.clone())
-            .unwrap()
-            .expect("lock is free");
-        let daemon = listening.daemon();
-        tokio::spawn(listening.serve());
-        TestDaemon {
-            dir,
-            config,
-            daemon,
-        }
-    }
-
-    async fn start() -> TestDaemon {
-        Self::start_in(Self::new_dir()).await
-    }
-
-    /// A daemon whose claude is `claude` instead of the shared fake.
-    async fn start_with_claude(dir: PathBuf, claude: PathBuf) -> TestDaemon {
-        let config = Config {
-            claude,
-            ..Self::config(&dir)
-        };
-        Self::start_with_config(dir, config)
-    }
-
-    fn work(&self) -> PathBuf {
-        self.dir.join("work")
-    }
-
-    async fn client(&self) -> Client {
-        Client::connect(&self.config.socket).await
-    }
-
-    fn spec(&self, id: SessionId) -> SpawnSpec {
-        SpawnSpec {
-            id,
-            cwd: self.work().to_string_lossy().into_owned(),
-            name: Some("test".into()),
-            args: vec![],
-            env: vec![("SECRET_ENV".into(), "hunter2".into())],
-            rows: 24,
-            cols: 80,
-            ephemeral: false,
-            extensions: None,
-        }
-    }
-
-    /// The hook token the fake claude was started with.
-    async fn token(&self) -> String {
-        self.token_other_than("").await
-    }
-
-    /// The hook token of a process started after the one with `previous`:
-    /// after a respawn, `settings.json` holds the old token until the new
-    /// process rewrites it.
-    async fn token_other_than(&self, previous: &str) -> String {
-        let path = self.work().join("settings.json");
-        within(async {
-            loop {
-                let token = std::fs::read(&path)
-                    .ok()
-                    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-                    .and_then(|settings| {
-                        let cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str()?;
-                        Some(cmd.rsplit(' ').next()?.to_owned())
-                    });
-                match token {
-                    Some(token) if token != previous => return token,
-                    _ => tokio::time::sleep(Duration::from_millis(20)).await,
-                }
-            }
-        })
-        .await
-    }
-
-    fn journal(&self) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(&self.config.journal).unwrap()).unwrap()
-    }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(READ_TIMEOUT, f)
-        .await
-        .expect("timed out")
-}
-
-/// A protocol client over a real socket.
-struct Client {
-    stream: UnixStream,
-    next_req: u64,
-}
-
-impl Client {
-    async fn raw(socket: &Path) -> Client {
-        Client {
-            stream: UnixStream::connect(socket).await.unwrap(),
-            next_req: 0,
-        }
-    }
-
-    async fn connect(socket: &Path) -> Client {
-        let mut c = Self::raw(socket).await;
-        match c.call(Msg::Hello(hello(PROTO))).await {
-            Msg::Welcome(w) => assert_eq!(w.proto, PROTO),
-            other => panic!("expected welcome, got {other:?}"),
-        }
-        c
-    }
-
-    async fn send(&mut self, frame: Frame) {
-        proto::write_frame(&mut self.stream, &frame).await.unwrap();
-    }
-
-    async fn request(&mut self, msg: Msg) -> u64 {
-        self.next_req += 1;
-        self.send(Frame::Control(Envelope::request(self.next_req, msg)))
-            .await;
-        self.next_req
-    }
-
-    async fn recv(&mut self) -> Option<Frame> {
-        within(proto::read_frame(&mut self.stream)).await.unwrap()
-    }
-
-    /// Read until `pick` accepts a frame. On a timeout, the panic lists the
-    /// last frames that did arrive, so a failure says what was seen instead.
-    async fn until<T>(&mut self, mut pick: impl FnMut(&Frame) -> Option<T>) -> T {
-        let mut seen: std::collections::VecDeque<String> = Default::default();
-        let wait = async {
-            loop {
-                let frame = proto::read_frame(&mut self.stream)
-                    .await
-                    .unwrap()
-                    .expect("daemon closed the connection");
-                if let Some(v) = pick(&frame) {
-                    return v;
-                }
-                if seen.len() == 12 {
-                    seen.pop_front();
-                }
-                seen.push_back(match &frame {
-                    Frame::Control(env) => format!("{:?}", env.msg).chars().take(160).collect(),
-                    Frame::Data { bytes, .. } => format!("{} data bytes", bytes.len()),
-                });
-            }
-        };
-        match tokio::time::timeout(READ_TIMEOUT, wait).await {
-            Ok(v) => v,
-            Err(_) => panic!(
-                "timed out; last frames seen:\n{}",
-                Vec::from(seen).join("\n")
-            ),
-        }
-    }
-
-    /// Send a request and wait for its reply.
-    async fn call(&mut self, msg: Msg) -> Msg {
-        let req = self.request(msg).await;
-        self.until(|f| match f {
-            Frame::Control(env) if env.req == Some(req) => Some(env.msg.clone()),
-            _ => None,
-        })
-        .await
-    }
-
-    /// Wait for a session event matching `pick`.
-    async fn event<T>(&mut self, id: SessionId, pick: impl Fn(&SessionEvent) -> Option<T>) -> T {
-        self.until(|f| match f {
-            Frame::Control(Envelope {
-                req: None,
-                msg: Msg::Event { id: eid, event },
-            }) if *eid == id => pick(event),
-            _ => None,
-        })
-        .await
-    }
-
-    /// Accumulate `D` bytes for `id` until they contain `needle`.
-    async fn output_until(&mut self, id: SessionId, needle: &str) -> String {
-        let mut seen = Vec::new();
-        self.until(|f| {
-            if let Frame::Data { session, bytes } = f {
-                if *session == id {
-                    seen.extend_from_slice(bytes);
-                }
-            }
-            String::from_utf8_lossy(&seen)
-                .contains(needle)
-                .then(|| String::from_utf8_lossy(&seen).into_owned())
-        })
-        .await
-    }
-
-    /// Attach and return the snapshot (the `D` frame right after `Attached`).
-    async fn attach(&mut self, id: SessionId, rows: u16, cols: u16) -> String {
-        let req = self.request(Msg::Attach { id, rows, cols }).await;
-        let attached = self
-            .until(|f| match f {
-                Frame::Control(env) if env.req == Some(req) => Some(env.msg.clone()),
-                _ => None,
-            })
-            .await;
-        assert_eq!(attached, Msg::Attached { id, rows, cols });
-        self.until(|f| match f {
-            Frame::Data { session, bytes } if *session == id => {
-                Some(String::from_utf8_lossy(bytes).into_owned())
-            }
-            _ => None,
-        })
-        .await
-    }
-
-    /// Attach, then wait until the screen (snapshot or later output) shows
-    /// `needle`.
-    async fn attach_until(&mut self, id: SessionId, needle: &str) {
-        if !self.attach(id, 24, 80).await.contains(needle) {
-            self.output_until(id, needle).await;
-        }
-    }
-
-    async fn spawn(&mut self, spec: SpawnSpec) -> Option<u32> {
-        match self.call(Msg::Spawn(spec)).await {
-            Msg::Spawned { pid, .. } => pid,
-            other => panic!("spawn failed: {other:?}"),
-        }
-    }
-
-    async fn sessions(&mut self) -> Vec<crate::proto::SessionInfo> {
-        match self.call(Msg::ListSessions).await {
-            Msg::Sessions { sessions } => sessions,
-            other => panic!("expected sessions, got {other:?}"),
-        }
-    }
-}
-
-fn hello(proto: u32) -> Hello {
-    Hello {
-        claudio_version: "test".into(),
-        proto,
-        colors: None,
-    }
-}
-
-async fn send_hook(socket: &Path, token: &str, event: &str, payload: serde_json::Value) {
-    let mut c = Client::raw(socket).await;
-    let hook = Msg::Hook {
-        token: token.into(),
-        event: event.into(),
-        payload,
-    };
-    c.send(Frame::Control(Envelope::event(hook))).await;
-    // Stay connected until the daemon hangs up, as the real relay does.
-    let _ = tokio::time::timeout(READ_TIMEOUT, proto::read_frame(&mut c.stream)).await;
-}
+use super::test_support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handshake_reports_host_and_rejects_wrong_proto() {
@@ -406,7 +42,9 @@ async fn handshake_reports_host_and_rejects_wrong_proto() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_daemon_backs_off() {
     let d = TestDaemon::start().await;
-    assert!(server::start(d.config.clone()).unwrap().is_none());
+    assert!(server::start(d.config.clone(), Arc::new(Addons::empty()))
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -930,6 +568,8 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         latex: false,
         build: None,
         path: None,
+        addon_timeout: std::time::Duration::from_secs(150),
+        old_peer: false,
     };
     // Pre-populate a journal entry with a claude_session_id so the spawn
     // request carries --resume.
@@ -948,7 +588,9 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     });
     crate::paths::write_atomic(journal_path, journal_entry.to_string().as_bytes()).unwrap();
 
-    let listening = server::start(config).unwrap().expect("lock is free");
+    let listening = server::start(config, Arc::new(Addons::empty()))
+        .unwrap()
+        .expect("lock is free");
     tokio::spawn(listening.serve());
     let socket = dir.join("rt/d.sock");
     // Wait for daemon to start.
@@ -981,6 +623,8 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         cols: 80,
         ephemeral: false,
         extensions: None,
+        env_remove: None,
+        optional: vec![],
     };
 
     // spawner handles the Spawn/Spawned handshake; observer watches events.
@@ -1046,9 +690,13 @@ async fn immediate_exit_leaves_session_dormant() {
         latex: false,
         build: None,
         path: None,
+        addon_timeout: std::time::Duration::from_secs(150),
+        old_peer: false,
     };
 
-    let listening = server::start(config).unwrap().expect("lock is free");
+    let listening = server::start(config, Arc::new(Addons::empty()))
+        .unwrap()
+        .expect("lock is free");
     tokio::spawn(listening.serve());
     let socket = dir.join("rt/d.sock");
     within(async {
@@ -1073,6 +721,8 @@ async fn immediate_exit_leaves_session_dormant() {
         cols: 80,
         ephemeral: false,
         extensions: None,
+        env_remove: None,
+        optional: vec![],
     };
     c.spawn(spec).await;
 
@@ -1389,9 +1039,11 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
         (proto::SessionKind::Shell, 1700000000)
     );
 }
+mod addon_ops;
 mod freshness;
 mod git;
 mod login_path;
+mod spawn_env;
 
 // ── Respawn (reset a session in place) ───────────────────────────────────────
 
@@ -1400,8 +1052,7 @@ mod login_path;
 fn fake_claude_logging_argv() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-av-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-av");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\
@@ -1472,6 +1123,7 @@ impl Client {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         };
         match self.call_seen(Msg::Respawn(spec)).await {
             (Msg::Spawned { id: spawned, pid }, seen) => {
@@ -1617,6 +1269,7 @@ async fn respawn_revives_a_dormant_session_and_rejects_unknown_ones() {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         }))
         .await;
     assert!(matches!(unknown, Msg::Error { message } if message.contains("no such session")));
@@ -1675,8 +1328,7 @@ async fn respawn_restarts_a_shell() {
 fn fake_claude_slow_to_stop() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-claude-ss-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = private_temp_dir("claudio-fake-claude-ss");
         let bin = dir.join("claude");
         let script = format!(
             "#!/bin/sh\n\
@@ -1700,6 +1352,7 @@ fn respawn_spec(id: SessionId, fresh: bool) -> proto::RespawnSpec {
         rows: 24,
         cols: 80,
         extensions: None,
+        env_remove: None,
     }
 }
 
@@ -2007,7 +1660,7 @@ fn journaled_lenses(entry: &serde_json::Value) -> Option<Vec<String>> {
 
 #[test]
 fn effective_extensions_follow_request_then_journal_then_legacy() {
-    use super::effective_extensions;
+    use super::admit::effective_extensions;
     let names = |e: proto::SessionExtensions| -> Vec<String> {
         e.lenses.into_iter().map(|l| l.name).collect()
     };
@@ -2161,952 +1814,33 @@ async fn a_daemon_start_clears_old_context_files() {
     assert!(!context.join("old.txt").exists());
 }
 
-// ── Manifest ─────────────────────────────────────────────────────────────────
-
-/// The manifest the `Manifest` tests apply: one marketplace with plugins
-/// `a` and `b`, servers `kb` (secret `KB_TOKEN`), `mine` and `jina`
-/// (secret `JINA_KEY`), agents `reviewer` and `helper`, instructions, env.
-const TEAM: &str = r#"
-format = 1
-name = "team"
-version = "1.0.0"
-instructions = "Team rules.\u202e"
-
-[[marketplace]]
-name = "market"
-source = "github:acme/market"
-
-[[plugin]]
-name = "a"
-marketplace = "market"
-
-[[plugin]]
-name = "b"
-marketplace = "market"
-
-[[mcp]]
-name = "kb"
-type = "http"
-url = "https://kb.example.org/mcp"
-headers = { Authorization = "Bearer ${KB_TOKEN}" }
-secrets = ["KB_TOKEN"]
-
-[[mcp]]
-name = "mine"
-type = "sse"
-url = "https://mine.example.org/sse"
-
-[[mcp]]
-name = "jina"
-type = "http"
-url = "https://jina.example.org"
-headers = { Authorization = "Bearer ${JINA_KEY}" }
-secrets = ["JINA_KEY"]
-
-[[agent]]
-name = "reviewer"
-description = "Reviews"
-prompt = "Review."
-
-[[agent]]
-name = "helper"
-description = "Helps"
-prompt = "Help."
-
-[env]
-REGION = "eu"
-"#;
-
-/// The fake `claude` of the `Manifest` tests, shared (written once). Its
-/// control dir is the first entry of its `PATH` (the test daemon's
-/// `Config::path`), and Claude Code's config dir is `<ctl>/../claude`.
-/// Every `plugin …` run appends its argv to `<ctl>/log`. `marketplace
-/// add` registers the name in `<ctl>/market-name` (default `market`), or
-/// fails with `<ctl>/market-fails`; with `<ctl>/market-raced` it registers
-/// the name and then fails, as when another run added it meanwhile.
-/// `install <spec>` waits while `<ctl>/gate-<spec>` exists, then fails
-/// with `<ctl>/fail-<spec>`, needs a person with `<ctl>/manual-<spec>`,
-/// succeeds without listing it with `<ctl>/silent-<spec>`, or adds the
-/// spec to `installed_plugins.json`. `--help` prints `<ctl>/help`.
-fn fake_plugin_claude() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-plugins-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("claude");
-        let script = r#"#!/bin/sh
-ctl="${PATH%%:*}"
-cfg="$ctl/../claude"
-case "$1" in
---version) echo '9.9.9 (Claude Code)'; exit 0;;
---help) [ -f "$ctl/help" ] && cat "$ctl/help"; exit 0;;
-update) echo updated; exit 0;;
-plugin) ;;
-*) exit 2;;
-esac
-echo "$*" >> "$ctl/log"
-mkdir -p "$cfg/plugins"
-if [ "$2" = marketplace ]; then
-  if [ -f "$ctl/market-fails" ]; then echo '{"error":"repository not found"}'; exit 1; fi
-  name=$(cat "$ctl/market-name" 2>/dev/null || echo market)
-  printf '{"%s":{"source":{"source":"github","repo":"%s"}}}\n' "$name" "$4" \
-    > "$cfg/plugins/known_marketplaces.json"
-  if [ -f "$ctl/market-raced" ]; then echo '{"error":"already exists"}'; exit 1; fi
-  echo '{"ok":true}'
-  exit 0
-fi
-spec="$3"
-while [ -e "$ctl/gate-$spec" ]; do sleep 0.05; done
-if [ -f "$ctl/fail-$spec" ]; then echo 'Installing'; echo '{"error":"network down"}'; exit 1; fi
-if [ -f "$ctl/manual-$spec" ]; then echo '{"shownCommand":{"command":"npx x","sha256":"ab"}}'; exit 1; fi
-if [ -f "$ctl/silent-$spec" ]; then echo '{"ok":true}'; exit 0; fi
-echo "$spec" >> "$ctl/installed"
-{
-  printf '{"version":2,"plugins":{'
-  sep=
-  while read -r k; do printf '%s"%s":[{"scope":"user"}]' "$sep" "$k"; sep=,; done < "$ctl/installed"
-  printf '}}\n'
-} > "$cfg/plugins/installed_plugins.json"
-echo "done $spec" >> "$ctl/log"
-echo '{"ok":true}'
-"#;
-        crate::daemon::host::write_executable(&bin, script);
-        bin
-    })
-}
-
-/// The name of a claude that is installed only during the test (never a
-/// real one: no such file in any directory claude is looked up in).
-const LATE_CLAUDE: &str = "claude-late";
-
-/// A directory for a `PATH` with claude's official installer faked, shared
-/// (written once): `sh`, `bash`, `cat`, `cp`, `mkdir` and `sleep` link to
-/// the system's, and `curl` logs its arguments to `<ctl>/log` (`<ctl>`:
-/// the `PATH`'s first entry) and prints a script that copies the fake
-/// plugin claude to `<ctl>/claude-late`. No real `curl` is on such a
-/// `PATH`, so the real installer can never run.
-fn fake_installer_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("claudio-fake-installer-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for tool in ["sh", "bash", "cat", "cp", "mkdir", "sleep"] {
-            let real = ["/usr/bin", "/bin"]
-                .iter()
-                .map(|d| Path::new(d).join(tool))
-                .find(|p| p.is_file())
-                .unwrap_or_else(|| panic!("no {tool} in /usr/bin or /bin"));
-            std::os::unix::fs::symlink(real, dir.join(tool)).unwrap();
-        }
-        let script = format!(
-            "#!/bin/sh\n\
-             ctl=\"${{PATH%%:*}}\"\n\
-             echo \"curl $*\" >> \"$ctl/log\"\n\
-             echo \"cp '{}' '$ctl/{LATE_CLAUDE}'\"\n\
-             echo 'echo claude installed'\n",
-            fake_plugin_claude().display()
-        );
-        std::fs::write(dir.join("curl"), script).unwrap();
-        std::fs::set_permissions(
-            dir.join("curl"),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .unwrap();
-        dir
-    })
-}
-
-/// A `Manifest` test's daemon: the fake plugin claude, manifests cached in
-/// `<dir>/cache/plugins` (TEAM there already), Claude Code's config in
-/// `<dir>/claude`, and the fake's control dir `<dir>/ctl`.
-struct PluginHost {
-    d: TestDaemon,
-    cache: PathBuf,
-    claude: PathBuf,
-    ctl: PathBuf,
-}
-
-impl PluginHost {
-    async fn start() -> PluginHost {
-        Self::start_with(|ctl| {
-            let path = format!("{}:/usr/bin:/bin", ctl.display());
-            (fake_plugin_claude().to_path_buf(), path)
-        })
-        .await
-    }
-
-    /// With the claude and `PATH` that `setup` gives for the control dir.
-    async fn start_with(setup: impl FnOnce(&Path) -> (PathBuf, String)) -> PluginHost {
-        let dir = TestDaemon::new_dir();
-        let (cache, claude, ctl) = (
-            dir.join("cache/plugins"),
-            dir.join("claude"),
-            dir.join("ctl"),
-        );
-        for d in [&cache, &claude, &ctl] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::write(cache.join("team.toml"), TEAM).unwrap();
-        std::fs::write(
-            cache.join("team.sha256"),
-            format!("{}\n", sha256_hex(TEAM.as_bytes())),
-        )
-        .unwrap();
-        let (bin, path) = setup(&ctl);
-        let config = Config {
-            claude: bin,
-            path: Some(path.into()),
-            ..TestDaemon::config(&dir)
-        };
-        let d = TestDaemon::start_with_config(dir, config);
-        d.daemon.manifests.set_dirs(cache.clone(), claude.clone());
-        PluginHost {
-            d,
-            cache,
-            claude,
-            ctl,
-        }
-    }
-
-    /// Create (or with `on` false, remove) control file `name`.
-    fn set(&self, name: &str, on: bool) {
-        let path = self.ctl.join(name);
-        if on {
-            std::fs::write(path, "").unwrap();
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    /// The fake's `plugin …` runs so far.
-    fn log(&self) -> Vec<String> {
-        std::fs::read_to_string(self.ctl.join("log"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// Wait until the log has a line equal to `line`.
-    async fn logged(&self, line: &str) {
-        within(async {
-            while !self.log().iter().any(|l| l == line) {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-    }
-
-    /// Wait until no install of manifest TEAM is queued or running.
-    async fn idle(&self) {
-        within(async {
-            while self.d.daemon.manifests.busy() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-    }
-}
-
-/// A `Manifest` request for TEAM (cached; its URL is never reached).
-fn team(secrets: &[&str], disabled: &[&str]) -> Msg {
-    Msg::Manifest {
-        name: "team".into(),
-        url: "https://127.0.0.1:9/never.toml".into(),
-        sha256: sha256_hex(TEAM.as_bytes()),
-        secrets: secrets.iter().map(|s| s.to_string()).collect(),
-        disabled: disabled.iter().map(|s| s.to_string()).collect(),
-    }
-}
-
-fn applied(reply: Msg) -> proto::Applied {
-    match reply {
-        Msg::Applied(a) => a,
-        other => panic!("expected Applied, got {other:?}"),
-    }
-}
-
-fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-    list.iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect()
-}
-
-/// `item` is `id` skipped for `why`, tried again in `secs` s (or one less:
-/// the clock moved on since the failure).
-fn assert_retrying(item: &(String, String), id: &str, why: &str, secs: u64) {
-    let due = (secs.saturating_sub(1)..=secs).any(|s| item.1 == proto::retrying(why, s));
-    assert!(item.0 == id && due, "{item:?}: want {id}, {why}, {secs} s");
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    format!("{:x}", sha2::Sha256::digest(bytes))
-}
-
-/// The reply comes before any install runs: plugins are `installing`,
-/// every static part is there (servers with their secrets, agents, the
-/// instructions sanitized, the env), and no `-y` reaches the CLI. The
-/// marketplace is added once for both plugins; later replies say
-/// `installed`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_replies_first_then_installs_each_plugin_once() {
-    let h = PluginHost::start().await;
-    h.set("gate-a@market", true);
-    let mut c = h.d.client().await;
-    let a = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
-    assert_eq!((a.name.as_str(), a.version.as_str()), ("team", "1.0.0"));
-    assert_eq!(
-        a.skipped,
-        pairs(&[
-            ("plugin:a@market", "installing"),
-            ("plugin:b@market", "installing")
-        ])
-    );
-    assert!(a.installed.is_empty() && a.present.is_empty());
-    let mcp: serde_json::Value = serde_json::from_str(a.mcp_config.as_deref().unwrap()).unwrap();
-    let servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
-    assert_eq!(servers, ["jina", "kb", "mine"]);
-    assert_eq!(
-        mcp["mcpServers"]["kb"]["headers"]["Authorization"],
-        "Bearer ${KB_TOKEN}"
-    );
-    let agents: serde_json::Value = serde_json::from_str(a.agents.as_deref().unwrap()).unwrap();
-    assert_eq!(agents["reviewer"]["prompt"], "Review.");
-    assert_eq!(a.instructions, "Team rules.");
-    assert_eq!(a.env, pairs(&[("REGION", "eu")]));
-    // The fake's `--help` lists neither flag.
-    assert_eq!(a.dropped, ["--mcp-config", "--agents"]);
-
-    // Asked again while `a` is blocked: nothing is queued twice.
-    h.logged("plugin install a@market --scope user --json")
-        .await;
-    let again = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
-    assert_eq!(again.skipped, a.skipped);
-    h.set("gate-a@market", false);
-    h.idle().await;
-    assert_eq!(
-        h.log(),
-        [
-            "plugin marketplace add acme/market --scope user --json",
-            "plugin install a@market --scope user --json",
-            "done a@market",
-            "plugin install b@market --scope user --json",
-            "done b@market",
-        ]
-    );
-    assert!(!h
-        .log()
-        .iter()
-        .any(|l| l.contains("-y") || l.contains("--yes") || l.contains("--accept-command")));
-    let done = applied(c.call(team(&["KB_TOKEN", "JINA_KEY"], &[])).await);
-    assert_eq!(done.installed, ["plugin:a@market", "plugin:b@market"]);
-    assert!(done.skipped.is_empty() && done.present.is_empty());
-    assert_eq!(h.log().len(), 5, "nothing ran again");
-    assert!(h.cache.join("team.toml").is_file());
-}
-
-/// What is already there is left alone: an installed plugin (any scope) is
-/// `present`, a server in `.claude.json` and an agent in `agents/` are the
-/// member's (`yours`), a server whose secret the request lacks is skipped,
-/// and a disabled id is neither applied nor listed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_leaves_the_members_own_alone_and_honours_disabled() {
-    let h = PluginHost::start().await;
-    std::fs::create_dir_all(h.claude.join("plugins")).unwrap();
-    std::fs::create_dir_all(h.claude.join("agents")).unwrap();
-    std::fs::write(
-        h.claude.join("plugins/installed_plugins.json"),
-        r#"{"version":2,"plugins":{"a@market":[{"scope":"project"}]}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        h.claude.join(".claude.json"),
-        r#"{"mcpServers":{"mine":{}}}"#,
-    )
-    .unwrap();
-    std::fs::write(h.claude.join("agents/helper.md"), "my helper").unwrap();
-    let mut c = h.d.client().await;
-    let a = applied(
-        c.call(team(
-            &["KB_TOKEN"],
-            &["plugin:b@market", "env", "instructions"],
-        ))
-        .await,
-    );
-    assert_eq!(a.present, ["plugin:a@market"]);
-    assert_eq!(
-        a.skipped,
-        pairs(&[
-            ("mcp:mine", "yours"),
-            ("mcp:jina", "missing secret JINA_KEY"),
-            ("agent:helper", "yours"),
-        ])
-    );
-    let mcp: serde_json::Value = serde_json::from_str(a.mcp_config.as_deref().unwrap()).unwrap();
-    let servers: Vec<&String> = mcp["mcpServers"].as_object().unwrap().keys().collect();
-    assert_eq!(servers, ["kb"]);
-    let agents: serde_json::Value = serde_json::from_str(a.agents.as_deref().unwrap()).unwrap();
-    assert!(agents.get("helper").is_none() && agents.get("reviewer").is_some());
-    assert!(a.instructions.is_empty() && a.env.is_empty());
-    h.idle().await;
-    assert!(h.log().is_empty(), "nothing to install: {:?}", h.log());
-
-    // Every server and agent disabled: no JSON at all.
-    let all = [
-        "plugin:b@market",
-        "mcp:kb",
-        "mcp:mine",
-        "mcp:jina",
-        "agent:reviewer",
-        "agent:helper",
-    ];
-    let a = applied(c.call(team(&["KB_TOKEN"], &all)).await);
-    assert_eq!((a.mcp_config, a.agents), (None, None));
-    assert!(a.skipped.is_empty(), "{:?}", a.skipped);
-
-    // An unreadable `.claude.json` skips every server, with the reason.
-    std::fs::write(h.claude.join(".claude.json"), "{").unwrap();
-    let a = applied(
-        c.call(team(&["KB_TOKEN", "JINA_KEY"], &["plugin:b@market"]))
-            .await,
-    );
-    assert_eq!(a.mcp_config, None);
-    let unreadable: Vec<&(String, String)> = a
-        .skipped
-        .iter()
-        .filter(|(_, why)| why == "cannot read .claude.json")
-        .collect();
-    assert_eq!(unreadable.len(), 3, "{:?}", a.skipped);
-}
-
-/// A failed install is skipped with the CLI's reason and the seconds to
-/// its retry: 15 s after the first failure, doubling with each one in a
-/// row, and 15 s again after a success. One that needs a person stays
-/// `needs manual install` for the daemon's life.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_installs_back_off_and_manual_ones_never_retry() {
-    let h = PluginHost::start().await;
-    h.set("fail-a@market", true);
-    h.set("manual-b@market", true);
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let manual = "needs manual install: claude plugin install b@market";
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
-    assert_eq!(a.skipped[1], pairs(&[("plugin:b@market", manual)])[0]);
-    let installs = |h: &PluginHost, spec: &str| {
-        let line = format!("plugin install {spec} --scope user --json");
-        h.log().iter().filter(|l| **l == line).count()
-    };
-    assert_eq!(installs(&h, "a@market"), 1);
-
-    // Within the backoff nothing runs again; after it, one more run, and
-    // the next wait is twice as long.
-    h.d.daemon.manifests.advance(Duration::from_secs(14));
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 1);
-    h.idle().await;
-    assert_eq!(installs(&h, "a@market"), 1);
-    h.d.daemon.manifests.advance(Duration::from_secs(1));
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0].1, "installing");
-    h.idle().await;
-    assert_eq!(installs(&h, "a@market"), 2);
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 30);
-
-    // Then it works; the manual one still waits for a person.
-    h.set("fail-a@market", false);
-    h.d.daemon.manifests.advance(Duration::from_secs(30));
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.installed, ["plugin:a@market"]);
-    assert_eq!(a.skipped[0], pairs(&[("plugin:b@market", manual)])[0]);
-    assert_eq!(installs(&h, "b@market"), 1);
-
-    // Uninstalled and failing again: the backoff starts over at 15 s.
-    std::fs::remove_file(h.ctl.join("installed")).unwrap();
-    std::fs::write(
-        h.claude.join("plugins/installed_plugins.json"),
-        r#"{"version":2,"plugins":{}}"#,
-    )
-    .unwrap();
-    h.set("fail-a@market", true);
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0].1, "installing");
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
-    assert_eq!(installs(&h, "a@market"), 4);
-}
-
-/// A marketplace Claude Code files under another name than the manifest's
-/// skips its plugins with that reason (and is not added again at once).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_marketplace_added_under_another_name_skips_its_plugins() {
-    let h = PluginHost::start().await;
-    std::fs::write(h.ctl.join("market-name"), "acme").unwrap();
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    let why = "marketplace market: added under another name";
-    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
-    assert_retrying(&a.skipped[1], "plugin:b@market", why, 15);
-    assert_eq!(
-        h.log(),
-        ["plugin marketplace add acme/market --scope user --json"]
-    );
-}
-
-/// An install that exits 0 but leaves the plugin out of
-/// `installed_plugins.json` is remembered as a failure for its backoff,
-/// not run again on every re-ask.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_install_claude_does_not_list_is_remembered_as_failed() {
-    let h = PluginHost::start().await;
-    h.set("silent-a@market", true);
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.installed, ["plugin:b@market"]);
-    let why = "installed but not listed";
-    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
-
-    // Within the backoff: not run again.
-    h.d.daemon.manifests.advance(Duration::from_secs(10));
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", why, 5);
-    h.idle().await;
-    let installs = |h: &PluginHost| {
-        h.log()
-            .iter()
-            .filter(|l| l.as_str() == "plugin install a@market --scope user --json")
-            .count()
-    };
-    assert_eq!(installs(&h), 1);
-
-    // After it: tried again.
-    h.d.daemon.manifests.advance(Duration::from_secs(5));
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0].1, "installing");
-    h.idle().await;
-    assert_eq!(installs(&h), 2);
-}
-
-/// A marketplace add that fails while the name is known by then (another
-/// manifest's install added it meanwhile) counts as added: its plugins
-/// install, and no failure is remembered.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_marketplace_add_of_a_name_known_by_then_counts_as_added() {
-    let h = PluginHost::start().await;
-    h.set("market-raced", true);
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.installed, ["plugin:a@market", "plugin:b@market"]);
-    assert!(
-        !a.skipped.iter().any(|(id, _)| id.starts_with("plugin:")),
-        "{:?}",
-        a.skipped
-    );
-    assert_eq!(
-        h.log(),
-        [
-            "plugin marketplace add acme/market --scope user --json",
-            "plugin install a@market --scope user --json",
-            "done a@market",
-            "plugin install b@market --scope user --json",
-            "done b@market",
-        ]
-    );
-}
-
-/// Installs share `claude update`'s lock, one subprocess at a time: an
-/// update during an install is refused with a message naming both, and a
-/// waiter that queued during one install gets the lock before the next.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installs_and_claude_update_take_turns() {
-    let h = PluginHost::start().await;
-    h.set("gate-a@market", true);
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.logged("plugin install a@market --scope user --json")
-        .await;
-    assert_eq!(
-        c.call(Msg::UpdateClaude { install: false }).await,
-        Msg::Error {
-            message: "a claude update or plugin install is already running on this host".into()
-        }
-    );
-    // Queue for the lock while `a` installs; `b` must wait for us.
-    let daemon = Arc::clone(&h.d.daemon);
-    let (got, held) = tokio::sync::oneshot::channel();
-    let (release, released) = tokio::sync::oneshot::channel::<()>();
-    let waiter = tokio::spawn(async move {
-        let _lock = daemon.updating.lock().await;
-        let _ = got.send(());
-        let _ = released.await;
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    h.set("gate-a@market", false);
-    within(held).await.unwrap();
-    h.logged("done a@market").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !h.log().iter().any(|l| l.contains("install b@market")),
-        "{:?}",
-        h.log()
-    );
-    release.send(()).unwrap();
-    waiter.await.unwrap();
-    h.idle().await;
-    // Between installs (here: after them) an update runs.
-    assert!(matches!(
-        c.call(Msg::UpdateClaude { install: false }).await,
-        Msg::ClaudeUpdated { ok: true, .. }
-    ));
-}
-
-/// Claude installed on the host: the failures are forgotten, so the next
-/// request queues those installs at once; a manual one still waits.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn forgotten_failures_install_on_the_next_request() {
-    let h = PluginHost::start().await;
-    h.set("fail-a@market", true);
-    h.set("manual-b@market", true);
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_retrying(&a.skipped[0], "plugin:a@market", "network down", 15);
-    h.set("fail-a@market", false);
-    h.d.daemon.manifests.forget_failures();
-    let a = applied(c.call(team(&[], &[])).await);
-    let manual = "needs manual install: claude plugin install b@market";
-    assert_eq!(
-        &a.skipped[..2],
-        &pairs(&[
-            ("plugin:a@market", "installing"),
-            ("plugin:b@market", manual)
-        ])[..]
-    );
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.installed, ["plugin:a@market"]);
-}
-
-/// A claude installed after the plugins' first request: until then each
-/// plugin install fails at once (`claude is not installed`, never holding
-/// the lock the installer takes). The installer (a fake `curl`: no real
-/// one is on this `PATH`) puts claude in place, the failures are
-/// forgotten, and the next request installs the plugins.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installing_claude_forgets_the_plugin_failures() {
-    let tools = fake_installer_dir();
-    let h = PluginHost::start_with(|ctl| {
-        let path = format!("{}:{}", ctl.display(), tools.display());
-        (PathBuf::from(LATE_CLAUDE), path)
-    })
-    .await;
-    let mut c = h.d.client().await;
-    c.call(team(&[], &[])).await;
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    let why = "marketplace market: claude is not installed";
-    assert_retrying(&a.skipped[0], "plugin:a@market", why, 15);
-    assert_retrying(&a.skipped[1], "plugin:b@market", why, 15);
-    assert!(h.log().is_empty(), "{:?}", h.log());
-
-    match c.call(Msg::UpdateClaude { install: true }).await {
-        Msg::ClaudeUpdated { version, ok, tail } => {
-            assert!(ok, "{tail}");
-            assert_eq!(version.as_deref(), Some("9.9.9 (Claude Code)"));
-            assert_eq!(tail, "claude installed");
-        }
-        other => panic!("expected ClaudeUpdated, got {other:?}"),
-    }
-    assert_eq!(h.log(), ["curl -fsSL https://claude.ai/install.sh"]);
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.skipped[0].1, "installing");
-    h.idle().await;
-    let a = applied(c.call(team(&[], &[])).await);
-    assert_eq!(a.installed, ["plugin:a@market", "plugin:b@market"]);
-}
-
-/// The installer does not run without `curl` on the daemon's `PATH`, nor
-/// for a claude that `CLAUDIO_CLAUDE_PATH` pins: the reply says why.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn install_says_why_it_cannot_run() {
-    let dir = TestDaemon::new_dir();
-    let empty = dir.join("bin");
-    std::fs::create_dir_all(&empty).unwrap();
-    let config = Config {
-        claude: PathBuf::from(LATE_CLAUDE),
-        path: Some(empty.into_os_string()),
-        ..TestDaemon::config(&dir)
-    };
-    let d = TestDaemon::start_with_config(dir, config);
-    let mut c = d.client().await;
-    assert_eq!(
-        c.call(Msg::UpdateClaude { install: true }).await,
-        Msg::ClaudeUpdated {
-            version: None,
-            ok: false,
-            tail: "claude installer needs curl".into()
-        }
-    );
-
-    let pinned = TestDaemon::start_in(TestDaemon::new_dir()).await;
-    let mut c = pinned.client().await;
-    match c.call(Msg::UpdateClaude { install: true }).await {
-        Msg::ClaudeUpdated {
-            ok: false, tail, ..
-        } => {
-            assert!(tail.starts_with("CLAUDIO_CLAUDE_PATH is /"), "{tail}");
-        }
-        other => panic!("expected ClaudeUpdated, got {other:?}"),
-    }
-}
-
-/// A claude that is there but does not answer `--version` (as `Welcome`
-/// sees on a slow box) is never installed over: no `curl` runs.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn install_never_runs_over_a_present_claude() {
-    let tools = fake_installer_dir();
-    let h = PluginHost::start_with(|ctl| {
-        let present = ctl.parent().unwrap().join("present");
-        std::fs::create_dir_all(&present).unwrap();
-        let bin = present.join(LATE_CLAUDE);
-        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
-        let exec = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-        std::fs::set_permissions(&bin, exec).unwrap();
-        let (c, t, p) = (ctl.display(), tools.display(), present.display());
-        let path = format!("{c}:{t}:{p}");
-        (PathBuf::from(LATE_CLAUDE), path)
-    })
-    .await;
-    let mut c = h.d.client().await;
-    match c.call(Msg::UpdateClaude { install: true }).await {
-        Msg::ClaudeUpdated {
-            ok: false, tail, ..
-        } => assert!(tail.starts_with("claude is at "), "{tail}"),
-        other => panic!("expected ClaudeUpdated, got {other:?}"),
-    }
-    assert!(h.log().is_empty(), "{:?}", h.log());
-}
-
-/// The fake's `--help` lists the flags: nothing is dropped.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn applied_names_the_flags_this_claude_lacks() {
-    let h = PluginHost::start().await;
-    std::fs::write(
-        h.ctl.join("help"),
-        "  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n",
-    )
-    .unwrap();
-    let mut c = h.d.client().await;
-    let a = applied(
-        c.call(team(&[], &["plugin:a@market", "plugin:b@market"]))
-            .await,
-    );
-    assert!(a.dropped.is_empty(), "{:?}", a.dropped);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_refuses_a_bad_request() {
-    let d = TestDaemon::start().await;
-    let cache = d.dir.join("cache/plugins");
-    // The real daemon: no http, even on loopback.
-    let mut c = d.client().await;
-    let good = "a".repeat(64);
-    let req = |name: &str, url: &str, sha: &str, secrets: Vec<String>, disabled: Vec<String>| {
-        Msg::Manifest {
-            name: name.into(),
-            url: url.into(),
-            sha256: sha.into(),
-            secrets,
-            disabled,
-        }
-    };
-    let url = "https://e.org/x.toml";
-    let many_secrets: Vec<String> = (0..65).map(|i| format!("K{i}")).collect();
-    let many_ids: Vec<String> = (0..257).map(|i| format!("mcp:s{i}")).collect();
-    for (msg, shown) in [
-        (req("../x", url, &good, vec![], vec![]), "?"),
-        (req("kb", url, "abc", vec![], vec![]), "kb"),
-        (
-            req("kb", "http://e.org/x.toml", &good, vec![], vec![]),
-            "kb",
-        ),
-        (req("kb", "file:///etc/passwd", &good, vec![], vec![]), "kb"),
-        (req("kb", url, &good, vec!["PATH".into()], vec![]), "kb"),
-        (req("kb", url, &good, vec!["bad key".into()], vec![]), "kb"),
-        (req("kb", url, &good, many_secrets, vec![]), "kb"),
-        (req("kb", url, &good, vec![], vec!["skill:x".into()]), "kb"),
-        (req("kb", url, &good, vec![], many_ids), "kb"),
-    ] {
-        let reply = c.call(msg.clone()).await;
-        assert_eq!(
-            reply,
-            Msg::Error {
-                message: format!("manifest {shown}: bad request")
-            },
-            "{msg:?}"
-        );
-    }
-    assert!(!cache.exists(), "nothing written");
-}
-
-/// Serve `body` at `/team.toml` on loopback, counting the requests.
-async fn serve(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let hits = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&hits);
-    let router = axum::Router::new().route(
-        "/team.toml",
-        axum::routing::get(move || {
-            counted.fetch_add(1, Ordering::SeqCst);
-            async move { body }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (format!("http://127.0.0.1:{port}/team.toml"), hits)
-}
-
-fn files_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
-}
-
-fn download(url: &str, sha256: &str) -> Msg {
-    Msg::Manifest {
-        name: "team".into(),
-        url: url.into(),
-        sha256: sha256.into(),
-        secrets: vec![],
-        disabled: vec!["plugin:a@market".into(), "plugin:b@market".into()],
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_download_is_verified_stored_privately_and_shared() {
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::Ordering;
-    let h = PluginHost::start().await;
-    std::fs::remove_dir_all(&h.cache).unwrap();
-    let (url, hits) = serve(TEAM.as_bytes()).await;
-    let hash = sha256_hex(TEAM.as_bytes());
-    let mut a = h.d.client().await;
-    let mut b = h.d.client().await;
-    let (ra, rb) = tokio::join!(a.call(download(&url, &hash)), b.call(download(&url, &hash)));
-    assert_eq!(applied(ra), applied(rb));
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "one download for both");
-    assert_eq!(
-        std::fs::read_to_string(h.cache.join("team.toml")).unwrap(),
-        TEAM
-    );
-    assert_eq!(
-        std::fs::read_to_string(h.cache.join("team.sha256")).unwrap(),
-        format!("{hash}\n")
-    );
-    assert_eq!(files_in(&h.cache), ["team.sha256", "team.toml"]);
-    let mode = std::fs::metadata(&h.cache).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wrong_hash_a_bad_manifest_or_an_oversized_one_is_an_error() {
-    static BIG: OnceLock<Vec<u8>> = OnceLock::new();
-    let h = PluginHost::start().await;
-    std::fs::remove_dir_all(&h.cache).unwrap();
-    let (url, _) = serve(b"tampered").await;
-    let mut c = h.d.client().await;
-    assert_eq!(
-        c.call(download(&url, &"b".repeat(64))).await,
-        Msg::Error {
-            message: "manifest team: hash mismatch".into()
-        }
-    );
-    assert!(files_in(&h.cache).is_empty(), "{:?}", files_in(&h.cache));
-    // Downloaded and verified, but not a manifest: refused with the reason.
-    assert_eq!(
-        c.call(download(&url, &sha256_hex(b"tampered"))).await,
-        Msg::Error {
-            message: "manifest team: not valid TOML, or a value of the wrong type (line 1)".into()
-        }
-    );
-    let other = TEAM.replacen("name = \"team\"", "name = \"other\"", 1);
-    let other: &'static [u8] = Box::leak(other.into_bytes().into_boxed_slice());
-    let (url, _) = serve(other).await;
-    assert_eq!(
-        c.call(download(&url, &sha256_hex(other))).await,
-        Msg::Error {
-            message: "manifest team: the manifest is other's".into()
-        }
-    );
-    let big = BIG.get_or_init(|| vec![b'#'; (256 << 10) + 1]);
-    let (url, _) = serve(big).await;
-    assert_eq!(
-        c.call(download(&url, &sha256_hex(big))).await,
-        Msg::Error {
-            message: "manifest team: over 256 KiB".into()
-        }
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_cache_keeps_at_most_32_manifests() {
-    let h = PluginHost::start().await;
-    std::fs::remove_dir_all(&h.cache).unwrap();
-    std::fs::create_dir_all(&h.cache).unwrap();
-    for i in 0..super::manifest::MAX_MANIFESTS {
-        std::fs::write(h.cache.join(format!("p{i}.toml")), b"z").unwrap();
-    }
-    let (url, hits) = serve(TEAM.as_bytes()).await;
-    let mut c = h.d.client().await;
-    let reply = c.call(download(&url, &sha256_hex(TEAM.as_bytes()))).await;
-    assert_eq!(
-        reply,
-        Msg::Error {
-            message: "manifest team: cache holds 32 manifests already".into()
-        }
-    );
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-}
-
 /// A claude that does not know `--plugin-dir` (the fake's `--help` is
 /// empty) still starts: the daemon leaves the pairs out of its argv, and
-/// the journal keeps them for a claude that does.
+/// the journal keeps them for a claude that does. A generic flag the spawn
+/// marks optional is treated the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_dirs_are_dropped_for_an_old_claude_but_journaled() {
-    let d = TestDaemon::start().await;
+    let d = TestDaemon::start_logging_argv().await;
     let mut c = d.client().await;
     let id = Uuid::new_v4();
     let mut spec = d.spec(id);
-    spec.args = vec!["--plugin-dir".into(), "/c/plugins/kb.zip".into()];
+    spec.args = vec![
+        "--plugin-dir".into(),
+        "/c/plugins/kb.zip".into(),
+        "--x-test=1".into(),
+    ];
+    spec.optional = vec!["--x-test".into()];
     c.spawn(spec).await;
     c.attach_until(id, BANNER).await;
-    assert!(!d.daemon.claude_flags().plugin_dir);
+    assert!(!d.daemon.claude_flags().knows("--plugin-dir"));
+    assert!(!d.daemon.claude_flags().knows("--x-test"));
+    assert_eq!(d.runs()[0], ["-n", "test"]);
     let entry = &d.journal()["sessions"][0];
     assert_eq!(
         entry["args"],
-        serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip"])
+        serde_json::json!(["--plugin-dir", "/c/plugins/kb.zip", "--x-test=1"])
     );
+    assert_eq!(entry["optional"], serde_json::json!(["--x-test"]));
 }
 
 // ── Working tree (the web's Changes view) ────────────────────────────────────

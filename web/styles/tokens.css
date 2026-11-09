@@ -53,6 +53,14 @@
   --gauge-hot: var(--coral);
   --gauge-track: var(--slate);
 
+  /* addon tones (docs/web-protocol.md §7): segments, panel text and bars */
+  --tone-ok: var(--phosphor);
+  --tone-warn: var(--violet);
+  --tone-hot: var(--coral);
+  --tone-muted: var(--steel);
+  --tone-accent: var(--ansi-cyan);
+  --ring-tone-accent: color-mix(in srgb, var(--tone-accent) 15%, transparent);
+
   /* diffs */
   --diff-add-text: var(--phosphor);
   --diff-add-bg: color-mix(in srgb, var(--deep-teal) 85%, var(--carbon));

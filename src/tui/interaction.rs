@@ -26,7 +26,6 @@ use super::leader::{Input, Picker};
 use super::reader::{ReaderView, RenderedAnswer};
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
-use super::stats_view::StatsView;
 use super::ui;
 use super::wizard::{Outcome, Wizard};
 
@@ -41,8 +40,8 @@ pub enum Modal {
     /// The new-session wizard. Boxed like the history viewer: both are
     /// several hundred bytes, the other modals a few dozen.
     Wizard(Box<Wizard>),
-    /// Proxy stats popup (see `stats_view.rs`).
-    ProxyStats(StatsView),
+    /// An addon's panel (see `panel_view.rs`).
+    Panel(Box<super::panel_view::PanelView>),
     /// Overview / "mission control": all sessions at a glance.
     Overview {
         selected: usize,
@@ -67,9 +66,9 @@ pub enum Modal {
     Picker(Box<Picker>),
     /// The extensions screen (Alt+i, see `extensions_view.rs`).
     ExtensionsMenu(ExtensionsView),
-    /// A plugin's setup screen (see `plugin_setup.rs`): swallows every
-    /// key, like `Confirm`.
-    PluginSetup(Box<super::plugin_setup::PluginSetup>),
+    /// An addon's checklist (see `checklist.rs`): swallows every key,
+    /// like `Confirm`.
+    Checklist(Box<super::checklist::ChecklistView>),
 }
 
 impl Modal {
@@ -81,7 +80,7 @@ impl Modal {
             Modal::Git(_)
                 | Modal::Overview { .. }
                 | Modal::Help
-                | Modal::ProxyStats { .. }
+                | Modal::Panel(_)
                 | Modal::Reader(_)
                 | Modal::Leader
                 | Modal::Picker(_)
@@ -97,7 +96,7 @@ impl Modal {
             (Modal::Git(_), Action::GitLog)
                 | (Modal::Overview { .. }, Action::Overview)
                 | (Modal::Help, Action::Help)
-                | (Modal::ProxyStats { .. }, Action::ProxyStats)
+                | (Modal::Panel(_), Action::Panel(_))
                 | (Modal::Reader(_), Action::Formulas)
                 | (Modal::Leader, Action::Extensions)
                 | (Modal::ExtensionsMenu(_), Action::ExtensionsMenu)
@@ -208,7 +207,7 @@ impl App {
                 self.save();
                 self.quit = true;
             }
-            Action::ProxyStats => self.open_proxy_stats(),
+            Action::Panel(i) => self.open_panel(i),
             Action::Overview => self.open_overview(),
             Action::Help => self.open_help(),
             Action::GitLog => self.open_git_log(),
@@ -334,7 +333,7 @@ impl App {
                 }
                 _ => {}
             },
-            Modal::ProxyStats(_) => self.stats_key(key),
+            Modal::Panel(_) => self.panel_key(&key),
             Modal::Overview { selected, filter } => {
                 let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
                 match key.code {
@@ -405,7 +404,7 @@ impl App {
             Modal::ActionInput(_) => self.action_input_key(&key),
             Modal::Picker(_) => self.picker_key(&key),
             Modal::ExtensionsMenu(_) => self.extensions_menu_key(&key),
-            Modal::PluginSetup(_) => self.plugin_setup_key(&key),
+            Modal::Checklist(_) => self.checklist_key(&key),
         }
     }
 
@@ -468,7 +467,7 @@ impl App {
                 self.redraw = true;
             }
             Some(
-                Modal::ProxyStats(_)
+                Modal::Panel(_)
                 | Modal::Overview { .. }
                 | Modal::Help
                 | Modal::Confirm(_)
@@ -476,7 +475,7 @@ impl App {
                 | Modal::Leader
                 | Modal::Picker(_)
                 | Modal::ExtensionsMenu(_)
-                | Modal::PluginSetup(_),
+                | Modal::Checklist(_),
             ) => {}
             Some(Modal::ActionInput(input)) => {
                 let line = text.lines().next().unwrap_or("");
@@ -685,13 +684,11 @@ impl App {
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
-            Outcome::Spawn { cwd, resume, proxy } => {
-                self.modal = None;
-                if let Some(ref pname) = proxy {
-                    self.maybe_fetch_proxy_config(pname);
-                }
-                self.spawn(wizard_host, cwd, resume, proxy);
-            }
+            Outcome::Spawn {
+                cwd,
+                resume,
+                select,
+            } => self.wizard_spawn(wizard_host, cwd, resume, select),
         }
         self.redraw = true;
     }
@@ -791,7 +788,6 @@ impl App {
                 // Handled in the event loop before on_incoming_from is called.
             }
             Incoming::Disconnected => {
-                self.plugin_host_gone(host);
                 if host == "local" {
                     self.on_disconnected_local();
                 } else {
@@ -842,7 +838,6 @@ impl App {
             SessionEvent::ClaudeSession { claude_session_id } => {
                 v.claude_session_id = Some(claude_session_id);
                 self.save();
-                self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
             }
             // A fresh reset: recovery must not resume the old conversation
             // from what we saved.
@@ -993,9 +988,6 @@ impl App {
                 }
             }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
-            (ReplyTo::Manifest { host, name, sha256 }, reply) => {
-                self.on_applied(&host, &name, &sha256, reply)
-            }
             // Typing a path that doesn't exist (yet) is not an error.
             (ReplyTo::DirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {
@@ -1034,7 +1026,7 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
 mod tests {
     use super::*;
     use crate::app::extensions::Registry;
-    use crate::tui::app::AppConfig;
+    use crate::tui::app::{AppConfig, LaunchCall};
     use crate::tui::test_support::{self, app_with, info, press};
     use crossterm::event::Event;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1249,7 +1241,7 @@ mod tests {
                 command: vec!["prog".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), true, vec![keys], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![keys]);
     }
 
     /// G5: the daemon's formula and lens lists (old daemons' `Latex`, new
@@ -1293,31 +1285,33 @@ mod tests {
         assert_eq!(row.trim_end(), "<latex>x^2</latex> <keys>Ctrl+C</keys>");
     }
 
-    /// The lenses still go to every spawn (the web UI renders their tags):
-    /// latex and mermaid by default, without latex once it is turned off.
+    /// The core's lenses still go to every spawn (the web UI renders their
+    /// tags): an external extension's, and none once it is turned off. The
+    /// latex and mermaid lenses are the web addon's, composed later.
     #[test]
     fn spawns_carry_the_enabled_lenses() {
         let respawned_lenses = |app: &mut App| -> Vec<String> {
             let id = app.sessions[0].id;
             app.take_effects();
             app.reset_session(id, false);
+            // A direct session is restarted through the launch composer.
             let sent = app.take_effects().into_iter().find_map(|e| match e {
-                Effect::Request {
-                    msg: Msg::Respawn(spec),
+                Effect::Launch(LaunchCall {
+                    base: Msg::Respawn(spec),
                     ..
-                } => Some(spec),
+                }) => Some(spec),
                 _ => None,
             });
             let ext = sent.expect("a respawn").extensions.expect("extensions");
             ext.lenses.into_iter().map(|l| l.name).collect()
         };
         let mut app = app_with(&[info(Some(1), None)]);
-        app.extensions = Registry::new(&Default::default(), true, vec![], &mut Vec::new());
-        assert_eq!(respawned_lenses(&mut app), ["latex", "mermaid"]);
+        with_keys(&mut app);
+        assert_eq!(respawned_lenses(&mut app), ["keys"]);
         let mut app = app_with(&[info(Some(1), None)]);
-        let off = std::collections::BTreeMap::from([("latex".to_owned(), false)]);
-        app.extensions = Registry::new(&off, true, vec![], &mut Vec::new());
-        assert_eq!(respawned_lenses(&mut app), ["mermaid"]);
+        with_keys(&mut app);
+        app.extensions.set_enabled("keys", false);
+        assert!(respawned_lenses(&mut app).is_empty());
     }
 
     #[test]

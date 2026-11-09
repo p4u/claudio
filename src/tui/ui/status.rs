@@ -1,11 +1,13 @@
 //! The two-line bottom bar: session info (line 1) and gauges (line 2).
 //!
 //! Line 1 says where the session is and what it is doing: host and directory,
-//! model, state, uptime, the proxy and its credential. Line 2 is the
-//! instrument panel: host CPU and memory, the context gauge, the git working
-//! tree, the credential's rate-limit windows and the conversation totals. Its
-//! segments have priorities; a narrow bar drops whole segments, least
-//! important first, and never cuts one mid-text.
+//! model, state, uptime, then the addons' segments of priority 0-99 (the
+//! proxy and its credential). Line 2 is the instrument panel: host CPU and
+//! memory, the context gauge, the git working tree and the conversation
+//! totals, with the addons' segments of priority 100-255 among them (the
+//! credential's rate-limit windows). Its segments have priorities; a narrow
+//! bar drops whole segments, the highest number (least important) first,
+//! and never cuts one mid-text.
 //!
 //! Every span carries an explicit foreground on the explicit [`BAR_BG`], so the
 //! bar reads the same on dark and light terminal themes (reversed video would
@@ -18,8 +20,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use crate::addon::{Segment as AddonSegment, Tone};
 use crate::proto::{GitStatus, SessionKind, SessionState};
-use crate::proxy::api::SessionCredential;
 
 use super::super::app::{App, HostStatsSample};
 use super::super::fmt::{
@@ -49,8 +51,6 @@ const BAR_SEPARATOR: &str = " │ ";
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 /// Cells of the context gauge.
 const CONTEXT_GAUGE: usize = 10;
-/// Cells of the rate-limit gauge.
-const USAGE_GAUGE: usize = 5;
 /// Most samples a sparkline shows.
 const SPARKLINE_SAMPLES: usize = 10;
 
@@ -142,35 +142,47 @@ fn session_segments(app: &App, v: &SessionView) -> Vec<Vec<Span<'static>>> {
     if v.created_at > 0 && app.now >= v.created_at {
         segments.push(vec![dim(fmt_age(app.now.saturating_sub(v.created_at)))]);
     }
-    // The session's proxy choice, not whether stats have been fetched.
-    segments.push(vec![match &v.proxy {
-        Some(name) => colored(format!("⇄ proxy:{name}"), GREEN),
-        None => dim("direct"),
-    }]);
-    if let Some(cred) = app.session_credential(v) {
-        segments.extend(credential_segments(cred, app.now));
+    // A session no addon routes says so (or that its route is unknown
+    // here); an addon's route is its segment.
+    if v.unknown.is_some() {
+        segments.push(vec![dim("route unknown")]);
+    } else if v.launch.is_none() {
+        segments.push(vec![dim("direct")]);
     }
+    let line_one = addon_segments(app, v).filter(|s| s.priority < LINE_TWO);
+    segments.extend(line_one.map(|s| vec![tone_span(s)]));
     segments
 }
 
-/// The credential the proxy reports for the session: `work-max (max)` and a
-/// short-lived switch notice. Empty when the proxy sent nothing to name.
-pub(super) fn credential_segments(cred: &SessionCredential, now: u64) -> Vec<Vec<Span<'static>>> {
-    let mut segments = Vec::new();
-    if let Some(name) = cred.name() {
-        let mut spans = vec![bold_colored(truncate(name, 24), TEXT)];
-        if let Some(plan) = cred.plan() {
-            spans.push(dim(format!(" ({plan})")));
-        }
-        segments.push(spans);
+/// Where line 2's addon segments start.
+const LINE_TWO: u8 = 100;
+
+/// Session `v`'s addon segments, by priority.
+fn addon_segments<'a>(app: &'a App, v: &SessionView) -> impl Iterator<Item = &'a AddonSegment> {
+    let mut all: Vec<&AddonSegment> = app
+        .segments
+        .get(&v.id)
+        .into_iter()
+        .flatten()
+        .map(|(_, s)| s)
+        .collect();
+    all.sort_by_key(|s| s.priority);
+    all.into_iter()
+}
+
+/// An addon segment's text in its tone's colour.
+fn tone_span(s: &AddonSegment) -> Span<'static> {
+    let fg = match s.tone {
+        Tone::Ok | Tone::Accent => GREEN,
+        Tone::Warn => YELLOW,
+        Tone::Hot => RED,
+        Tone::Muted => DIM,
+    };
+    let text = truncate(&s.text, crate::addon::SEGMENT_CHARS);
+    match s.tone {
+        Tone::Hot => bold_colored(text, fg),
+        _ => colored(text, fg),
     }
-    if let Some(age) = cred.recent_switch_age(now) {
-        segments.push(vec![Span::styled(
-            format!("⇆ switched {} ago", fmt_age(age)),
-            style(YELLOW).add_modifier(Modifier::DIM),
-        )]);
-    }
-    segments
 }
 
 /// Flatten segments into spans, with a dim separator between them.
@@ -210,14 +222,14 @@ struct Segment {
     spans: Vec<Span<'static>>,
 }
 
-/// Drop order of the line-2 segments (higher goes first).
-const PRIO_CPU: u8 = 0;
-const PRIO_CONTEXT: u8 = 0;
-const PRIO_GIT: u8 = 1;
-const PRIO_MEM: u8 = 2;
-const PRIO_FIVE_HOUR: u8 = 3;
-const PRIO_CONVERSATION: u8 = 4;
-const PRIO_SEVEN_DAY: u8 = 5;
+/// Drop order of the line-2 segments (higher goes first), in the addons'
+/// band (D9): an addon's segment sits before the first core one with a
+/// higher number.
+const PRIO_CPU: u8 = 100;
+const PRIO_CONTEXT: u8 = 100;
+const PRIO_GIT: u8 = 101;
+const PRIO_MEM: u8 = 102;
+const PRIO_CONVERSATION: u8 = 140;
 
 /// Line 2: host CPU/mem, context gauge, git, rate limits and conversation
 /// totals left; upgrade notice and "Alt+h help" right.
@@ -245,10 +257,15 @@ fn machine_segments(app: &App) -> Vec<Segment> {
     }
     segments.extend(git_segment(v.git.as_ref(), v.branch.as_deref()));
     if claude {
-        let cred = app.session_credential(v);
-        segments.extend(cred.and_then(five_hour_segment));
         segments.extend(conversation_segment(v.turns, v.output_tokens));
-        segments.extend(cred.and_then(seven_day_segment));
+    }
+    for s in addon_segments(app, v).filter(|s| s.priority >= LINE_TWO) {
+        let at = segments.iter().position(|c| c.priority > s.priority);
+        let segment = Segment {
+            priority: s.priority,
+            spans: vec![tone_span(s)],
+        };
+        segments.insert(at.unwrap_or(segments.len()), segment);
     }
     segments
 }
@@ -390,33 +407,6 @@ fn git_segment(git: Option<&GitStatus>, branch: Option<&str>) -> Option<Segment>
     Some(Segment {
         priority: PRIO_GIT,
         spans,
-    })
-}
-
-/// The credential's 5-hour rate-limit window: `5h ██▍░░ 37%`.
-fn five_hour_segment(cred: &SessionCredential) -> Option<Segment> {
-    let pct = cred.five_hour_pct()? as f32;
-    let color = level_color(pct);
-    let mut spans = vec![label("5h"), text(" ")];
-    spans.extend(gauge_spans(pct / 100.0, USAGE_GAUGE, color));
-    spans.push(text(" "));
-    spans.push(bold_colored(format!("{}%", pct.floor() as i64), color));
-    Some(Segment {
-        priority: PRIO_FIVE_HOUR,
-        spans,
-    })
-}
-
-/// The credential's 7-day rate-limit window: `7d 12%`.
-fn seven_day_segment(cred: &SessionCredential) -> Option<Segment> {
-    let pct = cred.seven_day_pct()? as f32;
-    Some(Segment {
-        priority: PRIO_SEVEN_DAY,
-        spans: vec![
-            label("7d"),
-            text(" "),
-            bold_colored(format!("{}%", pct.floor() as i64), level_color(pct)),
-        ],
     })
 }
 
@@ -569,8 +559,6 @@ fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::api::{CredentialInfo, CredentialUtilization, ModelEntry, ModelsResponse};
-    use crate::tui::proxy_state::{ProxyStatus, SessionCred};
 
     fn plain(spans: &[Span<'_>]) -> String {
         spans.iter().map(|s| s.content.as_ref()).collect()
@@ -597,71 +585,19 @@ mod tests {
         assert_eq!(level_color(100.0), RED);
     }
 
-    fn cred(five_hour: Option<f64>, switched_at: Option<&str>) -> SessionCredential {
-        SessionCredential {
-            credential: CredentialInfo {
-                label: "work-max".into(),
-                plan: "max".into(),
-                ..Default::default()
-            },
-            switched_at: switched_at.map(str::to_owned),
-            utilization: five_hour.map(|p| CredentialUtilization {
-                five_hour_pct: Some(p),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    // ── line 1 ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn credential_shows_label_and_plan_but_leaves_the_windows_to_line_two() {
-        let segs = credential_segments(&cred(Some(37.5), None), 0);
-        let spans = join_segments(segs);
-        assert_eq!(plain(&spans), "work-max (max)");
-        assert_eq!(find(&spans, " (max)").style.fg, Some(DIM));
-    }
-
-    #[test]
-    fn credential_without_utilization_or_plan_is_just_the_label() {
-        let mut c = cred(None, None);
-        c.credential.plan.clear();
-        assert_eq!(
-            plain(&join_segments(credential_segments(&c, 0))),
-            "work-max"
-        );
-        // The id stands in for a missing label; nothing to name shows nothing.
-        c.credential.label.clear();
-        c.credential.id = "cred_ab12".into();
-        assert_eq!(
-            plain(&join_segments(credential_segments(&c, 0))),
-            "cred_ab12"
-        );
-        c.credential.id.clear();
-        assert!(credential_segments(&c, 0).is_empty());
-    }
-
-    #[test]
-    fn switch_notice_lasts_ten_minutes() {
-        let at = "2026-10-09T10:07:02Z";
-        let t0 = crate::text::parse_rfc3339(at).unwrap();
-        let line = |now| {
-            plain(&join_segments(credential_segments(
-                &cred(None, Some(at)),
-                now,
-            )))
+    fn addon_segment(
+        id: &str,
+        text: &str,
+        tone: Tone,
+        priority: u8,
+    ) -> (&'static str, AddonSegment) {
+        let segment = AddonSegment {
+            id: id.into(),
+            text: text.into(),
+            tone,
+            priority,
         };
-        assert_eq!(line(t0 + 180), "work-max (max) · ⇆ switched 3m ago");
-        assert_eq!(line(t0 + 599), "work-max (max) · ⇆ switched 9m ago");
-        assert_eq!(line(t0 + 600), "work-max (max)");
-        let spans = join_segments(credential_segments(&cred(None, Some(at)), t0 + 5));
-        let sw = spans
-            .iter()
-            .find(|s| s.content.contains("switched"))
-            .unwrap();
-        assert_eq!(sw.style.fg, Some(YELLOW));
-        assert!(sw.style.add_modifier.contains(Modifier::DIM));
+        ("team", segment)
     }
 
     /// An app with one active claude session on a proxy, in a repo, with a
@@ -677,7 +613,7 @@ mod tests {
             state: SessionState::Idle,
             claude_session_id: Some("c1".into()),
             attached: true,
-            proxy: Some("work".into()),
+            launch: crate::tui::test_support::via("work"),
             branch: Some("main".into()),
             model: Some("claude-opus-5-5[1m]".into()),
             context_tokens: Some(620_000),
@@ -703,49 +639,48 @@ mod tests {
         for (cpu, mem) in [(10.0, 20u64), (30.0, 25), (23.0, 26)] {
             app.on_host_stats("local".into(), cpu, mem << 30, 46 << 30);
         }
-        app.session_creds.insert(
-            app.sessions[0].id,
-            SessionCred {
-                claude_session_id: "c1".into(),
-                cred: Some(SessionCredential {
-                    utilization: Some(CredentialUtilization {
-                        five_hour_pct: Some(37.0),
-                        seven_day_pct: Some(12.0),
-                        ..Default::default()
-                    }),
-                    ..cred(None, None)
-                }),
-                asked_at: 0,
-            },
-        );
+        let segments = vec![
+            addon_segment("proxy", "⇄ proxy:work", Tone::Accent, 10),
+            addon_segment("seven-day", "7d 12%", Tone::Ok, 150),
+            addon_segment("five-hour", "5h 37%", Tone::Ok, 110),
+        ];
+        app.segments.insert(app.sessions[0].id, segments);
         app
     }
 
     #[test]
-    fn status_line_appends_the_credential_after_the_proxy_badge() {
+    fn status_line_appends_the_addon_segments_by_priority() {
         let mut app = demo_app();
-        app.session_creds.clear();
         let line = |app: &App| plain(&join_segments(session_segments(app, &app.sessions[0])));
+        // Line 1 takes 0-99 only, lowest first.
         assert_eq!(line(&app), "/srv · opus-5-5[1m] · idle · ⇄ proxy:work");
-        // Unknown yet: nothing extra.
-        app.session_creds.insert(
-            app.sessions[0].id,
-            SessionCred {
-                claude_session_id: "c1".into(),
-                cred: None,
-                asked_at: 0,
-            },
-        );
-        assert!(line(&app).ends_with("⇄ proxy:work"));
-        app.session_creds.get_mut(&app.sessions[0].id).unwrap().cred = Some(cred(Some(37.5), None));
+        let id = app.sessions[0].id;
+        let cred = addon_segment("credential", "work-max (max)", Tone::Accent, 20);
+        app.segments.get_mut(&id).unwrap().insert(0, cred);
         assert!(
             line(&app).ends_with("⇄ proxy:work · work-max (max)"),
             "{}",
             line(&app)
         );
-        // A cached credential of a previous conversation is not shown.
-        app.sessions[0].claude_session_id = Some("c2".into());
-        assert!(line(&app).ends_with("⇄ proxy:work"));
+        let spans = session_segments(&app, &app.sessions[0]);
+        assert_eq!(
+            find(spans.last().unwrap(), "work-max (max)").style.fg,
+            Some(GREEN)
+        );
+        // An addon's long text is cut; a hot one is bold red.
+        let long = addon_segment("x", &"y".repeat(80), Tone::Hot, 30);
+        app.segments.insert(id, vec![long]);
+        let spans = session_segments(&app, &app.sessions[0]);
+        let last = &spans.last().unwrap()[0];
+        assert_eq!(str_width(&last.content), crate::addon::SEGMENT_CHARS);
+        assert_eq!(last.style.fg, Some(RED));
+        // A direct session says so; no addon segment, no route.
+        app.sessions[0].launch = None;
+        app.segments.clear();
+        assert_eq!(line(&app), "/srv · opus-5-5[1m] · idle · direct");
+        // One started elsewhere is not called direct (R19).
+        app.sessions[0].unknown = Some(crate::tui::sessions::UnknownRoute::Foreign);
+        assert_eq!(line(&app), "/srv · opus-5-5[1m] · idle · route unknown");
     }
 
     // ── gauges ───────────────────────────────────────────────────────────────
@@ -964,40 +899,6 @@ mod tests {
     // ── proxy and conversation ───────────────────────────────────────────────
 
     #[test]
-    fn usage_segments_gauge_the_five_hour_window_and_name_the_seven_day_one() {
-        let c = SessionCredential {
-            utilization: Some(CredentialUtilization {
-                five_hour_pct: Some(37.9),
-                seven_day_pct: Some(91.0),
-                ..Default::default()
-            }),
-            ..cred(None, None)
-        };
-        let five = five_hour_segment(&c).unwrap();
-        let seven = seven_day_segment(&c).unwrap();
-        assert_eq!(segment_text(&five), "5h █▉░░░ 37%");
-        assert_eq!(segment_text(&seven), "7d 91%");
-        assert_eq!(
-            (five.priority, seven.priority),
-            (PRIO_FIVE_HOUR, PRIO_SEVEN_DAY)
-        );
-        assert_eq!(find(&five.spans, "37%").style.fg, Some(GREEN));
-        assert_eq!(find(&seven.spans, "91%").style.fg, Some(RED));
-        for (value, color) in [(72.0, YELLOW), (91.0, RED)] {
-            let c = cred(Some(value), None);
-            assert!(seven_day_segment(&c).is_none(), "no 7d figure");
-            let five = five_hour_segment(&c).unwrap();
-            let pct = five
-                .spans
-                .iter()
-                .find(|s| s.content.ends_with('%'))
-                .unwrap();
-            assert_eq!(pct.style.fg, Some(color), "{value}");
-        }
-        assert!(five_hour_segment(&cred(None, None)).is_none());
-    }
-
-    #[test]
     fn conversation_segment_counts_turns_and_output() {
         let seg = conversation_segment(Some(14), Some(48_200)).unwrap();
         assert_eq!(segment_text(&seg), "14 turns · 48k out");
@@ -1034,33 +935,11 @@ mod tests {
         assert_eq!(str_width(&line), 200);
         assert!(
             line.starts_with(
-                " cpu ▁▃▂ 23% │ mem ▄▄▄ 26.0/46G │ ctx ██████▎░░░ 62% 620k/1M │ ⎇ main ↑2 ↓1 ✚3 │ 5h █▉░░░ 37% │ 14 turns · 48k out │ 7d 12%"
+                " cpu ▁▃▂ 23% │ mem ▄▄▄ 26.0/46G │ ctx ██████▎░░░ 62% 620k/1M │ ⎇ main ↑2 ↓1 ✚3 │ 5h 37% │ 14 turns · 48k out │ 7d 12%"
             ),
             "{line:?}"
         );
         assert!(line.ends_with("Alt+h help "), "{line:?}");
-        // The proxy's catalogue does not move the gauge: claude compacts
-        // against the window it believes the model has, not the catalogue's.
-        let mut app = app;
-        app.proxy_status.insert(
-            "work".into(),
-            ProxyStatus {
-                models: Some(ModelsResponse {
-                    data: vec![ModelEntry {
-                        id: "claude-opus-5-5[1m]".into(),
-                        max_input_tokens: 800_000,
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-        assert!(
-            render(&app, 200).contains("62% 620k/1M"),
-            "{}",
-            render(&app, 200)
-        );
     }
 
     #[test]
@@ -1074,14 +953,14 @@ mod tests {
             line.contains("7d 12%") && line.contains("14 turns"),
             "{line:?}"
         );
-        // 120: the 7-day window and the conversation totals go; 5h stays.
-        let line = at(120);
-        assert_eq!(str_width(&line), 120);
+        // 110: the 7-day window and the conversation totals go; 5h stays.
+        let line = at(110);
+        assert_eq!(str_width(&line), 110);
         assert!(line.contains("5h") && line.contains("⎇ main"), "{line:?}");
         assert!(!line.contains("7d") && !line.contains("turns"), "{line:?}");
-        // 100: the conversation totals and the 5-hour window go; git and mem stay.
-        let line = at(100);
-        assert_eq!(str_width(&line), 100);
+        // 95: the conversation totals and the 5-hour window go; git and mem stay.
+        let line = at(95);
+        assert_eq!(str_width(&line), 95);
         assert!(line.contains("⎇ main") && line.contains("mem"), "{line:?}");
         assert!(!line.contains("5h") && !line.contains("turns"), "{line:?}");
         // 80: mem goes before git; ctx and cpu stay.
@@ -1109,6 +988,7 @@ mod tests {
     fn terminal_tab_shows_host_and_git_only() {
         let mut app = demo_app();
         app.sessions[0].kind = SessionKind::Shell;
+        app.segments.clear();
         let line = render(&app, 200);
         assert!(line.contains("cpu") && line.contains("mem") && line.contains("⎇ main ↑2 ↓1 ✚3"));
         for claude_only in ["ctx", "5h", "7d", "turns", "out"] {
@@ -1121,7 +1001,7 @@ mod tests {
         let mut app = demo_app();
         let v = &mut app.sessions[0];
         (v.context_tokens, v.output_tokens, v.turns) = (None, None, None);
-        app.session_creds.clear();
+        app.segments.clear();
         let line = render(&app, 200);
         assert!(line.contains("⎇ main") && !line.contains("ctx") && !line.contains("5h"));
         // No session at all: just the host.

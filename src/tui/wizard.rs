@@ -10,9 +10,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::HashMap;
 
+use crate::addon::{LaunchOption, LaunchSelect};
 use crate::proto::{ClaudeSession, DirEntry};
 
 use super::fmt::{abbreviate_home, fmt_age};
+use super::wizard_route::Routes;
 
 /// Enrichment metadata for a candidate directory.
 ///
@@ -43,11 +45,11 @@ pub enum Outcome {
     ListDir(String),
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
-    /// Start claude in `cwd`, resuming `resume` if set, with optional proxy profile.
+    /// Start claude in `cwd`, resuming `resume` if set, routed as `select`.
     Spawn {
         cwd: String,
         resume: Option<String>,
-        proxy: Option<String>,
+        select: LaunchSelect,
     },
 }
 
@@ -433,10 +435,8 @@ pub struct Wizard {
     listed: Option<String>,
     /// The daemon host's home directory, for `~`.
     home: String,
-    /// Available proxy profile names (`"none"` prepended at index 0).
-    pub proxy_options: Vec<String>,
-    /// Currently selected index in `proxy_options` (0 = none).
-    pub proxy_selected: usize,
+    /// The route row: direct or a launch option (a proxy profile).
+    pub route: Routes,
     /// Saved first-screen state so Backspace in the directory step can
     /// return to the previous screen.
     pub saved_host_step: Option<HostStep>,
@@ -518,19 +518,12 @@ impl Wizard {
         home: String,
         active_host: &str,
         host_candidates: &[String],
-        proxy_profiles: &[String],
-        proxy_default: Option<&str>,
+        (options, preselect): (&[(&'static str, LaunchOption)], &LaunchSelect),
     ) -> Wizard {
         // Show recent local dirs in the LOCAL section so the user can jump
         // directly to a recent dir without going through the directory step.
         let host_step = HostStep::with_local_dirs(active_host, host_candidates, recent);
         let host = active_host.to_owned();
-        // Build proxy options: ["none", "profile1", "profile2", …]
-        let mut proxy_options = vec!["none".to_owned()];
-        proxy_options.extend_from_slice(proxy_profiles);
-        let proxy_selected = proxy_default
-            .and_then(|d| proxy_options.iter().position(|o| o == d))
-            .unwrap_or(0);
         let mut meta: HashMap<String, DirMeta> = HashMap::new();
         for r in recent {
             let r = trim_slash(r);
@@ -550,8 +543,7 @@ impl Wizard {
             completions: Vec::new(),
             listed: None,
             home,
-            proxy_options,
-            proxy_selected,
+            route: Routes::new(options, preselect),
             meta,
             saved_host_step: None,
             show_hidden: false,
@@ -583,17 +575,6 @@ impl Wizard {
             let hosts = std::mem::take(&mut step.candidates);
             *step = HostStep::with_local_dirs(&self.host, &hosts, dirs);
         }
-    }
-
-    /// The currently selected proxy profile name, or `None` when "none".
-    pub fn selected_proxy(&self) -> Option<&str> {
-        self.proxy_options.get(self.proxy_selected).and_then(|s| {
-            if s == "none" {
-                None
-            } else {
-                Some(s.as_str())
-            }
-        })
     }
 
     /// The host was chosen and the connection is ready. Advance to step 1
@@ -704,7 +685,7 @@ impl Wizard {
             return Outcome::Spawn {
                 cwd: cwd.to_owned(),
                 resume: None,
-                proxy: self.selected_proxy().map(str::to_owned),
+                select: self.route.select(),
             };
         }
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
@@ -883,17 +864,12 @@ impl Wizard {
                     step.selected = (step.selected + 1).min(max);
                     Outcome::None
                 }
-                KeyCode::Left if self.proxy_options.len() > 1 => {
-                    if self.proxy_selected > 0 {
-                        self.proxy_selected -= 1;
-                    } else {
-                        self.proxy_selected = self.proxy_options.len().saturating_sub(1);
-                    }
+                KeyCode::Left if self.route.cycles() => {
+                    self.route.left();
                     Outcome::None
                 }
-                KeyCode::Right if self.proxy_options.len() > 1 => {
-                    self.proxy_selected =
-                        (self.proxy_selected + 1) % self.proxy_options.len().max(1);
+                KeyCode::Right if self.route.cycles() => {
+                    self.route.right();
                     Outcome::None
                 }
                 KeyCode::Enter => {
@@ -907,7 +883,7 @@ impl Wizard {
                     Outcome::Spawn {
                         cwd,
                         resume,
-                        proxy: self.selected_proxy().map(str::to_owned),
+                        select: self.route.select(),
                     }
                 }
                 KeyCode::Char(c) if plain => {
@@ -944,16 +920,12 @@ impl Wizard {
             }
             // The proxy toggle is also available in the directory step:
             // when the input box is empty, Left/Right cycle the proxy profile.
-            KeyCode::Left if self.proxy_options.len() > 1 && self.input.is_empty() => {
-                if self.proxy_selected > 0 {
-                    self.proxy_selected -= 1;
-                } else {
-                    self.proxy_selected = self.proxy_options.len().saturating_sub(1);
-                }
+            KeyCode::Left if self.route.cycles() && self.input.is_empty() => {
+                self.route.left();
                 Outcome::None
             }
-            KeyCode::Right if self.proxy_options.len() > 1 && self.input.is_empty() => {
-                self.proxy_selected = (self.proxy_selected + 1) % self.proxy_options.len().max(1);
+            KeyCode::Right if self.route.cycles() && self.input.is_empty() => {
+                self.route.right();
                 Outcome::None
             }
             // Browse mode: → opens the highlighted directory, ← goes up. The
@@ -1176,6 +1148,31 @@ fn join(dir: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::Pick;
+
+    /// No launch options: the wizard offers no route row, and launches
+    /// the default for the composer to resolve (R18: never direct).
+    const NO_LAUNCH: (&[(&str, LaunchOption)], &LaunchSelect) = (
+        &[],
+        &LaunchSelect {
+            pick: Pick::Default,
+            flags: Vec::new(),
+        },
+    );
+
+    /// One launch option, `name`, of addon `a`.
+    fn option(name: &str) -> Vec<(&'static str, LaunchOption)> {
+        let label = name.to_owned();
+        let (id, group) = (label.clone(), "Proxy".to_owned());
+        let o = LaunchOption {
+            id,
+            label,
+            group,
+            default: false,
+            detail: None,
+        };
+        vec![("a", o)]
+    }
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1196,7 +1193,7 @@ mod tests {
     /// about the host step.
     fn wizard_local(seeds: Vec<String>, home: &str) -> Wizard {
         let seeds_clone = seeds.clone();
-        let mut w = Wizard::new(seeds, &[], home.into(), "local", &[], &[], None);
+        let mut w = Wizard::new(seeds, &[], home.into(), "local", &[], NO_LAUNCH);
         // Advance past the host step by picking "local".
         w.on_host_connected("local", home, seeds_clone);
         w
@@ -1325,7 +1322,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: None,
-                proxy: None
+                select: LaunchSelect::default()
             },
             "first row is `+ New session`"
         );
@@ -1336,7 +1333,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: Some("old".into()),
-                proxy: None
+                select: LaunchSelect::default()
             }
         );
         // Esc goes back to the directory step.
@@ -1354,7 +1351,7 @@ mod tests {
             Outcome::Spawn {
                 cwd: "/w".into(),
                 resume: None,
-                proxy: None
+                select: LaunchSelect::default()
             }
         );
     }
@@ -1405,17 +1402,16 @@ mod tests {
             "/h".into(),
             "local",
             &[],
-            &["myproxy".to_owned()],
-            None,
+            (&option("myproxy")[..], &LaunchSelect::default()),
         );
         w.on_host_connected("local", "/h", strings(&["/w"]));
-        // proxy_options = ["none", "myproxy"], selected = 0 initially
-        assert_eq!(w.proxy_selected, 0);
+        // The route row is ["none", "myproxy"], none selected initially.
+        assert_eq!(w.route.selected, 0);
         // Left/Right should cycle the proxy when input is empty.
         w.on_key(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(w.proxy_selected, 1);
+        assert_eq!(w.route.selected, 1);
         w.on_key(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        assert_eq!(w.proxy_selected, 0);
+        assert_eq!(w.route.selected, 0);
     }
 
     #[test]
@@ -1426,8 +1422,7 @@ mod tests {
             "/h".into(),
             "local",
             &["server.example.com".to_owned()],
-            &[],
-            None,
+            NO_LAUNCH,
         );
         // Host step is active; paste should go to it.
         assert!(w.host_step.is_some());
@@ -1445,8 +1440,7 @@ mod tests {
             "/h".into(),
             "local",
             &["my-server".to_owned(), "production".to_owned()],
-            &[],
-            None,
+            NO_LAUNCH,
         );
         let hs = w.host_step.as_mut().unwrap();
         // Type a fuzzy query that matches "my-server" but not "production".
@@ -1513,7 +1507,7 @@ mod tests {
     fn recently_used_badge_set_from_recent_dirs() {
         let seeds = strings(&["/a", "/b", "/c"]);
         let recent = strings(&["/b"]);
-        let w = Wizard::new(seeds, &recent, "/h".into(), "local", &[], &[], None);
+        let w = Wizard::new(seeds, &recent, "/h".into(), "local", &[], NO_LAUNCH);
         assert!(
             w.meta.get("/b").is_some_and(|m| m.recently_used),
             "/b should be marked recently_used"
@@ -1644,8 +1638,7 @@ mod tests {
             "/h".into(),
             "local",
             &["box".into()],
-            &[],
-            None,
+            NO_LAUNCH,
         );
         w.set_local_dirs(&strings(&["/h/a", "/h/b"]));
         let step = w.host_step.as_ref().unwrap();
@@ -1746,7 +1739,7 @@ mod tests {
 
     #[test]
     fn toggle_is_a_noop_outside_the_directory_step() {
-        let mut w = Wizard::new(strings(&["/w"]), &[], "/h".into(), "local", &[], &[], None);
+        let mut w = Wizard::new(strings(&["/w"]), &[], "/h".into(), "local", &[], NO_LAUNCH);
         assert!(w.host_step.is_some());
         w.toggle_hidden();
         assert!(!w.show_hidden, "host step ignores the toggle");
@@ -1763,8 +1756,7 @@ mod tests {
             "/home/u".into(),
             "local",
             &[],
-            &[],
-            None,
+            NO_LAUNCH,
         );
         w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
         let opened = w.browse_home();
@@ -1796,8 +1788,7 @@ mod tests {
             "/home/u".into(),
             "local",
             &["box".into()],
-            &[],
-            None,
+            NO_LAUNCH,
         );
         w.on_host_connected("box", "/home/remote", vec![]);
         assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
@@ -1951,18 +1942,17 @@ mod tests {
             "/h".into(),
             "local",
             &[],
-            &["p".to_owned()],
-            None,
+            (&option("p")[..], &LaunchSelect::default()),
         );
         w.on_host_connected("local", "/h", vec![]);
         // Empty input: proxy cycling.
         w.on_key(&press(KeyCode::Right));
-        assert_eq!(w.proxy_selected, 1);
+        assert_eq!(w.route.selected, 1);
         // Browse mode always has input: arrows browse instead.
         w.browse_home();
         w.on_key(&press(KeyCode::Right));
         w.on_key(&press(KeyCode::Left));
-        assert_eq!(w.proxy_selected, 1, "unchanged while browsing");
+        assert_eq!(w.route.selected, 1, "unchanged while browsing");
     }
 
     #[test]

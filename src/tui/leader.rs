@@ -428,7 +428,7 @@ mod tests {
                 command: vec!["p".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), true, vec![fake], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![fake]);
         app.activate(0);
         app.take_effects();
         app

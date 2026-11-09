@@ -4,26 +4,31 @@
 //! connections (local + remote) and runs the event loop. State and update
 //! logic live in [`app`], rendering in [`ui`].
 
+mod addon_calls;
+mod addon_runner;
 pub mod app;
 mod builtins;
+mod checklist;
 mod claude_update;
 mod confirm;
 mod extensions_view;
 mod fmt;
 mod git_app;
 mod git_view;
+mod hosts;
+use hosts::{
+    client_claude, connect_local, on_connected, on_local_reconnected, retry_outdated_hosts,
+    spawn_connect, spawn_connect_after, spawn_reader, spawn_reconnect_local,
+};
 mod interaction;
 mod keymap;
 mod leader;
 mod notifications;
+mod panel_view;
 mod plain;
-pub(crate) mod plugin_setup;
-mod plugins_glue;
-mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
-pub(crate) mod stats_view;
 
 /// `recent` without the local directories that no longer exist, so the
 /// wizard never offers a deleted directory (the check is I/O, so it happens
@@ -41,10 +46,12 @@ fn existing_local_dirs(
 mod test_support;
 mod ui;
 mod wizard;
+mod wizard_route;
 
 use std::io::{self, Stdout};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -61,17 +68,15 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use crate::client::{self, Client, Incoming};
-use crate::freshness::{self, DaemonCheck};
+use crate::client::{Client, Incoming};
 use crate::paths;
 use crate::proto::{Msg, SessionInfo};
-use crate::remote::bootstrap::ensure_remote;
 
+use crate::addon::{Addons, LaunchSelect};
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
 use crate::app::state::ClientState;
-use crate::plugins::state as plugin_state;
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
 use plain::PlainStart;
 
@@ -110,19 +115,12 @@ fn copy_to_clipboard(text: &str) {
     let _ = out.flush();
 }
 
-/// What the UI is started as.
-enum Launch {
-    /// The session manager, with a startup proxy override for new sessions.
-    Manager {
-        proxy: crate::proxy::ProxyChoice,
-        first_party: bool,
-    },
+/// What the UI is started as, routed as the run's launch flags ask.
+enum Entry {
+    /// The session manager.
+    Manager(LaunchSelect),
     /// `claudio --plain`: one bare session; `args` go to claude.
-    Plain {
-        proxy: crate::proxy::ProxyChoice,
-        first_party: bool,
-        args: Vec<String>,
-    },
+    Plain(LaunchSelect, Vec<String>),
 }
 
 /// What the app does first, once made.
@@ -136,41 +134,20 @@ enum Start {
     Plain(PlainStart),
 }
 
-/// Run the manager until the user quits.
-pub fn run() -> ExitCode {
-    run_with_proxy(crate::proxy::ProxyChoice::Default, false)
+/// Run the manager until the user quits; `select` (the run's launch flags,
+/// `claudio --proxy NAME`…) preselects new sessions' route.
+pub fn run(addons: Arc<Addons>, select: LaunchSelect) -> ExitCode {
+    run_launch(Entry::Manager(select), addons)
 }
 
-/// Like [`run`] but applies a startup proxy override to every new session.
-///
-/// - `Direct`  → new sessions never use a proxy (--no-proxy).
-/// - `Profile` → new sessions always pre-select that profile (--proxy <name>).
-/// - `Default` → wizard pre-selects the config.toml default, if any.
-///
-/// `first_party` (--first-party) makes every session of this run first-party.
-pub fn run_with_proxy(proxy_override: crate::proxy::ProxyChoice, first_party: bool) -> ExitCode {
-    run_launch(Launch::Manager {
-        proxy: proxy_override,
-        first_party,
-    })
-}
-
-/// `claudio --plain`: run claude alone, full screen, with the proxy `proxy`
-/// picks, and exit with its status. The manager's help, proxy stats, history
+/// `claudio --plain`: run claude alone, full screen, routed as `select`
+/// asks, and exit with its status. The manager's help, proxy stats, history
 /// and reset keys work; the rest of the keyboard is claude's.
-pub fn run_plain(
-    proxy: crate::proxy::ProxyChoice,
-    first_party: bool,
-    args: Vec<String>,
-) -> ExitCode {
-    run_launch(Launch::Plain {
-        proxy,
-        first_party,
-        args,
-    })
+pub fn run_plain(addons: Arc<Addons>, select: LaunchSelect, args: Vec<String>) -> ExitCode {
+    run_launch(Entry::Plain(select, args), addons)
 }
 
-fn run_launch(launch: Launch) -> ExitCode {
+fn run_launch(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -181,22 +158,18 @@ fn run_launch(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let code = rt.block_on(main(launch));
+    let code = rt.block_on(main(entry, addons));
     rt.shutdown_background();
     code
 }
 
-async fn main(launch: Launch) -> ExitCode {
+async fn main(entry: Entry, addons: Arc<Addons>) -> ExitCode {
     // Load config and build the keymap from defaults + overrides.
     let config = crate::config::load();
     let mut key_notices = Vec::new();
-    let (proxy_override, first_party, plain) = match launch {
-        Launch::Manager { proxy, first_party } => (proxy, first_party, None),
-        Launch::Plain {
-            proxy,
-            first_party,
-            args,
-        } => {
+    let (launch_default, plain) = match entry {
+        Entry::Manager(select) => (select, None),
+        Entry::Plain(select, args) => {
             let cwd = std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_owned());
@@ -205,13 +178,11 @@ async fn main(launch: Launch) -> ExitCode {
                 args,
                 cwd,
             };
-            (proxy, first_party, Some(start))
+            (select, Some(start))
         }
     };
-    let keymap = match plain {
-        Some(_) => keymap::Keymap::build_plain(&config.keys, &mut key_notices),
-        None => keymap::Keymap::build(&config.keys, &mut key_notices),
-    };
+    let panels = panel_view::panel_bindings(&addons);
+    let keymap = keymap::Keymap::of(plain.is_some(), &config.keys, &mut key_notices, &panels);
     let plain_id = plain.as_ref().map(|p| p.id);
 
     // The manager's session list; `--plain` neither reads nor writes it.
@@ -234,46 +205,7 @@ async fn main(launch: Launch) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (proxy_profiles, proxy_default) = crate::proxy::resolve::load_proxy_profiles();
-    // The plugin lists cached for the profiles there are; fetched again
-    // once the loop runs.
-    let cached_plugins: Vec<_> = crate::proxy::plugins::load_all()
-        .into_iter()
-        .filter(|l| proxy_profiles.contains(&l.profile))
-        .collect();
-    // External extensions are read once, at start.
-    let external = extensions::manifest::load(&extensions::manifest::dir(), &mut key_notices);
-    // A plugin's saved choice is no unknown name: the plugins come later. A
-    // built-in's or external's choice stays, whatever a plugin is named.
-    let builtins = extensions::Registry::default();
-    let known = |name: &str| {
-        builtins.extensions.iter().any(|e| e.name == name)
-            || external.iter().any(|e| e.name == name)
-    };
-    let builtin_choices: std::collections::BTreeMap<String, bool> = config
-        .extensions
-        .iter()
-        .filter(|(name, _)| {
-            known(name)
-                || !cached_plugins
-                    .iter()
-                    .any(|l| l.plugins.iter().any(|p| &p.name == *name))
-        })
-        .map(|(name, on)| (name.clone(), *on))
-        .collect();
-    let registry = extensions::Registry::new(
-        &builtin_choices,
-        config.claude.latex,
-        external,
-        &mut key_notices,
-    );
-    let dropped = registry.dropped_lenses();
-    if !dropped.is_empty() {
-        key_notices.push(format!(
-            "extensions: lenses {} left out of the session context (caps)",
-            dropped.join(", ")
-        ));
-    }
+    let registry = extension_registry(&config, &mut key_notices);
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() {
             Mode::Plain
@@ -285,10 +217,7 @@ async fn main(launch: Launch) -> ExitCode {
         keymap,
         notify: config.ui.notify && plain.is_none(),
         copy_on_select: config.ui.copy_on_select,
-        proxy_override,
-        first_party,
-        proxy_profiles,
-        proxy_default,
+        launch_default,
         claude: config.claude,
         local_claude: client_claude(&local_client),
         recent_dirs: existing_local_dirs(saved.recent_dirs.clone()),
@@ -298,36 +227,43 @@ async fn main(launch: Launch) -> ExitCode {
             Some(_) => Vec::new(),
             None => crate::remote::hosts::candidates(),
         },
+        addons: Arc::clone(&addons),
     });
     app.extensions = registry;
-    app.load_plugins(
-        cached_plugins,
-        config.extensions.clone(),
-        config.plugins.clone(),
-    );
-    app.on_plugin_host("local");
+    app.extension_config = config.extensions.clone();
+    let runner = addon_runner::start(addons, &mut app);
+    runner.runtime.host_up("local", local_client.clone());
     app.check_local_install();
     let start = match plain {
         Some(start) => Start::Plain(start),
         None => Start::Manager { saved, live },
     };
-    let mut conns = Connections::with_local(local_client.clone());
+    let mut conns = Connections::with_local(local_client);
     // A panic must still reach the cleanup below, so catch it and re-raise.
     let result = std::panic::AssertUnwindSafe(event_loop(
         &mut terminal,
         &mut conns,
         app,
         start,
-        local_client,
+        runner,
         config.update.check,
         key_notices,
     ))
     .catch_unwind()
     .await;
     restore_terminal();
-    // However the UI ended, a plain session dies with it: nothing lingers in
-    // the daemon, and a later manager has nothing to recover. (Killing an
-    // already closed session is a harmless "no such session".)
+    finish(result, plain_id, &conns).await
+}
+
+/// After the UI: kill a plain session (it dies with the UI: nothing lingers
+/// in the daemon, and a later manager has nothing to recover), re-raise a
+/// panic, report why the UI ended, and give `--plain` claude's status.
+async fn finish(
+    result: std::thread::Result<io::Result<plain::Exit>>,
+    plain_id: Option<crate::proto::SessionId>,
+    conns: &Connections,
+) -> ExitCode {
+    // (Killing an already closed session is a harmless "no such session".)
     if let Some(id) = plain_id {
         if let Some(client) = conns.client("local") {
             let kill = client.request(Msg::Kill { id });
@@ -353,51 +289,25 @@ async fn main(launch: Launch) -> ExitCode {
     }
 }
 
-/// Start the local daemon if needed (replacing an outdated one), connect and
-/// list its sessions.
-async fn connect_local() -> io::Result<(Client, Vec<SessionInfo>)> {
-    let check = client::ensure_local_daemon().await?;
-    let client = client::connect(&paths::daemon_socket()).await?;
-    if check == DaemonCheck::Deferred {
-        client.mark_daemon_outdated();
+/// The extension registry this run starts with: the built-ins and the
+/// external extensions (read once, now) with config.toml's choices; the
+/// other names are the addons' rows'. A lens the caps leave out is a notice.
+fn extension_registry(
+    config: &crate::config::Config,
+    key_notices: &mut Vec<String>,
+) -> extensions::Registry {
+    // External extensions are read once, at start.
+    let external = extensions::manifest::load(&extensions::manifest::dir(), key_notices);
+    let choices = extensions::core_choices(&config.extensions, &external);
+    let registry = extensions::Registry::new(&choices, external);
+    let dropped = registry.dropped_lenses();
+    if !dropped.is_empty() {
+        key_notices.push(format!(
+            "extensions: lenses {} left out of the session context (caps)",
+            dropped.join(", ")
+        ));
     }
-    list_sessions(&client).await.map(|s| (client, s))
-}
-
-/// Once the outdated daemon behind `client` is idle, ask for a reconnect:
-/// connecting runs the freshness check again (`connect_local`'s, or the
-/// remote bridge's), which replaces it now. A busy one waits for next time.
-async fn retry_outdated(
-    host: String,
-    generation: u64,
-    client: Client,
-    tx: mpsc::Sender<HostEvent>,
-) {
-    let Ok(Msg::Sessions { sessions }) = client.request(Msg::ListSessions).await else {
-        return;
-    };
-    if !freshness::busy(&sessions) {
-        let _ = tx.send(HostEvent::Reconnect { host, generation }).await;
-    }
-}
-
-/// The `claude --version` its daemon reported at connect, if claude is there.
-fn client_claude(client: &Client) -> Option<String> {
-    client
-        .welcome()
-        .host
-        .claude
-        .as_ref()
-        .map(|c| c.version.clone())
-}
-
-async fn list_sessions(client: &Client) -> io::Result<Vec<SessionInfo>> {
-    match client.request(Msg::ListSessions).await? {
-        Msg::Sessions { sessions } => Ok(sessions),
-        other => Err(io::Error::other(format!(
-            "unexpected reply to ListSessions: {other:?}"
-        ))),
-    }
+    registry
 }
 
 // ── Terminal setup ────────────────────────────────────────────────────────────
@@ -487,27 +397,6 @@ enum HostEvent {
     /// Drop `host`'s connection and connect again: its outdated daemon has
     /// become idle (see [`retry_outdated`]).
     Reconnect { host: String, generation: u64 },
-    /// Proxy config fetched (or failed).
-    ProxyConfig {
-        profile_name: String,
-        config: Option<crate::proxy::api::ConfigResponse>,
-    },
-    /// Proxy stats, pool health and model catalogue fetched (or failed).
-    ProxyStats {
-        profile_name: String,
-        fetch: proxy_state::ProxyFetch,
-    },
-    /// The credential claude-proxy reports for a session (or why not).
-    SessionCredential {
-        session: crate::proto::SessionId,
-        claude_session_id: String,
-        result: Result<Option<crate::proxy::api::SessionCredential>, String>,
-    },
-    /// The proxy answered a subscription switch request.
-    SubscriptionSwitch {
-        session: crate::proto::SessionId,
-        result: Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError>,
-    },
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
@@ -538,20 +427,12 @@ enum HostEvent {
         gen: u64,
         result: Result<extensions::ActionResult, String>,
     },
-    /// A profile's plugin list was fetched (and the cache updated), or not.
-    Plugins {
-        profile: String,
-        fetch: plugin_state::PluginsFetch,
-    },
-    /// Plugin `name`'s manifest at hash `sha256` was fetched and parsed, or
-    /// why not.
-    Manifest {
-        name: String,
-        sha256: String,
-        result: Result<crate::plugins::manifest::Manifest, String>,
-    },
     /// A notice from a background task.
     Notice(String),
+    /// A launch through the composer ended (`addon_runner::launch`).
+    Launched(app::Launched),
+    /// What an addon call's task found (`addon_runner`).
+    Addon(app::AddonResult),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -583,7 +464,7 @@ async fn event_loop(
     conns: &mut Connections,
     mut app: App,
     start: Start,
-    local_client: Client,
+    runner: addon_runner::Runner,
     update_check_enabled: bool,
     key_notices: Vec<String>,
 ) -> io::Result<plain::Exit> {
@@ -615,12 +496,11 @@ async fn event_loop(
     let (ev_tx, mut ev_rx) = mpsc::channel::<HostEvent>(1024);
 
     // Start the local incoming reader, tagged with the current local generation.
-    if let Some(rx) = local_client.take_incoming() {
+    if let Some(rx) = conns.client("local").and_then(Client::take_incoming) {
         let gen = conns.current_generation("local");
         spawn_reader("local".to_owned(), gen, rx, ev_tx.clone());
     }
-    // `conns` owns the connection from here: dropping it there closes it.
-    drop(local_client);
+    let addon_runner::Runner { runtime, mut rx } = runner;
 
     // Start background connections to the saved tabs' remote hosts.
     for host in remote_hosts {
@@ -671,12 +551,6 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The plugin lists: now, then every 15 minutes.
-    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugin_state::REFRESH_SECS));
-    plugins_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // 60-second proxy stats refresh.
-    let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
-    proxy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut outdated_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + OUTDATED_RETRY, OUTDATED_RETRY);
     outdated_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -686,9 +560,13 @@ async fn event_loop(
 
     loop {
         for effect in app.take_effects() {
-            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host);
+            run_effect(
+                effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host, &runtime,
+            );
         }
+        addon_runner::sync(&runtime, &mut app);
         if app.quit {
+            runtime.shutdown();
             ext_host.shutdown().await;
             return Ok(std::mem::take(&mut app.exit));
         }
@@ -722,7 +600,7 @@ async fn event_loop(
                         // Reconnect with backoff.
                         Incoming::Disconnected => {
                             conns.disconnect(&host);
-                            app.on_incoming_from(&host, Incoming::Disconnected);
+                            addon_runner::on_incoming(&mut app, &runtime, &host, Incoming::Disconnected);
                             let (delay, gen) = conns.next_attempt(&host);
                             if host == "local" {
                                 spawn_reconnect_local(delay, gen, ev_tx.clone());
@@ -737,29 +615,9 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::Connected { host, client, sessions, generation }) => {
-                    // A newer attempt is already in flight.
-                    if generation < conns.current_generation(&host) {
-                        continue;
+                    if on_connected(&mut app, conns, &ev_tx, &host, client, sessions, generation) {
+                        addon_runner::host_up(&runtime, &host, conns);
                     }
-                    let home = client.welcome().host.home.clone();
-                    let remote_claude = client_claude(&client);
-                    conns.reset_delay(&host);
-                    // Start the reader tagged with the current generation.
-                    let cur_gen = conns.current_generation(&host);
-                    if let Some(rx) = client.take_incoming() {
-                        spawn_reader(host.clone(), cur_gen, rx, ev_tx.clone());
-                    }
-                    conns.connected(&host, client);
-                    // Record this host in the MRU so it appears first next time.
-                    crate::remote::hosts::touch(&host);
-                    app.on_ssh_hosts(crate::remote::hosts::candidates());
-                    app.on_host_connected(&host, &home);
-                    app.on_plugin_host(&host);
-                    // Recover this host's sessions only.
-                    app.recover_host(&host, &sessions);
-                    app.subscribe_host_stats(&host);
-                    app.check_remote_claude(&host, remote_claude.as_deref());
-                    app.redraw = true;
                 }
                 Some(HostEvent::ConnectFailed { host, error, generation }) => {
                     // A newer attempt is already in flight.
@@ -775,21 +633,9 @@ async fn event_loop(
                     spawn_connect_after(host, gen, delay, ev_tx.clone(), skip_bootstrap);
                 }
                 Some(HostEvent::LocalReconnected { client, sessions, generation }) => {
-                    // A newer attempt is already in flight.
-                    if generation < conns.current_generation("local") {
-                        continue;
+                    if on_local_reconnected(&mut app, conns, &ev_tx, client, sessions, generation) {
+                        addon_runner::host_up(&runtime, "local", conns);
                     }
-                    conns.reset_delay("local");
-                    let home = client.welcome().host.home.clone();
-                    let cur_gen = conns.current_generation("local");
-                    if let Some(rx) = client.take_incoming() {
-                        spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
-                    }
-                    app.set_local_claude(client_claude(&client));
-                    conns.connected("local", client);
-                    app.on_plugin_host("local");
-                    app.check_local_install();
-                    app.on_reconnected_local(&sessions, home);
                 }
                 Some(HostEvent::LocalReconnectFailed { generation }) => {
                     if generation < conns.current_generation("local") {
@@ -805,7 +651,7 @@ async fn event_loop(
                     // Dropping the client closes the connection; the newer
                     // generation silences its reader.
                     conns.disconnect(&host);
-                    app.on_incoming_from(&host, Incoming::Disconnected);
+                    addon_runner::on_incoming(&mut app, &runtime, &host, Incoming::Disconnected);
                     let gen = conns.next_generation(&host);
                     if host == "local" {
                         spawn_reconnect_local(Duration::ZERO, gen, ev_tx.clone());
@@ -813,26 +659,7 @@ async fn event_loop(
                         spawn_connect(host, gen, ev_tx.clone(), true);
                     }
                 }
-                Some(HostEvent::ProxyConfig { profile_name, config }) => {
-                    if let Some(cfg) = config {
-                        app.on_proxy_config(profile_name, cfg);
-                    }
-                }
-                Some(HostEvent::ProxyStats { profile_name, fetch }) => {
-                    app.on_proxy_stats(profile_name, fetch);
-                }
-                Some(HostEvent::SessionCredential { session, claude_session_id, result }) => {
-                    app.on_session_credential(session, &claude_session_id, result);
-                }
-                Some(HostEvent::SubscriptionSwitch { session, result }) => {
-                    app.on_switch_result(session, result);
-                }
-                Some(HostEvent::UpgradeAvailable(tag)) => {
-                    if let Some(t) = tag {
-                        app.upgrade_notice = Some(t);
-                        app.redraw = true;
-                    }
-                }
+                Some(HostEvent::UpgradeAvailable(tag)) => app.on_upgrade_available(tag),
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
                     Ok(answers) => app.on_answers_rendered(gen, id, answers),
@@ -848,37 +675,15 @@ async fn event_loop(
                     app.on_snippets(gen, &dir, result);
                 }
                 Some(HostEvent::SnippetSaved { result, cut }) => app.on_snippet_saved(result, cut),
-                Some(HostEvent::Plugins { profile, fetch }) => app.on_plugins(&profile, fetch),
-                Some(HostEvent::Manifest { name, sha256, result }) => {
-                    app.on_manifest(&name, &sha256, result);
-                }
                 Some(HostEvent::Notice(text)) => app.notify(text),
+                Some(HostEvent::Launched(done)) => app.on_launched(done),
+                Some(HostEvent::Addon(result)) => app.on_addon(result),
                 None => return Ok(Default::default()),
             },
-            Some((to, reply)) = reply_rx.recv() => app.on_reply(to, reply),
+            Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
+            Some(out) = rx.recv() => addon_runner::on_out(&mut app, &runtime, out),
             _ = tick.tick() => app.on_tick(),
-            _ = proxy_tick.tick() => {
-                // Refresh proxy stats for the active session's profile (they
-                // feed the status bar, which `--plain` does not have).
-                let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
-                if let Some(name) = proxy_name.filter(|_| manager) {
-                    app.schedule_proxy_stats(&name, vec![crate::proxy::stats::Window::H24]);
-                }
-            }
-            _ = plugins_tick.tick() => app.fetch_plugin_lists(),
-            _ = outdated_tick.tick() => {
-                for (host, conn) in &conns.map {
-                    if let Some(client) = conn.client.as_ref().filter(|c| c.daemon_outdated()) {
-                        let retry = retry_outdated(
-                            host.clone(),
-                            conn.generation,
-                            client.clone(),
-                            ev_tx.clone(),
-                        );
-                        tokio::spawn(retry);
-                    }
-                }
-            }
+            _ = outdated_tick.tick() => retry_outdated_hosts(conns, &ev_tx),
             _ = tokio::time::sleep(wait), if app.redraw => {}
         }
     }
@@ -891,6 +696,7 @@ fn run_effect(
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
     ext_host: &extensions::host::ExtensionHost,
+    runtime: &addon_runner::Edge,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -985,19 +791,8 @@ fn run_effect(
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
-        Effect::SavePluginChoices { name, choices } => {
-            match crate::config::save_plugin_choices(&paths::config_file(), &name, &choices) {
-                Ok(()) => app.notify(format!("plugin {name} set up (saved)")),
-                Err(e) => app.notify(format!("could not save: {e}")),
-            }
-        }
-        Effect::SaveExtension { name, on } => {
-            let state = if on { "on" } else { "off" };
-            match crate::config::save_extension(&paths::config_file(), &name, on) {
-                Ok(()) => app.notify(format!("extension {name} {state} (saved)")),
-                Err(e) => app.notify(format!("could not save: {e}")),
-            }
-        }
+        e @ Effect::Addon(_) => addon_runner::run(e, app, runtime, ev_tx),
+        Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.
             let tx = ev_tx.clone();
@@ -1014,439 +809,6 @@ fn run_effect(
                 app.notify(format!("could not save state: {e}"));
             }
         }
-        Effect::FetchPlugins { profile } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetch = fetch_plugins(&profile, &tx).await;
-                let _ = tx.send(HostEvent::Plugins { profile, fetch }).await;
-            });
-        }
-        Effect::FetchManifest { name, url, sha256 } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetched = crate::proxy::plugins::fetch_manifest(&url, &sha256).await;
-                let result = fetched
-                    .and_then(|text| crate::plugins::manifest::Manifest::parse_named(&text, &name));
-                let _ = tx
-                    .send(HostEvent::Manifest {
-                        name,
-                        sha256,
-                        result,
-                    })
-                    .await;
-            });
-        }
-        Effect::FetchProxyConfig { profile_name } => {
-            let tx = ev_tx.clone();
-            let name = profile_name.clone();
-            tokio::spawn(async move {
-                let config = fetch_proxy_config(&name).await;
-                let _ = tx
-                    .send(HostEvent::ProxyConfig {
-                        profile_name: name,
-                        config,
-                    })
-                    .await;
-            });
-        }
-        Effect::FetchProxyStats {
-            profile_name,
-            windows,
-            models,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let fetch = fetch_proxy_stats(&profile_name, &windows, models).await;
-                let _ = tx
-                    .send(HostEvent::ProxyStats {
-                        profile_name,
-                        fetch,
-                    })
-                    .await;
-            });
-        }
-        Effect::FetchSessionCredential {
-            profile_name,
-            session,
-            claude_session_id,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let result = fetch_session_credential(&profile_name, &claude_session_id).await;
-                let _ = tx
-                    .send(HostEvent::SessionCredential {
-                        session,
-                        claude_session_id,
-                        result,
-                    })
-                    .await;
-            });
-        }
-        Effect::SwitchSubscription {
-            profile_name,
-            session,
-            claude_session_id,
-        } => {
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let result = switch_subscription(&profile_name, &claude_session_id).await;
-                let _ = tx
-                    .send(HostEvent::SubscriptionSwitch { session, result })
-                    .await;
-            });
-        }
-        Effect::SpawnWithProxy {
-            host,
-            msg,
-            proxy_name,
-            first_party,
-            to,
-            plugins: mut parts,
-            pending,
-        } => {
-            // Resolve the client now (synchronous, cheap) so we can move it
-            // into the async task. Client is Clone + Send + 'static.
-            let client = conns.client(&host).cloned();
-            let cached = app.proxy_config_cached(&proxy_name).cloned();
-            let tx = reply_tx.clone();
-            let notices = ev_tx.clone();
-            tokio::spawn(async move {
-                // Fetch proxy config with a 5 s timeout so the first spawn
-                // uses the real model/rate-limit overrides, not fallback
-                // defaults; meanwhile, wait for the plugin manifests.
-                let config = async {
-                    match cached {
-                        Some(cfg) => Some(cfg),
-                        None => tokio::time::timeout(
-                            Duration::from_secs(5),
-                            fetch_proxy_config(&proxy_name),
-                        )
-                        .await
-                        .ok()
-                        .flatten(),
-                    }
-                };
-                let waits = wait_manifests(client.as_ref(), pending, &tx);
-                let (cfg, (mut ready, left_out)) = tokio::join!(config, waits);
-                if !left_out.is_empty() {
-                    let names = left_out.join(", ");
-                    let text = format!("plugin {names} left out: not ready on {host}");
-                    let _ = notices.send(HostEvent::Notice(text)).await;
-                }
-                for part in &mut parts {
-                    if part.applied.is_none() {
-                        part.applied = ready.remove(&part.name);
-                    }
-                }
-                let composed = plugin_state::compose(&parts);
-                for text in composed.notices.clone() {
-                    let _ = notices.send(HostEvent::Notice(text)).await;
-                }
-
-                // Build env from profile + (possibly fresh) config.
-                let env = crate::proxy::resolve::proxy_env_for(
-                    Some(&proxy_name),
-                    cfg.as_ref(),
-                    first_party,
-                );
-                match env {
-                    Err(e) => {
-                        let _ =
-                            tx.send((to, Err(io::Error::other(format!("proxy env error: {e}")))));
-                    }
-                    Ok(env) => match client {
-                        Some(c) => {
-                            let msg = plugin_state::with_plugins(msg, composed).merge_env(env);
-                            let reply = c.request(msg);
-                            let _ = tx.send((to, reply.await));
-                        }
-                        None => {
-                            let _ = tx.send((
-                                to,
-                                Err(io::Error::new(
-                                    io::ErrorKind::NotConnected,
-                                    format!("{host}: not connected"),
-                                )),
-                            ));
-                        }
-                    },
-                }
-            });
-        }
-    }
-}
-
-/// How long a spawn waits for a host to answer its plugin manifests.
-pub(super) const MANIFEST_WAIT: Duration = Duration::from_secs(20);
-
-/// Ask `client` for each of `pending` and wait up to [`MANIFEST_WAIT`]: the
-/// answers that came back (`Applied`, by plugin name), and the names of
-/// those that did not (late, failed, or no client). Every answer, even a
-/// late one, also goes to `App` through `tx`.
-async fn wait_manifests(
-    client: Option<&Client>,
-    pending: Vec<app::PendingManifest>,
-    tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
-) -> (
-    std::collections::HashMap<String, crate::proto::Applied>,
-    Vec<String>,
-) {
-    let mut ready = std::collections::HashMap::new();
-    let mut left_out = Vec::new();
-    let deadline = tokio::time::Instant::now() + MANIFEST_WAIT;
-    let mut waiting = Vec::new();
-    for m in pending {
-        let Some(client) = client else {
-            left_out.push(m.name);
-            continue;
-        };
-        let reply = client.request(m.msg);
-        let (done, answer) = tokio::sync::oneshot::channel();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let reply = reply.await;
-            let applied = match &reply {
-                Ok(Msg::Applied(a)) => Some(a.clone()),
-                _ => None,
-            };
-            let _ = done.send(applied);
-            let _ = tx.send((m.to, reply));
-        });
-        waiting.push((m.name, answer));
-    }
-    for (name, answer) in waiting {
-        match tokio::time::timeout_at(deadline, answer).await {
-            Ok(Ok(Some(applied))) => {
-                ready.insert(name, applied);
-            }
-            _ => left_out.push(name),
-        }
-    }
-    (ready, left_out)
-}
-
-/// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list
-/// is saved, a 401/403 drops the profile's entry (its secrets), anything
-/// else leaves it. A failed write is a notice.
-async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_state::PluginsFetch {
-    use crate::proxy::api::ApiError;
-    use crate::proxy::plugins as cache;
-    use plugin_state::PluginsFetch;
-    let Some(p) = crate::proxy::resolve::find_profile(profile) else {
-        return PluginsFetch::Unreachable;
-    };
-    let (fetch, write) = match cache::fetch(profile, &p).await {
-        Ok(list) => {
-            let saved = list.clone();
-            let write = tokio::task::spawn_blocking(move || cache::save_cache(&saved));
-            (PluginsFetch::Listed(list), Some(write))
-        }
-        Err(ApiError::Http(s)) if s.as_u16() == 401 || s.as_u16() == 403 => {
-            let name = profile.to_owned();
-            let write = tokio::task::spawn_blocking(move || cache::remove_cache(&name));
-            (PluginsFetch::SignedOut, Some(write))
-        }
-        Err(_) => (PluginsFetch::Unreachable, None),
-    };
-    if let Some(write) = write {
-        if let Ok(Err(e)) = write.await {
-            let _ = tx
-                .send(HostEvent::Notice(format!("could not save plugins: {e}")))
-                .await;
-        }
-    }
-    fetch
-}
-
-/// Fetch proxy config for a named profile. Returns `None` on any error.
-async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::ConfigResponse> {
-    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)?;
-    match crate::proxy::api::fetch_config(&url, &token).await {
-        Ok(Some(cfg)) => Some(cfg),
-        Ok(None) => None,
-        Err(_) => None,
-    }
-}
-
-/// Fetch proxy stats for `windows`, pool health, and (when `models`) the
-/// model catalogue for a named profile. Requests run sequentially to stay
-/// well inside the proxy's per-user rate limit (1 req/s, burst 10).
-async fn fetch_proxy_stats(
-    profile_name: &str,
-    windows: &[crate::proxy::stats::Window],
-    models: bool,
-) -> proxy_state::ProxyFetch {
-    use crate::proxy::api;
-    let mut out = proxy_state::ProxyFetch::default();
-    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
-        let err = format!("proxy profile '{profile_name}' not found");
-        out.stats = windows.iter().map(|w| (*w, Err(err.clone()))).collect();
-        return out;
-    };
-    for w in windows {
-        let result = api::fetch_stats(&url, &token, w.param())
-            .await
-            .map_err(describe_api_error);
-        out.stats.push((*w, result));
-    }
-    out.pool = api::fetch_pool_health(&url, &token).await.ok();
-    if models {
-        out.models = api::fetch_models(&url, &token).await.ok();
-    }
-    out
-}
-
-/// Ask the proxy which credential a conversation uses. `Ok(None)` is "not
-/// known (yet)": no credential to show, not an error.
-async fn fetch_session_credential(
-    profile_name: &str,
-    claude_session_id: &str,
-) -> Result<Option<crate::proxy::api::SessionCredential>, String> {
-    let (url, token) = crate::proxy::resolve::resolve_profile(profile_name)
-        .ok_or_else(|| format!("proxy profile '{profile_name}' not found"))?;
-    crate::proxy::api::fetch_session(&url, &token, claude_session_id)
-        .await
-        .map_err(describe_api_error)
-}
-
-/// Ask the proxy to move a conversation to its next subscription.
-async fn switch_subscription(
-    profile_name: &str,
-    claude_session_id: &str,
-) -> Result<crate::proxy::api::SwitchOutcome, crate::proxy::api::SwitchError> {
-    use crate::proxy::api::{ApiError, SwitchError};
-    let Some((url, token)) = crate::proxy::resolve::resolve_profile(profile_name) else {
-        return Err(SwitchError::Api(ApiError::Http(
-            reqwest::StatusCode::UNAUTHORIZED,
-        )));
-    };
-    crate::proxy::api::switch_session(&url, &token, claude_session_id).await
-}
-
-/// A one-line, user-facing description of a proxy API error.
-fn describe_api_error(e: crate::proxy::api::ApiError) -> String {
-    use crate::proxy::api::ApiError;
-    match e {
-        ApiError::Http(s) if s.as_u16() == 403 => {
-            "stats need a user token (admin and anonymous tokens are refused)".to_owned()
-        }
-        ApiError::Http(s) if s.as_u16() == 404 => {
-            "this proxy has no claudio API (upgrade claude-proxy)".to_owned()
-        }
-        ApiError::Http(s) if s.as_u16() == 429 => {
-            "rate limited by the proxy; wait a few seconds".to_owned()
-        }
-        other => other.to_string(),
-    }
-}
-
-/// Spawn a task that reads incoming items from `rx` and forwards them,
-/// tagged with `host` and `gen`, to `tx`.
-fn spawn_reader(
-    host: String,
-    gen: u64,
-    mut rx: mpsc::Receiver<Incoming>,
-    tx: mpsc::Sender<HostEvent>,
-) {
-    tokio::spawn(async move {
-        while let Some(item) = rx.recv().await {
-            if tx
-                .send(HostEvent::Incoming(host.clone(), gen, item))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-}
-
-/// Spawn a task that reconnects to the local daemon (starting it if needed)
-/// after `delay`; the outcome comes back tagged with `generation`.
-fn spawn_reconnect_local(delay: Duration, generation: u64, tx: mpsc::Sender<HostEvent>) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        let event = match connect_local().await {
-            Ok((client, sessions)) => HostEvent::LocalReconnected {
-                client,
-                sessions,
-                generation,
-            },
-            Err(_) => HostEvent::LocalReconnectFailed { generation },
-        };
-        let _ = tx.send(event).await;
-    });
-}
-
-/// Spawn a background task that bootstraps + connects to `host`.
-fn spawn_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bootstrap: bool) {
-    tokio::spawn(async move {
-        do_connect(host, gen, tx, skip_bootstrap).await;
-    });
-}
-
-/// Spawn a task that sleeps `delay` then connects.
-fn spawn_connect_after(
-    host: String,
-    gen: u64,
-    delay: Duration,
-    tx: mpsc::Sender<HostEvent>,
-    skip_bootstrap: bool,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        do_connect(host, gen, tx, skip_bootstrap).await;
-    });
-}
-
-async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bootstrap: bool) {
-    // Bootstrap (upload binary if needed). Skip on reconnect or when the last
-    // failure was not a bootstrap failure.
-    if !skip_bootstrap {
-        if let Err(e) = ensure_remote(&host).await {
-            let _ = tx
-                .send(HostEvent::ConnectFailed {
-                    host,
-                    error: e,
-                    generation: gen,
-                })
-                .await;
-            return;
-        }
-    }
-    // Connect the SSH bridge.
-    match client::connect_ssh(&host).await {
-        Ok(client) => {
-            let sessions = match list_sessions(&client).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx
-                        .send(HostEvent::ConnectFailed {
-                            host,
-                            error: e.to_string(),
-                            generation: gen,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            let _ = tx
-                .send(HostEvent::Connected {
-                    host,
-                    client,
-                    sessions,
-                    generation: gen,
-                })
-                .await;
-        }
-        Err(e) => {
-            let _ = tx
-                .send(HostEvent::ConnectFailed {
-                    host,
-                    error: e.to_string(),
-                    generation: gen,
-                })
-                .await;
-        }
+        Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
     }
 }

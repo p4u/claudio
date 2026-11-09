@@ -30,7 +30,7 @@
 .main { display: grid; grid-template-columns: var(--rail-w) minmax(var(--stage-floor, 560px), 1fr); min-height: 0; }
 .main[data-drawer="true"]:not([data-narrow="true"]):not([data-overlay="true"]) { grid-template-columns: var(--rail-w) minmax(var(--stage-floor, 560px), 1fr) var(--drawer-w); }
 
-/* ---- drawer: reader, changes, history, stats, session ---- */
+/* ---- drawer: reader, changes, history, session ---- */
 .drawer {
   position: relative;
   display: flex; flex-direction: column; min-height: 0; min-width: 0;

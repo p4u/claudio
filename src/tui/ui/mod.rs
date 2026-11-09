@@ -11,19 +11,18 @@ use ratatui::Frame;
 
 use crate::proto::{SessionKind, SessionState};
 
+mod checklist;
 mod confirm;
 mod extensions;
 mod git;
 mod leader;
-mod plugin_setup;
+mod panel;
 mod reader;
-mod stats;
 mod status;
 
 use confirm::draw_confirm;
 use git::draw_git;
 use reader::draw_reader;
-use stats::draw_proxy_stats;
 use status::{draw_status_machine, draw_status_session};
 
 use super::app::{App, Modal, Mode, SessionView};
@@ -98,7 +97,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
                 .unwrap_or_default();
             draw_wizard(frame, w, app.now, &toggle_key)
         }
-        Some(Modal::ProxyStats(view)) => draw_proxy_stats(frame, app, view),
+        Some(Modal::Panel(view)) => panel::draw_panel(frame, view, app.now),
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
@@ -108,7 +107,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::ActionInput(input)) => leader::draw_action_input(frame, input),
         Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
         Some(Modal::ExtensionsMenu(view)) => extensions::draw_extensions(frame, app, view),
-        Some(Modal::PluginSetup(setup)) => plugin_setup::draw_plugin_setup(frame, setup),
+        Some(Modal::Checklist(view)) => checklist::draw_checklist(frame, view),
         None => {}
     }
 }
@@ -540,7 +539,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
     // Step 2: resume picker.
     if let Some(step) = &w.resume {
         // Proxy toggle row takes 1 line when profiles are available.
-        let has_proxy = w.proxy_options.len() > 1;
+        let has_proxy = w.route.cycles();
         let inner = popup(
             frame,
             rect,
@@ -560,12 +559,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
             .style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(cwd, areas[0]);
         let (filter_idx, list_idx) = if has_proxy {
-            let sel = w
-                .proxy_options
-                .get(w.proxy_selected)
-                .map(String::as_str)
-                .unwrap_or("none");
-            let proxy_line = format!("Proxy: ◀ {} ▶", sel);
+            let proxy_line = format!("{}: ◀ {} ▶", w.route.group, w.route.label());
             frame.render_widget(
                 Paragraph::new(proxy_line).style(Style::default().fg(Color::Cyan)),
                 areas[1],
@@ -773,7 +767,7 @@ pub fn draw_overview(frame: &mut Frame, app: &App, selected: usize, filter: &str
                 format!("{}:{}", v.host, cwd)
             };
             let age = fmt_age(app.now.saturating_sub(v.created_at));
-            let proxy_badge = if v.proxy.is_some() { PROXY_BADGE } else { " " };
+            let proxy_badge = if v.launch.is_some() { PROXY_BADGE } else { " " };
             let state = match v.kind {
                 SessionKind::Claude => v.state.name(),
                 SessionKind::Shell => "terminal",

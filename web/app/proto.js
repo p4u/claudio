@@ -1,6 +1,6 @@
-// Browser protocol v1 client (docs/web-protocol.md). Pure apart from the injected
+// Browser protocol v2 client (docs/web-protocol.md). Pure apart from the injected
 // WebSocket and timers; imports nothing.
-export const PROTO_VERSION = 1;
+export const PROTO_VERSION = 2;
 export const KIND_OUTPUT = 0x01;
 export const KIND_INPUT = 0x02;
 export const MAX_INPUT = 64 * 1024;

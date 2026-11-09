@@ -7,17 +7,18 @@ test.beforeAll(async () => { srv = await startServer({ proxy: true }); });
 test.afterAll(async () => { await srv?.stop(); });
 test.afterEach(async () => { await srv.reset(); });
 
-test('a plugin without choices opens setup before spawn and Skip spawns without it', async ({ page }) => {
+test('a plugin without choices asks for its checklist before spawn and Skip spawns without it', async ({ page }) => {
   await page.goto(srv.url);
   await expect(page.getByTestId('rail')).toBeVisible();
   await page.keyboard.press('n');
   await page.getByTestId('wizard-dir-input').fill(srv.dirs.a);
   await expect(page.getByTestId('wizard-proxy')).toHaveValue('default');
   await page.getByTestId('wizard-start').click();
-  const setup = page.getByTestId('plugin-setup');
-  await expect(setup).toBeVisible();
-  await expect(setup).toContainText(PLUGIN);
-  await page.getByTestId('plugin-skip').click();
+  const checklist = page.getByTestId('checklist');
+  await expect(checklist).toBeVisible();
+  await expect(checklist).toContainText(PLUGIN);
+  await expect(page.getByTestId('checklist-item').first()).toBeVisible();
+  await page.getByTestId('checklist-skip').click();
   await expect(page.getByTestId('session-card')).toHaveCount(1);
   await expect(page.getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');
   const env = await srv.waitFor(() => srv.launchedEnv(srv.dirs.a), 'the launched env');
@@ -27,18 +28,22 @@ test('a plugin without choices opens setup before spawn and Skip spawns without 
 });
 
 test('proxy stats render the fixture window', async ({ page }) => {
-  const sid = await srv.spawn(srv.dirs.b, { proxy: { kind: 'default' }, skip_plugins: [PLUGIN] });
+  const sid = await srv.spawn(srv.dirs.b, { launch: { pick: 'default' }, defer: [{ addon: 'vocdoni', id: PLUGIN }] });
   await page.goto(srv.url);
   await page.locator(`[data-testid="session-card"][data-sid="${sid}"]`).click();
   await expect(page.getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');
   await page.getByTestId('terminal').click();
   await page.keyboard.press('Control+Shift+Space');
   await page.keyboard.press('k');
-  await page.getByTestId('palette-input').fill('stats');
+  await page.getByTestId('palette-input').fill('proxy stats');
   await page.getByTestId('palette-item').first().click();
-  await page.getByTestId('stats-window-24h').click();
-  const chart = page.getByTestId('stats-chart');
-  await expect(chart).toBeVisible();
-  await expect(chart.locator('title')).toContainText('claude-opus-5-5');
-  await expect(page.getByTestId('stats')).toContainText('5.6k');
+  const panel = page.getByTestId('panel');
+  await expect(panel).toBeVisible();
+  await page.getByTestId('panel-window-24h').click();
+  await expect(panel.getByTestId('panel-table').first()).toContainText('opus-5-5');
+  await expect(panel).toContainText('out 6k');
+  await page.getByTestId('panel-page-2').click(); // Trends: per-day bars of every window fetched
+  const bars = panel.getByTestId('panel-bars');
+  await expect(bars.first()).toBeVisible();
+  await expect(bars.filter({ hasText: 'Output tokens' })).toContainText('5.6k');
 });

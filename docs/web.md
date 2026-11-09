@@ -3,8 +3,20 @@
 `claudio web` serves the session manager to a browser. It is one more client of the claudio
 daemons, like the TUI: the same sessions, the same hosts (local and over SSH), the same
 `config.toml`. Sessions keep running when you close the tab. The wire contract between the
-server and the page is [web-protocol.md](web-protocol.md); the design is in
-[specs/2026-11-08-web-ui-design.md](specs/2026-11-08-web-ui-design.md).
+server and the page is [web-protocol.md](web-protocol.md), version 2; the design is in
+[specs/2026-11-08-web-ui-design.md](specs/2026-11-08-web-ui-design.md). `claudio web` is the
+web addon (docs/addons.md, "The web addon"): it reaches the other addons only through the
+registry, and the latex and mermaid lenses it renders are its own share of every launch.
+
+**Protocol 2 and the addons.** What an addon shows comes as data and is drawn by generic
+components: a session's `segments` (the Vocdoni addon's route, credential and 5h/7d windows)
+in the top bar and the session card, an addon's **panel** (pages of blocks, windows, actions;
+the Vocdoni addon's "Proxy stats" on `Alt+s`) in a dialog, and an addon's **checklist** (a
+plugin's setup) when a launch answers `review`: Save keeps the choices and spawns, Skip spawns
+without that plugin this once, Cancel spawns nothing. The wizard has one select per launch
+option group and a checkbox per labelled launch flag (`addons.list`). The ops are `addons.*`;
+the version-1 `proxy.*` and `plugins.*` ops are gone, and a tab of an older page reloads once
+through the version handshake. Addon text is rendered as text only.
 
 ## Usage
 
@@ -70,7 +82,8 @@ the terminal in it, and the page's own keys are not fighting the browser's.
 - **What is logged** (INFO, to stderr): `session.shell`, `session.spawn`, `session.kill`,
   `session.approve` and `extensions.action`, with the op, the host and the session id. Never
   values, typed text or tokens.
-- **State.** The web writes `web-state.json` (layout, order, proxy choice per session) and
+- **State.** The web writes `web-state.json` (layout, order, each session's `launch`, still
+  with its `proxy`/`first_party` for one release, remote hosts) and
   `web-token` in the config dir. It reads the TUI's `state.json` and never writes it.
 
 ## Keys
@@ -98,7 +111,7 @@ TERM; `Ctrl+Shift+Space` leaves it.
 | `Esc` | APP | Close the open panel |
 
 Everything else is a button, the palette (`k`) or a menu: rename, restart, kill, terminal tab,
-history, stats, snippets, extensions, hosts, settings.
+history, addon panels (proxy stats), snippets, extensions, hosts, settings.
 
 ### The TUI's keys, anywhere
 
@@ -115,7 +128,7 @@ xterm and the browser do (matched on the physical key, so any layout works; AltG
 | `Alt+r` / `Alt+x` / `Alt+e` | Rename / kill (asks) / restart the focused session |
 | `Alt+a` | Next session that needs you |
 | `Alt+g` | The board |
-| `Alt+s` / `Alt+l` / `Alt+u` | Stats / history / reader drawer |
+| `Alt+s` / `Alt+l` / `Alt+u` | Addon panel (proxy stats) / history / reader drawer |
 | `Alt+i` | Extensions screen |
 | `Alt+h` | Help |
 | `Alt+z` | Command palette (lists the extension actions) |
@@ -145,8 +158,8 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Terminal tabs | `Alt+c` | `t`, "Terminal beside" in a pane | `session.shell` | `a terminal tab runs echo ok`; `web_session_lifecycle_shell_rename_kill` |
 | New-session wizard: dirs | `Alt+n` | `n`: folder field, recent folders, browser | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir` |
 | Wizard: resume | `Alt+n` resume list | "Conversation" field | `claude.sessions`, `session.spawn` (`resume`) | `web_reader_and_search_read_a_fixture_transcript`; `search finds a fixture conversation` |
-| Wizard: proxy profile | wizard proxy choice | "Proxy" select | `session.spawn` (`proxy`) | `web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser` |
-| Wizard: first-party | wizard checkbox | "First-party session" | `session.spawn` (`first_party`) | `web_respawn_without_a_known_proxy_asks` (the rule); the UI box: manual check |
+| Wizard: launch options (proxy profile) | wizard proxy choice | one select per launch option group ("Proxy") | `addons.list`, `session.spawn` (`launch`) | `web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser`; `the wizard starts a session in a chosen dir` |
+| Wizard: launch flags (first-party) | wizard checkbox | one checkbox per labelled flag ("First-party session") | `session.spawn` (`launch.flags`) | `web_addons_ops_refuse_unknown_addons_and_bad_args` (the rule); the UI box: manual check |
 | Opening prompt | wizard prompt | "Opening prompt" | `session.spawn` (`prompt`) | `web_opening_prompt_is_pasted_after_bracketed_paste_mode` |
 | Rename | `Alt+r` | pencil in the pane header | `session.rename` | `rename, kill and restart a session` |
 | Stop (kill) | `Alt+x` | the stop icon `⏻` in the pane header (asks) | `session.kill` | `rename, kill and restart a session` |
@@ -157,12 +170,12 @@ test in `tests/web.rs`; rows without an automated test say how they were checked
 | Reader with formulas and diagrams | `Alt+u` (source text only) | `r`: Answers, Formulas | `reader.answers`, `lens`/`latex` events, `extensions.render` | `the reader renders KaTeX and mermaid with no CSP violation` |
 | Git history | `Alt+l` | `g`, History tab | `git.log`, `git.commit`, `git.diff` | manual check (history list and commit view, probed in a browser on a fixture repo) |
 | Git working tree | `Alt+l` | `g`, Changes tab | `git.status`, `git.worktree_diff` | `Changes lists a modified file and shows its diff`; `web_git_status_and_worktree_diff` |
-| Proxy stats | `Alt+s` | Stats tab | `proxy.stats` | `proxy stats render the fixture window`; `web_proxy_stats_render_the_fixture` |
-| Subscription switch | `Alt+s` → `n` | "Move to next subscription" in Stats | `proxy.credential`, `proxy.switch` | not covered: the fake proxy has no `/session` route; manual check on a real proxy |
+| Proxy stats (an addon panel) | `Alt+s` | `Alt+s` or the palette ("Proxy stats"): the panel dialog, pages and windows | `addons.list`, `addons.panel` | `proxy stats render the fixture window`; `web_addons_panel_renders_the_fixture_and_never_leaks_the_token` |
+| Subscription switch (a panel action) | `Alt+s` → `n` | the panel's action button, or the palette once the panel was read | `addons.action` | `web_addons_action_switch_uses_server_state`; the fake proxy has no `/session` route: manual check on a real proxy |
 | Search | `Alt+z` `s` | `/` | `search` | `search finds a fixture conversation`; `web_reader_and_search_read_a_fixture_transcript` |
 | Snippets | `Alt+z` `p` / `P` | palette: Insert snippet, Save last prompt | `snippets.list`, `snippets.save`, `reader.last_prompt` | `save and insert a snippet`; `web_snippets_save_and_list` |
 | Extensions screen | `Alt+i` | Settings → Manage… | `extensions.list`, `extensions.toggle`, `extensions.action` | `toggling an extension rewrites its config.toml line`; `web_extension_toggle_edits_config_and_is_reread`; `web_external_extension_action_runs_its_program` |
-| Plugin setup | first spawn, extensions screen | setup step before the spawn, Enter on a plugin row | `plugins.list`, `plugins.items`, `plugins.save`, `plugins.status` | `a plugin without choices opens setup before spawn and Skip spawns without it`; `web_plugin_without_choices_is_left_out_until_saved` |
+| Plugin setup (an addon checklist) | first spawn, extensions screen | the checklist a launch's `review` asks for (Save / Skip / Cancel), "Set up" on an addon row | `addons.checklist`, `addons.checklist.save`, `addons.rows`, `session.spawn` (`defer`) | `a plugin without choices asks for its checklist before spawn and Skip spawns without it`; `web_spawn_with_launch_needs_review_then_defer_spawns_without_the_plugin` |
 | claude install / update | update prompt | Hosts menu → host row → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
 | Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
 | Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |

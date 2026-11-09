@@ -1,4 +1,7 @@
-// The hover info of a session: its facts as text rows, and where the popover goes. Pure. Imports nothing.
+// The hover info of a session: its facts as text rows, and where the popover goes. Pure. Imports
+// only the launch label.
+import { labelFor } from './launch.js';
+
 export const INFO_DELAY_MS = 800;
 
 const CLASS_NAME = { working: 'working', waiting: 'waiting for you', stopped: 'stopped', error: 'error' };
@@ -47,7 +50,7 @@ export function infoRows(s, cls, nowSec, window = 200_000) {
   }
   if (s.created_at) add('Uptime', duration(nowSec - s.created_at));
   if (s.state_since) add('In this state', duration(nowSec - s.state_since));
-  if (s.kind !== 'shell') add('Proxy', s.proxy_known ? (s.proxy ? `${s.proxy}${s.first_party ? ' (first-party)' : ''}` : 'direct') : 'unknown');
+  if (s.kind !== 'shell') add('Launch', labelFor(s.launch));
   add('Kind', s.kind === 'shell' ? 'terminal' : 'claude');
   return rows;
 }

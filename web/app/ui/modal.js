@@ -53,7 +53,7 @@ export function Modal() {
 }
 
 // A titled popover used by help and settings: Esc closes, Tab stays inside, focus returns.
-export function Dialog({ title, onClose, testid, wide = false, children }) {
+export function Dialog({ title, onClose, testid, wide = false, extra = '', children }) {
   const root = useRef(null);
   useLayoutEffect(() => {
     const prev = document.activeElement;
@@ -71,7 +71,7 @@ export function Dialog({ title, onClose, testid, wide = false, children }) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   };
   return html`<div class="scrim" onMouseDown=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <div class=${`dialog popover${wide ? ' wide' : ''}`} ref=${root} tabindex="-1" role="dialog" aria-modal="true" aria-label=${title} data-testid=${testid} onKeyDown=${keydown}>
+    <div class=${`dialog popover${wide ? ' wide' : ''}${extra ? ` ${extra}` : ''}`} ref=${root} tabindex="-1" role="dialog" aria-modal="true" aria-label=${title} data-testid=${testid} onKeyDown=${keydown}>
       <h2 class="dialog-title"><span>${title}</span><button class="icon-btn" aria-label="close" onClick=${onClose}>×</button></h2>
       ${children}
     </div>

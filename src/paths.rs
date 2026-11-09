@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 use crate::version::PROTO;
 
+mod lock;
+pub use lock::{FileLock, LOCK_WAIT};
+
 /// The current user's home directory (honours `$HOME`).
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")

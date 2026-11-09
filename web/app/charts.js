@@ -1,4 +1,4 @@
-// Chart arithmetic for the stats drawer. Imports nothing.
+// Chart arithmetic and token counts (formatTokens: the Session tab). Imports nothing.
 
 // linearScale([d0, d1], [r0, r1]) -> (v) => r. A flat domain maps everything to r0.
 export function linearScale([d0, d1], [r0, r1]) {

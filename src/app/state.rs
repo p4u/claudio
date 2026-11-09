@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::addon::{Addons, LaunchChoice, LegacyChoice};
 use crate::paths;
 use crate::proto::{SessionId, SessionInfo, SessionKind, SessionState};
 
@@ -102,13 +103,24 @@ pub struct SavedSession {
     pub claude_session_id: Option<String>,
     #[serde(default)]
     pub created_at: u64,
-    /// The proxy profile name used by this session (profile name only, never the token).
+    /// What it was launched with (`None` with no `proxy`: direct). Read
+    /// first; a state.json without it is read from `proxy`/`first_party`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchChoice>,
+    /// compat(v0.10): the pre-addon routing, still written (derived from
+    /// `launch` through `Launch::legacy`) so a rolled-back build keeps the
+    /// session's routing: the proxy profile's name, never the token.
     #[serde(default)]
     pub proxy: Option<String>,
-    /// Launched first-party (`--first-party`). Omitted when false, so a
-    /// state.json without it reads as gateway, as before.
+    /// compat(v0.10): launched first-party (`--first-party`). Omitted when
+    /// false, so a state.json without it reads as gateway, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_party: bool,
+    /// Known only from its daemon (another front-end started it): its
+    /// routing is unknown here, so a restart or recovery refuses rather
+    /// than start it direct (R19). Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub route_unknown: bool,
     /// A terminal tab never resumes and never gets proxy env.
     #[serde(default)]
     pub kind: SessionKind,
@@ -116,6 +128,77 @@ pub struct SavedSession {
 
 fn local() -> String {
     "local".into()
+}
+
+/// Why a persisted launch is refused (AC8: never direct instead).
+pub const NOT_AVAILABLE: &str = "this session's launch option is not available in this build";
+
+/// A session's route as state.json and web-state.json persist it: `launch`
+/// and, for one release, the pre-addon fields beside it (compat(v0.10)).
+/// Kept whole when this build cannot use it, so a save writes it back
+/// unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SavedRoute {
+    /// The launch choice, when the file has one.
+    pub launch: Option<LaunchChoice>,
+    /// `proxy` and `first_party` as the file has them.
+    pub legacy: LegacyChoice,
+}
+
+impl SavedRoute {
+    /// The route written for `choice` (`None`: direct): the choice and the
+    /// pre-addon fields its addon derives (compat(v0.10)).
+    pub fn of(addons: &Addons, choice: Option<&LaunchChoice>) -> SavedRoute {
+        SavedRoute {
+            launch: choice.cloned(),
+            legacy: crate::app::launch::legacy(addons, choice),
+        }
+    }
+
+    /// What the session is launched with: `launch` wins when this build
+    /// has its addon; without `launch`, the pre-addon fields as an addon
+    /// adopts them (no `proxy`: direct). `Err`: a choice this build cannot
+    /// make, which fails the launch and is never direct (F4, AC8).
+    pub fn resolve(&self, addons: &Addons) -> Result<Option<LaunchChoice>, String> {
+        match &self.launch {
+            Some(c) if addons.get(&c.addon).and_then(|a| a.launch()).is_some() => {
+                Ok(Some(c.clone()))
+            }
+            Some(_) => Err(NOT_AVAILABLE.to_owned()),
+            None => crate::app::launch::adopt_legacy(addons, &self.legacy)
+                .map_err(|_| NOT_AVAILABLE.to_owned()),
+        }
+    }
+}
+
+impl SavedSession {
+    /// Its persisted route.
+    pub fn route(&self) -> SavedRoute {
+        SavedRoute {
+            launch: self.launch.clone(),
+            legacy: LegacyChoice {
+                proxy: self.proxy.clone(),
+                first_party: self.first_party,
+            },
+        }
+    }
+
+    /// Its launch as this build makes it ([`SavedRoute::resolve`]); `Err`
+    /// for one started elsewhere (R19) or a choice this build cannot make:
+    /// never direct (AC8).
+    pub fn launch_of(&self, addons: &Addons) -> Result<Option<LaunchChoice>, String> {
+        if self.route_unknown {
+            return Err("started elsewhere".to_owned());
+        }
+        self.route().resolve(addons)
+    }
+
+    /// Persist `route`.
+    pub fn set_route(&mut self, route: SavedRoute) {
+        self.launch = route.launch;
+        self.proxy = route.legacy.proxy;
+        self.first_party = route.legacy.first_party;
+    }
 }
 
 impl ClientState {
@@ -225,8 +308,12 @@ fn recover_with_host(saved: Option<&SavedSession>, info: &SessionInfo, host: &st
                 .unwrap_or_else(|| host.to_owned()),
             claude_session_id,
             created_at: info.created_at,
+            launch: saved.and_then(|s| s.launch.clone()),
             proxy: saved.and_then(|s| s.proxy.clone()),
             first_party: saved.is_some_and(|s| s.first_party),
+            // A session state.json does not know was started elsewhere.
+            route_unknown: info.kind == SessionKind::Claude
+                && saved.is_none_or(|s| s.route_unknown),
             // The daemon's journal is authoritative.
             kind: info.kind,
         },
@@ -267,8 +354,10 @@ mod tests {
             host: "local".into(),
             claude_session_id: csid.map(Into::into),
             created_at: 1,
+            launch: None,
             proxy: None,
             first_party: false,
+            route_unknown: false,
             kind: SessionKind::Claude,
         }
     }
@@ -489,5 +578,135 @@ mod tests {
         let merged = merge_for_host("myserver.example.com", &state, &live);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].saved.host, "myserver.example.com");
+    }
+}
+
+/// P3.19: `launch` beside the pre-addon fields, and the previous release's
+/// state.json (AC8, B3).
+#[cfg(test)]
+mod launch_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::addon::test_support::TestAddon;
+    use crate::addon::Addon;
+
+    /// A build whose addon `team` adopts the pre-addon routing.
+    fn adopting() -> Addons {
+        let team: Arc<dyn Addon> = Arc::new(TestAddon::new("team").adopts_legacy());
+        Addons::new(vec![team]).unwrap()
+    }
+
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/state-v0.8.0.json")
+    }
+
+    fn sid(n: u128) -> SessionId {
+        format!("0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c{n:04}")
+            .parse()
+            .unwrap()
+    }
+
+    /// Session `n`'s launch in `state` (`Err` for one it lacks).
+    fn launch(
+        state: &ClientState,
+        addons: &Addons,
+        n: u128,
+    ) -> Result<Option<LaunchChoice>, String> {
+        let saved = state.sessions.iter().find(|s| s.id == sid(n));
+        saved
+            .ok_or_else(|| "no such session".to_owned())?
+            .launch_of(addons)
+    }
+
+    fn team(option: &str, flags: &[&str]) -> LaunchChoice {
+        LaunchChoice {
+            addon: "team".into(),
+            option: option.into(),
+            flags: flags.iter().map(|f| f.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn v080_state_json_loads_with_its_proxy_choices() {
+        let state = ClientState::load(&fixture());
+        assert_eq!(state.sessions.len(), 4);
+        assert_eq!(state.active, Some(sid(2)));
+        let addons = adopting();
+        assert_eq!(launch(&state, &addons, 1), Ok(None), "direct");
+        assert_eq!(launch(&state, &addons, 2), Ok(Some(team("work", &[]))));
+        assert_eq!(
+            launch(&state, &addons, 3),
+            Ok(Some(team("lab", &["--first-party"])))
+        );
+        assert_eq!(launch(&state, &addons, 4), Ok(None), "a terminal");
+        assert!(launch(&state, &addons, 9).is_err(), "unknown");
+    }
+
+    #[test]
+    fn saving_writes_launch_and_the_legacy_fields() {
+        /// state.json's session as v0.8.0 reads it (its struct, kept here).
+        #[derive(Deserialize)]
+        struct V080Session {
+            #[serde(default)]
+            proxy: Option<String>,
+            #[serde(default)]
+            first_party: bool,
+        }
+        let addons = adopting();
+        let mut state = ClientState::load(&fixture());
+        let choice = team("lab", &["--first-party"]);
+        state.sessions[0].set_route(SavedRoute::of(&addons, Some(&choice)));
+        let json = serde_json::to_value(&state).unwrap();
+        let entry = &json["sessions"][0];
+        assert_eq!(
+            entry["launch"],
+            serde_json::json!({"addon": "team", "option": "lab", "flags": ["--first-party"]})
+        );
+        let old: V080Session = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(old.proxy.as_deref(), Some("lab"));
+        assert!(old.first_party);
+        // `launch` wins over the legacy fields once both are there.
+        let back: ClientState = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(launch(&back, &addons, 1), Ok(Some(choice)));
+        // A direct session writes neither.
+        assert!(json["sessions"][3].get("launch").is_none());
+        assert_eq!(json["sessions"][3]["proxy"], serde_json::Value::Null);
+        assert_eq!(SavedRoute::of(&addons, None), SavedRoute::default());
+    }
+
+    #[test]
+    fn an_unknown_legacy_profile_is_kept_and_fails_at_launch() {
+        // The adopting addon takes any profile name; its launch then
+        // resolves the option (and fails it), never direct (AC8).
+        let addons = adopting();
+        let mut state = ClientState::load(&fixture());
+        state.sessions[1].proxy = Some("gone".into());
+        let choice = launch(&state, &addons, 2).unwrap();
+        assert_eq!(choice, Some(team("gone", &[])));
+        assert_ne!(
+            crate::addon::LaunchSelect::of(choice.as_ref()).pick,
+            crate::addon::Pick::Direct
+        );
+    }
+
+    #[test]
+    fn a_build_without_the_routing_addon_keeps_the_choice_it_cannot_adopt() {
+        let none = Addons::empty();
+        let state = ClientState::load(&fixture());
+        assert_eq!(launch(&state, &none, 1), Ok(None));
+        assert_eq!(launch(&state, &none, 2), Err(NOT_AVAILABLE.to_owned()));
+        assert_eq!(launch(&state, &none, 3), Err(NOT_AVAILABLE.to_owned()));
+        // A choice whose addon this build lacks: refused, never direct.
+        let mut later = state.sessions[1].clone();
+        later.set_route(SavedRoute::of(&adopting(), Some(&team("work", &[]))));
+        assert!(later.route().resolve(&none).is_err());
+        // The raw fields survive a load and a save.
+        let route = state.sessions[2].route();
+        let mut copy = state.sessions[2].clone();
+        copy.set_route(route.clone());
+        assert_eq!(copy, state.sessions[2]);
+        assert_eq!(route.legacy.proxy.as_deref(), Some("lab"));
     }
 }

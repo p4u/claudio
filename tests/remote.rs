@@ -450,7 +450,7 @@ fn t9_remote_plugin_manifest() {
     };
     let octal: String = T9_MANIFEST.bytes().map(|b| format!("\\{b:03o}")).collect();
     let seed = format!(
-        "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/claudio/plugins\" && mkdir -p \"$d\" && chmod 700 \"$d\" \
+        "d=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/claudio/vocdoni\" && mkdir -p \"$d\" && chmod 700 \"$d\" \
          && printf '{octal}' > \"$d/claudio-t9.toml\" && printf '{sha}\\n' > \"$d/claudio-t9.sha256\" \
          && echo ok"
     );

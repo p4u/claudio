@@ -126,20 +126,23 @@ mod tests {
     #[test]
     fn the_screen_shows_rows_details_and_the_footer() {
         let mut app = app_with(&[info(Some(1), None)]);
+        // The web addon's rows follow the built-ins.
+        crate::tui::test_support::rows(&mut app, "web", &[("diagram", None)], &[]);
         app.activate(0);
         app.on_terminal(alt('i'));
         assert!(matches!(app.modal, Some(Modal::ExtensionsMenu(_))));
-        app.on_terminal(crate::tui::test_support::press(
-            crossterm::event::KeyCode::Down,
-        ));
+        for _ in 0..2 {
+            app.on_terminal(crate::tui::test_support::press(
+                crossterm::event::KeyCode::Down,
+            ));
+        }
         let shown = screen(&app);
         for expected in [
             TITLE,
-            "[x] latex     built-in  —          <latex>",
-            "[x] diagram   built-in  —          ```mermaid",
+            "[x] search    built-in  Alt+z s    —",
             "[x] snippets  built-in  Alt+z p/P  —",
-            "Mermaid diagrams drawn in the web UI",
-            "```mermaid  fence lens (the web UI)",
+            "[x] diagram   web       —          —",
+            "1.4.0 · work",
             FOOTER,
         ] {
             assert!(shown.contains(expected), "{expected} missing:\n{shown}");

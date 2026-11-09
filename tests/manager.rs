@@ -25,10 +25,11 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use common::{
-    current_nonce, encode_cwd, extract_nonce, run_git, wizard_pick_dir, ClaudeProjectGuard,
-    ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q,
-    ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, BINARY, CTRL_U, DAEMON_WAIT,
-    DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
+    current_nonce, encode_cwd, extract_nonce, record_env_sh, run_git, wizard_pick_dir,
+    ClaudeProjectGuard, ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L,
+    ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, BINARY,
+    CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW,
+    WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -1016,15 +1017,35 @@ fn test_proxy_env_injection() {
     let proxy_url = format!("{token}@127.0.0.1:{port}");
     let expected_base_url = format!("http://127.0.0.1:{port}");
 
-    // ── 4. Isolated env with an env-dumping fake claude ───────────────────────
+    // ── 4. Isolated env with an env-recording fake claude ─────────────────────
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("claude-env.txt");
-    // Overwrite fake claude: dump env (but not on --version), then banner+cat.
-    harness.write_env_dumping_fake_claude(&env_file);
+    // Overwrite fake claude: record the asserted env vars (but not on
+    // --version), then banner+cat. Values only for what the test sets.
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_USE_GATEWAY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        ],
+        &[
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_API_KEY",
+        ],
+    );
 
     // ── 5. Start claudio TUI with CLAUDIO_PROXY_URL ────────────────────────────
     let mut tui = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+        // Never inherit the developer's own gateway settings.
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
     });
 
     // ── 6. Wizard: pick a fresh dir ───────────────────────────────────────────
@@ -1142,6 +1163,8 @@ fn test_proxy_env_injection() {
     // Restart claudio with the proxy URL; daemon should respawn the dormant session.
     let mut tui2 = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDIO_PROXY_URL", &proxy_url);
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
     });
 
     // Wait for env.txt to be re-written by the respawned session.
@@ -1730,6 +1753,63 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     tui.quit(WAIT);
 }
 
+/// R19: a session another client started (a raw `Spawn` over the daemon
+/// socket, carrying a proxy token as a web-started one would) is unknown
+/// to a manager whose state.json does not have it: its status says so,
+/// Alt+e refuses with a notice and never restarts it direct, and
+/// state.json keeps it unknown.
+#[test]
+fn test_restart_of_a_session_started_elsewhere_never_goes_direct() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("other.env");
+    harness.write_env_recording_fake_claude(&env_file, &["ANTHROPIC_AUTH_TOKEN"], &[]);
+    // The daemon runs; this manager's state.json knows no session.
+    let mut tui = harness.start_tui();
+    tui.quit(WAIT);
+    let reply = harness.daemon_request(serde_json::json!({
+        "op": "spawn",
+        "id": "6d1f6a52-3c55-4a8e-9a39-5d1c0b0e0019",
+        "cwd": harness.dirs[0],
+        "env": [["ANTHROPIC_AUTH_TOKEN", "other-client-token"]],
+        "rows": 24,
+        "cols": 80,
+    }));
+    assert_eq!(reply["op"], "spawned", "the daemon refused the spawn");
+    let proxied = || {
+        fs::read_to_string(&env_file)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l == "ANTHROPIC_AUTH_TOKEN=other-client-token")
+    };
+    let deadline = Instant::now() + WAIT;
+    while !proxied() {
+        assert!(Instant::now() < deadline, "the session never started");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut tui = harness.start_tui();
+    let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(n0, Region::TabBar, WAIT);
+    tui.wait_for("route unknown", Region::StatusBar, WAIT);
+    tui.wait_for("nonce=", Region::Pane, WAIT);
+    let before = current_nonce(&tui);
+    tui.send_keys(ALT_E);
+    tui.wait_for("restart & resume", Region::Screen, WAIT);
+    tui.send_keys(b"r");
+    tui.wait_for("restart it where it was started", Region::StatusBar, WAIT);
+    // Nothing restarted: the same process, still on its proxy token.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(current_nonce(&tui), before);
+    assert!(proxied(), "restarted without its proxy");
+    tui.quit(WAIT);
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(harness.state_json()).unwrap()).unwrap();
+    let entry = &state["sessions"][0];
+    assert_eq!(entry["route_unknown"], true, "{state}");
+    assert!(entry["proxy"].is_null(), "{state}");
+}
+
 // ── Scope guard ───────────────────────────────────────────────────────────────
 
 /// Minimal scope guard: runs `f` when dropped.
@@ -1846,7 +1926,6 @@ fn test_plain_help_lists_only_the_plain_keys() {
     for key in [
         "Alt+h",
         "Alt+s",
-        "Alt+s → n",
         "Alt+l",
         "Alt+e",
         "Alt+u",
@@ -1858,7 +1937,7 @@ fn test_plain_help_lists_only_the_plain_keys() {
     }
     assert_eq!(
         screen.matches("Alt+").count(),
-        9,
+        8,
         "exactly the plain keys:\n{screen}"
     );
 
@@ -1928,7 +2007,15 @@ fn test_plain_keeps_proxy_stats_and_reset() {
 fn test_plain_injects_proxy_env() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ],
+        &["ANTHROPIC_API_KEY", "CLAUDECODE"],
+    );
 
     let tui = harness.start_plain_with(&["-c", "hello"], |cmd| {
         cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
@@ -1968,7 +2055,11 @@ fn test_plain_injects_proxy_env() {
 fn test_plain_no_proxy_keeps_api_key() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_API_KEY"],
+        &["ANTHROPIC_AUTH_TOKEN", "CLAUDECODE"],
+    );
 
     let tui = harness.start_plain_with(&["--no-proxy"], |cmd| {
         cmd.env("CLAUDIO_PROXY_URL", "sekret@127.0.0.1:1");
@@ -1980,6 +2071,144 @@ fn test_plain_no_proxy_keeps_api_key() {
     drop(tui);
 }
 
+/// R20: a `[proxy]` section that cannot be read (here mistyped; the rest of
+/// config.toml still parses) fails `--plain`'s default launch with the load
+/// error: claude never starts, and never direct.
+#[test]
+fn test_plain_with_unreadable_proxy_profiles_never_starts_direct() {
+    let harness = ManagerHarness::new();
+    let marker = harness.root.join("claude-ran");
+    harness.write_marker_fake_claude(&marker);
+    let config = harness.config_home.join("claudio").join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("[proxy]\ndefault = 5\n");
+    fs::write(&config, text).unwrap();
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    cmd.arg("--plain");
+    cmd.cwd(&harness.dirs[0]);
+    harness.apply(&mut cmd);
+    let mut tui = TuiProcess::spawn(cmd);
+    assert_eq!(tui.wait_exit_code(DAEMON_WAIT), 1);
+    let screen = tui.screen_text(Region::Screen);
+    assert!(
+        screen.contains("cannot read the proxy profiles"),
+        "{screen}"
+    );
+    assert!(!marker.exists(), "claude started");
+
+    // `--no-proxy` still starts it, direct.
+    let tui = harness.start_plain_with(&["--no-proxy"], |_| {});
+    assert!(marker.exists());
+    drop(tui);
+}
+
+/// The env-recording fakes never write the inherited environment into a
+/// fixture (C1, E3): a sentinel secret in this test process's env reaches
+/// claude's process (inherited through the UI and the daemon: the record
+/// says it is set) and its value lands in no file under the harness root,
+/// which is 0700, with the record 0600. The suite runs single-threaded, so
+/// setting the process env is safe.
+#[test]
+fn test_env_recording_fakes_keep_inherited_secrets_out_of_fixtures() {
+    use std::os::unix::fs::PermissionsExt;
+    const SENTINEL_KEY: &str = "CL_TEST_SENTINEL_SECRET";
+    let sentinel = format!("sentinel-secret-{}", std::process::id());
+    std::env::set_var(SENTINEL_KEY, &sentinel);
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("plain.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_API_KEY"],
+        &[SENTINEL_KEY, "CLAUDECODE"],
+    );
+    let tui = harness.start_plain_with(&[], |_| {});
+    std::env::remove_var(SENTINEL_KEY);
+    let env = fs::read_to_string(&env_file).expect("env recorded");
+    drop(tui);
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(
+        env.lines().any(|l| l == format!("{SENTINEL_KEY}=<set>")),
+        "claude's process never inherited the sentinel: {env}"
+    );
+
+    let mut files = vec![];
+    let mut stack = vec![harness.root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    assert!(files.contains(&env_file), "{files:?}");
+    for file in &files {
+        let bytes = fs::read(file).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(&sentinel),
+            "the inherited sentinel's value landed in {file:?}"
+        );
+    }
+    let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&harness.root), 0o700, "the fixture root is private");
+    assert_eq!(mode(&env_file), 0o600, "the record is private");
+}
+
+/// An old client's spawn (no `env_remove`) gets the compatibility scrub
+/// from a new daemon: the proxy token in its env replaces the inherited
+/// `ANTHROPIC_API_KEY`, and the session markers go (docs/daemon-protocol.md,
+/// "Mixed versions"; B1). The spawn is the raw JSON an older client sends.
+#[test]
+fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("old-client.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_AUTH_TOKEN"],
+        &["ANTHROPIC_API_KEY", "CLAUDECODE"],
+    );
+    // The daemon inherits the TUI's env: the harness's API key and a marker.
+    let tui = harness.start_tui_with(|cmd| {
+        cmd.env("CLAUDECODE", "1");
+        // Never inherit the developer's own gateway settings.
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
+    });
+    let id = "6d1f6a52-3c55-4a8e-9a39-5d1c0b0e0001";
+    let reply = harness.daemon_request(serde_json::json!({
+        "op": "spawn",
+        "id": id,
+        "cwd": harness.dirs[0],
+        "env": [["ANTHROPIC_AUTH_TOKEN", "old-client-token"]],
+        "rows": 24,
+        "cols": 80,
+    }));
+    assert_eq!(reply["op"], "spawned", "the daemon refused the spawn");
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env
+            .lines()
+            .any(|l| l == "ANTHROPIC_AUTH_TOKEN=old-client-token")
+        {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "the session never started");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let set = |key: &str| env.lines().any(|l| l.starts_with(&format!("{key}=")));
+    // Values are never printed (C1): the messages name the keys only.
+    assert!(
+        !set("ANTHROPIC_API_KEY"),
+        "the inherited API key reached claude"
+    );
+    assert!(!set("CLAUDECODE"), "a session marker reached claude");
+    drop(tui);
+}
+
 /// A proxy profile is gateway by default; `--first-party` makes one run
 /// first-party. Nothing listens on the profile's port, so the config fetch
 /// falls back to the built-in model defaults. An inherited
@@ -1988,7 +2217,17 @@ fn test_plain_no_proxy_keeps_api_key() {
 fn test_plain_first_party_flag() {
     let harness = ManagerHarness::new();
     let env_file = harness.root.join("plain.env");
-    harness.write_env_dumping_fake_claude(&env_file);
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &[
+            "CLAUDE_CODE_USE_GATEWAY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "DISABLE_AUTOUPDATER",
+            "ANTHROPIC_BASE_URL",
+            "ENABLE_TOOL_SEARCH",
+        ],
+        &[],
+    );
     let proxy = "sekret@127.0.0.1:1";
 
     let tui = harness.start_plain_with(&[], |cmd| {
@@ -2022,6 +2261,55 @@ fn test_plain_first_party_flag() {
     assert!(env.contains("DISABLE_AUTOUPDATER=1"), "{env}");
     assert!(env.contains("ENABLE_TOOL_SEARCH=true"), "{env}");
     drop(tui);
+}
+
+/// The configured default proxy profile routes a new session even when its
+/// proxy config cannot be fetched (nothing listens on its port): the
+/// session starts through that proxy with the built-in model defaults,
+/// never direct (AC8; Routing::Required).
+#[test]
+fn test_default_profile_with_unreachable_config_starts_through_the_proxy() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("default.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_BASE_URL"],
+        &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+    );
+    let config = harness.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\n\
+         url = \"http://127.0.0.1:1\"\ntoken = \"work-test-token\"\n",
+    );
+    fs::write(&config, text).unwrap();
+    let mut tui = harness.start_tui();
+    tui.wait_for("New session", Region::Screen, WAIT);
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env.lines().any(|l| l.starts_with("ANTHROPIC_BASE_URL=")) {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "no session started: {env}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        env.lines()
+            .any(|l| l == "ANTHROPIC_BASE_URL=http://127.0.0.1:1"),
+        "{env}"
+    );
+    assert!(
+        env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=<set>"),
+        "{env}"
+    );
+    assert!(
+        !env.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        "the API key reached a proxied session: {env}"
+    );
+    tui.wait_for("proxy:work", Region::StatusBar, WAIT);
+    tui.quit(WAIT);
 }
 
 /// When claude ends (Ctrl+D), the UI exits with status 0 and no session
@@ -2852,21 +3140,27 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
         Region::Screen,
         WAIT,
     );
+    // The built-ins, the external one, then the web addon's rows (P3.18:
+    // latex and diagram are the web addon's, so they follow and have no
+    // lens column of their own).
+    tui.wait_for("[x] diagram   web", Region::Screen, WAIT);
     let shown = tui.screen_text(Region::Screen);
     for row in [
-        "[x] latex     built-in  —              <latex>",
-        "[x] diagram   built-in  —              ```mermaid",
         "[x] search    built-in  Alt+z s",
         "[x] snippets  built-in  Alt+z p/P",
         "[x] fake      external  Alt+z k/l/d/h  <keys>",
-        "math typeset from <latex> tags",
+        "[x] latex     web       —",
+        "[x] diagram   web       —",
+        "search claude conversations",
         "changes apply now",
     ] {
         assert!(shown.contains(row), "missing {row:?} in:\n{shown}");
     }
 
     // Space on diagram: off now, and saved.
-    tui.send_keys(DOWN_ARROW);
+    for _ in 0..4 {
+        tui.send_keys(DOWN_ARROW);
+    }
     tui.wait_for("Mermaid diagrams drawn in the web UI", Region::Screen, WAIT);
     tui.send_keys(b" ");
     tui.wait_for("[ ] diagram", Region::Screen, WAIT);
@@ -2880,7 +3174,7 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     );
 
     // Snippets off: its keys leave the leader.
-    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(b"\x1b[H"); // Home
     tui.send_keys(DOWN_ARROW);
     tui.wait_for("saved prompts", Region::Screen, WAIT);
     tui.send_keys(b" ");
@@ -2912,6 +3206,56 @@ fn test_extensions_screen_turns_extensions_off_and_saves_it() {
     );
     tui.send_keys(ALT_I);
     tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
+/// The lens names of the journaled session in `dir`, once it has some.
+fn journaled_lenses(h: &ManagerHarness, dir: &std::path::Path) -> Vec<String> {
+    let dir = dir.to_str().unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let entry = h
+            .journal_sessions()
+            .into_iter()
+            .find(|e| e["cwd"] == dir && e["extensions"].is_object());
+        if let Some(entry) = entry {
+            return entry["extensions"]["lenses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["name"].as_str().unwrap().to_owned())
+                .collect();
+        }
+        assert!(Instant::now() < deadline, "{:?}", h.journal_sessions());
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// AC6: a session started from the TUI asks the daemon for the web addon's
+/// `latex` and `mermaid` lenses (the web UI renders them); turning `latex`
+/// off on the extensions screen drops it for the next session.
+#[test]
+fn test_tui_session_requests_the_latex_lens_from_the_web_addon() {
+    let h = ManagerHarness::new();
+    let mut tui = h.start_tui();
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    assert_eq!(journaled_lenses(&h, &h.dirs[0]), ["latex", "mermaid"]);
+
+    tui.send_keys(ALT_I);
+    tui.wait_for("[x] latex     web", Region::Screen, WAIT);
+    tui.send_keys(DOWN_ARROW);
+    tui.send_keys(DOWN_ARROW);
+    tui.wait_for("math rendered from <latex> tags", Region::Screen, WAIT);
+    tui.send_keys(b" ");
+    tui.wait_for("[ ] latex", Region::Screen, WAIT);
+    tui.wait_for("extension latex off (saved)", Region::StatusBar, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[1]);
+    assert_eq!(journaled_lenses(&h, &h.dirs[1]), ["mermaid"]);
     tui.send_keys(ALT_Q);
     tui.wait_exit(WAIT);
 }
@@ -2992,6 +3336,9 @@ fn fake_plugin_proxy() -> String {
             let line = String::from_utf8_lossy(&head);
             let (status, reply) = if line.starts_with("GET /v1/claudio/plugins ") {
                 ("200 OK", list.as_str())
+            } else if line.starts_with("GET /v1/claudio ") {
+                // `claudio vocdoni login`'s check of the token.
+                ("200 OK", "{}")
             } else if line.starts_with(&format!("GET /{PLUGIN}.toml ")) {
                 ("200 OK", PLUGIN_MANIFEST)
             } else {
@@ -3012,11 +3359,17 @@ fn fake_plugin_proxy() -> String {
 /// `plugin …` runs are logged to `<dumps>/plugin.log` and act on
 /// `$CLAUDE_CONFIG_DIR` as Claude Code would (the marketplace is added, the
 /// plugin installed beside `have@market`). Every other launch is recorded
-/// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`) before the
-/// usual banner and `cat`.
+/// in `<dumps>/<n>/` (`argv`, one argument per line, and `env`: the plugin
+/// secret's key only, [`record_env_sh`]) before the usual banner and `cat`.
 fn write_plugin_claude(h: &ManagerHarness, dumps: &std::path::Path) {
+    write_plugin_claude_noting(h, dumps, &[]);
+}
+
+/// [`write_plugin_claude`], also noting whether each of `present` is set.
+fn write_plugin_claude_noting(h: &ManagerHarness, dumps: &std::path::Path, present: &[&str]) {
     use std::os::unix::fs::PermissionsExt;
     fs::create_dir_all(dumps.join("launches")).unwrap();
+    let record = record_env_sh("$d/env", &[PLUGIN_KEY], present);
     let dumps = dumps.display();
     let script = format!(
         r#"#!/bin/sh
@@ -3036,8 +3389,7 @@ if [ "$1" = "plugin" ]; then
 fi
 d="{dumps}/launches/$(ls "{dumps}/launches" | wc -l | tr -d ' ')"
 mkdir -p "$d"
-printf '%s\n' "$@" > "$d/argv"
-env > "$d/env"
+{record}printf '%s\n' "$@" > "$d/argv"
 echo "FAKE_CLAUDE_BANNER pid=$$"
 exec cat
 "#
@@ -3095,6 +3447,95 @@ fn context_files(h: &ManagerHarness) -> String {
 /// the instructions in its context, and the plugin is installed through
 /// the CLI; the extensions screen shows each item's outcome; turned off,
 /// the next session has none of it.
+/// AC7: `claudio vocdoni login --token` (the URL given, the token on
+/// stdin) saves the default profile and caches its plugins; a new session
+/// then gets the proxy env (the token), the plugin args and the
+/// instructions in its context file.
+#[test]
+fn test_vocdoni_login_token_then_a_session_gets_the_proxy_and_plugins() {
+    use std::io::Write;
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude_noting(&h, &dumps, &["ANTHROPIC_AUTH_TOKEN"]);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(claude_config.join("plugins")).unwrap();
+    let cache = h.root.join("xdg-cache");
+    let proxy = fake_plugin_proxy();
+    let url = format!("http://{proxy}");
+    let mut login = std::process::Command::new(BINARY)
+        .args(["vocdoni", "login", &url, "--name", "work", "--token"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("XDG_RUNTIME_DIR", &h.runtime_dir)
+        .env("XDG_CONFIG_HOME", &h.config_home)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("HOME", &h.home)
+        .env("CLAUDIO_CLAUDE_PATH", &h.fake_claude)
+        .env("CLAUDIO_TEST_LOOPBACK_HTTP", "1")
+        .env("CLAUDIO_NO_BROWSER", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run claudio vocdoni login");
+    login
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"member-token\n")
+        .unwrap();
+    let out = login.wait_with_output().unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("Profile \"work\" saved as default."),
+        "{stdout}"
+    );
+    assert!(stdout.contains(PLUGIN), "its plugins are listed: {stdout}");
+    assert!(!stdout.contains("member-token") && !stderr.contains("member-token"));
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains("default = \"work\""), "{config}");
+
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("XDG_CACHE_HOME", &cache);
+        cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    // Past the arming, keep everything.
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ENTER);
+    tui.wait_for(
+        &format!("plugin {PLUGIN} set up (saved)"),
+        Region::StatusBar,
+        WAIT,
+    );
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(
+        env.contains("ANTHROPIC_AUTH_TOKEN=<set>"),
+        "the proxy env: {env}"
+    );
+    assert!(env.contains(&format!("{PLUGIN_KEY}=s3cret")), "{env}");
+    assert!(flag_value(&argv, "--agents").is_some(), "{argv:?}");
+    let mcp = flag_value(&argv, "--mcp-config").expect("--mcp-config");
+    assert!(mcp.contains("Bearer ${VOCDONI_TEST_TOKEN}"), "{mcp}");
+    assert!(!argv.iter().any(|a| a.contains("member-token")), "{argv:?}");
+    let context = context_files(&h);
+    assert!(
+        context.contains("Manifest instructions for the test."),
+        "{context}"
+    );
+    tui.send_keys(ALT_Q);
+    tui.wait_exit(WAIT);
+}
+
 #[test]
 fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     let h = ManagerHarness::new();
@@ -3207,7 +3648,9 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
     // The extensions screen: `r` asks again, and each outcome shows.
     tui.send_keys(ALT_I);
     tui.wait_for(&format!("[x] {PLUGIN}"), Region::Screen, WAIT);
-    for _ in 0..4 {
+    // After the built-ins search and snippets (P3.18: latex and diagram are
+    // the web addon's rows, after the plugins).
+    for _ in 0..2 {
         tui.send_keys(DOWN_ARROW);
     }
     tui.wait_for("1 items disabled (Enter to change)", Region::Screen, WAIT);
@@ -3231,6 +3674,185 @@ fn test_plugin_manifest_setup_then_sessions_get_what_was_kept() {
         "{argv:?}"
     );
     assert!(!env.contains(PLUGIN_KEY), "{env}");
+    tui.quit(WAIT);
+}
+
+/// The wizard's host and directory steps for `dir`, without waiting for
+/// the session (a review may come first).
+fn wizard_enter_dir(tui: &mut TuiProcess, dir: &std::path::Path) {
+    tui.send_keys(ENTER);
+    thread::sleep(Duration::from_millis(80));
+    tui.send_paste(dir.to_str().expect("UTF-8 dir"));
+    thread::sleep(Duration::from_millis(50));
+    tui.send_keys(ENTER);
+}
+
+/// The first-sight offer put off (Esc), a launch still reviews the unsaved
+/// plugin: its checklist opens before the session starts, `s` skips it for
+/// that launch (the session starts without the plugin's secret or flags),
+/// and the next launch asks again; Esc then cancels that launch and its tab.
+#[test]
+fn test_a_launch_reviews_an_unsaved_plugin_and_skip_starts_without_it() {
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude(&h, &dumps);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(&claude_config).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+        cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+        cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    tui.wait_for("Esc later", Region::Screen, WAIT);
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Set up vocdoni-test", Region::Screen), WAIT);
+
+    tui.send_keys(ALT_N);
+    wizard_enter_dir(&mut tui, &h.dirs[0]);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, WAIT);
+    tui.wait_for("s skip · Esc cancel", Region::Screen, WAIT);
+    assert!(
+        !dumps.join("launches/0").exists(),
+        "nothing starts before the review"
+    );
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(b"s");
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, WAIT);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(
+        !argv.iter().any(|a| a == "--agents" || a == "--mcp-config"),
+        "{argv:?}"
+    );
+    assert!(
+        !env.contains(PLUGIN_KEY),
+        "skipped: no plugin secret: {env}"
+    );
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap_or_default();
+    assert!(!config.contains("[plugins."), "nothing saved: {config}");
+
+    // The next launch asks again; Esc cancels it, and its tab goes.
+    tui.send_keys(ALT_N);
+    wizard_enter_dir(&mut tui, &h.dirs[1]);
+    tui.wait_for("s skip · Esc cancel", Region::Screen, WAIT);
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ESC);
+    tui.wait_for("launch cancelled", Region::StatusBar, WAIT);
+    thread::sleep(Duration::from_millis(500));
+    assert!(!dumps.join("launches/1").exists(), "nothing started");
+    tui.quit(WAIT);
+}
+
+/// `--plain` with a plugin never set up: its checklist comes before the
+/// session starts; Enter saves it and the session gets the plugin.
+#[test]
+fn test_plain_reviews_before_starting() {
+    let h = ManagerHarness::new();
+    let dumps = h.root.join("dumps");
+    write_plugin_claude(&h, &dumps);
+    let claude_config = h.root.join("claude-config");
+    fs::create_dir_all(&claude_config).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut cmd = CommandBuilder::new(BINARY);
+    cmd.arg("--plain");
+    cmd.cwd(&h.dirs[0]);
+    h.apply(&mut cmd);
+    cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+    cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+    cmd.env("CLAUDE_CONFIG_DIR", &claude_config);
+    cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+    let mut tui = TuiProcess::spawn(cmd);
+    tui.wait_for("Set up vocdoni-test 1.0.0", Region::Screen, DAEMON_WAIT);
+    tui.wait_for(
+        "[x] kb (http https://kb.example.org/mcp)",
+        Region::Screen,
+        WAIT,
+    );
+    assert!(
+        !dumps.join("launches/0").exists(),
+        "nothing starts before the review"
+    );
+    thread::sleep(Duration::from_millis(1200));
+    tui.send_keys(ENTER);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Screen, WAIT);
+    let (argv, env) = launch_dump(&dumps, 0);
+    assert!(env.contains(&format!("{PLUGIN_KEY}=s3cret")), "{env}");
+    let mcp = flag_value(&argv, "--mcp-config").expect("--mcp-config");
+    assert!(mcp.contains("Bearer ${VOCDONI_TEST_TOKEN}"), "{mcp}");
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains(&format!("[plugins.{PLUGIN}]")), "{config}");
+    drop(tui);
+}
+
+/// A daemon of the previous release (no `addon:vocdoni`): a new client
+/// starts the session through the proxy without the plugins, and says why
+/// (spec "Mixed versions", row 2; AC8). The old daemon's own scrub drops
+/// the inherited API key; no plugin secret reaches the session.
+#[test]
+fn test_new_client_old_daemon_gets_proxy_env_without_plugins() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("old-daemon.env");
+    h.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_AUTH_TOKEN"],
+        &[PLUGIN_KEY, "ANTHROPIC_API_KEY"],
+    );
+    // The plugin is set up already: no setup screen.
+    let config = h.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[plugins.{PLUGIN}]\ndisabled = []\nreviewed = \"1.0.0\"\n"
+    ));
+    fs::write(&config, text).unwrap();
+    let proxy = fake_plugin_proxy();
+    let mut tui = h.start_tui_with(|cmd| {
+        cmd.env("CLAUDIO_PROXY_URL", format!("tok@{proxy}"));
+        cmd.env("XDG_CACHE_HOME", h.root.join("xdg-cache"));
+        cmd.env("CLAUDIO_TEST_LOOPBACK_HTTP", "1");
+        cmd.env("CLAUDIO_TEST_OLD_DAEMON", "1");
+    });
+    tui.wait_for("New session", Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_for("No sessions", Region::Screen, WAIT);
+    // The plugin is listed (its row) before the session starts.
+    tui.send_keys(ALT_I);
+    tui.wait_for(&format!("[x] {PLUGIN}"), Region::Screen, WAIT);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("Space toggle", Region::Screen), WAIT);
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env.lines().any(|l| l.starts_with("ANTHROPIC_AUTH_TOKEN=")) {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "no session started: {env}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=tok"),
+        "{env}"
+    );
+    assert!(
+        !env.lines()
+            .any(|l| l.starts_with(&format!("{PLUGIN_KEY}="))),
+        "a plugin secret reached the session: {env}"
+    );
+    assert!(
+        !env.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")),
+        "the old scrub kept the API key: {env}"
+    );
+    tui.wait_for(
+        "plugins after `claudio daemon restart`",
+        Region::Screen,
+        WAIT,
+    );
     tui.quit(WAIT);
 }
 

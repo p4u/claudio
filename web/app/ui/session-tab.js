@@ -6,7 +6,8 @@ import { registerDrawerTab, toggleDrawer } from './drawer.js';
 import { SessionActions } from './session-actions.js';
 import { Glyph, ago, STATE_NAME } from './glyph.js';
 import { gitText } from './strip.js';
-import { credentials } from './stats.js';
+import { Segments } from './segments.js';
+import { labelFor } from '../launch.js';
 import { formatTokens } from '../charts.js';
 
 function Row({ k, v, mono = false }) {
@@ -18,7 +19,6 @@ export function SessionTab({ sid }) {
   const s = model.value.sessions[sid];
   if (!s) return null;
   const h = model.value.hosts[s.host];
-  const c = credentials.value[s.id];
   const shell = s.kind === 'shell';
   const g = s.git;
   return html`<div class="session-tab" data-testid="session-tab">
@@ -31,14 +31,14 @@ export function SessionTab({ sid }) {
       <${Row} k="Session" v=${s.id} mono />
       <${Row} k="Conversation" v=${s.claude_session_id} mono />
       ${shell ? null : html`
-        <${Row} k="Proxy" v=${s.proxy_known ? (s.proxy ? `${s.proxy}${s.first_party ? ' · first-party' : ''}` : 'direct') : 'unknown'} />
+        <${Row} k="Launch" v=${labelFor(s.launch)} />
         <${Row} k="Model" v=${s.model} />
         <${Row} k="Context" v=${s.context_tokens != null ? `${formatTokens(s.context_tokens)} tokens` : null} />
         <${Row} k="Output" v=${s.output_tokens != null ? `${formatTokens(s.output_tokens)} tokens` : null} />
         <${Row} k="Turns" v=${s.turns} />`}
       <${Row} k="Branch" v=${s.branch} />
       <${Row} k="Git" v=${g ? `${g.detached ? 'detached ' : ''}${g.head}${gitText(g) ? `  ${gitText(g)}` : ''}${g.upstream ? '' : '  (no upstream)'}` : null} />
-      ${c ? html`<${Row} k="Subscription" v=${`${c.name ?? 'unnamed'}${c.plan ? ` (${c.plan})` : ''} · 5h ${c.five_hour_pct ?? '–'}% · 7d ${c.seven_day_pct ?? '–'}%`} />` : null}
+      ${s.segments?.length ? html`<div class="kv"><dt>Addons</dt><dd><${Segments} s=${s} testid="session-segments" /></dd></div>` : null}
       <${Row} k="Process" v=${s.pid != null ? `pid ${s.pid}` : s.dormant ? 'dormant (no process)' : null} />
       <${Row} k="Started" v=${s.created_at ? `${ago(s.created_at)} ago` : null} />
       ${s.ephemeral ? html`<${Row} k="Ephemeral" v="yes" />` : null}

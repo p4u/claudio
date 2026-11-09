@@ -1,0 +1,35 @@
+{
+  "sessions": {
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0011": {
+      "host": "local",
+      "proxy": null,
+      "first_party": false
+    },
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0012": {
+      "host": "local",
+      "proxy": "work",
+      "first_party": false
+    },
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0013": {
+      "host": "devbox",
+      "proxy": "lab",
+      "first_party": true
+    }
+  },
+  "order": [
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0012",
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0011",
+    "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0013"
+  ],
+  "layout": {
+    "grid": 2,
+    "panes": [
+      "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0012",
+      null
+    ],
+    "focus": 0
+  },
+  "hosts": [
+    "devbox"
+  ]
+}

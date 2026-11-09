@@ -1,0 +1,31 @@
+//! The addons this build registers (docs/addons.md). The core never names
+//! them; `main` hands `all()` to `addon::Addons::new`.
+
+pub mod api;
+pub mod vocdoni;
+pub mod web;
+
+use std::sync::Arc;
+
+use crate::addon::Addon;
+
+/// The addons this build registers, in registry order.
+pub fn all() -> Vec<Arc<dyn Addon>> {
+    // The API addon parses every remaining argv (`cli::parse`), so it is last.
+    vec![
+        Arc::new(vocdoni::Vocdoni::new()),
+        Arc::new(web::WebAddon),
+        Arc::new(api::ApiAddon),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::addon::Addons;
+
+    #[test]
+    fn addons_all_registers() {
+        assert!(Addons::new(all()).is_ok());
+    }
+}

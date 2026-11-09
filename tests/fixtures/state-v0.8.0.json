@@ -1,0 +1,57 @@
+{
+  "sessions": [
+    {
+      "id": "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0001",
+      "name": null,
+      "cwd": "/home/member/src/site",
+      "host": "local",
+      "claude_session_id": "5b0e7f2a-1c3d-4e5f-8a9b-0c1d2e3f0001",
+      "created_at": 1762600000,
+      "proxy": null,
+      "kind": "claude"
+    },
+    {
+      "id": "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0002",
+      "name": "api",
+      "cwd": "/home/member/src/api",
+      "host": "local",
+      "claude_session_id": "5b0e7f2a-1c3d-4e5f-8a9b-0c1d2e3f0002",
+      "created_at": 1762600100,
+      "proxy": "work",
+      "kind": "claude"
+    },
+    {
+      "id": "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0003",
+      "name": null,
+      "cwd": "/srv/lab",
+      "host": "devbox",
+      "claude_session_id": "5b0e7f2a-1c3d-4e5f-8a9b-0c1d2e3f0003",
+      "created_at": 1762600200,
+      "proxy": "lab",
+      "first_party": true,
+      "kind": "claude"
+    },
+    {
+      "id": "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0004",
+      "name": "logs",
+      "cwd": "/home/member",
+      "host": "local",
+      "claude_session_id": null,
+      "created_at": 1762600300,
+      "proxy": null,
+      "kind": "shell"
+    }
+  ],
+  "active": "0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c0002",
+  "recent_dirs": {
+    "local": [
+      "/home/member/src/api",
+      "/home/member/src/site"
+    ],
+    "devbox": [
+      "/srv/lab"
+    ]
+  },
+  "killed": [],
+  "claude_skipped": {}
+}

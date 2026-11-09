@@ -44,7 +44,8 @@ function isolatedEnv(root, extra) {
     TERM: 'xterm-256color',
     SHELL: '/bin/sh',
     FAKE_DIR: path.join(root, 'fake'),
-    FAKE_DUMP_ENV: '1',
+    // The env vars the fake claude records (never the whole env): the ones the specs assert on.
+    FAKE_ENV_KEYS: 'ANTHROPIC_AUTH_TOKEN VOCDONI_TEST_TOKEN',
     CLAUDIO_TEST_LOOPBACK_HTTP: '1',
     ...extra,
   };
@@ -107,6 +108,9 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
   const home = os.homedir();
   const base = path.join(home, '.cache/claudio/web-e2e');
   const root = path.join(base, crypto.randomBytes(4).toString('hex'));
+  // Private (0700): what the fake claude records under it may hold env values.
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.chmodSync(root, 0o700);
   for (const d of ['run', 'cfg/claudio', 'home', 'claude-config', 'xdg-cache', 'fake', 'work/a', 'work/b', 'work/repo']) {
     fs.mkdirSync(path.join(root, d), { recursive: true });
   }
@@ -182,7 +186,7 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
     inputLog(cwd) {
       try { return fs.readFileSync(path.join(root, 'fake/input', `${mangle(cwd)}.log`), 'utf8'); } catch { return ''; }
     },
-    /** The env the fake claude of `cwd` dumped at launch (null until it did). */
+    /** The FAKE_ENV_KEYS vars the fake claude of `cwd` recorded at launch (null until it did). */
     launchedEnv(cwd) {
       try { return fs.readFileSync(path.join(root, 'fake/env', `${mangle(cwd)}.txt`), 'utf8'); } catch { return null; }
     },
@@ -190,7 +194,7 @@ export async function startServer({ proxy = false, hosts = [] } = {}) {
     api: (op, args) => api.req(op, args),
     /** Spawn a claude session through the API; its sid. */
     async spawn(cwd, extraArgs = {}) {
-      const r = await api.req('session.spawn', { host: 'local', cwd, rows: 30, cols: 100, proxy: { kind: 'direct' }, ...extraArgs });
+      const r = await api.req('session.spawn', { host: 'local', cwd, rows: 30, cols: 100, launch: { pick: 'direct' }, ...extraArgs });
       return r.sid;
     },
     /** Kill every session and forget what the fake claudes wrote, so a test starts clean. */
