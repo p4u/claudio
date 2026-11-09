@@ -15,8 +15,8 @@ use super::runner::Runner;
 use super::state::State;
 use super::Vocdoni;
 use crate::addon::{
-    ActionRequest, AddonCtx, BoxFuture, Checklist, ChecklistAnswer, ChecklistItem, Notice, Panel,
-    PanelDecl, PanelRequest, Segment, SessionSnap, Tone, Ui,
+    ActionRequest, AddonCtx, BoxFuture, Checklist, ChecklistAnswer, ChecklistItem, ExtensionRow,
+    Notice, Panel, PanelDecl, PanelRequest, RowAction, Segment, SessionSnap, Tone, Ui,
 };
 
 /// The most characters of a credential's name a segment shows.
@@ -32,6 +32,10 @@ impl Ui for Vocdoni {
     }
 
     fn panel<'a>(&'a self, req: PanelRequest, ctx: Arc<dyn AddonCtx>) -> BoxFuture<'a, Panel> {
+        if req.id == super::v1::PANEL {
+            let v1 = super::v1::panel(&self.runner.state());
+            return Box::pin(async move { v1 });
+        }
         Box::pin(panel::panel(Arc::clone(&self.runner), req, ctx))
     }
 
@@ -54,6 +58,19 @@ impl Ui for Vocdoni {
         ctx: Arc<dyn AddonCtx>,
     ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(save(Arc::clone(&self.runner), id, answer, ctx))
+    }
+
+    fn extension_rows(&self, _ctx: &dyn AddonCtx) -> Vec<ExtensionRow> {
+        super::rows::rows(&self.runner.state())
+    }
+
+    fn row_action<'a>(
+        &'a self,
+        row: String,
+        action: RowAction,
+        _ctx: Arc<dyn AddonCtx>,
+    ) -> BoxFuture<'a, Result<Option<Notice>, String>> {
+        Box::pin(super::rows::action(Arc::clone(&self.runner), row, action))
     }
 }
 

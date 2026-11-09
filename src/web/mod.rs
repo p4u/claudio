@@ -327,6 +327,12 @@ async fn build_state(
         let own = registry.extensions.iter().filter(|e| !e.is_plugin());
         bridge.set_taken(own.map(|e| e.name.clone()).collect());
     }
+    {
+        let registry = ext.registry();
+        let registry = registry.lock().unwrap_or_else(|p| p.into_inner());
+        let own = registry.extensions.iter().filter(|e| !e.is_plugin());
+        runtime.set_core_extensions(own.map(|e| e.name.clone()).collect());
+    }
     let feed = plugins::Feed::new(hub.clone(), ext.registry(), runtime.clone(), profiles);
     addon_feed::follow(hub.clone(), runtime.clone(), rt_rx, feed);
     ext.watch_config(hub.clone(), runtime.clone());

@@ -124,6 +124,8 @@ pub(super) fn start(addons: Arc<Addons>, app: &mut App) -> Runner {
         watch_config: false,
     };
     let (rt, rx) = AddonRuntime::start(addons, opts);
+    let own = app.extensions.extensions.iter().filter(|e| !e.is_plugin());
+    rt.set_core_extensions(own.map(|e| e.name.clone()).collect());
     app.on_addon(AddonResult::Options(options(&rt)));
     Runner {
         runtime: Edge::new(rt),

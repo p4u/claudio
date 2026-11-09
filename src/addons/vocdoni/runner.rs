@@ -4,7 +4,7 @@
 //! config edits, notices and `changed`. The state's lock is never held
 //! across an await or a call into the context (A6).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -32,9 +32,8 @@ pub struct Runner {
     cache: PathBuf,
     /// Where the proxy profiles are read.
     source: ProfileSource,
-    /// Whether a front-end runs its plugins through this addon (core-addons
-    /// plan P3.8-P3.10: the web keeps its own until P3.10); until then
-    /// every event is ignored.
+    /// Whether a front-end's runtime runs this addon: set by its first
+    /// event (a launch without one waits for no start).
     active: AtomicBool,
 }
 
@@ -105,7 +104,7 @@ impl Runner {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// From now on the runtime's events drive the state.
+    /// A runtime runs this addon (its first event; tests).
     pub fn activate(&self) {
         self.active.store(true, Ordering::SeqCst);
     }
@@ -121,12 +120,21 @@ impl Runner {
     }
 
     /// A runtime event: the start loads, hosts and ticks are transitions,
-    /// a config change re-reads the profiles and `[plugins]`.
+    /// a config change re-reads the profiles and `[plugins]`. Every event
+    /// takes the names the core's extensions hold (a plugin of such a name
+    /// is refused), and a tick or a session's change the profiles the
+    /// sessions use (their lists are fetched).
     pub fn on_event(self: &Arc<Self>, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
-        if !self.active.load(Ordering::SeqCst) {
-            return;
-        }
+        self.activate();
         let _ = self.ctx.set(Arc::clone(ctx));
+        self.take_names(ctx.as_ref());
+        if matches!(
+            event,
+            AddonEvent::Tick | AddonEvent::SessionAdded { .. } | AddonEvent::SessionChanged { .. }
+        ) {
+            let used = used_profiles(ctx.as_ref());
+            self.transition(|s| s.use_profiles(used));
+        }
         match event {
             AddonEvent::Started => ctx.spawn(Box::pin(Arc::clone(self).load())),
             AddonEvent::ConfigChanged => ctx.spawn(Box::pin(Arc::clone(self).reload())),
@@ -148,6 +156,20 @@ impl Runner {
             }
             AddonEvent::SessionRemoved { sid } => self.state().forget_session(*sid),
             _ => {}
+        }
+    }
+
+    /// The names the core's own extensions hold; a change re-reads the rows.
+    fn take_names(&self, ctx: &dyn AddonCtx) {
+        let names: BTreeSet<String> = ctx.core_extensions().into_iter().collect();
+        let moved = {
+            let mut state = self.state();
+            let moved = state.taken != names;
+            state.taken = names;
+            moved && state.loaded
+        };
+        if moved {
+            ctx.changed();
         }
     }
 
@@ -330,6 +352,16 @@ fn focused(ctx: &dyn AddonCtx) -> Vec<Focused> {
                 conversation,
             })
         })
+        .collect()
+}
+
+/// The profiles the sessions this addon routes use.
+fn used_profiles(ctx: &dyn AddonCtx) -> BTreeSet<String> {
+    let sessions = ctx.sessions().into_iter();
+    sessions
+        .filter_map(|s| s.launch)
+        .filter(|c| c.addon == super::NAME)
+        .map(|c| c.option)
         .collect()
 }
 

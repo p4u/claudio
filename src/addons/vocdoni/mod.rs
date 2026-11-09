@@ -7,11 +7,13 @@ pub mod panel;
 pub mod plugins;
 pub mod profiles;
 pub mod proxy;
+mod rows;
 pub mod runner;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
+pub mod v1;
 
 use std::sync::Arc;
 

@@ -55,7 +55,7 @@ async fn runner_asks_a_host_once_choices_are_saved() {
     let ctx = Arc::new(TestCtx::default());
     let runner = running(&ctx);
     listed_kb(&runner);
-    // An event before activation is ignored; a tick asks nothing unsaved.
+    // A tick asks nothing unsaved.
     runner.on_event(&AddonEvent::Tick, &(ctx.clone() as Arc<dyn AddonCtx>));
     assert!(lock(&ctx.requests).is_empty(), "nothing before the setup");
 
@@ -89,15 +89,43 @@ async fn runner_asks_a_host_once_choices_are_saved() {
 }
 
 #[tokio::test]
-async fn an_inactive_runner_ignores_the_runtimes_events() {
-    let ctx: Arc<dyn AddonCtx> = Arc::new(TestCtx::default());
+async fn a_runner_starts_on_the_runtimes_first_event() {
+    let test = Arc::new(TestCtx::default());
+    *lock(&test.taken) = vec!["latex".into()];
+    *lock(&test.sessions) = vec![crate::addon::SessionSnap {
+        sid: uuid::Uuid::from_u128(1),
+        host: "local".into(),
+        kind: crate::proto::SessionKind::Claude,
+        cwd: "/w".into(),
+        label: "w".into(),
+        conversation: None,
+        launch: Some(crate::addon::LaunchChoice {
+            addon: "vocdoni".into(),
+            option: "work".into(),
+            flags: Vec::new(),
+        }),
+        focused: false,
+    }];
+    let ctx: Arc<dyn AddonCtx> = test.clone();
     let runner = Arc::new(Runner::with_cache("/nonexistent/plugins.json".into()));
+    assert!(
+        !runner.is_active(),
+        "no runtime: a launch waits for no start"
+    );
     let up = AddonEvent::HostUp {
         host: "local".into(),
         features: vec!["addon:vocdoni".into()],
     };
     runner.on_event(&up, &ctx);
-    assert!(runner.state().plugins.hosts.is_empty());
+    assert!(runner.is_active());
+    assert!(runner.state().plugins.hosts.contains("local"));
+    assert_eq!(runner.state().taken, ["latex".to_owned()].into());
+    assert!(
+        runner.state().used.is_empty(),
+        "a host's event names no profile"
+    );
+    runner.on_event(&AddonEvent::Tick, &ctx);
+    assert_eq!(runner.state().used, ["work".to_owned()].into());
 }
 
 /// A loopback proxy whose `/v1/claudio/plugins` answers `status` (with a

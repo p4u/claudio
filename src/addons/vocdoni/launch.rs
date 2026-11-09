@@ -71,8 +71,14 @@ impl Launch for Vocdoni {
         FLAGS
     }
 
+    /// The flags parsed; a profile given (`--proxy NAME`) is one in use:
+    /// its list is fetched from the start.
     fn select(&self, given: &[FlagArg]) -> Result<LaunchSelect, String> {
-        select(given)
+        let select = select(given)?;
+        if let Pick::Option { option, .. } = &select.pick {
+            self.runner.state().used.insert(option.clone());
+        }
+        Ok(select)
     }
 
     fn options(&self, _ctx: &dyn AddonCtx) -> Vec<LaunchOption> {
