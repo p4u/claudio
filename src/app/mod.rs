@@ -3,6 +3,7 @@
 //! here draws or reads input; it imports neither ratatui, crossterm nor axum.
 
 pub(crate) mod browser;
+pub(crate) mod config_edit;
 pub(crate) mod connections;
 pub(crate) mod extensions;
 pub(crate) mod label;

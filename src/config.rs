@@ -33,6 +33,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::config_edit::{self, header, split_eol, track_multiline};
 use crate::paths;
 
 // ── Data model ────────────────────────────────────────────────────────────────
@@ -268,7 +269,7 @@ fn try_load_from(path: &Path) -> io::Result<Config> {
 
 // ── Editing ───────────────────────────────────────────────────────────────────
 
-/// Why [`save_extension`] wrote nothing.
+/// Why [`save_extension`] (or another config edit) wrote nothing.
 #[derive(Debug)]
 pub enum SaveError {
     /// The file does not parse as TOML.
@@ -278,6 +279,9 @@ pub enum SaveError {
     Unsupported(String),
     /// Like `Unsupported`, for table `[plugins.<name>]`.
     UnsupportedPlugin(String),
+    /// Like `Unsupported`, for an edit of a whole top-level table
+    /// ([`config_edit::edit_section`]).
+    UnsupportedSection(String),
     /// The name is not an extension's (`^[a-z][a-z0-9-]{0,31}$`) or a
     /// plugin's (`[a-z0-9-]{1,40}`).
     BadName,
@@ -295,6 +299,10 @@ impl std::fmt::Display for SaveError {
             SaveError::UnsupportedPlugin(name) => write!(
                 f,
                 "config.toml layout not understood; edit [plugins.{name}] by hand"
+            ),
+            SaveError::UnsupportedSection(section) => write!(
+                f,
+                "config.toml layout not understood; edit [{section}] by hand"
             ),
             SaveError::BadName => write!(f, "not an extension name"),
             SaveError::Io(e) => write!(f, "{e}"),
@@ -317,202 +325,43 @@ fn extension_name_ok(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// `line` as its content and its line ending (`\r\n`, `\n` or none).
-fn split_eol(line: &str) -> (&str, &str) {
-    if let Some(content) = line.strip_suffix("\r\n") {
-        (content, "\r\n")
-    } else if let Some(content) = line.strip_suffix('\n') {
-        (content, "\n")
-    } else {
-        (line, "")
-    }
-}
-
-/// The table a header line opens (`[ name ]` → `name`, unquoted), `[[`
-/// for an array of tables, or `None` when `content` is not a header.
-fn header(content: &str) -> Option<String> {
-    let t = content.trim_start();
-    if t.starts_with("[[") {
-        return Some("[[".to_owned());
-    }
-    let inner = t.strip_prefix('[')?;
-    let end = inner.find(']')?;
-    let rest = inner[end + 1..].trim_start();
-    if !(rest.is_empty() || rest.starts_with('#')) {
-        return None;
-    }
-    let name = inner[..end].trim();
-    let unquoted = ['"', '\'']
-        .iter()
-        .find_map(|q| name.strip_prefix(*q).and_then(|n| n.strip_suffix(*q)))
-        .unwrap_or(name);
-    Some(unquoted.to_owned())
-}
-
-/// `content` with key `name`'s value set to `on`, keeping its
-/// indentation, the key as written and a trailing comment; `None` when
-/// the line is not `name`'s.
-fn replace_key(content: &str, name: &str, on: bool) -> Option<String> {
-    let t = content.trim_start();
-    let indent = &content[..content.len() - t.len()];
-    let forms = [name.to_owned(), format!("\"{name}\""), format!("'{name}'")];
-    let key = forms.iter().find(|k| {
-        t.strip_prefix(k.as_str())
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    })?;
-    let rest = &t[key.len()..];
-    let eq = rest.find('=')?;
-    let after = &rest[eq + 1..];
-    let value = after.trim_start();
-    let spaces = &after[..after.len() - value.len()];
-    let end = value
-        .find(|c: char| c.is_whitespace() || c == '#')
-        .unwrap_or(value.len());
-    let tail = &value[end..];
-    Some(format!("{indent}{key}{}{spaces}{on}{tail}", &rest[..=eq]))
-}
-
-/// Toggle the multi-line string `content` opens or closes (`"""`, `'''`).
-fn track_multiline(content: &str, open: &mut Option<&'static str>) {
-    match *open {
-        Some(delim) => {
-            if content.matches(delim).count() % 2 == 1 {
-                *open = None;
-            }
-        }
-        None => {
-            // Only a value can open a multi-line string; a comment or a
-            // key never does.
-            if content.trim_start().starts_with('#') {
-                return;
-            }
-            let Some(eq) = content.find('=') else { return };
-            let value = content[eq + 1..].trim_start();
-            for delim in ["\"\"\"", "'''"] {
-                if value.starts_with(delim) && value.matches(delim).count() % 2 == 1 {
-                    *open = Some(delim);
-                    break;
-                }
-            }
-        }
-    }
-}
-
 /// `text` (a `config.toml`) with `[extensions] name = on`, edited
-/// minimally: an existing `name = …` line of the `[extensions]` table is
-/// replaced (its indentation and trailing comment kept), else the key goes
-/// at the end of that table, else the table is appended. Every other byte
-/// stays as it was; the line ending follows the file's (`\r\n` or `\n`).
-/// `name` must match `^[a-z][a-z0-9-]{0,31}$` (no quoting needed).
+/// minimally ([`config_edit::edit_section`]'s rules): an existing `name = …`
+/// line of the `[extensions]` table is replaced (its indentation and
+/// trailing comment kept), else the key goes at the end of that table, else
+/// the table is appended. Every other byte stays as it was; the line ending
+/// follows the file's (`\r\n` or `\n`). A layout the edit does not handle
+/// leaves `text` as it is. `name` must match `^[a-z][a-z0-9-]{0,31}$` (no
+/// quoting needed). The text form of [`save_extension`], for its tests.
+#[cfg(test)]
 pub fn set_extension(text: &str, name: &str, on: bool) -> String {
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
-    let mut table: Option<String> = None;
-    let mut multiline: Option<&'static str> = None;
-    // The header or the last key line of `[extensions]`.
-    let mut last: Option<usize> = None;
-    for i in 0..lines.len() {
-        let line = lines[i].clone();
-        let (content, ending) = split_eol(&line);
-        let continued = multiline.is_some();
-        track_multiline(content, &mut multiline);
-        let ours = table.as_deref() == Some("extensions");
-        if continued {
-            if ours {
-                last = Some(i);
-            }
-            continue;
-        }
-        if let Some(name) = header(content) {
-            if name == "extensions" && last.is_none() {
-                last = Some(i);
-            }
-            table = Some(name);
-            continue;
-        }
-        if !ours {
-            continue;
-        }
-        let t = content.trim_start();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if let Some(new) = replace_key(content, name, on) {
-            lines[i] = format!("{new}{ending}");
-            return lines.concat();
-        }
-        last = Some(i);
-    }
-    let entry = format!("{name} = {on}{eol}");
-    match last {
-        Some(i) => {
-            if !lines[i].ends_with('\n') {
-                lines[i].push_str(eol);
-            }
-            lines.insert(i + 1, entry);
-            lines.concat()
-        }
-        None => {
-            let mut out = text.to_owned();
-            if !out.is_empty() {
-                if !out.ends_with('\n') {
-                    out.push_str(eol);
-                }
-                out.push_str(eol);
-            }
-            out.push_str(&format!("[extensions]{eol}{entry}"));
-            out
-        }
-    }
+    let old = text
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("extensions")?.as_table().cloned())
+        .unwrap_or_default();
+    let mut new = old.clone();
+    new.insert(name.to_owned(), toml::Value::Boolean(on));
+    config_edit::edit_text(text, "extensions", &old, &new).unwrap_or_else(|| text.to_owned())
 }
 
 /// Set `[extensions] name = on` in the config file at `path` (through a
-/// symlink, to its target) with [`set_extension`]; written atomically,
-/// keeping the file's mode (0600 when it is created). Nothing is written
-/// when the file does not parse as TOML, before or after the edit.
+/// symlink, to its target) with [`config_edit::edit_section`]: written
+/// atomically, keeping the file's mode (0600 when it is created). Nothing
+/// is written when the file does not parse as TOML, before or after the
+/// edit, or when anything but that key would change.
 pub fn save_extension(path: &Path, name: &str, on: bool) -> Result<(), SaveError> {
-    use std::os::unix::fs::PermissionsExt;
     if !extension_name_ok(name) {
         return Err(SaveError::BadName);
     }
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let (text, mode) = match std::fs::read(&path) {
-        Ok(bytes) => {
-            let text = String::from_utf8(bytes).map_err(|_| SaveError::InvalidToml)?;
-            let mode = std::fs::metadata(&path)?.permissions().mode() & 0o7777;
-            (text, Some(mode))
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => (String::new(), None),
-        Err(e) => return Err(e.into()),
+    let set = |t: &mut toml::Table| {
+        t.insert(name.to_owned(), toml::Value::Boolean(on));
     };
-    let mut before: toml::Table = toml::from_str(&text).map_err(|_| SaveError::InvalidToml)?;
-    let edited = set_extension(&text, name, on);
-    let unsupported = || SaveError::Unsupported(name.to_owned());
-    let mut after: toml::Table = toml::from_str(&edited).map_err(|_| unsupported())?;
-    let set = after
-        .get("extensions")
-        .and_then(|e| e.get(name))
-        .and_then(toml::Value::as_bool);
-    if set != Some(on) {
-        return Err(unsupported());
+    match config_edit::edit_section(path, "extensions", set) {
+        Ok(_) => Ok(()),
+        Err(SaveError::UnsupportedSection(_)) => Err(SaveError::Unsupported(name.to_owned())),
+        Err(e) => Err(e),
     }
-    // Only `extensions.<name>` may differ.
-    for t in [&mut before, &mut after] {
-        if let Some(toml::Value::Table(e)) = t.get_mut("extensions") {
-            e.remove(name);
-            if e.is_empty() {
-                t.remove("extensions");
-            }
-        }
-    }
-    if before != after {
-        return Err(unsupported());
-    }
-    paths::write_atomic(&path, edited.as_bytes())?;
-    if let Some(mode) = mode.filter(|m| *m != 0o600) {
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
-    }
-    Ok(())
 }
 
 /// `[plugins.<name>]` with `choices`, as lines ending in `eol`.
@@ -597,6 +446,7 @@ pub fn save_plugin_choices(
     if !crate::plugins::manifest::name_ok(name) {
         return Err(SaveError::BadName);
     }
+    let _edit = config_edit::lock();
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (text, mode) = match std::fs::read(&path) {
         Ok(bytes) => {
