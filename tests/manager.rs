@@ -1992,6 +1992,9 @@ fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
     // The daemon inherits the TUI's env: the harness's API key and a marker.
     let tui = harness.start_tui_with(|cmd| {
         cmd.env("CLAUDECODE", "1");
+        // Never inherit the developer's own gateway settings.
+        cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        cmd.env_remove("ANTHROPIC_BASE_URL");
     });
     let id = "6d1f6a52-3c55-4a8e-9a39-5d1c0b0e0001";
     let reply = harness.daemon_request(serde_json::json!({
@@ -2006,7 +2009,10 @@ fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
     let deadline = Instant::now() + WAIT;
     let env = loop {
         let env = fs::read_to_string(&env_file).unwrap_or_default();
-        if env.lines().any(|l| l.starts_with("ANTHROPIC_AUTH_TOKEN=")) {
+        if env
+            .lines()
+            .any(|l| l == "ANTHROPIC_AUTH_TOKEN=old-client-token")
+        {
             break env;
         }
         assert!(Instant::now() < deadline, "the session never started");
