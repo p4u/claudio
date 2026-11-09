@@ -85,6 +85,10 @@ extension off in `~/.config/claudio/config.toml`:
 diagram = false        # by name: built-in, external or an addon's row; all on by default
 ```
 
+A name that matches no extension once the addons have started (a typo, such
+as `latx`) gets a notice, `config.toml [extensions]: no extension named
+'latx'`: in the TUI's status bar, in `web.log` for the web UI.
+
 `[claude] latex = false` still turns math off. On the client it is an alias
 of `[extensions] latex = false` (and wins over it); on a host it keeps the
 latex instruction out of that host's sessions, and its daemon extracts no

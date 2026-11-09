@@ -35,6 +35,7 @@ pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, m
                     feed.changed().await;
                 }
                 RuntimeOut::ConfigChanged => feed.config_changed().await,
+                RuntimeOut::Started => feed.started(),
                 RuntimeOut::Offer { .. } => {}
             }
         }
@@ -57,7 +58,19 @@ impl Feed {
     /// An addon's data changed: the registry's addon rows, then
     /// `extensions_changed` when they differ.
     async fn changed(&mut self) {
-        if self.ext.set_rows(&self.runtime.extension_rows()) {
+        if self.ext.set_rows(&self.runtime.extension_rows()).0 {
+            self.hub.broadcast(extensions_changed());
+        }
+    }
+
+    /// The addons have started: their rows, and a warning for each
+    /// `[extensions]` name that matches no extension.
+    fn started(&self) {
+        let (changed, unknown) = self.ext.set_rows(&self.runtime.extension_rows());
+        for notice in unknown {
+            tracing::warn!("web: {}", crate::text::sanitize(&notice));
+        }
+        if changed {
             self.hub.broadcast(extensions_changed());
         }
     }

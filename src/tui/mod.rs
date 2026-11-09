@@ -299,7 +299,7 @@ fn extension_registry(
     // External extensions are read once, at start.
     let external = extensions::manifest::load(&extensions::manifest::dir(), key_notices);
     let choices = extensions::core_choices(&config.extensions, &external);
-    let registry = extensions::Registry::new(&choices, external, key_notices);
+    let registry = extensions::Registry::new(&choices, external);
     let dropped = registry.dropped_lenses();
     if !dropped.is_empty() {
         key_notices.push(format!(

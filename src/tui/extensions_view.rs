@@ -343,7 +343,7 @@ mod tests {
                 command: vec!["p".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), vec![fake], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![fake]);
         app.activate(0);
         app.take_effects();
         app
@@ -551,6 +551,36 @@ mod tests {
         rows(&mut app, "team", &[("kb", None), ("search", None)], details);
         app.take_effects();
         app
+    }
+
+    /// A misspelt `[extensions]` key is named once the addons have started
+    /// (their rows are known then); a name the rows hold is not.
+    #[test]
+    fn an_extensions_key_that_names_nothing_is_said_once_the_addons_started() {
+        use crate::tui::addon_calls::AddonResult;
+        let mut app = app_with_fake("");
+        app.extension_config = [("kb".to_owned(), false), ("latx".to_owned(), false)].into();
+        let kb = crate::addon::ExtensionRow {
+            name: "kb".into(),
+            description: String::new(),
+            default_on: true,
+            refused: None,
+            details: Vec::new(),
+            setup: None,
+        };
+        // A row change before the start says nothing.
+        app.on_addon(AddonResult::Rows(Vec::new()));
+        assert!(app.notice.is_none());
+        app.on_addon(AddonResult::Started(vec![("team", kb)]));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("config.toml [extensions]: no extension named 'latx'")
+        );
+        assert!(app
+            .extensions
+            .extensions
+            .iter()
+            .any(|e| e.name == "kb" && !e.enabled));
     }
 
     #[test]

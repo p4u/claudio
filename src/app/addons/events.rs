@@ -200,6 +200,7 @@ async fn started_once_done(inner: Weak<Inner>, mut done: mpsc::Receiver<()>) {
     while done.recv().await.is_some() {}
     if let Some(inner) = inner.upgrade() {
         inner.started.send_replace(true);
+        inner.outbox.push(RuntimeOut::Started);
     }
 }
 

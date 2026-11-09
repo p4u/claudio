@@ -1241,7 +1241,7 @@ mod tests {
                 command: vec!["prog".into()],
             }),
         };
-        app.extensions = Registry::new(&Default::default(), vec![keys], &mut Vec::new());
+        app.extensions = Registry::new(&Default::default(), vec![keys]);
     }
 
     /// G5: the daemon's formula and lens lists (old daemons' `Latex`, new

@@ -403,11 +403,7 @@ impl App {
             copy_on_select: cfg.copy_on_select,
             selection: None,
             clicks: Clicks::default(),
-            extensions: crate::app::extensions::Registry::new(
-                &Default::default(),
-                Vec::new(),
-                &mut Vec::new(),
-            ),
+            extensions: crate::app::extensions::Registry::new(&Default::default(), Vec::new()),
             pending_action: None,
             failed_extensions: Vec::new(),
             extension_config: Default::default(),

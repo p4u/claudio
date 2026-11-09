@@ -104,6 +104,9 @@ pub enum AddonResult {
     Segments(HashMap<SessionId, Vec<(&'static str, Segment)>>),
     /// Every addon's extension rows, cleaned (C2), in registry order.
     Rows(Vec<(&'static str, ExtensionRow)>),
+    /// The addons have started: their rows as [`AddonResult::Rows`], and
+    /// an `[extensions]` key that names no extension now gets a notice.
+    Started(Vec<(&'static str, ExtensionRow)>),
 }
 
 impl App {
@@ -111,7 +114,15 @@ impl App {
     pub fn on_addon(&mut self, result: AddonResult) {
         match result {
             AddonResult::Changed { .. } => {}
-            AddonResult::Rows(rows) => self.on_rows(&rows),
+            AddonResult::Rows(rows) => {
+                self.on_rows(&rows);
+            }
+            AddonResult::Started(rows) => {
+                let unknown = self.on_rows(&rows);
+                if !unknown.is_empty() {
+                    self.notify(unknown.join("; "));
+                }
+            }
             AddonResult::Options(options) => self.on_launch_options(options),
             AddonResult::Checklist {
                 addon,
@@ -130,10 +141,12 @@ impl App {
         }
     }
 
-    /// The addons' rows, with `[extensions]` as this run has it.
-    fn on_rows(&mut self, rows: &[(&'static str, ExtensionRow)]) {
+    /// The addons' rows, with `[extensions]` as this run has it; the
+    /// notices for its names that match no extension.
+    fn on_rows(&mut self, rows: &[(&'static str, ExtensionRow)]) -> Vec<String> {
         let before = self.extensions.clone();
-        self.extensions.set_addon_rows(rows, &self.extension_config);
+        let unknown = self.extensions.set_addon_rows(rows, &self.extension_config);
         self.redraw |= self.extensions != before;
+        unknown
     }
 }

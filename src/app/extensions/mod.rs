@@ -182,25 +182,14 @@ impl Default for Registry {
 impl Registry {
     /// The built-ins, then `external` (already validated against each
     /// other and the built-ins by [`manifest::admit`]), with `[extensions]`
-    /// (`enabled`) applied. A name in `enabled` that matches nothing gets a
-    /// notice.
-    pub fn new(
-        enabled: &BTreeMap<String, bool>,
-        external: Vec<Extension>,
-        notices: &mut Vec<String>,
-    ) -> Registry {
+    /// (`enabled`) applied. A name that matches none of them may be an
+    /// addon's row: [`Registry::set_addon_rows`] names the unknown ones.
+    pub fn new(enabled: &BTreeMap<String, bool>, external: Vec<Extension>) -> Registry {
         let mut extensions = builtins();
         extensions.extend(external);
         for ext in &mut extensions {
             if let Some(on) = enabled.get(&ext.name) {
                 ext.enabled = *on;
-            }
-        }
-        for name in enabled.keys() {
-            if !extensions.iter().any(|e| &e.name == name) {
-                notices.push(format!(
-                    "config.toml [extensions]: no extension named '{name}'"
-                ));
             }
         }
         Registry { extensions }
@@ -210,12 +199,14 @@ impl Registry {
     /// externals, in order. A row whose name is not a valid `[extensions]`
     /// key, or is held by another extension or an earlier row, is listed
     /// refused; a row is on when `enabled` (`[extensions]`) says so, else
-    /// when it is on by default, and never while refused.
+    /// when it is on by default, and never while refused. Returns a notice
+    /// for each name in `enabled` that matches no extension, row included
+    /// (a front-end shows them once the addons have started).
     pub fn set_addon_rows(
         &mut self,
         rows: &[(&'static str, ExtensionRow)],
         enabled: &BTreeMap<String, bool>,
-    ) {
+    ) -> Vec<String> {
         self.extensions.retain(|e| !e.is_addon());
         for (addon, row) in rows {
             let taken = self.extensions.iter().any(|e| e.name == row.name);
@@ -241,6 +232,11 @@ impl Registry {
                 },
             });
         }
+        enabled
+            .keys()
+            .filter(|name| !self.extensions.iter().any(|e| &e.name == *name))
+            .map(|name| format!("config.toml [extensions]: no extension named '{name}'"))
+            .collect()
     }
 
     /// Turn extension `name` on or off; whether there is one.
@@ -368,15 +364,21 @@ mod tests {
 
     #[test]
     fn config_turns_extensions_off_and_names_unknown_ones() {
-        let mut notices = Vec::new();
-        let enabled = BTreeMap::from([("snippets".to_owned(), false), ("nope".to_owned(), false)]);
-        let r = Registry::new(&enabled, vec![], &mut notices);
+        let enabled = BTreeMap::from([
+            ("snippets".to_owned(), false),
+            ("kb".to_owned(), false),
+            ("nope".to_owned(), false),
+        ]);
+        let mut r = Registry::new(&enabled, vec![]);
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s']);
+        // Once the rows are in: a built-in's or a row's name is known.
+        let notices = r.set_addon_rows(&[row("kb", None)], &enabled);
         assert_eq!(
             notices,
             ["config.toml [extensions]: no extension named 'nope'"]
         );
+        assert!(!r.extensions[2].enabled, "kb is off");
     }
 
     #[test]
@@ -391,31 +393,27 @@ mod tests {
         let choices = core_choices(&enabled, &external);
         let held: Vec<&str> = choices.keys().map(String::as_str).collect();
         assert_eq!(held, ["keys", "snippets"]);
-        let mut notices = Vec::new();
-        let r = Registry::new(&choices, external.to_vec(), &mut notices);
-        assert!(notices.is_empty(), "{notices:?}");
+        let r = Registry::new(&choices, external.to_vec());
         assert!(r.session_extensions().lenses.is_empty(), "keys is off");
     }
 
     #[test]
     fn external_extensions_follow_the_builtins() {
-        let mut notices = Vec::new();
         let ext = vec![external("keys", "keys", 'k')];
-        let r = Registry::new(&BTreeMap::new(), ext, &mut notices);
+        let r = Registry::new(&BTreeMap::new(), ext);
         assert_eq!(names(&r.session_extensions()), ["keys"]);
         assert!(r.extensions[2].is_external() && r.extensions[2].name == "keys");
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
         assert_eq!(keys, ['s', 'p', 'P', 'k']);
         let off = BTreeMap::from([("keys".to_owned(), false)]);
-        let r = Registry::new(&off, vec![external("keys", "keys", 'k')], &mut notices);
+        let r = Registry::new(&off, vec![external("keys", "keys", 'k')]);
         assert!(r.session_extensions().lenses.is_empty());
-        assert!(notices.is_empty());
     }
 
     #[test]
     fn an_extension_turned_off_and_on_again_takes_its_lenses_and_actions_along() {
         let ext = vec![external("keys", "keys", 'k')];
-        let mut r = Registry::new(&BTreeMap::new(), ext, &mut Vec::new());
+        let mut r = Registry::new(&BTreeMap::new(), ext);
         assert!(r.set_enabled("keys", false));
         assert!(r.session_extensions().lenses.is_empty());
         let keys: Vec<char> = r.actions().iter().map(|(_, a)| a.key).collect();
@@ -444,7 +442,7 @@ mod tests {
     #[test]
     fn addon_rows_follow_the_others_and_a_taken_name_is_refused() {
         let ext = vec![external("keys", "keys", 'k')];
-        let mut r = Registry::new(&BTreeMap::new(), ext, &mut Vec::new());
+        let mut r = Registry::new(&BTreeMap::new(), ext);
         let rows = [
             row("kb", None),
             row("keys", None),
@@ -505,7 +503,7 @@ mod tests {
         ext[0].lenses[0].instruction = "i".repeat(2048);
         ext[1].lenses[0].instruction = "i".repeat(2048);
         ext[2].lenses[0].instruction = "i".repeat(2048);
-        let r = Registry::new(&BTreeMap::new(), ext, &mut Vec::new());
+        let r = Registry::new(&BTreeMap::new(), ext);
         let ctx = r.session_extensions();
         assert_eq!(ctx.validate(), Ok(()));
         assert_eq!(ctx.lenses.len(), 16);

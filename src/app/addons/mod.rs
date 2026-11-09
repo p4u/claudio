@@ -57,6 +57,10 @@ pub enum RuntimeOut {
     /// config.toml was re-read (the front-end re-reads its own
     /// tables: `[extensions]`, `[claude]`).
     ConfigChanged,
+    /// The addons have started ([`AddonRuntime::started`]): their rows are
+    /// what they read at their start, so an `[extensions]` key that matches
+    /// no extension now is worth a notice.
+    Started,
 }
 
 /// The bounds of the runtime (D13); tests shorten them.

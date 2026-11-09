@@ -41,12 +41,12 @@ pub(crate) struct Extensions {
 }
 
 impl Extensions {
-    /// Registry::new(core_choices(&config.extensions, &external), external, &mut notices),
+    /// Registry::new(core_choices(&config.extensions, &external), external),
     /// with `manifest::load(&manifest::dir(), &mut notices)` in spawn_blocking;
     /// ExtensionHost::new; its notices become `notice` events.
     pub(crate) async fn load(config: &Config, hub: &HubHandle) -> Arc<Extensions> {
         let config_path = crate::paths::config_file();
-        let (external, mut notices) = tokio::task::spawn_blocking(move || {
+        let (external, notices) = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let external = manifest::load(&manifest::dir(), &mut notices);
             (external, notices)
@@ -54,7 +54,7 @@ impl Extensions {
         .await
         .unwrap_or_default();
         let choices = core_choices(&config.extensions, &external);
-        let registry = Registry::new(&choices, external, &mut notices);
+        let registry = Registry::new(&choices, external);
         for notice in &notices {
             tracing::warn!("web: {}", crate::text::sanitize(notice));
         }
@@ -81,13 +81,14 @@ impl Extensions {
         own.map(|e| e.name.clone()).collect()
     }
 
-    /// The addons' rows now; whether the registry changed.
-    pub(crate) fn set_rows(&self, rows: &[(&'static str, ExtensionRow)]) -> bool {
+    /// The addons' rows now; whether the registry changed, and the notices
+    /// for `[extensions]` names that match no extension.
+    pub(crate) fn set_rows(&self, rows: &[(&'static str, ExtensionRow)]) -> (bool, Vec<String>) {
         let choices = lock(&self.choices).clone();
         let mut registry = lock(&self.registry);
         let before = registry.clone();
-        registry.set_addon_rows(rows, &choices);
-        *registry != before
+        let unknown = registry.set_addon_rows(rows, &choices);
+        (*registry != before, unknown)
     }
 
     pub(crate) fn registry(&self) -> Arc<Mutex<Registry>> {

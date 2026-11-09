@@ -392,12 +392,38 @@ async fn next(rx: &mut RuntimeRx) -> RuntimeOut {
         .unwrap()
 }
 
+/// Past the runtime's start, its `Started` taken: what the test counts
+/// next is its own.
+async fn past_start(rt: &AddonRuntime, rx: &mut RuntimeRx) {
+    tokio::time::timeout(WAIT, rt.started()).await.unwrap();
+    assert_eq!(next(rx).await, RuntimeOut::Started);
+}
+
+/// The runtime tells its front-end once that the addons started: after
+/// the tasks an addon spawned for `Started` ended.
+#[tokio::test]
+async fn started_is_told_once_after_the_start_tasks() {
+    let (dir, path) = scratch("");
+    let slow = Arc::new(TestAddon::new("slow").loads_at_start(Duration::from_millis(200)));
+    let (rt, mut rx) = runtime(vec![slow], &path, Limits::default());
+    let begun = std::time::Instant::now();
+    past_start(&rt, &mut rx).await;
+    assert!(begun.elapsed() >= Duration::from_millis(150));
+    rt.ctx("slow").changed();
+    assert_eq!(next(&mut rx).await, RuntimeOut::Changed { addon: "slow" });
+    let nothing = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+    assert!(nothing.is_err(), "Started once");
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn changed_is_coalesced() {
     let (dir, path) = scratch("");
     let a = Arc::new(TestAddon::new("a"));
     let b = Arc::new(TestAddon::new("b"));
     let (rt, mut rx) = runtime(vec![a, b], &path, Limits::default());
+    past_start(&rt, &mut rx).await;
     let (ca, cb) = (rt.ctx("a"), rt.ctx("b"));
     ca.changed();
     cb.changed();
@@ -419,6 +445,7 @@ async fn notices_are_cleaned() {
     let (dir, path) = scratch("");
     let echo = Arc::new(TestAddon::new("echo"));
     let (rt, mut rx) = runtime(vec![echo], &path, Limits::default());
+    past_start(&rt, &mut rx).await;
     let ctx = rt.ctx("echo");
     ctx.notify("a\x1b[31mb\x07\nc\u{9b}d".into());
     let RuntimeOut::Notice { addon, notice } = next(&mut rx).await else {
@@ -446,6 +473,7 @@ async fn a_full_queue_drops_the_oldest_notice() {
     let (dir, path) = scratch("");
     let echo = Arc::new(TestAddon::new("echo"));
     let (rt, mut rx) = runtime(vec![echo], &path, Limits::default());
+    past_start(&rt, &mut rx).await;
     let ctx = rt.ctx("echo");
     for i in 0..300 {
         ctx.notify(format!("n{i}"));
@@ -463,6 +491,7 @@ async fn dropping_the_last_handle_stops_the_runtime() {
     let (dir, path) = scratch("");
     let echo = Arc::new(TestAddon::new("echo"));
     let (rt, mut rx) = runtime(vec![echo], &path, Limits::default());
+    past_start(&rt, &mut rx).await;
     let ctx = rt.ctx("echo");
     let dropped = Arc::new(AtomicUsize::new(0));
     let guard = Dropped(Arc::clone(&dropped));
