@@ -7,12 +7,11 @@ file src/daemon/git.rs 978
 file src/daemon/server.rs 900
 file src/daemon/session.rs 1036
 file src/proto.rs 929
-file src/tui/interaction.rs 1027
-file src/tui/mod.rs 842
+file src/tui/interaction.rs 1024
+file src/tui/mod.rs 838
 file src/tui/ui/mod.rs 881
 file src/tui/wizard.rs 1147
-file src/web/hub.rs 2297
-file src/web/ws.rs 891
+file src/web/hub.rs 2229
 fn src/addons/vocdoni/plugins/manifest.rs::check 130
 fn src/addons/vocdoni/plugins/manifest.rs::check#2 99
 fn src/addons/vocdoni/proxy/cmd.rs::cmd_login 169
@@ -38,7 +37,7 @@ fn src/tui/interaction.rs::modal_key 113
 fn src/tui/interaction.rs::on_event 91
 fn src/tui/interaction.rs::on_reply 111
 fn src/tui/mod.rs::event_loop 229
-fn src/tui/mod.rs::main 97
+fn src/tui/mod.rs::main 93
 fn src/tui/mod.rs::run_effect 123
 fn src/tui/ui/extensions.rs::draw_extensions 85
 fn src/tui/ui/mod.rs::draw_wizard 188
@@ -50,7 +49,7 @@ fn src/upgrade.rs::run_upgrade 103
 fn src/web/hub.rs::apply_event 125
 fn src/web/hub.rs::connected 119
 fn src/web/hub.rs::handle 194
-fn src/web/ws.rs::dispatch 324
+fn src/web/ws.rs::dispatch 251
 fn src/web/ws.rs::tab 103
 unwrap src/addons/vocdoni/proxy/cmd.rs 2
 unwrap src/api/pool.rs 9

@@ -26,15 +26,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use super::addon_feed;
 use super::dto;
 use super::events::{claude_event, ev, host_stats};
+use super::hub_io::{connect_once, write_state, WriteJob};
 use super::input::{self, Decision};
 use super::lenses;
 use super::state::{self, Layout, SessionMeta, WebState};
 use crate::app::connections::Connections;
 use crate::claude::update::{decide, needs_update, short, Decision as Policy};
-use crate::client::{self, Client, Incoming};
+use crate::client::{Client, Incoming};
 use crate::config::UpdatePolicy;
-use crate::freshness::{self, DaemonCheck};
-use crate::paths;
+use crate::freshness;
 use crate::proto::{
     ClaudeInfo, GitStatus, LensItem, Msg, SessionEvent, SessionId, SessionInfo, SessionState,
     Welcome, UPDATE_BUSY,
@@ -533,7 +533,7 @@ pub(crate) struct SessionRef {
 
 type Reply<T> = oneshot::Sender<T>;
 /// Run after a web-state write, with its outcome.
-type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
+pub(super) type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
 
 enum Cmd {
     OpenTab {
@@ -2207,46 +2207,6 @@ impl Hub {
     }
 }
 
-/// Connect `host` and list its sessions. The error says whether the
-/// bootstrap failed (the next attempt runs it again).
-async fn connect_once(
-    host: &str,
-    bootstrap: bool,
-) -> Result<(Client, Vec<SessionInfo>), (String, bool)> {
-    let client = if host == "local" {
-        let check = client::ensure_local_daemon()
-            .await
-            .map_err(|e| (e.to_string(), false))?;
-        let client = client::connect(&paths::daemon_socket())
-            .await
-            .map_err(|e| (e.to_string(), false))?;
-        if check == DaemonCheck::Deferred {
-            client.mark_daemon_outdated();
-        }
-        client
-    } else {
-        if bootstrap {
-            crate::remote::bootstrap::ensure_remote(host)
-                .await
-                .map_err(|e| (format!("bootstrap: {e}"), true))?;
-        }
-        client::connect_ssh_reporting(host)
-            .await
-            .map_err(|e| (e.to_string(), false))?
-    };
-    let sessions = match client.request(Msg::ListSessions).await {
-        Ok(Msg::Sessions { sessions }) => sessions,
-        Ok(_) => return Err(("unexpected reply to ListSessions".to_owned(), false)),
-        Err(e) => return Err((e.to_string(), false)),
-    };
-    // An old daemon answers an error: no stats, nothing else changes.
-    let stats = client.request(Msg::SubscribeHostStats);
-    tokio::spawn(async move {
-        let _ = stats.await;
-    });
-    Ok((client, sessions))
-}
-
 /// Forward a connection's unsolicited messages to the actor, tagged.
 async fn forward(
     host: String,
@@ -2263,34 +2223,6 @@ async fn forward(
         };
         if tx.send(cmd).await.is_err() || end {
             break;
-        }
-    }
-}
-
-struct WriteJob {
-    state: WebState,
-    done: Vec<Done>,
-}
-
-/// The one writer of web-state.json: jobs in order, the newest of a burst
-/// written once, each job's `done` run after its write.
-async fn write_state(path: PathBuf, mut jobs: mpsc::UnboundedReceiver<WriteJob>) {
-    while let Some(mut job) = jobs.recv().await {
-        while let Ok(next) = jobs.try_recv() {
-            job.state = next.state;
-            job.done.extend(next.done);
-        }
-        let (p, s) = (path.clone(), job.state);
-        let result = match tokio::task::spawn_blocking(move || state::save(&p, &s)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(format!("cannot save web-state.json: {e}")),
-            Err(_) => Err("cannot save web-state.json".to_owned()),
-        };
-        if let Err(e) = &result {
-            tracing::warn!("web: {e}");
-        }
-        for d in job.done {
-            d(result.clone());
         }
     }
 }

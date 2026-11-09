@@ -17,12 +17,12 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
 
-use super::hub::{self, daemon_error, Out, TabId, TabTx, MAX_TABS};
+use super::hub::{daemon_error, Out, TabId, TabTx, MAX_TABS};
 use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{ext, plugins};
+use super::{ext, git_ops, plugins};
 use crate::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
@@ -258,8 +258,8 @@ struct HostArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SidArgs {
-    sid: SessionId,
+pub(super) struct SidArgs {
+    pub(super) sid: SessionId,
 }
 
 #[derive(Deserialize)]
@@ -342,43 +342,6 @@ struct SearchArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WorktreeDiffArgs {
-    sid: SessionId,
-    path: String,
-    #[serde(default)]
-    staged: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LogArgs {
-    sid: SessionId,
-    #[serde(default)]
-    all: bool,
-    #[serde(default)]
-    skip: u32,
-    #[serde(default)]
-    limit: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommitArgs {
-    sid: SessionId,
-    oid: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DiffArgs {
-    sid: SessionId,
-    oid: String,
-    #[serde(default)]
-    file: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ClaudeUpdateArgs {
     host: String,
     #[serde(default)]
@@ -436,7 +399,7 @@ const PATH_MAX: usize = 4096;
 /// The longest search query, in bytes.
 const QUERY_MAX: usize = 1024;
 
-fn check_path(field: &str, path: &str) -> Result<(), String> {
+pub(super) fn check_path(field: &str, path: &str) -> Result<(), String> {
     if path.is_empty() || path.len() > PATH_MAX {
         return Err(format!(
             "bad request: {field}: must be 1..={PATH_MAX} bytes"
@@ -446,11 +409,11 @@ fn check_path(field: &str, path: &str) -> Result<(), String> {
 }
 
 /// A daemon reply as the browser gets it.
-fn to_json<T: serde::Serialize>(value: T) -> Result<Value, String> {
+pub(super) fn to_json<T: serde::Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|_| "cannot encode the reply".to_owned())
 }
 
-const UNEXPECTED: &str = "unexpected reply from the daemon";
+pub(super) const UNEXPECTED: &str = "unexpected reply from the daemon";
 
 /// One request op (docs/web-protocol.md §5).
 pub(crate) async fn dispatch(
@@ -646,80 +609,7 @@ pub(crate) async fn dispatch(
             }
             Ok(search(state, a.query).await)
         }
-        "git.status" => {
-            let a: SidArgs = parse(args)?;
-            let s = worktree_session(hub, a.sid).await?;
-            match s
-                .client
-                .request(Msg::GitWorktree { cwd: s.info.cwd })
-                .await
-                .map_err(daemon_error)?
-            {
-                Msg::GitWorktreeStatus(status) => to_json(status),
-                _ => Err(UNEXPECTED.to_owned()),
-            }
-        }
-        "git.worktree_diff" => {
-            let a: WorktreeDiffArgs = parse(args)?;
-            check_path("path", &a.path)?;
-            let s = worktree_session(hub, a.sid).await?;
-            let msg = Msg::GitWorktreeDiff {
-                cwd: s.info.cwd,
-                path: a.path,
-                staged: a.staged,
-            };
-            match s.client.request(msg).await.map_err(daemon_error)? {
-                Msg::GitPatch(patch) => to_json(patch),
-                _ => Err(UNEXPECTED.to_owned()),
-            }
-        }
-        "git.log" => {
-            let a: LogArgs = parse(args)?;
-            let limit = a.limit.unwrap_or(100);
-            if !(1..=crate::proto::GIT_LOG_MAX).contains(&limit) {
-                return Err("bad request: limit: must be 1..=500".to_owned());
-            }
-            let s = hub.session(a.sid).await?;
-            let msg = Msg::GitLog {
-                cwd: s.info.cwd,
-                all: a.all,
-                skip: a.skip,
-                limit,
-            };
-            match s.client.request(msg).await.map_err(daemon_error)? {
-                Msg::GitLogPage(page) => to_json(page),
-                _ => Err(UNEXPECTED.to_owned()),
-            }
-        }
-        "git.commit" => {
-            let a: CommitArgs = parse(args)?;
-            check_oid(&a.oid)?;
-            let s = hub.session(a.sid).await?;
-            let msg = Msg::GitCommit {
-                cwd: s.info.cwd,
-                id: a.oid,
-            };
-            match s.client.request(msg).await.map_err(daemon_error)? {
-                Msg::GitCommitInfo(info) => to_json(info),
-                _ => Err(UNEXPECTED.to_owned()),
-            }
-        }
-        "git.diff" => {
-            let a: DiffArgs = parse(args)?;
-            check_oid(&a.oid)?;
-            let s = hub.session(a.sid).await?;
-            let msg = Msg::GitDiff {
-                cwd: s.info.cwd,
-                id: a.oid,
-                file: a.file,
-                path: None,
-                old_path: None,
-            };
-            match s.client.request(msg).await.map_err(daemon_error)? {
-                Msg::GitPatch(patch) => to_json(patch),
-                _ => Err(UNEXPECTED.to_owned()),
-            }
-        }
+        op if op.starts_with("git.") => git_ops::dispatch(hub, op, args).await,
         "claude.update" => {
             let a: ClaudeUpdateArgs = parse(args)?;
             hub.claude_update(a.host, a.install)
@@ -776,24 +666,6 @@ pub(crate) async fn dispatch(
         }
         _ => Err("unknown op".to_owned()),
     }
-}
-
-/// A full object id: 40 or 64 hex digits.
-fn check_oid(oid: &str) -> Result<(), String> {
-    if matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err("bad request: oid: not a full object id".to_owned())
-    }
-}
-
-/// The session, if its daemon has the working-tree ops.
-async fn worktree_session(hub: &hub::HubHandle, sid: SessionId) -> Result<hub::SessionRef, String> {
-    let s = hub.session(sid).await?;
-    if !s.features.iter().any(|f| f == "worktree") {
-        return Err("unsupported by this host's daemon".to_owned());
-    }
-    Ok(s)
 }
 
 /// `search` (docs/web-protocol.md §5): every connected host with the
@@ -941,7 +813,7 @@ mod tests {
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(
-            binary_frame(&[hub::KIND_OUTPUT; HEADER]),
+            binary_frame(&[crate::web::hub::KIND_OUTPUT; HEADER]),
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(
