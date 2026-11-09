@@ -270,6 +270,19 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 `<cache>/plugins/` is downloaded again once. Installs run after the reply, under the
 `updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
 
+**Launch.** Flags `--proxy NAME`, `--no-proxy` and `--first-party` (the wizard checkbox
+"First-party session"); one option per proxy profile (group "Proxy", the configured default
+marked). The default profile, or a chosen one, is `Routing::Required`: a profile that does not
+exist fails the launch, never direct. `prepare` builds the profile's env from its proxy config
+(cached 5 min, else fetched within 5 s; unreachable means the built-in model defaults, still
+through the proxy), removes `ANTHROPIC_API_KEY` (and `CLAUDE_CODE_USE_GATEWAY` for a first-party
+session) from the inherited env, and adds the plugins' share: for a new session it asks the host
+for the manifests it has not answered (≤ 20 s), then each plugin's `--agents`/`--mcp-config` as
+optional args, its `[env]` and secrets (under the profile's env, which wins) and its
+instructions. A respawn or recovery takes what is answered now. A host whose daemon lacks
+`addon:vocdoni` gets the proxy env without plugins and a notice. Legacy `proxy`/`first_party`
+fields are adopted as `{addon: "vocdoni", option: <profile>, flags: ["first-party"]?}`.
+
 **Client side.** `state/` is the addon's pure plugin state machine and proxy config cache (A5,
 A6): each profile's list (`plugins.json`, then the proxy every 15 min), each plugin's manifest,
 what each host answered, and the member's `[plugins.<name>]` choices. `runner.rs` drives it from

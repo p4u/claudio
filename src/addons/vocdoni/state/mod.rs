@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::addons::vocdoni::daemon::ApplyRequest;
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, Plugins, REFRESH_SECS};
+use crate::addons::vocdoni::profiles::Profiles;
 use crate::addons::vocdoni::proxy::api::ConfigResponse;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
 
@@ -64,6 +65,10 @@ pub struct State {
     pub profiles: Vec<String>,
     /// The default profile.
     pub default: Option<String>,
+    /// The profiles marked `first_party = true`.
+    pub first_party: BTreeSet<String>,
+    /// Whether the profiles were read (a launch reads them once if not).
+    pub profiles_read: bool,
     /// Per profile: its proxy config and when it was fetched (Unix seconds).
     pub config: HashMap<String, (ConfigResponse, u64)>,
     /// Lists, manifests, host answers, choices, `[extensions]`.
@@ -93,6 +98,7 @@ impl State {
         cached: Vec<PluginList>,
     ) -> Vec<Task> {
         (self.profiles, self.default) = profiles;
+        self.profiles_read = true;
         self.plugins.choices = choices;
         self.known(extensions);
         for list in cached {
@@ -119,6 +125,7 @@ impl State {
         choices: BTreeMap<String, PluginChoices>,
     ) -> Vec<Task> {
         (self.profiles, self.default) = profiles;
+        self.profiles_read = true;
         let names: BTreeSet<String> = self
             .plugins
             .choices
@@ -140,6 +147,22 @@ impl State {
             tasks.push(Task::Changed);
         }
         tasks
+    }
+
+    /// The profiles as read, if they were.
+    pub fn profiles(&self) -> Option<Profiles> {
+        self.profiles_read.then(|| Profiles {
+            names: self.profiles.clone(),
+            default: self.default.clone(),
+            first_party: self.first_party.clone(),
+        })
+    }
+
+    /// The profiles were read: names, default and first-party ones.
+    pub fn set_profiles(&mut self, p: Profiles) {
+        (self.profiles, self.default) = (p.names, p.default);
+        self.first_party = p.first_party;
+        self.profiles_read = true;
     }
 
     /// `[extensions]` entries for plugin names it has none for yet (a

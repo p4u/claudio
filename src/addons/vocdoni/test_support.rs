@@ -3,12 +3,18 @@
 //! for them (`PluginHost`), and a loopback manifest server (`serve`).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use serde_json::Value;
+
 use super::daemon::{apply_msg, retrying, Applied, ApplyRequest, Manifests, VocdoniDaemon};
+use super::plugins::state::applied as applied_for;
 use super::Vocdoni;
-use crate::addon::{Addon, Addons};
+use crate::addon::{
+    Addon, AddonCtx, AddonError, Addons, BoxFuture, ConfigEdit, HostSnap, SessionSnap,
+};
 use crate::daemon::test_support::{private_temp_dir, within, TestDaemon};
 use crate::daemon::Config;
 use crate::proto::Msg;
@@ -341,4 +347,81 @@ pub(crate) fn download(url: &str, sha256: &str) -> Msg {
         secrets: vec![],
         disabled: vec!["plugin:a@market".into(), "plugin:b@market".into()],
     })
+}
+
+/// A context that records what the runner asks of it: requests answer
+/// with `applied(<name>)`, config edits apply to `config`.
+#[derive(Default)]
+pub(crate) struct TestCtx {
+    /// Whether `host_has` says no (a daemon older than addons).
+    pub(crate) old: AtomicBool,
+    pub(crate) requests: Mutex<Vec<(String, String, Value)>>,
+    pub(crate) config: Mutex<toml::Table>,
+    pub(crate) notices: Mutex<Vec<String>>,
+    pub(crate) changed: AtomicUsize,
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl AddonCtx for TestCtx {
+    fn addon(&self) -> &'static str {
+        "vocdoni"
+    }
+    fn spawn(&self, task: BoxFuture<'static, ()>) {
+        tokio::spawn(task);
+    }
+    fn http(&self) -> reqwest::Client {
+        reqwest::Client::new()
+    }
+    fn request(
+        &self,
+        host: &str,
+        op: &str,
+        body: Value,
+    ) -> BoxFuture<'static, Result<Value, AddonError>> {
+        let name = body["name"].as_str().unwrap_or("").to_owned();
+        lock(&self.requests).push((host.to_owned(), op.to_owned(), body));
+        Box::pin(async move { Ok(serde_json::to_value(applied_for(&name)).unwrap()) })
+    }
+    fn host_has(&self, _host: &str) -> bool {
+        !self.old.load(Ordering::SeqCst)
+    }
+    fn sessions(&self) -> Vec<SessionSnap> {
+        Vec::new()
+    }
+    fn hosts(&self) -> Vec<HostSnap> {
+        Vec::new()
+    }
+    fn config(&self, section: &str) -> toml::Table {
+        match lock(&self.config).get(section) {
+            Some(toml::Value::Table(t)) => t.clone(),
+            _ => toml::Table::new(),
+        }
+    }
+    fn edit_config(
+        &self,
+        section: &str,
+        edit: ConfigEdit,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let mut config = lock(&self.config);
+        let entry = config
+            .entry(section.to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let toml::Value::Table(t) = entry {
+            edit(t);
+        }
+        Box::pin(async { Ok(()) })
+    }
+    fn extension_on(&self, _name: &str) -> Option<bool> {
+        None
+    }
+    fn notify(&self, text: String) {
+        lock(&self.notices).push(text);
+    }
+    fn changed(&self) {
+        self.changed.fetch_add(1, Ordering::SeqCst);
+    }
+    fn offer_checklist(&self, _id: String) {}
 }

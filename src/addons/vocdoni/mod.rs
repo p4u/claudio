@@ -2,7 +2,9 @@
 
 pub mod bridge;
 pub mod daemon;
+pub mod launch;
 pub mod plugins;
+pub mod profiles;
 pub mod proxy;
 pub mod runner;
 pub mod state;
@@ -11,7 +13,7 @@ pub(crate) mod test_support;
 
 use std::sync::Arc;
 
-use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps};
+use crate::addon::{Addon, AddonCtx, AddonEvent, DaemonOps, Launch};
 
 /// The addon's name: its config sections' owner and its daemon ops' prefix.
 pub const NAME: &str = "vocdoni";
@@ -27,6 +29,15 @@ impl Vocdoni {
     /// The addon as this build registers it.
     pub fn new() -> Vocdoni {
         Vocdoni::with_daemon(daemon::VocdoniDaemon::new())
+    }
+
+    /// The addon with `runner` as its client side (tests give it their files).
+    #[cfg(test)]
+    pub fn with_runner(runner: Arc<runner::Runner>) -> Vocdoni {
+        Vocdoni {
+            daemon: daemon::VocdoniDaemon::new(),
+            runner,
+        }
     }
 
     /// The addon with `daemon` as its daemon side (tests give it their dirs).
@@ -45,6 +56,10 @@ impl Addon for Vocdoni {
 
     fn config_sections(&self) -> &'static [&'static str] {
         &["proxy", "plugins"]
+    }
+
+    fn launch(&self) -> Option<&dyn Launch> {
+        Some(self)
     }
 
     fn daemon(&self) -> Option<&dyn DaemonOps> {

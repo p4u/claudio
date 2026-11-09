@@ -18,7 +18,6 @@ use crate::addons::vocdoni::daemon::{applied_of, retry_secs, Applied};
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::manifest::Manifest;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
-use crate::envmerge::merge_env_pairs;
 use crate::proto::{Msg, MAX_PLUGIN_INSTRUCTIONS};
 
 /// `--agents`, `--mcp-config` (the daemon drops them for a claude without).
@@ -230,9 +229,25 @@ pub fn compose(parts: &[PluginPart]) -> Composed {
         .iter()
         .flat_map(|p| p.secrets.iter().cloned())
         .collect();
-    c.env = merge_env_pairs(&manifest_env, merge_env_pairs(&secrets, Vec::new()));
+    c.env = layer_env(&manifest_env, layer_env(&secrets, Vec::new()));
     c.instructions = instructions.join("\n\n");
     c
+}
+
+/// Env layers: the pairs of `lower` whose key `upper` does not set (the
+/// first of a repeated key), then `upper`. `upper` wins; no key twice.
+pub fn layer_env(
+    lower: &[(String, String)],
+    upper: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(lower.len() + upper.len());
+    for (k, v) in lower {
+        if !upper.iter().chain(out.iter()).any(|(u, _)| u == k) {
+            out.push((k.clone(), v.clone()));
+        }
+    }
+    out.extend(upper);
+    out
 }
 
 /// `msg` (a `Spawn` or `Respawn`) with the plugins' share: their flags

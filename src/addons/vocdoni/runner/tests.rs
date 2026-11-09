@@ -1,93 +1,16 @@
 //! The runner's tests: its tasks run against a recording context and a
 //! loopback proxy stub.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use serde_json::Value;
-
 use super::*;
-use crate::addon::{Addons, BoxFuture, ConfigEdit, HostSnap, SessionSnap};
+use crate::addon::Addons;
 use crate::addons::vocdoni::bridge::Bridge;
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
-use crate::addons::vocdoni::plugins::state::{applied, ApplyState};
+use crate::addons::vocdoni::plugins::state::ApplyState;
 use crate::addons::vocdoni::proxy::plugins::sample;
-use crate::addons::vocdoni::test_support::TEAM;
-
-/// A context that records what the runner asks of it: requests answer
-/// with `applied(<name>)`, config edits apply to `config`.
-#[derive(Default)]
-struct TestCtx {
-    requests: Mutex<Vec<(String, String, Value)>>,
-    config: Mutex<toml::Table>,
-    notices: Mutex<Vec<String>>,
-    changed: AtomicUsize,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-impl AddonCtx for TestCtx {
-    fn addon(&self) -> &'static str {
-        "vocdoni"
-    }
-    fn spawn(&self, task: BoxFuture<'static, ()>) {
-        tokio::spawn(task);
-    }
-    fn http(&self) -> reqwest::Client {
-        reqwest::Client::new()
-    }
-    fn request(
-        &self,
-        host: &str,
-        op: &str,
-        body: Value,
-    ) -> BoxFuture<'static, Result<Value, AddonError>> {
-        let name = body["name"].as_str().unwrap_or("").to_owned();
-        lock(&self.requests).push((host.to_owned(), op.to_owned(), body));
-        Box::pin(async move { Ok(serde_json::to_value(applied(&name)).unwrap()) })
-    }
-    fn host_has(&self, _host: &str) -> bool {
-        true
-    }
-    fn sessions(&self) -> Vec<SessionSnap> {
-        Vec::new()
-    }
-    fn hosts(&self) -> Vec<HostSnap> {
-        Vec::new()
-    }
-    fn config(&self, section: &str) -> toml::Table {
-        match lock(&self.config).get(section) {
-            Some(toml::Value::Table(t)) => t.clone(),
-            _ => toml::Table::new(),
-        }
-    }
-    fn edit_config(
-        &self,
-        section: &str,
-        edit: ConfigEdit,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        let mut config = lock(&self.config);
-        let entry = config
-            .entry(section.to_owned())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if let toml::Value::Table(t) = entry {
-            edit(t);
-        }
-        Box::pin(async { Ok(()) })
-    }
-    fn extension_on(&self, _name: &str) -> Option<bool> {
-        None
-    }
-    fn notify(&self, text: String) {
-        lock(&self.notices).push(text);
-    }
-    fn changed(&self) {
-        self.changed.fetch_add(1, Ordering::SeqCst);
-    }
-    fn offer_checklist(&self, _id: String) {}
-}
+use crate::addons::vocdoni::test_support::{lock, TestCtx, TEAM};
 
 /// Wait until `f` holds (5 s at most).
 async fn until(what: &str, mut f: impl FnMut() -> bool) {

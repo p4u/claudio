@@ -13,10 +13,10 @@ use super::daemon::{serves_apply, Applied, OP_APPLY};
 use super::plugins::choices;
 use super::plugins::manifest::Manifest;
 use super::plugins::state::PluginsFetch;
+use super::profiles::{ProfileSource, Profiles};
 use super::proxy::api::{self, ApiError, ConfigResponse};
 use super::proxy::plugins::{self as cache, PluginList};
 use super::proxy::profile::Profile;
-use super::proxy::resolve::{find_profile, load_proxy_profiles};
 use super::state::{State, Task};
 use crate::addon::{AddonCtx, AddonError, AddonEvent};
 
@@ -29,6 +29,8 @@ pub struct Runner {
     ctx: OnceLock<Arc<dyn AddonCtx>>,
     /// `plugins.json`: the lists cached per profile.
     cache: PathBuf,
+    /// Where the proxy profiles are read.
+    source: ProfileSource,
     /// Whether a front-end runs its plugins through this addon (core-addons
     /// plan P3.8-P3.10: the web keeps its own until P3.10); until then
     /// every event is ignored.
@@ -48,8 +50,46 @@ impl Runner {
             state: Mutex::default(),
             ctx: OnceLock::new(),
             cache,
+            source: ProfileSource::Config,
             active: AtomicBool::new(false),
         }
+    }
+
+    /// A runner whose profiles are `profiles`' `[proxy]` alone (tests).
+    #[cfg(test)]
+    pub fn with_files(cache: PathBuf, profiles: PathBuf) -> Runner {
+        Runner {
+            source: ProfileSource::File(profiles),
+            ..Runner::with_cache(cache)
+        }
+    }
+
+    /// Whether a front-end runs its plugins through this addon.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// The profiles: as read at the start (or since), else read now, once
+    /// (blocking; a front-end reads them at its start, [`Runner::read_profiles`]).
+    pub fn profiles(&self) -> Profiles {
+        if let Some(p) = self.state().profiles() {
+            return p;
+        }
+        self.read_profiles()
+    }
+
+    /// Read the profiles now (blocking) and keep them.
+    pub fn read_profiles(&self) -> Profiles {
+        let read = self.source.read();
+        self.state().set_profiles(read.clone());
+        read
+    }
+
+    /// Profile `name`, read off the executor (`None`: it does not exist).
+    pub async fn find_profile(&self, name: &str) -> Option<Profile> {
+        let (source, name) = (self.source.clone(), name.to_owned());
+        let found = tokio::task::spawn_blocking(move || source.find(&name)).await;
+        found.ok().flatten()
     }
 
     /// The state, locked (never across an await or a context call).
@@ -102,17 +142,23 @@ impl Runner {
         let Some(ctx) = self.ctx.get().cloned() else {
             return;
         };
-        let path = self.cache.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            (load_proxy_profiles(), cache::load_all_from(&path))
-        })
-        .await;
+        let (path, source) = (self.cache.clone(), self.source.clone());
+        let read =
+            tokio::task::spawn_blocking(move || (source.read(), cache::load_all_from(&path))).await;
         let Ok((profiles, cached)) = read else {
             return;
         };
         let choices = choices::from_table(&ctx.config("plugins"));
         let extensions = extensions_of(&*ctx, &cached);
-        self.transition(|s| s.load(profiles, choices, extensions, cached));
+        self.transition(|s| {
+            s.first_party = profiles.first_party;
+            s.load(
+                (profiles.names, profiles.default),
+                choices,
+                extensions,
+                cached,
+            )
+        });
     }
 
     /// config.toml changed: the profiles and `[plugins]` again.
@@ -120,11 +166,15 @@ impl Runner {
         let Some(ctx) = self.ctx.get().cloned() else {
             return;
         };
-        let Ok(profiles) = tokio::task::spawn_blocking(load_proxy_profiles).await else {
+        let source = self.source.clone();
+        let Ok(profiles) = tokio::task::spawn_blocking(move || source.read()).await else {
             return;
         };
         let choices = choices::from_table(&ctx.config("plugins"));
-        self.transition(|s| s.reload(profiles, choices));
+        self.transition(|s| {
+            s.first_party = profiles.first_party;
+            s.reload((profiles.names, profiles.default), choices)
+        });
     }
 
     /// Do `tasks` (dropped while no front-end has started the addon).
@@ -145,7 +195,11 @@ impl Runner {
     async fn task(self: Arc<Self>, ctx: Arc<dyn AddonCtx>, task: Task) {
         match task {
             Task::FetchList { profile } => {
-                let (fetch, notice) = fetch_list(&profile, &self.cache).await;
+                let found = self.find_profile(&profile).await;
+                let (fetch, notice) = match found {
+                    Some(p) => fetch_list_with(&profile, &p, &self.cache).await,
+                    None => (PluginsFetch::Unreachable, None),
+                };
                 if let Some(text) = notice {
                     ctx.notify(text);
                 }
@@ -197,7 +251,7 @@ impl Runner {
                 return Some(config.clone());
             }
         }
-        let fetched = tokio::time::timeout(CONFIG_WAIT, fetch_config(profile)).await;
+        let fetched = tokio::time::timeout(CONFIG_WAIT, self.fetch_config(profile)).await;
         let config = fetched.ok().flatten();
         self.transition(|s| {
             s.on_config(profile, config.clone());
@@ -205,10 +259,16 @@ impl Runner {
         });
         config
     }
+
+    /// `profile`'s proxy config, `None` on any error.
+    async fn fetch_config(&self, profile: &str) -> Option<ConfigResponse> {
+        let p = self.find_profile(profile).await?;
+        api::fetch_config(&p.url, &p.token).await.ok().flatten()
+    }
 }
 
 /// The `Applied` of a reply body.
-fn applied(body: serde_json::Value) -> Result<Applied, AddonError> {
+pub(super) fn applied(body: serde_json::Value) -> Result<Applied, AddonError> {
     serde_json::from_value(body).map_err(|_| AddonError::Daemon("unexpected reply".to_owned()))
 }
 
@@ -219,25 +279,6 @@ fn extensions_of(ctx: &dyn AddonCtx, lists: &[PluginList]) -> BTreeMap<String, b
         .flat_map(|l| l.plugins.iter())
         .filter_map(|p| Some((p.name.clone(), ctx.extension_on(&p.name)?)))
         .collect()
-}
-
-/// `profile`'s proxy config, `None` on any error.
-async fn fetch_config(profile: &str) -> Option<ConfigResponse> {
-    let name = profile.to_owned();
-    let found = tokio::task::spawn_blocking(move || find_profile(&name)).await;
-    let p = found.ok().flatten()?;
-    api::fetch_config(&p.url, &p.token).await.ok().flatten()
-}
-
-/// Fetch `profile`'s list and keep `cache` (plugins.json) in step, and a
-/// notice when the cache could not be written.
-async fn fetch_list(profile: &str, cache: &Path) -> (PluginsFetch, Option<String>) {
-    let name = profile.to_owned();
-    let found = tokio::task::spawn_blocking(move || find_profile(&name)).await;
-    match found.ok().flatten() {
-        Some(p) => fetch_list_with(profile, &p, cache).await,
-        None => (PluginsFetch::Unreachable, None),
-    }
 }
 
 /// Fetch `profile`'s list from `p`: a list is saved in `cache`, a 401/403
