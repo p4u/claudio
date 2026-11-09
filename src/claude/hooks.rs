@@ -10,8 +10,7 @@
 //! - [`relay`] — the short-lived relay process that ships the payload.
 //! - [`context`] — `claudio __context file <path>`, the SessionStart hook
 //!   that adds the session's extension instructions (the daemon's context
-//!   file) to claude's context; `__context latex` is kept for sessions an
-//!   older daemon started.
+//!   file) to claude's context.
 //! - [`new_token`] — generate a per-spawn secret token.
 
 use std::io::{Read, Write};
@@ -50,10 +49,10 @@ const MAX_PAYLOAD: usize = 1 << 20;
 /// The most of a context file `__context file` reads.
 pub(crate) const MAX_CONTEXT: u64 = 16 * 1024;
 
-/// What `claudio __context latex` adds to every conversation's context when
-/// `[claude] latex` is on: the manager renders `<latex>` tags in the pane.
-/// Context, not the system prompt, so the session stays a plain interactive
-/// one (see CLAUDE.md on system prompts).
+/// The latex lens's instruction, added to every conversation's context when
+/// `[claude] latex` is on: the web UI renders `<latex>` tags. Context, not
+/// the system prompt, so the session stays a plain interactive one (see
+/// CLAUDE.md on system prompts).
 pub const LATEX_CONTEXT: &str = "This terminal renders math written as LaTeX inside \
 <latex>…</latex> tags. Whenever you write a mathematical formula or expression, wrap its \
 LaTeX in <latex>…</latex> instead of $…$ or $$…$$, for example \
@@ -110,32 +109,26 @@ fn shell_quote(s: &str) -> String {
 
 /// `claudio __context <kind> [<path>]`: a SessionStart hook that adds to
 /// claude's context. Drains the hook payload (capped like the relay), then
-/// prints the one JSON line that adds [`LATEX_CONTEXT`] for `latex`, or the
-/// context file's text for `file <path>` ([`read_context`]), and nothing for
-/// anything else. Always exits 0 and never touches the daemon's socket.
+/// prints the one JSON line that adds the context file's text for
+/// `file <path>` ([`read_context`]), and nothing for anything else (the
+/// pre-0.6 `latex` kind included: the console no longer renders formulas).
+/// Always exits 0 and never touches the daemon's socket.
 pub fn context(kind: Option<&str>, path: Option<&str>) -> std::process::ExitCode {
-    match (kind, path) {
-        (Some("file"), Some(path)) => {
-            context_file_to(Path::new(path), std::io::stdin(), &mut std::io::stdout())
-        }
-        _ => context_to(kind, std::io::stdin(), &mut std::io::stdout()),
-    }
+    context_to(
+        kind,
+        path.map(Path::new),
+        std::io::stdin(),
+        &mut std::io::stdout(),
+    );
     std::process::ExitCode::SUCCESS
 }
 
-fn context_to(kind: Option<&str>, input: impl Read, out: &mut impl Write) {
+fn context_to(kind: Option<&str>, path: Option<&Path>, input: impl Read, out: &mut impl Write) {
     let _ = std::io::copy(&mut input.take(MAX_PAYLOAD as u64), &mut std::io::sink());
-    if kind != Some("latex") {
-        return;
-    }
-    print_context(LATEX_CONTEXT, out);
-}
-
-/// `__context file <path>`: the file's text as context, if it is acceptable.
-fn context_file_to(path: &Path, input: impl Read, out: &mut impl Write) {
-    let _ = std::io::copy(&mut input.take(MAX_PAYLOAD as u64), &mut std::io::sink());
-    if let Some(text) = read_context(path) {
-        print_context(&text, out);
+    if let (Some("file"), Some(path)) = (kind, path) {
+        if let Some(text) = read_context(path) {
+            print_context(&text, out);
+        }
     }
 }
 
@@ -335,28 +328,21 @@ mod tests {
         assert_eq!(on_start["timeout"], off_start["timeout"]);
     }
 
-    #[test]
-    fn context_latex_prints_one_session_start_line() {
-        let mut out = Vec::new();
-        context_to(Some("latex"), &b"{\"session_id\":\"s\"}"[..], &mut out);
-        let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
-        let v: Value = serde_json::from_str(text.trim_end()).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        let context = v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert_eq!(context, LATEX_CONTEXT);
-        assert!(context.contains("<latex>") && context.contains("</latex>"));
-    }
-
+    /// The pre-0.6 `__context latex` (sessions an older daemon started)
+    /// prints nothing now, like any kind but `file`, and a `file` kind
+    /// without a path does too.
     #[test]
     fn context_prints_nothing_for_anything_else() {
-        for kind in [None, Some(""), Some("other"), Some("LATEX")] {
+        let kinds = [None, Some(""), Some("other"), Some("LATEX"), Some("latex")];
+        for kind in kinds {
             let mut out = Vec::new();
-            context_to(kind, &b"{}"[..], &mut out);
+            let path = Some(Path::new("/nonexistent"));
+            context_to(kind, path, &b"{\"session_id\":\"s\"}"[..], &mut out);
             assert!(out.is_empty(), "{kind:?}");
         }
+        let mut out = Vec::new();
+        context_to(Some("file"), None, &b"{}"[..], &mut out);
+        assert!(out.is_empty());
     }
 
     /// A fresh private scratch dir for context files.
@@ -368,7 +354,7 @@ mod tests {
 
     fn context_of(path: &Path) -> String {
         let mut out = Vec::new();
-        context_file_to(path, &b"{}"[..], &mut out);
+        context_to(Some("file"), Some(path), &b"{}"[..], &mut out);
         String::from_utf8(out).unwrap()
     }
 
