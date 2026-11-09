@@ -3,7 +3,6 @@ file src/claude/projects.rs 927
 file src/client.rs 857
 file src/daemon/git.rs 978
 file src/daemon/manifest.rs 872
-file src/daemon/mod.rs 993
 file src/daemon/server.rs 918
 file src/daemon/session.rs 1138
 file src/plugins/manifest.rs 828
@@ -23,8 +22,8 @@ fn src/api/pool.rs::resolve_turn 98
 fn src/api/routes/chat.rs::completions 91
 fn src/cli.rs::parse#2 138
 fn src/client.rs::handshake_flagged 91
+fn src/daemon/lifecycle.rs::respawn 83
 fn src/daemon/login_path.rs::capture 91
-fn src/daemon/mod.rs::respawn 83
 fn src/daemon/mod.rs::spawn_reserved 114
 fn src/daemon/server.rs::request 171
 fn src/daemon/session.rs::run 86
