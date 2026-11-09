@@ -22,24 +22,24 @@ fn crates/core/src/upgrade.rs::run_upgrade 103
 unwrap crates/core/src/daemon/host.rs 4
 
 # -- claudio-tui (src/tui and src/plain.rs until P4.3)
-file src/tui/interaction.rs 1024
-file src/tui/mod.rs 838
-file src/tui/ui/mod.rs 881
-file src/tui/wizard.rs 1147
-fn src/tui/interaction.rs::modal_key 113
-fn src/tui/interaction.rs::on_event 91
-fn src/tui/interaction.rs::on_reply 111
-fn src/tui/keys.rs::encode_key 127
-fn src/tui/mod.rs::event_loop 229
-fn src/tui/mod.rs::main 93
-fn src/tui/mod.rs::run_effect 123
-fn src/tui/ui/extensions.rs::draw_extensions 85
-fn src/tui/ui/mod.rs::draw_wizard 188
-fn src/tui/wizard.rs::on_key 110
-fn src/tui/wizard.rs::on_key#2 155
-fn src/tui/wizard.rs::refilter 85
-fn src/tui/wizard.rs::refilter#2 85
-unwrap src/tui/keymap.rs 2
+file crates/tui/src/interaction.rs 1024
+file crates/tui/src/lib.rs 838
+file crates/tui/src/ui/mod.rs 881
+file crates/tui/src/wizard.rs 1147
+fn crates/tui/src/interaction.rs::modal_key 113
+fn crates/tui/src/interaction.rs::on_event 91
+fn crates/tui/src/interaction.rs::on_reply 111
+fn crates/tui/src/keys.rs::encode_key 127
+fn crates/tui/src/lib.rs::event_loop 229
+fn crates/tui/src/lib.rs::main 93
+fn crates/tui/src/lib.rs::run_effect 123
+fn crates/tui/src/ui/extensions.rs::draw_extensions 85
+fn crates/tui/src/ui/mod.rs::draw_wizard 188
+fn crates/tui/src/wizard.rs::on_key 110
+fn crates/tui/src/wizard.rs::on_key#2 155
+fn crates/tui/src/wizard.rs::refilter 85
+fn crates/tui/src/wizard.rs::refilter#2 85
+unwrap crates/tui/src/keymap.rs 2
 
 # -- claudio-api (src/addons/api until P4.4)
 fn src/addons/api/api/agentic.rs::tool_preamble 85
