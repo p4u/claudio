@@ -14,7 +14,7 @@ use crate::proxy::api::{
     SwitchError, SwitchOutcome,
 };
 use crate::proxy::profile::Profile;
-use crate::tui::stats_view::Window;
+use crate::proxy::stats::Window;
 
 /// How long a profile's `/v1/claudio/config` is kept.
 const CONFIG_TTL: Duration = Duration::from_secs(300);
@@ -69,13 +69,10 @@ impl ProxyCache {
 
 /// A profile name for a message: sanitized, ≤ 80 characters.
 fn clean(name: &str) -> String {
-    crate::claude::latex::sanitize(name)
-        .chars()
-        .take(80)
-        .collect()
+    crate::text::sanitize(name).chars().take(80).collect()
 }
 
-/// "24h"|"7d"|"30d" via stats_view::Window::param, else "bad request: window".
+/// "24h"|"7d"|"30d" via crate::proxy::stats::Window::param, else "bad request: window".
 pub(crate) fn window_param(window: &str) -> Result<&'static str, String> {
     Window::ALL
         .iter()
@@ -118,7 +115,7 @@ pub(crate) fn stats_dto(
         .iter()
         .map(|m| {
             json!({
-                "model": crate::claude::latex::sanitize(&m.model),
+                "model": crate::text::sanitize(&m.model),
                 "requests": m.requests,
                 "errors": m.errors,
                 "input_tokens": m.input_tokens,
@@ -135,7 +132,7 @@ pub(crate) fn stats_dto(
             "used_output_tokens": l.used_output_tokens,
             "used_pct": l.used_pct,
             "blocked": l.blocked,
-            "blocked_until": l.blocked_until.as_deref().map(crate::claude::latex::sanitize),
+            "blocked_until": l.blocked_until.as_deref().map(crate::text::sanitize),
         })
     });
     let pool = pool.map(|p| {
@@ -143,8 +140,8 @@ pub(crate) fn stats_dto(
             .iter()
             .map(|h| {
                 json!({
-                    "name": crate::claude::latex::sanitize(&h.name),
-                    "status": crate::claude::latex::sanitize(&h.status),
+                    "name": crate::text::sanitize(&h.name),
+                    "status": crate::text::sanitize(&h.status),
                 })
             })
             .collect::<Vec<Value>>()
@@ -152,7 +149,7 @@ pub(crate) fn stats_dto(
     json!({
         "profile": profile,
         "window": window,
-        "user_name": crate::claude::latex::sanitize(&s.user_name),
+        "user_name": crate::text::sanitize(&s.user_name),
         "totals": {
             "requests": t.requests,
             "errors": t.errors,
@@ -170,9 +167,9 @@ pub(crate) fn stats_dto(
 /// A credential as the browser sees it: names and percentages, no ids.
 pub(crate) fn credential_dto(c: &SessionCredential, now: u64) -> Value {
     json!({
-        "name": c.name().map(crate::claude::latex::sanitize),
-        "plan": c.plan().map(crate::claude::latex::sanitize),
-        "provider": crate::claude::latex::sanitize(&c.credential.provider),
+        "name": c.name().map(crate::text::sanitize),
+        "plan": c.plan().map(crate::text::sanitize),
+        "provider": crate::text::sanitize(&c.credential.provider),
         "five_hour_pct": c.five_hour_pct(),
         "seven_day_pct": c.seven_day_pct(),
         "switched_secs_ago": c.recent_switch_age(now),
@@ -181,9 +178,9 @@ pub(crate) fn credential_dto(c: &SessionCredential, now: u64) -> Value {
 
 fn switch_dto(o: &SwitchOutcome) -> Value {
     json!({
-        "from": o.from.name().map(crate::claude::latex::sanitize),
-        "to": o.to.as_ref().and_then(|t| t.name()).map(crate::claude::latex::sanitize),
-        "state": crate::claude::latex::sanitize(&o.state),
+        "from": o.from.name().map(crate::text::sanitize),
+        "to": o.to.as_ref().and_then(|t| t.name()).map(crate::text::sanitize),
+        "state": crate::text::sanitize(&o.state),
     })
 }
 
@@ -212,10 +209,9 @@ pub(crate) async fn switch(profile: &str, claude_session_id: &str) -> Result<Val
     match api::switch_session(&p.url, &p.token, claude_session_id).await {
         Ok(o) => Ok(switch_dto(&o)),
         Err(SwitchError::Api(e)) => Err(api_error(e)),
-        Err(SwitchError::NoAlternative(why)) => Err(crate::claude::latex::sanitize(&why)
-            .chars()
-            .take(300)
-            .collect()),
+        Err(SwitchError::NoAlternative(why)) => {
+            Err(crate::text::sanitize(&why).chars().take(300).collect())
+        }
         Err(e) => Err(e.to_string()),
     }
 }

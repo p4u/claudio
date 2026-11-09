@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-/// Protocol version. Bump on incompatible changes; it is part of the daemon
-/// socket name, so daemons of different versions coexist instead of colliding.
-pub const PROTO: u32 = 1;
+pub use crate::version::PROTO;
 
 /// Hard cap on a single frame (tag + payload).
 pub const MAX_FRAME: usize = 1 << 20;
@@ -565,7 +563,7 @@ impl SessionExtensions {
             if self.lenses[..i].iter().any(|l| l.name == lens.name) {
                 return Err(format!("lens {} given twice", lens.name));
             }
-            let len = crate::claude::latex::sanitize(&lens.instruction).len();
+            let len = crate::text::sanitize(&lens.instruction).len();
             if len > MAX_INSTRUCTION {
                 return Err(format!(
                     "lens {} instruction over {MAX_INSTRUCTION} bytes",
@@ -577,7 +575,7 @@ impl SessionExtensions {
         if total > MAX_INSTRUCTIONS {
             return Err(format!("instructions over {MAX_INSTRUCTIONS} bytes"));
         }
-        if crate::claude::latex::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
+        if crate::text::sanitize(&self.instructions).len() > MAX_PLUGIN_INSTRUCTIONS {
             return Err(format!(
                 "plugin instructions over {MAX_PLUGIN_INSTRUCTIONS} bytes"
             ));
@@ -602,7 +600,7 @@ impl SessionExtensions {
             .iter()
             .map(|l| l.instruction.as_str())
             .chain([self.instructions.as_str()])
-            .map(|i| crate::claude::latex::sanitize(i).trim().to_owned())
+            .map(|i| crate::text::sanitize(i).trim().to_owned())
             .filter(|i| !i.is_empty())
             .collect();
         parts.join("\n\n")
@@ -656,14 +654,14 @@ impl Msg {
     }
 
     /// `self` with the proxy env added after the plugin env it carries
-    /// ([`crate::proxy::env::merge`]: the proxy wins, no key twice).
+    /// ([`crate::envmerge::merge_env_pairs`]: the proxy wins, no key twice).
     pub fn merge_env(self, proxy: Vec<(String, String)>) -> Msg {
         let plugin = match &self {
             Msg::Spawn(spec) => spec.env.clone(),
             Msg::Respawn(spec) => spec.env.clone(),
             _ => return self,
         };
-        self.with_env(crate::proxy::env::merge(&plugin, proxy))
+        self.with_env(crate::envmerge::merge_env_pairs(&plugin, proxy))
     }
 
     /// `self` with the plugins' flags (`--agents <json>`, `--mcp-config

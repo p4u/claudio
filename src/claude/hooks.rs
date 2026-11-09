@@ -148,7 +148,7 @@ fn read_context(path: &Path) -> Option<String> {
     }
     let mut bytes = Vec::new();
     file.take(MAX_CONTEXT).read_to_end(&mut bytes).ok()?;
-    let text = crate::claude::latex::sanitize(&String::from_utf8_lossy(&bytes));
+    let text = crate::text::sanitize(&String::from_utf8_lossy(&bytes));
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }

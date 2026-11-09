@@ -11,11 +11,11 @@ use serde_json::{json, Value};
 
 use super::hub::HubHandle;
 use super::plugins::{extensions_changed, notice_event, Plugins};
+use crate::app::extensions::host::ExtensionHost;
+use crate::app::extensions::protocol::SessionContext;
+use crate::app::extensions::{manifest, ActionResult, Extension, Registry, Source};
 use crate::config::Config;
 use crate::proto::{LensKind, SessionExtensions, SessionId};
-use crate::tui::extensions::host::ExtensionHost;
-use crate::tui::extensions::protocol::SessionContext;
-use crate::tui::extensions::{manifest, ActionResult, Extension, Registry, Source};
 
 /// How often config.toml's mtime is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(5);
@@ -70,7 +70,7 @@ impl Extensions {
             &mut notices,
         );
         for notice in &notices {
-            tracing::warn!("web: {}", crate::claude::latex::sanitize(notice));
+            tracing::warn!("web: {}", crate::text::sanitize(notice));
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let host = ExtensionHost::new(&registry, tx);
@@ -124,7 +124,7 @@ impl Extensions {
                 refused: Some(why), ..
             } = &ext.source
             {
-                return Err(format!("refused: {}", crate::claude::latex::sanitize(why)));
+                return Err(format!("refused: {}", crate::text::sanitize(why)));
             }
             let source = ext.source.clone();
             registry.set_enabled(name, on);
@@ -321,7 +321,7 @@ fn extension_dto(e: &Extension) -> Value {
         .iter()
         .map(|a| json!({"id": a.id, "title": a.title, "input": a.input}))
         .collect();
-    let s = crate::claude::latex::sanitize;
+    let s = crate::text::sanitize;
     json!({
         "name": s(&e.name),
         "description": s(&e.description),
@@ -359,10 +359,10 @@ fn action_dto(r: &ActionResult) -> Value {
 }
 
 pub(crate) async fn snippets_list() -> Result<Value, String> {
-    use crate::tui::snippets;
-    let list = tokio::task::spawn_blocking(|| snippets::load(&snippets::dir()))
+    use crate::app::snippets;
+    let list = snippets::load_all()
         .await
-        .map_err(|_| "cannot read the snippets".to_owned())?
+        .1
         .map_err(|e| format!("cannot read the snippets: {e}"))?;
     let list: Vec<Value> = list
         .into_iter()
@@ -373,7 +373,7 @@ pub(crate) async fn snippets_list() -> Result<Value, String> {
 
 /// ≤ 64 KiB
 pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<Value, String> {
-    use crate::tui::snippets;
+    use crate::app::snippets;
     if text.len() > SNIPPET_MAX {
         return Err("bad request: text: at most 64 KiB".to_owned());
     }
@@ -383,23 +383,18 @@ pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<
     if name.as_deref().is_some_and(|n| n.trim().is_empty()) {
         return Err("bad request: name: empty".to_owned());
     }
-    let name = tokio::task::spawn_blocking(move || match name {
-        Some(n) => snippets::save_named(&snippets::dir(), &n, &text),
-        None => snippets::save(&snippets::dir(), &text),
-    })
-    .await
-    .map_err(|_| "cannot save the snippet".to_owned())?
-    .map_err(|e| format!("cannot save the snippet: {e}"))?;
+    let saved = match name {
+        Some(n) => snippets::save_text_named(n, text).await,
+        None => snippets::save_text(text).await,
+    };
+    let name = saved.map_err(|e| format!("cannot save the snippet: {e}"))?;
     Ok(json!({ "name": name }))
 }
 
 /// Delete the snippet `name` (as `snippets.list` returns it).
 pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
-    use crate::tui::snippets;
-    let r = tokio::task::spawn_blocking(move || snippets::delete(&snippets::dir(), &name))
-        .await
-        .map_err(|_| "cannot delete the snippet".to_owned())?;
-    match r {
+    use crate::app::snippets;
+    match snippets::delete_named(name).await {
         Ok(()) => Ok(json!({})),
         Err(e)
             if matches!(
@@ -446,7 +441,7 @@ mod tests {
     fn action_results_nest() {
         let r = ActionResult::List {
             title: "t".into(),
-            items: vec![crate::tui::extensions::ListItem {
+            items: vec![crate::app::extensions::ListItem {
                 label: "a".into(),
                 detail: None,
                 result: ActionResult::Notice { text: "hi".into() },

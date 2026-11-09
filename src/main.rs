@@ -11,11 +11,13 @@
 //!     JSONL, and emit text/json/stream-json.
 
 mod api;
+mod app;
 mod claude;
 mod cli;
 mod client;
 mod config;
 mod daemon;
+mod envmerge;
 mod freshness;
 mod msglog;
 mod paths;
@@ -24,10 +26,13 @@ mod plugins;
 mod print;
 mod proto;
 mod proxy;
+mod release;
 mod remote;
 mod term;
+mod text;
 mod tui;
 mod upgrade;
+mod version;
 mod web;
 
 use std::io::{IsTerminal, Read, Write};

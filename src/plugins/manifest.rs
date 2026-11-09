@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::proxy::plugins::{key_ok, name_ok};
+pub use super::names::{key_ok, name_ok};
 
 /// A manifest's size cap, in bytes.
 pub const MAX_BYTES: usize = 256 << 10;

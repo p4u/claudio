@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::{builtins, ActionDecl, Extension, Lens, Source, MANAGE_KEY, READER_KEY};
-use crate::claude::latex::sanitize;
 use crate::proto::{lens_name_ok, LensKind, MAX_INSTRUCTION};
+use crate::text::sanitize;
 
 /// The most external extensions loaded.
 pub const MAX_EXTERNAL: usize = 16;

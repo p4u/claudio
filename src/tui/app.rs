@@ -33,8 +33,9 @@ use super::proxy_state::{
     ProxyFetch, SessionCred, SESSION_CRED_MIN_GAP_SECS, SESSION_CRED_POLL_SECS,
 };
 use super::selection::{Clicks, Selection};
-use super::state::{ClientState, KillTombstone};
-use super::stats_view::{StatsOutcome, StatsView, Window};
+use super::stats_view::{StatsOutcome, StatsView};
+use crate::app::state::{ClientState, KillTombstone};
+use crate::proxy::stats::Window;
 
 // Re-export split types so ui.rs and mod.rs can still import from `app`.
 pub use super::interaction::Modal;
@@ -133,7 +134,7 @@ pub enum Effect {
     /// Spawn (or respawn) a session with proxy config: the effect runner
     /// fetches the proxy config (with a 5 s timeout) unless it is cached,
     /// waits up to 20 s for `pending` (asking `host` for each), adds the
-    /// plugins' share ([`super::plugins::compose`]) and the proxy env, then
+    /// plugins' share ([`crate::plugins::state::compose`]) and the proxy env, then
     /// sends the request. This avoids silently using fallback model
     /// defaults when the proxy-config cache is cold, and starting a session
     /// without a plugin whose manifest a host has not answered for yet.
@@ -146,7 +147,7 @@ pub enum Effect {
         first_party: bool,
         to: ReplyTo,
         /// The profile's enabled plugins, in registry order.
-        plugins: Vec<super::plugins::PluginPart>,
+        plugins: Vec<crate::plugins::state::PluginPart>,
         /// The `Manifest` requests of the plugins `host` has not answered.
         pending: Vec<PendingManifest>,
     },
@@ -165,7 +166,7 @@ pub enum Effect {
         extension: String,
         action: String,
         input: Option<String>,
-        session: Option<super::extensions::protocol::SessionContext>,
+        session: Option<crate::app::extensions::protocol::SessionContext>,
     },
     /// Turn external extension `name` on or off in the extension host
     /// (off: its program is stopped, off the UI thread).
@@ -378,7 +379,7 @@ pub struct App {
     pub(super) clicks: Clicks,
     /// The extensions (built-in and external) this client runs with; the
     /// event loop sets the configured ones at start.
-    pub extensions: super::extensions::Registry,
+    pub extensions: crate::app::extensions::Registry,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
     /// The external extensions the extension host disabled after
@@ -386,7 +387,7 @@ pub struct App {
     pub failed_extensions: Vec<String>,
     /// The proxy plugins: lists, saved choices, manifests, each host's
     /// answers.
-    pub plugins: super::plugins::Plugins,
+    pub plugins: crate::plugins::state::Plugins,
     /// `--plain`'s session while plugin setup holds it: what to start, its
     /// proxy profile, and until when (Unix seconds) manifests are awaited.
     pub(super) plain_pending: Option<(super::plain::PlainStart, Option<String>, u64)>,
@@ -474,7 +475,7 @@ impl App {
             copy_on_select: cfg.copy_on_select,
             selection: None,
             clicks: Clicks::default(),
-            extensions: super::extensions::Registry::new(
+            extensions: crate::app::extensions::Registry::new(
                 &Default::default(),
                 latex,
                 Vec::new(),
@@ -911,10 +912,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::SavedSession;
     use crate::client::Incoming;
     use crate::proto::{RespawnSpec, SessionEvent, SessionInfo, SessionKind};
     use crate::tui::confirm::Choice;
-    use crate::tui::state::SavedSession;
     use crate::tui::test_support::{self, alt, app_with, info, key, press, shell_info};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
@@ -1658,7 +1659,7 @@ mod tests {
             id,
             ..info(None, None)
         };
-        let merged = crate::tui::state::merge_for_host("local", &saved, &[dormant]);
+        let merged = crate::app::state::merge_for_host("local", &saved, &[dormant]);
         assert_eq!(merged[0].respawn, Some(vec![]));
     }
 

@@ -10,6 +10,7 @@ use super::api;
 use super::login::{self, Granted};
 use super::plugins;
 use super::profile::{self, Profile};
+use crate::text::fmt_tokens;
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
@@ -249,8 +250,14 @@ async fn browser_login(url: &str) -> Result<Option<Granted>, login::LoginError> 
     println!("Your code: {}", printable(&start.user_code));
     let web = page.starts_with("https://") || page.starts_with("http://");
     let env = |k: &str| std::env::var(k).ok();
-    if web && login::browser_wanted(std::env::consts::OS, env, io::stdout().is_terminal()) {
-        login::open_browser(&page);
+    if web
+        && crate::app::browser::browser_wanted(
+            std::env::consts::OS,
+            env,
+            io::stdout().is_terminal(),
+        )
+    {
+        crate::app::browser::open_browser(&page);
     }
     println!("Waiting… (Ctrl+C to cancel)");
     let _ = io::stdout().flush();
@@ -562,18 +569,6 @@ async fn print_live_status(p: &Profile) {
             }
         }
         Err(e) => eprintln!("  Pool health unavailable: {e}"),
-    }
-}
-
-/// Format a token count for display (e.g. `1.2M`, `340k`, `42`).
-/// Made `pub` so other modules (e.g. the TUI) can reuse this formatter.
-pub fn fmt_tokens(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }
 

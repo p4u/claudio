@@ -18,15 +18,15 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config::PluginChoices;
+use crate::plugins::choices::choices_for;
 use crate::plugins::manifest::{Manifest, Section};
 
 use super::app::{App, Effect, Mode};
 use super::confirm::Queued;
-use super::extensions::Source;
 use super::extensions_view::ExtensionsView;
 use super::interaction::Modal;
-use super::plugins::ManifestState;
+use crate::app::extensions::Source;
+use crate::plugins::state::ManifestState;
 
 /// Ticks (250 ms each) during which a first-sight screen ignores keys.
 const ARM_TICKS: u8 = 4;
@@ -137,31 +137,6 @@ impl PluginSetup {
         } else {
             "Space toggle · a all on · n all off · Enter save · Esc cancel"
         }
-    }
-}
-
-/// The choices to save for `m` from a screen whose off ids are `off`:
-/// `disabled` keeps the earlier disabled ids `m` no longer has (so one that
-/// comes back stays off), and `seen` is every id of `m` plus those.
-pub fn choices_for(m: &Manifest, off: &[String], earlier: Option<&PluginChoices>) -> PluginChoices {
-    let ids = m.ids();
-    let gone: Vec<String> = earlier
-        .map(|c| {
-            c.disabled
-                .iter()
-                .filter(|d| !ids.contains(d))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut disabled = off.to_vec();
-    disabled.extend(gone.iter().cloned());
-    let mut seen = ids;
-    seen.extend(gone);
-    PluginChoices {
-        disabled,
-        reviewed: m.version.clone(),
-        seen,
     }
 }
 
@@ -391,10 +366,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PluginChoices;
+    use crate::plugins::state::PluginsFetch;
     use crate::proto::Msg;
     use crate::proxy::plugins::{sample, PluginList};
     use crate::tui::confirm::{Choice, ConfirmPrompt};
-    use crate::tui::plugins::PluginsFetch;
     use crate::tui::test_support::{alt, app_with, press};
 
     const TEAM: &str = r#"
@@ -681,28 +657,6 @@ prompt = "Review."
         app.on_manifest("team", &sha(), Ok(team()));
         assert!(app.notice.is_none(), "off: nothing to review");
         assert!(app.modal.is_none(), "off: no screen");
-    }
-
-    #[test]
-    fn saved_choices_keep_the_disabled_ids_a_manifest_dropped() {
-        let earlier = PluginChoices {
-            disabled: vec!["mcp:gone".into(), "mcp:kb".into()],
-            reviewed: "0.9".into(),
-            seen: vec![],
-        };
-        let c = choices_for(&team(), &["agent:reviewer".into()], Some(&earlier));
-        assert_eq!(c.disabled, ["agent:reviewer", "mcp:gone"]);
-        assert_eq!(c.reviewed, "1.0.0");
-        assert_eq!(
-            c.seen,
-            [
-                "plugin:a@m",
-                "mcp:kb",
-                "agent:reviewer",
-                "instructions",
-                "mcp:gone"
-            ]
-        );
     }
 
     #[test]

@@ -124,7 +124,11 @@ async fn ensure_current(socket: &Path) {
         }
     };
     let start = || ensure_daemon_detached(socket);
-    match freshness::ensure_current(socket, &paths::daemon_lock(), &own, start).await {
+    let checked = async {
+        let daemon = crate::client::connect(socket).await?;
+        freshness::ensure_current(daemon, &paths::daemon_lock(), &own, start).await
+    };
+    match checked.await {
         Ok(DaemonCheck::UpToDate) => {}
         Ok(DaemonCheck::Restarted) => eprintln!("claudio --slave: restarted the outdated daemon"),
         Ok(DaemonCheck::Deferred) => eprintln!(

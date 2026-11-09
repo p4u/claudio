@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::UpdatePolicy;
 use crate::paths;
-use crate::upgrade::{http_client, SemVer};
+use crate::release::{http_client, SemVer};
 
 /// Where claude publishes its release channels; `<base>/<channel>` answers
 /// with a bare version such as `2.1.296`.

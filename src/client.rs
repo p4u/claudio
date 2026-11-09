@@ -217,7 +217,7 @@ fn lock_tail(m: &Mutex<SshTail>) -> MutexGuard<'_, SshTail> {
 /// One ssh stderr line as a failed connect reports it: sanitized, trimmed,
 /// at most [`SSH_TAIL_CHARS`] characters; `None` when nothing is left.
 fn ssh_tail_line(line: &str) -> Option<String> {
-    let clean = crate::claude::latex::sanitize(line);
+    let clean = crate::text::sanitize(line);
     let clean: String = clean.trim().chars().take(SSH_TAIL_CHARS).collect();
     (!clean.is_empty()).then_some(clean)
 }
@@ -784,7 +784,11 @@ pub async fn ensure_local_daemon() -> io::Result<DaemonCheck> {
         return Ok(DaemonCheck::UpToDate);
     };
     let (socket, lock) = (paths::daemon_socket(), paths::daemon_lock());
-    match crate::freshness::ensure_current(&socket, &lock, own, start).await {
+    let checked = async {
+        let daemon = connect(&socket).await?;
+        crate::freshness::ensure_current(daemon, &lock, own, start).await
+    };
+    match checked.await {
         Ok(check) => Ok(check),
         Err(e) => {
             tracing::warn!(error = %e, "could not check the daemon's version");

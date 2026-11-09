@@ -446,7 +446,7 @@ Spec: `docs/specs/2026-11-04-latex-render-design.md`.
 Spec: `docs/specs/2026-11-05-extensions-design.md`; author guide:
 `docs/extensions.md`.
 
-- **Registry** (`tui/extensions/`). Built-ins `latex` (tag lens),
+- **Registry** (`app/extensions/`). Built-ins `latex` (tag lens),
   `diagram` (fence lens `mermaid`), `search` (`s`) and `snippets`
   (`p`, `P`), then external extensions from
   `~/.config/claudio/extensions/<name>/extension.toml` (validated and admitted
@@ -471,7 +471,7 @@ Spec: `docs/specs/2026-11-05-extensions-design.md`; author guide:
   `Effect::RenderExternal`, the reader's through the worker's list of
   external slots. The pane overlays every enabled tag lens; the reader turns
   fence lenses into blocks, with the code block as the fallback.
-- **Host** (`tui/extensions/host.rs`, driven by `tui/mod.rs`). One program
+- **Host** (`app/extensions/host.rs`, driven by `tui/mod.rs`). One program
   per external extension, started lazily in its directory and process
   group with a scrubbed env; JSON lines (protocol v1), ≤ 16 requests in
   flight, render 1 s / action 15 s, results capped and sanitized

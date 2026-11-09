@@ -9,8 +9,8 @@
 
 use serde_json::Value;
 
-use crate::claude::latex::sanitize;
 use crate::proto::{Attention, SessionEvent, SessionState};
+use crate::text::sanitize;
 
 /// The most an attention's `kind` takes, in bytes.
 pub const MAX_KIND: usize = 64;

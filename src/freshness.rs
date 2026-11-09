@@ -32,10 +32,10 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::client;
+use crate::client::Client;
 use crate::proto::{Msg, SessionInfo, SessionKind, SessionState, Welcome};
+use crate::release::SemVer;
 use crate::remote::probe::Probe;
-use crate::upgrade::SemVer;
 
 /// What the bridge prints on stderr when it left an outdated daemon running.
 pub const DEFERRED: &str = "daemon-update-deferred";
@@ -97,11 +97,12 @@ pub fn busy(sessions: &[SessionInfo]) -> bool {
     })
 }
 
-/// Make sure the daemon listening on `socket` (its startup lock at `lock`)
-/// runs `own` or a newer build: an outdated one is shut down and `start`
-/// launches ours, unless it is [`busy`]. The daemon must be running.
+/// Make sure the daemon `daemon` is connected to (its startup lock at
+/// `lock`) runs `own` or a newer build: an outdated one is shut down and
+/// `start` launches ours, unless it is [`busy`]. The caller connects; the
+/// connection is closed before the daemon is replaced.
 pub async fn ensure_current<F, Fut>(
-    socket: &Path,
+    daemon: Client,
     lock: &Path,
     own: &Probe,
     start: F,
@@ -110,7 +111,6 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = io::Result<()>>,
 {
-    let daemon = client::connect(socket).await?;
     if compare(daemon.welcome(), own) != Freshness::Outdated {
         return Ok(DaemonCheck::UpToDate);
     }

@@ -18,15 +18,15 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
 use super::hub::{daemon_error, HubEvent, HubHandle};
+use crate::app::extensions::{Registry, Source};
 use crate::config::PluginChoices;
 use crate::plugins::manifest::Manifest;
+use crate::plugins::state::{
+    reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
+};
 use crate::proto::{retry_secs, Applied, Msg};
 use crate::proxy::api::ApiError;
 use crate::proxy::plugins::{Plugin, PluginList};
-use crate::tui::extensions::{Registry, Source};
-use crate::tui::plugins::{
-    reask_after, Apply, ApplyState, ListState, ManifestState, PluginPart, REFRESH_SECS,
-};
 
 /// How long a spawn waits for a host to answer its plugin manifests.
 const MANIFEST_WAIT: Duration = Duration::from_secs(20);
@@ -64,10 +64,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// `text` sanitized and cut at `max` characters.
 fn clean(text: &str, max: usize) -> String {
-    crate::claude::latex::sanitize(text)
-        .chars()
-        .take(max)
-        .collect()
+    crate::text::sanitize(text).chars().take(max).collect()
 }
 
 /// A `notice` event (docs/web-protocol.md §6) for every tab.
@@ -823,7 +820,7 @@ impl Plugins {
             ));
         }
         let earlier = lock(&self.state).choices.get(name).cloned();
-        let choices = crate::tui::plugin_setup::choices_for(&m, &disabled, earlier.as_ref());
+        let choices = crate::plugins::choices::choices_for(&m, &disabled, earlier.as_ref());
         let (owned, saved) = (name.to_owned(), choices.clone());
         tokio::task::spawn_blocking(move || {
             crate::config::save_plugin_choices(&crate::paths::config_file(), &owned, &saved)

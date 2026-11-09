@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::state::ClientState;
 use crate::paths;
 use crate::proto::SessionId;
-use crate::tui::state::ClientState;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WebState {
@@ -121,7 +121,7 @@ pub(crate) fn known_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::SavedSession;
+    use crate::app::state::SavedSession;
     use std::os::unix::fs::PermissionsExt;
     use uuid::Uuid;
 

@@ -8,10 +8,10 @@
 use std::io;
 
 use super::app::{App, Effect, ReplyTo};
-use super::extensions::{ActionResult, ListItem};
 use super::fmt::{abbreviate_home, fmt_age};
 use super::interaction::Modal;
 use super::leader::Picker;
+use crate::app::extensions::{ActionResult, ListItem};
 use crate::proto::{Msg, SearchHit, SessionKind};
 
 /// The most hits a search asks for.

@@ -19,8 +19,9 @@ use super::super::fmt::{
     fmt_age, fmt_count, fmt_delta, fmt_pct, fmt_rfc3339, fmt_tokens, short_model, str_width,
     truncate,
 };
-use super::super::stats_view::{Page, StatsView, Window};
+use super::super::stats_view::{Page, StatsView};
 use super::{centered, popup};
+use crate::proxy::stats::Window;
 
 const POPUP_W: u16 = 86;
 const POPUP_H: u16 = 28;

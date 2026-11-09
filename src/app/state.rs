@@ -280,7 +280,7 @@ mod tests {
             name: Some("daemon-name".into()),
             title: Some("title".into()),
             created_at: 100,
-            ..crate::tui::test_support::info(pid, csid)
+            ..crate::app::test_support::info(pid, csid)
         }
     }
 

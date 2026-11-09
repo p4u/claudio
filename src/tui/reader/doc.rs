@@ -17,7 +17,8 @@
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
-use crate::claude::latex::{is_combining, latex_tags, sanitize, MAX_FORMULAS};
+use crate::claude::latex::{latex_tags, MAX_FORMULAS};
+use crate::text::{is_combining, sanitize};
 
 /// The first placeholder: tag `i` of an answer is `PLACEHOLDER + i`.
 const PLACEHOLDER: u32 = 0xE000;

@@ -3,10 +3,10 @@
 
 use ratatui::text::Span;
 
-use crate::proxy::api::parse_rfc3339;
+use crate::text::parse_rfc3339;
 
 /// Token counts as `claudio proxy status` prints them: `1.2M`, `340k`, `42`.
-pub use crate::proxy::cmd::fmt_tokens;
+pub use crate::text::fmt_tokens;
 
 // ── Widths ────────────────────────────────────────────────────────────────────
 

@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::stats_view::Window;
 use crate::proxy::api::{ModelsResponse, PoolHealthResponse, SessionCredential, StatsResponse};
+use crate::proxy::stats::Window;
 
 /// Live proxy data per profile, shown in the stats popup (Alt+s).
 #[derive(Debug, Clone, Default)]

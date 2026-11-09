@@ -8,8 +8,6 @@ pub mod app;
 mod builtins;
 mod claude_update;
 mod confirm;
-pub(crate) mod connections;
-pub(crate) mod extensions;
 mod extensions_view;
 mod fmt;
 mod git_app;
@@ -20,13 +18,11 @@ mod leader;
 mod notifications;
 mod plain;
 pub(crate) mod plugin_setup;
-pub(crate) mod plugins;
+mod plugins_glue;
 mod proxy_state;
 mod reader;
 mod selection;
 pub(crate) mod sessions;
-pub(crate) mod snippets;
-pub(crate) mod state;
 pub(crate) mod stats_view;
 
 /// `recent` without the local directories that no longer exist, so the
@@ -71,10 +67,13 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 use crate::remote::bootstrap::ensure_remote;
 
+use crate::app::connections::Connections;
+use crate::app::extensions;
+use crate::app::snippets;
+use crate::app::state::ClientState;
+use crate::plugins::state as plugin_state;
 use app::{App, AppConfig, Effect, Mode, ReplyTo};
-use connections::Connections;
 use plain::PlainStart;
-use state::ClientState;
 
 /// Animation / clock tick.
 const TICK: Duration = Duration::from_millis(250);
@@ -95,7 +94,7 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// cannot smuggle escape sequences into the outer terminal.
 fn emit_notification(label: &str) {
     use std::io::Write;
-    let safe = sessions::sanitize_label(label, 200);
+    let safe = crate::app::label::sanitize_label(label, 200);
     let msg = format!("\x1b]9;claudio: {safe} needs you\x07");
     let _ = std::io::stdout().write_all(msg.as_bytes());
     let _ = std::io::stdout().flush();
@@ -542,7 +541,7 @@ enum HostEvent {
     /// A profile's plugin list was fetched (and the cache updated), or not.
     Plugins {
         profile: String,
-        fetch: plugins::PluginsFetch,
+        fetch: plugin_state::PluginsFetch,
     },
     /// Plugin `name`'s manifest at hash `sha256` was fetched and parsed, or
     /// why not.
@@ -673,7 +672,7 @@ async fn event_loop(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The plugin lists: now, then every 15 minutes.
-    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugins::REFRESH_SECS));
+    let mut plugins_tick = tokio::time::interval(Duration::from_secs(plugin_state::REFRESH_SECS));
     plugins_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 60-second proxy stats refresh.
     let mut proxy_tick = tokio::time::interval(Duration::from_secs(60));
@@ -863,7 +862,7 @@ async fn event_loop(
                 // feed the status bar, which `--plain` does not have).
                 let proxy_name = app.active_view().and_then(|v| v.proxy.clone());
                 if let Some(name) = proxy_name.filter(|_| manager) {
-                    app.schedule_proxy_stats(&name, vec![stats_view::Window::H24]);
+                    app.schedule_proxy_stats(&name, vec![crate::proxy::stats::Window::H24]);
                 }
             }
             _ = plugins_tick.tick() => app.fetch_plugin_lists(),
@@ -947,12 +946,10 @@ fn run_effect(
         Effect::LoadSnippets { gen } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
-                let dir = snippets::dir();
+                let (dir, read) = snippets::load_all().await;
                 let shown = dir.display().to_string();
-                let read = tokio::task::spawn_blocking(move || snippets::load(&dir)).await;
                 let result = match read {
-                    Ok(Ok(list)) => Ok(list.into_iter().map(|s| (s.name, s.text)).collect()),
-                    Ok(Err(e)) => Err(e.to_string()),
+                    Ok(list) => Ok(list.into_iter().map(|s| (s.name, s.text)).collect()),
                     Err(e) => Err(e.to_string()),
                 };
                 let event = HostEvent::SnippetsLoaded {
@@ -966,12 +963,7 @@ fn run_effect(
         Effect::SaveSnippet { text, cut } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
-                let save = move || snippets::save(&snippets::dir(), &text);
-                let result = match tokio::task::spawn_blocking(save).await {
-                    Ok(Ok(name)) => Ok(name),
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                };
+                let result = snippets::save_text(text).await.map_err(|e| e.to_string());
                 let _ = tx.send(HostEvent::SnippetSaved { result, cut }).await;
             });
         }
@@ -1146,7 +1138,7 @@ fn run_effect(
                         part.applied = ready.remove(&part.name);
                     }
                 }
-                let composed = plugins::compose(&parts);
+                let composed = plugin_state::compose(&parts);
                 for text in composed.notices.clone() {
                     let _ = notices.send(HostEvent::Notice(text)).await;
                 }
@@ -1164,7 +1156,7 @@ fn run_effect(
                     }
                     Ok(env) => match client {
                         Some(c) => {
-                            let msg = plugins::with_plugins(msg, composed).merge_env(env);
+                            let msg = plugin_state::with_plugins(msg, composed).merge_env(env);
                             let reply = c.request(msg);
                             let _ = tx.send((to, reply.await));
                         }
@@ -1236,10 +1228,10 @@ async fn wait_manifests(
 /// Fetch `profile`'s plugin list and keep `plugins.json` in step: a list
 /// is saved, a 401/403 drops the profile's entry (its secrets), anything
 /// else leaves it. A failed write is a notice.
-async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugins::PluginsFetch {
+async fn fetch_plugins(profile: &str, tx: &mpsc::Sender<HostEvent>) -> plugin_state::PluginsFetch {
     use crate::proxy::api::ApiError;
     use crate::proxy::plugins as cache;
-    use plugins::PluginsFetch;
+    use plugin_state::PluginsFetch;
     let Some(p) = crate::proxy::resolve::find_profile(profile) else {
         return PluginsFetch::Unreachable;
     };
@@ -1281,7 +1273,7 @@ async fn fetch_proxy_config(profile_name: &str) -> Option<crate::proxy::api::Con
 /// well inside the proxy's per-user rate limit (1 req/s, burst 10).
 async fn fetch_proxy_stats(
     profile_name: &str,
-    windows: &[stats_view::Window],
+    windows: &[crate::proxy::stats::Window],
     models: bool,
 ) -> proxy_state::ProxyFetch {
     use crate::proxy::api;

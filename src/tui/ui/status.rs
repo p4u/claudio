@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn switch_notice_lasts_ten_minutes() {
         let at = "2026-10-09T10:07:02Z";
-        let t0 = crate::proxy::api::parse_rfc3339(at).unwrap();
+        let t0 = crate::text::parse_rfc3339(at).unwrap();
         let line = |now| {
             plain(&join_segments(credential_segments(
                 &cred(None, Some(at)),

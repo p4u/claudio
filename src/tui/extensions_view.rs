@@ -14,11 +14,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::app::{App, Effect, Mode};
-use super::extensions::{ActionDecl, Extension, Source};
 use super::interaction::Modal;
 use super::keymap::Action;
-use crate::claude::latex::sanitize;
+use crate::app::extensions::{ActionDecl, Extension, Source};
 use crate::proto::LensKind;
+use crate::text::sanitize;
 
 /// The screen's title.
 pub const TITLE: &str = "Extensions (Space toggle · Enter plugin setup · r refresh · Esc close)";
@@ -297,9 +297,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::extensions::{manifest::Program, Lens, Registry};
     use crate::proto::Msg;
     use crate::tui::app::ReplyTo;
-    use crate::tui::extensions::{manifest::Program, Lens, Registry};
     use crate::tui::test_support::{alt, app_with, info, press};
 
     /// An app with one session and an external extension `fake` (a tag
@@ -538,8 +538,8 @@ mod tests {
     /// [`app_with_fake`] with proxy profile `work` serving plugins `kb`
     /// and `latex` (a taken name), and `local` connected.
     fn app_with_plugins() -> App {
+        use crate::plugins::state::PluginsFetch;
         use crate::proxy::plugins::{sample, PluginList};
-        use crate::tui::plugins::PluginsFetch;
         let mut app = app_with_fake("");
         app.on_plugin_host("local");
         let list = PluginList {

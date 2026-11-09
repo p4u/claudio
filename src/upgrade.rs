@@ -17,48 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::paths;
-use crate::remote::bootstrap::RELEASES_REPO;
-
-// ── Version comparison ────────────────────────────────────────────────────────
-
-/// A parsed semantic version (major.minor.patch).  Anything that doesn't parse
-/// cleanly is considered equal to 0.0.0 so it never triggers an upgrade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SemVer {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-}
-
-impl SemVer {
-    /// Parse a string like "1.2.3" or "v1.2.3".
-    pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim().trim_start_matches('v');
-        let mut parts = s.splitn(3, '.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        // Allow trailing pre-release suffixes on patch (e.g. "3-alpha").
-        let patch_str = parts.next().unwrap_or("0");
-        let patch: u32 = patch_str
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(0);
-        Some(SemVer {
-            major,
-            minor,
-            patch,
-        })
-    }
-
-    fn zero() -> Self {
-        SemVer {
-            major: 0,
-            minor: 0,
-            patch: 0,
-        }
-    }
-}
+use crate::release::{http_client, SemVer, RELEASES_REPO};
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
@@ -101,15 +60,6 @@ impl UpdateCache {
 // ── GitHub API ────────────────────────────────────────────────────────────────
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// An HTTP client that identifies itself as claudio.
-pub fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(format!("claudio/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("cannot build HTTP client: {e}"))
-}
 
 /// Fetch the latest release tag from the GitHub API.
 ///
@@ -195,7 +145,7 @@ pub async fn check_once(update_check_enabled: bool) -> Option<String> {
 /// Returns the platform asset name for the current binary, e.g.
 /// `"claudio-linux-x86_64"`.
 pub fn current_asset_name() -> Result<String, String> {
-    use crate::remote::bootstrap::{release_arch, release_os};
+    use crate::release::{release_arch, release_os};
     let os = std::env::consts::OS; // "linux" | "macos" | ...
     let probe_os = match os {
         "linux" => "linux",
@@ -454,48 +404,6 @@ fn install_binary(exe_path: &std::path::Path, binary_bytes: &[u8]) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Version comparison ────────────────────────────────────────────────────
-
-    #[test]
-    fn semver_parse() {
-        assert_eq!(
-            SemVer::parse("1.2.3"),
-            Some(SemVer {
-                major: 1,
-                minor: 2,
-                patch: 3
-            })
-        );
-        assert_eq!(
-            SemVer::parse("v0.2.0"),
-            Some(SemVer {
-                major: 0,
-                minor: 2,
-                patch: 0
-            })
-        );
-        assert_eq!(SemVer::parse("bad"), None);
-        // Trailing pre-release suffix on patch.
-        assert_eq!(
-            SemVer::parse("1.2.3-alpha"),
-            Some(SemVer {
-                major: 1,
-                minor: 2,
-                patch: 3
-            })
-        );
-    }
-
-    #[test]
-    fn semver_comparison() {
-        let v020 = SemVer::parse("0.2.0").unwrap();
-        let v030 = SemVer::parse("0.3.0").unwrap();
-        let v100 = SemVer::parse("1.0.0").unwrap();
-        assert!(v030 > v020);
-        assert!(v100 > v030);
-        assert_eq!(v020, v020);
-    }
 
     // ── Cache TTL ─────────────────────────────────────────────────────────────
 

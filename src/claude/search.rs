@@ -15,9 +15,9 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::claude::latex::sanitize;
 use crate::claude::projects::{answer_prompt, flag, push_texts};
 use crate::proto::SearchHit;
+use crate::text::sanitize;
 
 /// A query's length after trimming and [`sanitize`], in bytes.
 pub const MIN_QUERY: usize = 2;
