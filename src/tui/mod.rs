@@ -946,12 +946,10 @@ fn run_effect(
         Effect::LoadSnippets { gen } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
-                let dir = snippets::dir();
+                let (dir, read) = snippets::load_all().await;
                 let shown = dir.display().to_string();
-                let read = tokio::task::spawn_blocking(move || snippets::load(&dir)).await;
                 let result = match read {
-                    Ok(Ok(list)) => Ok(list.into_iter().map(|s| (s.name, s.text)).collect()),
-                    Ok(Err(e)) => Err(e.to_string()),
+                    Ok(list) => Ok(list.into_iter().map(|s| (s.name, s.text)).collect()),
                     Err(e) => Err(e.to_string()),
                 };
                 let event = HostEvent::SnippetsLoaded {
@@ -965,12 +963,7 @@ fn run_effect(
         Effect::SaveSnippet { text, cut } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
-                let save = move || snippets::save(&snippets::dir(), &text);
-                let result = match tokio::task::spawn_blocking(save).await {
-                    Ok(Ok(name)) => Ok(name),
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                };
+                let result = snippets::save_text(text).await.map_err(|e| e.to_string());
                 let _ = tx.send(HostEvent::SnippetSaved { result, cut }).await;
             });
         }

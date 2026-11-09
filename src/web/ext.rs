@@ -360,9 +360,9 @@ fn action_dto(r: &ActionResult) -> Value {
 
 pub(crate) async fn snippets_list() -> Result<Value, String> {
     use crate::app::snippets;
-    let list = tokio::task::spawn_blocking(|| snippets::load(&snippets::dir()))
+    let list = snippets::load_all()
         .await
-        .map_err(|_| "cannot read the snippets".to_owned())?
+        .1
         .map_err(|e| format!("cannot read the snippets: {e}"))?;
     let list: Vec<Value> = list
         .into_iter()
@@ -383,23 +383,18 @@ pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<
     if name.as_deref().is_some_and(|n| n.trim().is_empty()) {
         return Err("bad request: name: empty".to_owned());
     }
-    let name = tokio::task::spawn_blocking(move || match name {
-        Some(n) => snippets::save_named(&snippets::dir(), &n, &text),
-        None => snippets::save(&snippets::dir(), &text),
-    })
-    .await
-    .map_err(|_| "cannot save the snippet".to_owned())?
-    .map_err(|e| format!("cannot save the snippet: {e}"))?;
+    let saved = match name {
+        Some(n) => snippets::save_text_named(n, text).await,
+        None => snippets::save_text(text).await,
+    };
+    let name = saved.map_err(|e| format!("cannot save the snippet: {e}"))?;
     Ok(json!({ "name": name }))
 }
 
 /// Delete the snippet `name` (as `snippets.list` returns it).
 pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
     use crate::app::snippets;
-    let r = tokio::task::spawn_blocking(move || snippets::delete(&snippets::dir(), &name))
-        .await
-        .map_err(|_| "cannot delete the snippet".to_owned())?;
-    match r {
+    match snippets::delete_named(name).await {
         Ok(()) => Ok(json!({})),
         Err(e)
             if matches!(

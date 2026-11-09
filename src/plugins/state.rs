@@ -4,7 +4,7 @@
 //! a spawn gets from them ([`compose`]).
 //!
 //! Pure, like `app.rs`: fetching a list or a manifest, writing the cache
-//! and asking a host for a manifest are [`Effect`]s that `tui/mod.rs`
+//! and asking a host for a manifest are `Effect`s that `tui/mod.rs`
 //! runs. The registry lists the plugins (`Source::Plugin`) so the
 //! extensions screen shows and toggles them; turning one off is saved as
 //! `[extensions] <name> = false` and applies to new sessions only. A host

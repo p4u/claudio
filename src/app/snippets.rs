@@ -1,7 +1,8 @@
 //! Saved prompts: the files of `~/.config/claudio/snippets/`.
 //!
-//! File I/O, so it is called only from the effect runner in `tui/mod.rs`,
-//! never from `App`. Names on disk are always made by [`slug`], never taken
+//! File I/O, so it is called only from the front-ends' effect runners (the
+//! TUI's in `tui/mod.rs`, the web's `web/ext.rs`) through the async functions
+//! below, never from `App`. Names on disk are always made by [`slug`], never taken
 //! from claude's text as a path; files are written 0600 in a 0700 dir.
 
 use std::fs;
@@ -153,6 +154,38 @@ pub fn delete(dir: &Path, name: &str) -> io::Result<()> {
         Ok(m) if m.is_file() => fs::remove_file(&path),
         _ => Err(io::Error::new(io::ErrorKind::NotFound, "no such snippet")),
     }
+}
+
+/// [`dir`] and its snippets ([`load`]), read off the async runtime. The
+/// directory comes first so a caller can name it in a failure.
+pub async fn load_all() -> (PathBuf, io::Result<Vec<Snippet>>) {
+    let dir = dir();
+    let from = dir.clone();
+    let read = tokio::task::spawn_blocking(move || load(&from))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)));
+    (dir, read)
+}
+
+/// [`save`] `text` in [`dir`], off the async runtime.
+pub async fn save_text(text: String) -> io::Result<String> {
+    tokio::task::spawn_blocking(move || save(&dir(), &text))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
+}
+
+/// [`save_named`] `text` as `name` in [`dir`], off the async runtime.
+pub async fn save_text_named(name: String, text: String) -> io::Result<String> {
+    tokio::task::spawn_blocking(move || save_named(&dir(), &name, &text))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
+}
+
+/// [`delete`] the snippet `name` in [`dir`], off the async runtime.
+pub async fn delete_named(name: String) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || delete(&dir(), &name))
+        .await
+        .unwrap_or_else(|e| Err(io::Error::other(e)))
 }
 
 /// A file name for `text`: its first words, lowercase ASCII letters and
