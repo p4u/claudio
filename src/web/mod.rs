@@ -15,6 +15,7 @@ mod input;
 mod lenses;
 mod plugins;
 mod proxy;
+mod session_events;
 mod spawn;
 mod state;
 mod ws;

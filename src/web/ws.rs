@@ -356,20 +356,6 @@ struct LayoutArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SnippetArgs {
-    text: String,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnippetDeleteArgs {
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ToggleArgs {
     name: String,
     on: bool,
@@ -625,18 +611,7 @@ pub(crate) async fn dispatch(
             let a: LayoutArgs = parse(args)?;
             hub.layout(tab, a.layout).await.map(|()| json!({}))
         }
-        "snippets.list" => {
-            parse::<NoArgs>(args)?;
-            ext::snippets_list().await
-        }
-        "snippets.save" => {
-            let a: SnippetArgs = parse(args)?;
-            ext::snippets_save(a.text, a.name).await
-        }
-        "snippets.delete" => {
-            let a: SnippetDeleteArgs = parse(args)?;
-            ext::snippets_delete(a.name).await
-        }
+        op if op.starts_with("snippets.") => ext::snippets(op, args).await,
         "extensions.list" => {
             parse::<NoArgs>(args)?;
             Ok(state.ctx.ext.list())

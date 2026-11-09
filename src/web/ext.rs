@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::hub::HubHandle;
 use super::plugins::{extensions_changed, notice_event};
+use super::ws::parse;
 use crate::addon::ExtensionRow;
 use crate::app::addons::AddonRuntime;
 use crate::app::extensions::host::ExtensionHost;
@@ -332,6 +334,43 @@ fn action_dto(r: &ActionResult) -> Value {
         } => json!({"kind": "resume", "host": host, "cwd": cwd, "conversation": conversation}),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnippetArgs {
+    text: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnippetDeleteArgs {
+    name: String,
+}
+
+/// One `snippets.*` op (docs/web-protocol.md §5).
+pub(crate) async fn snippets(op: &str, args: Value) -> Result<Value, String> {
+    match op {
+        "snippets.list" => {
+            parse::<NoArgs>(args)?;
+            snippets_list().await
+        }
+        "snippets.save" => {
+            let a: SnippetArgs = parse(args)?;
+            snippets_save(a.text, a.name).await
+        }
+        "snippets.delete" => {
+            let a: SnippetDeleteArgs = parse(args)?;
+            snippets_delete(a.name).await
+        }
+        _ => Err("unknown op".to_owned()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoArgs {}
 
 pub(crate) async fn snippets_list() -> Result<Value, String> {
     use crate::app::snippets;

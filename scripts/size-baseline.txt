@@ -46,7 +46,7 @@ fn src/tui/wizard.rs::on_key#2 155
 fn src/tui/wizard.rs::refilter 85
 fn src/tui/wizard.rs::refilter#2 85
 fn src/upgrade.rs::run_upgrade 103
-fn src/web/hub.rs::apply_event 125
+fn src/web/session_events.rs::apply_event 125
 fn src/web/hub.rs::connected 119
 fn src/web/hub.rs::handle 194
 fn src/web/ws.rs::dispatch 251
