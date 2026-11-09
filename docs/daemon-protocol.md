@@ -102,11 +102,50 @@ the flags this claude knows, `<cache>/<addon>`, and the lock held while `claude 
 
 ## Spawn env: `env_remove`
 
-Filled in by the next protocol change (`SpawnSpec.env_remove`, `RespawnSpec.env_remove`).
+A claude session's process starts from the daemon's own environment, then loses some variables
+and gets the spawn's `env` on top. `SpawnSpec` and `RespawnSpec` say which ones it loses:
+
+```json
+{"op": "spawn", "id": "…", "cwd": "~/w", "env": [["ANTHROPIC_AUTH_TOKEN", "…"]],
+ "env_remove": ["ANTHROPIC_API_KEY"], "rows": 24, "cols": 80}
+```
+
+| `env_remove` | The process loses |
+|---|---|
+| absent (`None`): an older client | the **compatibility scrub**: the session markers (`claude::SESSION_MARKERS`); with `ANTHROPIC_AUTH_TOKEN` in `env`, also `ANTHROPIC_API_KEY`, and `CLAUDE_CODE_USE_GATEWAY` unless `env` sets it (the rule of the previous release) |
+| `Some(list)` | exactly the session markers plus `list` (`[]`: the markers only) |
+
+A terminal (`SpawnShell`) always loses the markers only. The list holds names, never values: at
+most 64, each `[A-Za-z_][A-Za-z0-9_]{0,127}`; anything else refuses the spawn with `Error "bad
+env_remove: …"`. The session's `env` then applies, after the daemon's `TERM`, `COLORTERM` and
+login-shell `PATH` (an explicit `PATH` in `env` wins).
+
+The env and `env_remove` of a session are never journaled. The daemon keeps the last pair of
+each live or dormant session in memory, so the fresh retry after a failed `--resume` (claude
+exits at once because the conversation is gone) starts with the same env as the spawn it
+replaces. A Kill or a session's clean exit drops the pair, and so does the daemon's end; a
+retry the daemon has no pair for (it restarted meanwhile) starts with no env and logs a
+warning.
 
 ## Optional args: `optional`
 
-Filled in by the next protocol change (`SpawnSpec.optional`).
+`SpawnSpec.optional` names claude flags of `args` that the session can do without:
+
+```json
+{"op": "spawn", "…": "…", "args": ["--agents", "{…}", "--mcp-config", "{…}"],
+ "optional": ["--agents", "--mcp-config"]}
+```
+
+When this host's claude does not list such a flag in its `--help`, the daemon leaves it out of
+the command line with its value (the next argument, or the `=value` of `--flag=value`), so an
+older claude still starts. The daemon applies the same rule to `--plugin-dir`, `--agents` and
+`--mcp-config` whether `optional` names them or not (the legacy list, for older clients). At
+most 16 names, each `--[a-z0-9][a-z0-9-]{0,39}`; anything else refuses the spawn with `Error
+"bad optional: …"`.
+
+`optional` is journaled with the args: a Respawn, a recovery after a daemon restart and the
+fresh retry drop the same flags again when this claude lacks them, and a newer claude gets them
+back. `RespawnSpec` has no `optional`; the journal's applies.
 
 ## Mixed versions
 
@@ -117,6 +156,11 @@ A client and a daemon one release apart work together in both directions.
 | new client → new daemon | `AddonOp`, `env_remove: Some(..)` |
 | new client → old daemon (busy, deferred, failed check) | no `addon:vocdoni` in features → no `AddonOp`; the launch gets the proxy env without the plugins' share and one notice ("daemon too old, plugins after `claudio daemon restart`"). The old daemon applies its own `env_diff` (a superset of what the addon sends in `env_remove`). |
 | old client → new daemon | `Spawn`/`Respawn` without `env_remove` (`None`) → the daemon's **compatibility scrub** applies today's `env_diff` rule. Its `Manifest` op is refused (`unsupported op`) → the old client's existing "daemon too old" path, session without plugins. |
+| new client → old daemon, `optional` | ignored; the old daemon drops its own fixed three (`--plugin-dir`, `--agents`, `--mcp-config`) when its claude lacks them, which covers every flag a client marks optional within the window. |
+
+Debug builds take `CLAUDIO_TEST_OLD_DAEMON=1` (tests only; a release build ignores it): the
+daemon then plays the previous release. It lists no `addon:` feature, answers `AddonOp` with
+`unsupported op: addon_op`, treats every `env_remove` as absent and ignores `optional`.
 
 **Removal date.** The compatibility paths for older peers (the compatibility scrub for a spawn
 without `env_remove`, the legacy optional-flag list, the refused-`Manifest` test, and the legacy
