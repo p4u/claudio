@@ -30,10 +30,15 @@ pub(crate) fn slots(addons: &Addons) -> HashMap<&'static str, Arc<Semaphore>> {
         .collect()
 }
 
-/// `Welcome.features`: this build's, then `addon:<name>` per daemon-side addon.
+/// `Welcome.features`: this build's, then `addon:<name>` per daemon-side
+/// addon (none for a daemon playing the previous release).
 pub(crate) fn features(daemon: &Daemon) -> Vec<String> {
     let own = proto::DAEMON_FEATURES.iter().map(|f| f.to_string());
-    own.chain(daemon.addons.daemon_features()).collect()
+    let addons = match daemon.config.old_peer {
+        true => Vec::new(),
+        false => daemon.addons.daemon_features(),
+    };
+    own.chain(addons).collect()
 }
 
 /// The `DaemonCtx` of addon `addon` in this daemon.
@@ -81,6 +86,12 @@ impl DaemonCtx for Ctx {
 /// free → Error "addon <name> busy"), `handle` under the timeout, reply cap.
 /// Logs `addon`, `op` and the body's encoded length, never the body (F23).
 pub(crate) async fn run(daemon: Arc<Daemon>, addon: String, op: String, body: Value) -> Msg {
+    if daemon.config.old_peer {
+        // The previous release decodes the op as unknown.
+        return Msg::Error {
+            message: "unsupported op: addon_op".to_owned(),
+        };
+    }
     let bytes = proto::addon_body_len(&body);
     tracing::info!(%addon, %op, bytes, "addon op");
     match handle(daemon, &addon, &op, body).await {

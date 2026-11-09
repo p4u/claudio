@@ -106,6 +106,7 @@ impl TestDaemon {
             build: None,
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
+            old_peer: false,
         }
     }
 
@@ -941,6 +942,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         build: None,
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
+        old_peer: false,
     };
     // Pre-populate a journal entry with a claude_session_id so the spawn
     // request carries --resume.
@@ -1062,6 +1064,7 @@ async fn immediate_exit_leaves_session_dormant() {
         build: None,
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
+        old_peer: false,
     };
 
     let listening = server::start(config, Arc::new(Addons::empty()))

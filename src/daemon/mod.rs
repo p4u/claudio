@@ -93,6 +93,10 @@ pub struct Config {
     pub path: Option<OsString>,
     /// How long one addon op may run ([`addon_ops::TIMEOUT`]).
     pub addon_timeout: Duration,
+    /// Play the previous release (mixed-version tests only; docs/daemon-protocol.md,
+    /// "Mixed versions"): no `addon:` features, `AddonOp` refused as unknown,
+    /// every `env_remove` taken as absent and `optional` ignored.
+    pub old_peer: bool,
 }
 
 impl Config {
@@ -120,6 +124,7 @@ impl Config {
                 .ok(),
             path,
             addon_timeout: addon_ops::TIMEOUT,
+            old_peer: admit::old_peer(std::env::var_os("CLAUDIO_TEST_OLD_DAEMON").as_deref()),
         })
     }
 
@@ -409,7 +414,7 @@ impl Daemon {
         spec: SpawnSpec,
         requested: SessionKind,
     ) -> io::Result<Option<u32>> {
-        admit::check_spawn(&spec)?;
+        self.check_spawn(&spec)?;
         // Phase 1: idempotency check and reservation (fast, no I/O).
         let kind = {
             let mut reg = self.registry();
@@ -846,6 +851,7 @@ mod claude_path_tests {
             build: None,
             path,
             addon_timeout: std::time::Duration::from_secs(150),
+            old_peer: false,
         }
     }
 

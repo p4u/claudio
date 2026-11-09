@@ -85,7 +85,7 @@ impl Daemon {
     /// Respawn (or a Spawn) is refused meanwhile, and a Kill is deferred to
     /// `to_kill` and wins, so a killed session is never brought back.
     pub(super) async fn respawn(self: &Arc<Self>, req: RespawnSpec) -> io::Result<Option<u32>> {
-        super::admit::check_respawn(&req)?;
+        self.check_respawn(&req)?;
         let id = req.id;
         let (entry, old) = {
             let mut reg = self.registry();

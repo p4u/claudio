@@ -41,18 +41,35 @@ impl Registry {
     }
 }
 
-/// Refuse a spawn whose request breaks a cap, before anything is reserved.
-pub(super) fn check_spawn(spec: &SpawnSpec) -> io::Result<()> {
-    check_extensions(spec.extensions.as_ref())?;
-    check_env_remove(spec.env_remove.as_deref())?;
-    command::optional_ok(&spec.optional)
-        .map_err(|why| io::Error::other(format!("bad optional: {why}")))
+impl Daemon {
+    /// Refuse a spawn whose request breaks a cap, before anything is
+    /// reserved. An old peer knows neither `env_remove` nor `optional`.
+    pub(super) fn check_spawn(&self, spec: &SpawnSpec) -> io::Result<()> {
+        check_extensions(spec.extensions.as_ref())?;
+        if self.config.old_peer {
+            return Ok(());
+        }
+        check_env_remove(spec.env_remove.as_deref())?;
+        command::optional_ok(&spec.optional)
+            .map_err(|why| io::Error::other(format!("bad optional: {why}")))
+    }
+
+    /// Refuse a respawn whose request breaks a cap, before anything is
+    /// stopped.
+    pub(super) fn check_respawn(&self, req: &RespawnSpec) -> io::Result<()> {
+        check_extensions(req.extensions.as_ref())?;
+        if self.config.old_peer {
+            return Ok(());
+        }
+        check_env_remove(req.env_remove.as_deref())
+    }
 }
 
-/// Refuse a respawn whose request breaks a cap, before anything is stopped.
-pub(super) fn check_respawn(req: &RespawnSpec) -> io::Result<()> {
-    check_extensions(req.extensions.as_ref())?;
-    check_env_remove(req.env_remove.as_deref())
+/// `CLAUDIO_TEST_OLD_DAEMON=1` in a debug build: the daemon plays the
+/// previous release ([`super::Config::old_peer`]). A release build never
+/// does.
+pub(super) fn old_peer(value: Option<&std::ffi::OsStr>) -> bool {
+    cfg!(debug_assertions) && value.is_some_and(|v| v == "1")
 }
 
 fn check_env_remove(list: Option<&[String]>) -> io::Result<()> {
@@ -72,8 +89,13 @@ fn check_extensions(ext: Option<&SessionExtensions>) -> io::Result<()> {
 impl Daemon {
     /// The spec as the process starts with it: a terminal never carries
     /// claude args, env or extensions; a claude session gets its effective
-    /// extensions ([`effective_extensions`]).
+    /// extensions ([`effective_extensions`]). An old peer drops what the
+    /// previous release did not know.
     pub(super) fn prepare(&self, spec: &mut SpawnSpec, kind: SessionKind) {
+        if self.config.old_peer {
+            spec.env_remove = None;
+            spec.optional.clear();
+        }
         if kind == SessionKind::Shell {
             spec.args.clear();
             spec.env.clear();
