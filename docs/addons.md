@@ -278,9 +278,9 @@ installs claude.
 
 **Mixed versions (B1).** A client sends an `AddonOp` only to a host whose `Welcome.features`
 lists `addon:<name>`; `ctx.request` returns `AddonError::Missing` otherwise, and the addon goes on
-without that host's share and says so once ("daemon too old: run `claudio daemon restart`"). An
-older daemon answers an unknown op with `unsupported op`. A core-only daemon lists no addon
-features. The daemon protocol, its features and the mixed-version table are in
+without that host's share and says so once (the Vocdoni addon: "daemon on <host> is older:
+plugins after `claudio daemon restart`"). An older daemon answers an unknown op with `unsupported
+op`. A core-only daemon lists no addon features. The daemon protocol, its features and the mixed-version table are in
 `docs/daemon-protocol.md`.
 
 ## The API addon
