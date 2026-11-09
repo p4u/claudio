@@ -23,7 +23,7 @@ use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
 use super::{addons, ext, git_ops};
-use crate::proto::{Msg, SearchHit, SessionId};
+use claudio_core::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
 pub(crate) const MAX_TEXT: usize = 128 * 1024;
@@ -423,7 +423,7 @@ pub(crate) async fn dispatch(
                 .filter(|h| h["connected"] == true)
                 .filter_map(|h| h["name"].as_str().map(str::to_owned))
                 .collect();
-            let all = tokio::task::spawn_blocking(crate::remote::hosts::candidates)
+            let all = tokio::task::spawn_blocking(claudio_core::remote::hosts::candidates)
                 .await
                 .unwrap_or_default();
             let hosts: Vec<String> = all.into_iter().filter(|h| !connected.contains(h)).collect();
@@ -782,7 +782,7 @@ mod tests {
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(
-            binary_frame(&[crate::addons::web::hub::KIND_OUTPUT; HEADER]),
+            binary_frame(&[crate::hub::KIND_OUTPUT; HEADER]),
             Frame::Close(1003, "bad frame")
         );
         assert_eq!(

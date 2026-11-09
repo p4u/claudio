@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::events::ev;
 use super::hub::SessionView;
-use crate::proto::{LensItem, SessionEvent, SessionId};
+use claudio_core::proto::{LensItem, SessionEvent, SessionId};
 
 /// A `Latex` or `Lens` event applied to `view`: the list to send, if it is
 /// new. A daemon without the `lens` feature (`lens_host`) sends formulas

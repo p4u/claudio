@@ -52,12 +52,12 @@ unwrap src/addons/api/api/pool.rs 9
 unwrap src/addons/api/print/hooks.rs 3
 
 # -- claudio-web (src/addons/web until P4.5)
-file src/addons/web/hub.rs 2229
-fn src/addons/web/hub.rs::connected 119
-fn src/addons/web/hub.rs::handle 194
-fn src/addons/web/session_events.rs::apply_event 125
-fn src/addons/web/ws.rs::dispatch 251
-fn src/addons/web/ws.rs::tab 103
+file addons/web/src/hub.rs 2229
+fn addons/web/src/hub.rs::connected 119
+fn addons/web/src/hub.rs::handle 194
+fn addons/web/src/session_events.rs::apply_event 125
+fn addons/web/src/ws.rs::dispatch 251
+fn addons/web/src/ws.rs::tab 103
 unwrap addons/web/build.rs 1
 
 # -- claudio-vocdoni (src/addons/vocdoni until P4.6)

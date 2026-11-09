@@ -7,11 +7,11 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::addon::{
+use claudio_core::addon::{
     Addon, AddonCtx, Addons, BoxFuture, Commands, ExtensionRow, Launch, LaunchError, LaunchPart,
     LaunchRequest, LaunchSelect, Notice, Routing, RowAction, Ui,
 };
-use crate::proto::{LensKind, LensSpec};
+use claudio_core::proto::{LensKind, LensSpec};
 
 /// The diagram lens's instruction (spec §7).
 pub const DIAGRAM_CONTEXT: &str = "This terminal draws Mermaid diagrams. When a diagram \
@@ -66,7 +66,7 @@ fn lenses(ctx: &dyn AddonCtx) -> Vec<LensSpec> {
         lenses.push(LensSpec {
             name: "latex".to_owned(),
             kind: LensKind::Tag,
-            instruction: crate::claude::hooks::LATEX_CONTEXT.to_owned(),
+            instruction: claudio_core::claude::hooks::LATEX_CONTEXT.to_owned(),
         });
     }
     if on(ctx, DIAGRAM) {

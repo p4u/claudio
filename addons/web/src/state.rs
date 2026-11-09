@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::addon::{LaunchChoice, LegacyChoice};
-use crate::app::state::{ClientState, SavedRoute, SavedSession};
-use crate::paths;
-use crate::proto::SessionId;
+use claudio_core::addon::{LaunchChoice, LegacyChoice};
+use claudio_core::app::state::{ClientState, SavedRoute, SavedSession};
+use claudio_core::paths;
+use claudio_core::proto::SessionId;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WebState {
@@ -152,12 +152,12 @@ pub(crate) fn known_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::SavedSession;
+    use claudio_core::app::state::SavedSession;
     use std::os::unix::fs::PermissionsExt;
     use uuid::Uuid;
 
     fn dir(tag: &str) -> PathBuf {
-        let d = crate::paths::socket_test_dir(tag);
+        let d = claudio_core::paths::socket_test_dir(tag);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -318,8 +318,8 @@ mod launch_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::addon::test_support::TestAddon;
-    use crate::addon::{Addon, Addons};
+    use claudio_core::addon::test_support::TestAddon;
+    use claudio_core::addon::{Addon, Addons};
 
     fn sid(n: u128) -> SessionId {
         format!("0c8a1f52-6d0e-4b8a-9b51-2f0d5b1c{n:04}")
@@ -329,8 +329,8 @@ mod launch_tests {
 
     #[test]
     fn v080_web_state_loads_with_its_proxy() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/web-state-v0.8.0.json");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/web-state-v0.8.0.json");
         let web = load(&path);
         assert_eq!(web.sessions.len(), 3);
         assert_eq!(web.hosts, ["devbox"]);

@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn disk_paths_cannot_escape() {
-        let root = crate::paths::socket_test_dir("web-disk");
+        let root = claudio_core::paths::socket_test_dir("web-disk");
         std::fs::create_dir_all(root.join("app")).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
         for bad in [

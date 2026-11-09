@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::addon::test_support::TestAddon;
-use crate::addon::{FlagDecl, Tone};
-use crate::app::state::SavedRoute;
+use claudio_core::addon::test_support::TestAddon;
+use claudio_core::addon::{FlagDecl, Tone};
+use claudio_core::app::state::SavedRoute;
 
 /// A routing addon's flags: an option, and a labelled switch.
 const FLAGS: &[FlagDecl] = &[
@@ -34,7 +34,7 @@ fn addons() -> Addons {
 fn legacy(proxy: Option<&str>, first_party: bool) -> SavedRoute {
     SavedRoute {
         launch: None,
-        legacy: crate::addon::LegacyChoice {
+        legacy: claudio_core::addon::LegacyChoice {
             proxy: proxy.map(str::to_owned),
             first_party,
         },

@@ -14,13 +14,15 @@ use serde_json::{json, Value};
 use super::events::{extensions_changed, notice_event};
 use super::hub::HubHandle;
 use super::ws::parse;
-use crate::addon::ExtensionRow;
-use crate::app::addons::AddonRuntime;
-use crate::app::extensions::host::ExtensionHost;
-use crate::app::extensions::protocol::SessionContext;
-use crate::app::extensions::{core_choices, manifest, ActionResult, Extension, Registry, Source};
-use crate::config::Config;
-use crate::proto::{LensKind, SessionExtensions, SessionId};
+use claudio_core::addon::ExtensionRow;
+use claudio_core::app::addons::AddonRuntime;
+use claudio_core::app::extensions::host::ExtensionHost;
+use claudio_core::app::extensions::protocol::SessionContext;
+use claudio_core::app::extensions::{
+    core_choices, manifest, ActionResult, Extension, Registry, Source,
+};
+use claudio_core::config::Config;
+use claudio_core::proto::{LensKind, SessionExtensions, SessionId};
 
 /// The longest action input and render source, in bytes.
 const INPUT_MAX: usize = 64 * 1024;
@@ -45,7 +47,7 @@ impl Extensions {
     /// with `manifest::load(&manifest::dir(), &mut notices)` in spawn_blocking;
     /// ExtensionHost::new; its notices become `notice` events.
     pub(crate) async fn load(config: &Config, hub: &HubHandle) -> Arc<Extensions> {
-        let config_path = crate::paths::config_file();
+        let config_path = claudio_core::paths::config_file();
         let (external, notices) = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let external = manifest::load(&manifest::dir(), &mut notices);
@@ -56,7 +58,7 @@ impl Extensions {
         let choices = core_choices(&config.extensions, &external);
         let registry = Registry::new(&choices, external);
         for notice in &notices {
-            tracing::warn!("web: {}", crate::text::sanitize(notice));
+            tracing::warn!("web: {}", claudio_core::text::sanitize(notice));
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let host = ExtensionHost::new(&registry, tx);
@@ -127,7 +129,7 @@ impl Extensions {
                 refused: Some(why), ..
             } = &ext.source
             {
-                return Err(format!("refused: {}", crate::text::sanitize(why)));
+                return Err(format!("refused: {}", claudio_core::text::sanitize(why)));
             }
             let source = ext.source.clone();
             registry.set_enabled(name, on);
@@ -149,7 +151,7 @@ impl Extensions {
                 }
                 let (path, owned) = (self.config_path.clone(), name.to_owned());
                 let saved = tokio::task::spawn_blocking(move || {
-                    crate::config::save_extension(&path, &owned, on)
+                    claudio_core::config::save_extension(&path, &owned, on)
                 })
                 .await
                 .map_err(|_| "cannot write config.toml".to_owned())?;
@@ -234,7 +236,8 @@ impl Extensions {
     /// runtime has them now), to the addons' rows; then `extensions_changed`.
     pub(crate) async fn reread(&self, hub: &HubHandle, rows: &[(&'static str, ExtensionRow)]) {
         let path = self.config_path.clone();
-        let Ok(config) = tokio::task::spawn_blocking(move || crate::config::load_from(&path)).await
+        let Ok(config) =
+            tokio::task::spawn_blocking(move || claudio_core::config::load_from(&path)).await
         else {
             return;
         };
@@ -295,7 +298,7 @@ fn extension_dto(e: &Extension) -> Value {
         .iter()
         .map(|a| json!({"id": a.id, "title": a.title, "input": a.input}))
         .collect();
-    let s = crate::text::sanitize;
+    let s = claudio_core::text::sanitize;
     json!({
         "name": s(&e.name),
         "description": s(&e.description),
@@ -370,7 +373,7 @@ pub(crate) async fn snippets(op: &str, args: Value) -> Result<Value, String> {
 struct NoArgs {}
 
 pub(crate) async fn snippets_list() -> Result<Value, String> {
-    use crate::app::snippets;
+    use claudio_core::app::snippets;
     let list = snippets::load_all()
         .await
         .1
@@ -384,7 +387,7 @@ pub(crate) async fn snippets_list() -> Result<Value, String> {
 
 /// ≤ 64 KiB
 pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<Value, String> {
-    use crate::app::snippets;
+    use claudio_core::app::snippets;
     if text.len() > SNIPPET_MAX {
         return Err("bad request: text: at most 64 KiB".to_owned());
     }
@@ -404,7 +407,7 @@ pub(crate) async fn snippets_save(text: String, name: Option<String>) -> Result<
 
 /// Delete the snippet `name` (as `snippets.list` returns it).
 pub(crate) async fn snippets_delete(name: String) -> Result<Value, String> {
-    use crate::app::snippets;
+    use claudio_core::app::snippets;
     match snippets::delete_named(name).await {
         Ok(()) => Ok(json!({})),
         Err(e)
@@ -448,7 +451,7 @@ mod tests {
         assert_eq!(search["actions"][0]["id"], "search");
         let mut keys = Registry::default();
         keys.extensions.push(Extension {
-            lenses: vec![crate::app::extensions::Lens {
+            lenses: vec![claudio_core::app::extensions::Lens {
                 name: "keys".into(),
                 kind: LensKind::Tag,
                 instruction: String::new(),
@@ -463,7 +466,7 @@ mod tests {
     fn action_results_nest() {
         let r = ActionResult::List {
             title: "t".into(),
-            items: vec![crate::app::extensions::ListItem {
+            items: vec![claudio_core::app::extensions::ListItem {
                 label: "a".into(),
                 detail: None,
                 result: ActionResult::Notice { text: "hi".into() },

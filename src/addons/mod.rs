@@ -11,8 +11,7 @@ pub mod api;
 pub mod vocdoni;
 
 #[cfg(feature = "web")]
-// P4.5 slot: becomes `pub use claudio_web as web;`
-pub mod web;
+pub use claudio_web as web;
 
 use std::sync::Arc;
 

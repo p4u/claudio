@@ -17,12 +17,12 @@ use super::events::notice_event;
 use super::ext::Extensions;
 use super::hub::{HubHandle, SessionRef};
 use super::state::SessionMeta;
-use crate::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect};
-use crate::app::addons::AddonRuntime;
-use crate::app::launch::{self, LaunchSpec, ReviewAnswer, Step};
-use crate::app::state::SavedRoute;
-use crate::client::Client;
-use crate::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
+use claudio_core::addon::{Frontend, LaunchChoice, LaunchOp, LaunchSelect};
+use claudio_core::app::addons::AddonRuntime;
+use claudio_core::app::launch::{self, LaunchSpec, ReviewAnswer, Step};
+use claudio_core::app::state::SavedRoute;
+use claudio_core::client::Client;
+use claudio_core::proto::{Msg, RespawnSpec, SessionId, SessionKind, ShellSpec, SpawnSpec};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,7 +84,7 @@ pub(crate) fn check_name(name: Option<&str>) -> Result<Option<String>, String> {
     let Some(name) = name else {
         return Ok(None);
     };
-    let clean = crate::app::label::sanitize_label(name, NAME_MAX + 1);
+    let clean = claudio_core::app::label::sanitize_label(name, NAME_MAX + 1);
     if clean.chars().count() > NAME_MAX {
         return Err(format!("bad request: name: at most {NAME_MAX} characters"));
     }

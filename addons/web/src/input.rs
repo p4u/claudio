@@ -2,7 +2,7 @@
 //! guarded by the session's state and attention, and a paste, bracketed and
 //! stripped of what could escape the brackets.
 
-use crate::proto::{Attention, SessionState};
+use claudio_core::proto::{Attention, SessionState};
 
 pub(crate) const STALE: &str = "stale";
 pub(crate) const NOT_PERMISSION: &str = "not a permission prompt";

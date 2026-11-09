@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::hub::{self, daemon_error};
 use super::ws::{check_path, parse, to_json, SidArgs, UNEXPECTED};
-use crate::proto::{Msg, SessionId};
+use claudio_core::proto::{Msg, SessionId};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,7 +78,7 @@ pub(crate) async fn dispatch(hub: &hub::HubHandle, op: &str, args: Value) -> Res
         "git.log" => {
             let a: LogArgs = parse(args)?;
             let limit = a.limit.unwrap_or(100);
-            if !(1..=crate::proto::GIT_LOG_MAX).contains(&limit) {
+            if !(1..=claudio_core::proto::GIT_LOG_MAX).contains(&limit) {
                 return Err("bad request: limit: must be 1..=500".to_owned());
             }
             let s = hub.session(a.sid).await?;

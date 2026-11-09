@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 
 use super::hub::{HostState, SessionView};
-use crate::proto::{SessionKind, SessionState};
+use claudio_core::proto::{SessionKind, SessionState};
 
 #[cfg_attr(not(test), allow(dead_code))] // the documented list, checked by the tests
 pub(crate) const SESSION_FIELDS: &[&str] = &[
@@ -187,13 +187,13 @@ pub(crate) fn label(
                 .to_owned(),
             SessionKind::Shell => "term".to_owned(),
         });
-    crate::app::label::sanitize_label(&raw, 200)
+    claudio_core::app::label::sanitize_label(&raw, 200)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{Attention, ClaudeInfo, HostInfo, SessionInfo, Welcome};
+    use claudio_core::proto::{Attention, ClaudeInfo, HostInfo, SessionInfo, Welcome};
     use std::collections::BTreeSet;
 
     fn info(state: SessionState) -> SessionInfo {
@@ -231,9 +231,9 @@ mod tests {
             tool: Some("Bash".into()),
             detail: None,
         });
-        view.meta = Some(crate::app::state::SavedRoute {
+        view.meta = Some(claudio_core::app::state::SavedRoute {
             launch: None,
-            legacy: crate::addon::LegacyChoice {
+            legacy: claudio_core::addon::LegacyChoice {
                 proxy: Some("work".into()),
                 first_party: true,
             },

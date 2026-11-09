@@ -25,7 +25,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::paths;
+use claudio_core::paths;
 
 pub(crate) const COOKIE: &str = "claudio_web";
 pub(crate) const TOKEN_BYTES: usize = 32;
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn token_file_is_private_reused_and_rotated() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = crate::paths::socket_test_dir("web-token");
+        let dir = claudio_core::paths::socket_test_dir("web-token");
         let path = dir.join("web-token");
         let first = load_or_create_token(&path, false).unwrap();
         assert!(token_ok(&first));
