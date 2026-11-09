@@ -167,16 +167,6 @@ impl TestAddon {
         self
     }
 
-    /// Change what `prepare` answers from now on.
-    pub fn set_prepare(&self, script: Script) {
-        *lock(&self.prepare) = script;
-    }
-
-    /// Change what `resolve` answers from now on.
-    pub fn set_routing(&self, routing: Result<Routing, String>) {
-        *lock(&self.routing) = routing;
-    }
-
     /// Every call so far, in order (`"prepare New"`, `"daemon echo"`, …).
     pub fn calls(&self) -> Vec<String> {
         lock(&self.calls).clone()
