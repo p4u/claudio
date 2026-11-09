@@ -218,8 +218,8 @@ impl App {
         }
         for lens in &ext.lenses {
             let kind = match lens.kind {
-                LensKind::Fence => "fence lens (the reader)",
-                _ => "tag lens (the pane and the reader)",
+                LensKind::Fence => "fence lens (the web UI)",
+                _ => "tag lens (the web UI)",
             };
             lines.push(format!("{}  {kind}", lens_label(&lens.name, lens.kind)));
         }
@@ -392,8 +392,8 @@ mod tests {
         assert_eq!(
             app.extension_details(1),
             [
-                "Mermaid diagrams drawn in the reader",
-                "```mermaid  fence lens (the reader)",
+                "Mermaid diagrams drawn in the web UI",
+                "```mermaid  fence lens (the web UI)",
             ]
         );
         assert_eq!(
@@ -401,7 +401,7 @@ mod tests {
             [
                 "(no description)",
                 "Alt+z k  do it",
-                "<keys>  tag lens (the pane and the reader)",
+                "<keys>  tag lens (the web UI)",
             ]
         );
     }
@@ -450,7 +450,14 @@ mod tests {
         app.on_terminal(alt('i'));
         app.on_terminal(press(KeyCode::Down));
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert!(app.extensions.fence_lenses().is_empty(), "diagram is off");
+        let lenses = |app: &App| -> Vec<String> {
+            let ext = app.extensions.session_extensions();
+            ext.lenses.into_iter().map(|l| l.name).collect()
+        };
+        assert!(
+            !lenses(&app).contains(&"mermaid".to_owned()),
+            "diagram is off"
+        );
         assert!(row_lines(&app.extension_rows())[1].starts_with("[ ] diagram"));
         assert_eq!(
             toggles(&mut app),
@@ -467,12 +474,12 @@ mod tests {
                 ("save", "fake".to_owned(), false)
             ]
         );
-        assert!(app.extensions.external_lens("keys").is_none());
+        assert!(!lenses(&app).contains(&"keys".to_owned()));
         assert!(!app.leader_entries().iter().any(|e| e.key == 'k'));
         assert_eq!(app.extensions.session_extensions().lenses.len(), 1);
         // Again: back on.
         app.on_terminal(press(KeyCode::Char(' ')));
-        assert!(app.extensions.external_lens("keys").is_some());
+        assert!(lenses(&app).contains(&"keys".to_owned()));
         assert!(app.leader_entries().iter().any(|e| e.key == 'k'));
         assert_eq!(
             toggles(&mut app),

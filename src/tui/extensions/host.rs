@@ -2,8 +2,8 @@
 //! them over protocol v1 (JSON lines on stdin/stdout, [`super::protocol`]).
 //!
 //! Driven by `tui/mod.rs` (never by `App`): each request is a future the
-//! event loop spawns, so a slow or hung program never blocks the UI thread
-//! or the render worker. Per extension:
+//! event loop spawns, so a slow or hung program never blocks the UI thread.
+//! Per extension:
 //! - the program starts on the first request, in the extension's directory,
 //!   in its own process group, stdin/stdout piped, stderr discarded, with
 //!   the client's environment minus anything secret or claudio's;

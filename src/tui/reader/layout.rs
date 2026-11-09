@@ -1,27 +1,18 @@
-//! A [`Doc`] wrapped to the reader view's width: styled lines, formulas in
-//! TeX's line boxes. Pure; the view caches the result for its width.
+//! A [`Doc`] wrapped to the reader view's width: styled lines. Pure; the
+//! view caches the result for its width.
 //!
-//! - Inline formulas are unbreakable boxes in the text flow, at most three
-//!   rows (one above and one below the baseline); a line is as tall as its
-//!   tallest box, baselines aligned. A taller formula, or one wider than
-//!   the view, is its one-line form; one that was not rendered is its
-//!   source, dimmed.
-//! - A display formula is its own block, two columns in; wider than the
-//!   view, it is its one-line form, wrapped.
-//! - Code blocks are never wrapped (cut at the edge); tables are aligned
-//!   columns when they fit, else one `a │ b │ c` paragraph per row.
+//! - Paragraphs wrap at spaces; a word wider than the view is cut.
+//! - Code blocks (diagram fences included) are never wrapped (cut at the
+//!   edge); tables are aligned columns when they fit, else one
+//!   `a │ b │ c` paragraph per row.
 
 use ratatui::style::{Modifier, Style};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::doc::{Block, Doc, Emphasis, Span};
-use crate::tui::latex::{prepare, Formula};
-use crate::tui::typeset::Laid;
 
-/// How many rows an inline formula may have above and below its baseline.
-const INLINE_REACH: usize = 1;
-/// The indentation of a display formula, a code block and a quote's text.
+/// The indentation of a code block and a quote's text.
 const INDENT: &str = "  ";
 const GUTTER: &str = "│ ";
 const CELL_SEPARATOR: &str = " │ ";
@@ -73,11 +64,10 @@ impl Line {
     }
 }
 
-/// `doc`, whose formulas are `formulas`, as lines at most `width` columns
-/// wide (code blocks and over-deep indentation aside, which the drawing
-/// cuts).
-pub fn layout(doc: &Doc, formulas: &[Formula], width: usize) -> Vec<Line> {
-    Ctx { formulas }.blocks(&doc.blocks, width.max(1), true)
+/// `doc` as lines at most `width` columns wide (code blocks and over-deep
+/// indentation aside, which the drawing cuts).
+pub fn layout(doc: &Doc, width: usize) -> Vec<Line> {
+    blocks(&doc.blocks, width.max(1), true)
 }
 
 fn dim() -> Style {
@@ -116,8 +106,6 @@ pub fn safe(s: &str) -> String {
 enum Item {
     /// Text without spaces.
     Text(String, Style),
-    /// A formula box.
-    Box(Laid),
     /// A space a line may break at.
     Space,
     /// A forced line break.
@@ -128,7 +116,6 @@ impl Item {
     fn width(&self) -> usize {
         match self {
             Item::Text(t, _) => t.width(),
-            Item::Box(laid) => laid.width(),
             Item::Space => 1,
             Item::Break => 0,
         }
@@ -155,12 +142,6 @@ fn words(text: &str, style: Style, out: &mut Vec<Item>) {
     }
 }
 
-/// Whether `laid` may sit in a line of text: three rows at most, one above
-/// and one below its baseline.
-fn fits_inline(laid: &Laid) -> bool {
-    laid.baseline <= INLINE_REACH && laid.rows.len() <= laid.baseline + 1 + INLINE_REACH
-}
-
 /// A code block's lines, indented, dim and cut at `width`.
 fn code(lines: &[String], width: usize, out: &mut Vec<Line>) {
     for line in lines {
@@ -168,261 +149,160 @@ fn code(lines: &[String], width: usize, out: &mut Vec<Line>) {
     }
 }
 
-/// A fence lens's block: its rendering's rows, indented, when there is one
-/// that fits `width`; else the code block it was, with one dim line saying
-/// how wide the rendering is when that is why.
-fn lens_block(
-    lens: &str,
-    lines: &[String],
-    rows: Option<&[String]>,
-    width: usize,
-    out: &mut Vec<Line>,
-) {
-    let Some(rows) = rows else {
-        return code(lines, width, out);
-    };
-    let rows: Vec<String> = rows.iter().map(|r| safe(&prepare(r))).collect();
-    let wide = rows.iter().map(|r| r.width()).max().unwrap_or(0);
-    if INDENT.width() + wide <= width {
-        for row in rows {
-            out.push(cut(&format!("{INDENT}{row}"), Style::default(), width));
+/// `blocks` as lines; with `spaced`, a blank line between two blocks.
+fn blocks(blocks: &[Block], width: usize, spaced: bool) -> Vec<Line> {
+    let mut out = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        if i > 0 && spaced {
+            out.push(Line::default());
+        }
+        block(b, width, &mut out);
+    }
+    out
+}
+
+fn block(block: &Block, width: usize, out: &mut Vec<Line>) {
+    match block {
+        Block::Para(spans) => out.extend(para(spans, Style::default(), width)),
+        Block::Heading(level, spans) => {
+            let style = match level {
+                1 => bold().add_modifier(Modifier::UNDERLINED),
+                _ => bold(),
+            };
+            out.extend(para(spans, style, width));
+        }
+        Block::Code(lines) => code(lines, width, out),
+        Block::List(start, items) => list(*start, items, width, out),
+        Block::Quote(inner) => {
+            let inner = blocks(inner, width.saturating_sub(GUTTER.width()).max(1), true);
+            for line in inner {
+                let gutter = if line.0.is_empty() {
+                    GUTTER.trim_end()
+                } else {
+                    GUTTER
+                };
+                out.push(line.after(gutter, dim()));
+            }
+        }
+        Block::Table(rows) => table(rows, width, out),
+        Block::Rule => {
+            let mut line = Line::default();
+            line.push(&"─".repeat(width), dim());
+            out.push(line);
+        }
+    }
+}
+
+/// A paragraph of `spans` in `style`, wrapped to `width`.
+fn para(spans: &[Span], style: Style, width: usize) -> Vec<Line> {
+    wrap(&items(spans, style), width)
+        .iter()
+        .map(|line| render(line))
+        .collect()
+}
+
+/// `spans` as items; inline code (a formula's tag among it) dimmed.
+fn items(spans: &[Span], style: Style) -> Vec<Item> {
+    let mut out = Vec::new();
+    for span in spans {
+        match span {
+            Span::Text(text, emphasis) => words(text, emphasized(style, *emphasis), &mut out),
+            Span::Code(code) => words(code, style.patch(dim()), &mut out),
+            Span::Break => out.push(Item::Break),
+        }
+    }
+    out
+}
+
+/// A list: each item behind its marker (`•`, or its number), its other
+/// lines indented as far (a hanging indent); no blank lines.
+fn list(start: Option<u64>, items: &[Vec<Block>], width: usize, out: &mut Vec<Line>) {
+    let markers: Vec<String> = (0..items.len())
+        .map(|k| match start {
+            Some(n) => format!("{}.", n.saturating_add(k as u64)),
+            None => "•".to_owned(),
+        })
+        .collect();
+    let indent = markers.iter().map(|m| m.width()).max().unwrap_or(1) + 1;
+    for (marker, item) in markers.iter().zip(items) {
+        let lines = blocks(item, width.saturating_sub(indent).max(1), false);
+        let first = format!("{marker:<indent$}");
+        if lines.is_empty() {
+            out.push(Line::default().after(first.trim_end(), Style::default()));
+        }
+        for (j, line) in lines.into_iter().enumerate() {
+            let prefix = if j == 0 {
+                first.clone()
+            } else {
+                " ".repeat(indent)
+            };
+            out.push(line.after(&prefix, Style::default()));
+        }
+    }
+}
+
+/// A table: aligned columns (the header bold, then a rule) when they fit
+/// `width`, else each row one paragraph of its cells.
+fn table(rows: &[Vec<Vec<Span>>], width: usize, out: &mut Vec<Line>) {
+    let style = |r: usize| if r == 0 { bold() } else { Style::default() };
+    let cells: Vec<Vec<Line>> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, row)| {
+            row.iter()
+                .map(|cell| render(&items(cell, style(r))))
+                .collect()
+        })
+        .collect();
+    let columns = cells.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..columns)
+        .map(|c| {
+            let column = cells.iter().filter_map(|row| row.get(c));
+            column.map(Line::width).max().unwrap_or(0)
+        })
+        .collect();
+    let total = widths.iter().sum::<usize>() + CELL_SEPARATOR.width() * columns.saturating_sub(1);
+    if total > width {
+        for (r, row) in rows.iter().enumerate() {
+            let mut line = Vec::new();
+            for (c, cell) in row.iter().enumerate() {
+                if c > 0 {
+                    line.extend([Item::Space, Item::Text("│".to_owned(), dim()), Item::Space]);
+                }
+                line.extend(items(cell, style(r)));
+            }
+            out.extend(wrap(&line, width).iter().map(|l| render(l)));
         }
         return;
     }
-    code(lines, width, out);
-    let what = if lens == "mermaid" { "diagram" } else { lens };
-    out.push(cut(
-        &format!("{INDENT}{what} is {wide} columns wide"),
-        dim(),
-        width,
-    ));
-}
-
-struct Ctx<'a> {
-    formulas: &'a [Formula],
-}
-
-impl Ctx<'_> {
-    /// `blocks` as lines; with `spaced`, a blank line between two blocks.
-    fn blocks(&self, blocks: &[Block], width: usize, spaced: bool) -> Vec<Line> {
-        let mut out = Vec::new();
-        for (i, block) in blocks.iter().enumerate() {
-            if i > 0 && spaced {
-                out.push(Line::default());
+    for (r, row) in cells.iter().enumerate() {
+        let mut line = Line::default();
+        for (c, w) in widths.iter().enumerate() {
+            if c > 0 {
+                line.push(CELL_SEPARATOR, dim());
             }
-            self.block(block, width, &mut out);
-        }
-        out
-    }
-
-    fn block(&self, block: &Block, width: usize, out: &mut Vec<Line>) {
-        match block {
-            Block::Para(spans) => out.extend(self.para(spans, Style::default(), width)),
-            Block::Heading(level, spans) => {
-                let style = match level {
-                    1 => bold().add_modifier(Modifier::UNDERLINED),
-                    _ => bold(),
-                };
-                out.extend(self.para(spans, style, width));
-            }
-            Block::Code(lines) => code(lines, width, out),
-            Block::Lens { lens, lines, rows } => {
-                lens_block(lens, lines, rows.as_deref(), width, out)
-            }
-            Block::List(start, items) => self.list(*start, items, width, out),
-            Block::Quote(inner) => {
-                let inner = self.blocks(inner, width.saturating_sub(GUTTER.width()).max(1), true);
-                for line in inner {
-                    let gutter = if line.0.is_empty() {
-                        GUTTER.trim_end()
-                    } else {
-                        GUTTER
-                    };
-                    out.push(line.after(gutter, dim()));
+            let cell = row.get(c);
+            let shown = cell.map_or(0, Line::width);
+            if let Some(cell) = cell {
+                for seg in &cell.0 {
+                    line.push(&seg.text, seg.style);
                 }
             }
-            Block::Table(rows) => self.table(rows, width, out),
-            Block::Rule => {
-                let mut line = Line::default();
-                line.push(&"─".repeat(width), dim());
-                out.push(line);
-            }
-            Block::Display(i) => self.display(*i, width, out),
+            line.push(&" ".repeat(w - shown), Style::default());
         }
-    }
-
-    /// A paragraph of `spans` in `style`, wrapped to `width`.
-    fn para(&self, spans: &[Span], style: Style, width: usize) -> Vec<Line> {
-        let items = self.items(spans, style, width, false);
-        wrap(&items, width)
-            .iter()
-            .flat_map(|line| render(line).0)
-            .collect()
-    }
-
-    /// `spans` as items. A table cell's display formula (`cells`) is its
-    /// display box.
-    fn items(&self, spans: &[Span], style: Style, width: usize, cells: bool) -> Vec<Item> {
-        let mut out = Vec::new();
-        for span in spans {
-            match span {
-                Span::Text(text, emphasis) => words(text, emphasized(style, *emphasis), &mut out),
-                Span::Code(code) => words(code, style.patch(dim()), &mut out),
-                Span::Formula(i) => self.inline(*i, style, width, &mut out),
-                Span::Display(i) => match self.formulas.get(*i).and_then(|f| f.block.as_ref()) {
-                    Some(block) if cells => out.push(Item::Box(block.clone())),
-                    _ => self.inline(*i, style, width, &mut out),
-                },
-                Span::Break => out.push(Item::Break),
-            }
-        }
-        out
-    }
-
-    /// Formula `i` in a line: its text-style box when that fits a line and
-    /// the width, else its one-line form, else its source dimmed.
-    fn inline(&self, i: usize, style: Style, width: usize, out: &mut Vec<Item>) {
-        let Some(f) = self.formulas.get(i) else {
-            return;
-        };
-        match (&f.text, &f.inline) {
-            (Some(text), _) if fits_inline(text) && text.width() <= width => {
-                out.push(Item::Box(text.clone()))
-            }
-            (_, Some(line)) => words(line, style, out),
-            _ => words(&prepare(&f.src), style.patch(dim()), out),
-        }
-    }
-
-    /// Display formula `i`: its display box, two columns in, when it fits;
-    /// else its one-line form wrapped, else its source dimmed.
-    fn display(&self, i: usize, width: usize, out: &mut Vec<Line>) {
-        let Some(f) = self.formulas.get(i) else {
-            return;
-        };
-        let inner = width.saturating_sub(INDENT.width()).max(1);
-        let lines = match (&f.block, &f.inline) {
-            (Some(block), _) if block.width() <= inner => render(&[Item::Box(block.clone())]).0,
-            (_, Some(line)) => self.text_lines(line, Style::default(), inner),
-            _ => self.text_lines(&prepare(&f.src), dim(), inner),
-        };
-        out.extend(lines.into_iter().map(|l| l.after(INDENT, Style::default())));
-    }
-
-    /// Plain text wrapped to `width`.
-    fn text_lines(&self, text: &str, style: Style, width: usize) -> Vec<Line> {
-        let mut items = Vec::new();
-        words(text, style, &mut items);
-        wrap(&items, width)
-            .iter()
-            .flat_map(|line| render(line).0)
-            .collect()
-    }
-
-    /// A list: each item behind its marker (`•`, or its number), its other
-    /// lines indented as far (a hanging indent); no blank lines.
-    fn list(&self, start: Option<u64>, items: &[Vec<Block>], width: usize, out: &mut Vec<Line>) {
-        let markers: Vec<String> = (0..items.len())
-            .map(|k| match start {
-                Some(n) => format!("{}.", n.saturating_add(k as u64)),
-                None => "•".to_owned(),
-            })
-            .collect();
-        let indent = markers.iter().map(|m| m.width()).max().unwrap_or(1) + 1;
-        for (marker, item) in markers.iter().zip(items) {
-            let lines = self.blocks(item, width.saturating_sub(indent).max(1), false);
-            let first = format!("{marker:<indent$}");
-            if lines.is_empty() {
-                out.push(Line::default().after(first.trim_end(), Style::default()));
-            }
-            for (j, line) in lines.into_iter().enumerate() {
-                let prefix = if j == 0 {
-                    first.clone()
-                } else {
-                    " ".repeat(indent)
-                };
-                out.push(line.after(&prefix, Style::default()));
-            }
-        }
-    }
-
-    /// A table: aligned columns (the header bold, then a rule) when they
-    /// fit `width`, else each row one paragraph of its cells.
-    fn table(&self, rows: &[Vec<Vec<Span>>], width: usize, out: &mut Vec<Line>) {
-        let style = |r: usize| if r == 0 { bold() } else { Style::default() };
-        let cells: Vec<Vec<(Vec<Line>, usize)>> = rows
-            .iter()
-            .enumerate()
-            .map(|(r, row)| {
-                row.iter()
-                    .map(|cell| render(&self.items(cell, style(r), usize::MAX, true)))
-                    .collect()
-            })
-            .collect();
-        let columns = cells.iter().map(Vec::len).max().unwrap_or(0);
-        let widths: Vec<usize> = (0..columns)
-            .map(|c| {
-                let column = cells.iter().filter_map(|row| row.get(c));
-                column
-                    .flat_map(|(lines, _)| lines.iter().map(Line::width))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect();
-        let total =
-            widths.iter().sum::<usize>() + CELL_SEPARATOR.width() * columns.saturating_sub(1);
-        if total > width {
-            for (r, row) in rows.iter().enumerate() {
-                let mut items = Vec::new();
-                for (c, cell) in row.iter().enumerate() {
-                    if c > 0 {
-                        items.extend([Item::Space, Item::Text("│".to_owned(), dim()), Item::Space]);
-                    }
-                    items.extend(self.items(cell, style(r), width, false));
-                }
-                out.extend(wrap(&items, width).iter().flat_map(|line| render(line).0));
-            }
-            return;
-        }
-        for (r, row) in cells.iter().enumerate() {
-            let above = row.iter().map(|(_, base)| *base).max().unwrap_or(0);
-            let below = row
-                .iter()
-                .map(|(lines, base)| lines.len().saturating_sub(base + 1))
-                .max()
-                .unwrap_or(0);
-            for k in 0..above + 1 + below {
-                let mut line = Line::default();
-                for (c, w) in widths.iter().enumerate() {
-                    if c > 0 {
-                        line.push(CELL_SEPARATOR, dim());
-                    }
-                    let cell = row.get(c).and_then(|(lines, base)| {
-                        k.checked_sub(above - base).and_then(|i| lines.get(i))
-                    });
-                    let shown = cell.map_or(0, Line::width);
-                    if let Some(cell) = cell {
-                        for seg in &cell.0 {
-                            line.push(&seg.text, seg.style);
-                        }
-                    }
-                    line.push(&" ".repeat(w - shown), Style::default());
-                }
-                out.push(trim_end(line));
-            }
-            if r == 0 && cells.len() > 1 {
-                let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
-                let mut line = Line::default();
-                line.push(&rule.join("─┼─"), dim());
-                out.push(line);
-            }
+        out.push(trim_end(line));
+        if r == 0 && cells.len() > 1 {
+            let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+            let mut line = Line::default();
+            line.push(&rule.join("─┼─"), dim());
+            out.push(line);
         }
     }
 }
 
 /// `items` broken into lines at most `width` wide: at spaces, at forced
 /// breaks, and inside a word only when the word alone is wider than the
-/// line (formula boxes are never cut).
+/// line.
 fn wrap(items: &[Item], width: usize) -> Vec<Vec<Item>> {
     let mut lines = Vec::new();
     let mut line: Vec<Item> = Vec::new();
@@ -442,7 +322,7 @@ fn wrap(items: &[Item], width: usize) -> Vec<Vec<Item>> {
                 i += 1;
                 continue;
             }
-            _ => {}
+            Item::Text(..) => {}
         }
         let end = items[i..]
             .iter()
@@ -465,32 +345,23 @@ fn wrap(items: &[Item], width: usize) -> Vec<Vec<Item>> {
         } else {
             // A word wider than a line: cut between its graphemes.
             for item in word {
-                match item {
-                    Item::Text(text, style) => {
-                        let mut piece = String::new();
-                        for g in text.graphemes(true) {
-                            if used + g.width() > width && used > 0 {
-                                if !piece.is_empty() {
-                                    line.push(Item::Text(std::mem::take(&mut piece), *style));
-                                }
-                                lines.push(std::mem::take(&mut line));
-                                used = 0;
-                            }
-                            piece.push_str(g);
-                            used += g.width();
-                        }
+                let Item::Text(text, style) = item else {
+                    continue;
+                };
+                let mut piece = String::new();
+                for g in text.graphemes(true) {
+                    if used + g.width() > width && used > 0 {
                         if !piece.is_empty() {
-                            line.push(Item::Text(piece, *style));
+                            line.push(Item::Text(std::mem::take(&mut piece), *style));
                         }
+                        lines.push(std::mem::take(&mut line));
+                        used = 0;
                     }
-                    other => {
-                        if used > 0 && used + other.width() > width {
-                            lines.push(std::mem::take(&mut line));
-                            used = 0;
-                        }
-                        used += other.width();
-                        line.push(other.clone());
-                    }
+                    piece.push_str(g);
+                    used += g.width();
+                }
+                if !piece.is_empty() {
+                    line.push(Item::Text(piece, *style));
                 }
             }
         }
@@ -502,48 +373,17 @@ fn wrap(items: &[Item], width: usize) -> Vec<Vec<Item>> {
     lines
 }
 
-/// One wrapped line of items as rows, and which row is the baseline: as
-/// tall as its tallest box, text on the baseline.
-fn render(items: &[Item]) -> (Vec<Line>, usize) {
-    let above = items
-        .iter()
-        .map(|it| match it {
-            Item::Box(laid) => laid.baseline,
-            _ => 0,
-        })
-        .max()
-        .unwrap_or(0);
-    let below = items
-        .iter()
-        .map(|it| match it {
-            Item::Box(laid) => laid.rows.len() - 1 - laid.baseline,
-            _ => 0,
-        })
-        .max()
-        .unwrap_or(0);
-    let rows = (0..above + 1 + below)
-        .map(|row| {
-            let mut line = Line::default();
-            for item in items {
-                let width = item.width();
-                match item {
-                    Item::Text(text, style) if row == above => line.push(text, *style),
-                    Item::Box(laid) => {
-                        let text = (row + laid.baseline)
-                            .checked_sub(above)
-                            .and_then(|i| laid.rows.get(i))
-                            .map_or(String::new(), |r| safe(r));
-                        let pad = width.saturating_sub(text.width());
-                        line.push(&text, Style::default());
-                        line.push(&" ".repeat(pad), Style::default());
-                    }
-                    _ => line.push(&" ".repeat(width), Style::default()),
-                }
-            }
-            trim_end(line)
-        })
-        .collect();
-    (rows, above)
+/// One wrapped line of items as a line.
+fn render(items: &[Item]) -> Line {
+    let mut line = Line::default();
+    for item in items {
+        match item {
+            Item::Text(text, style) => line.push(text, *style),
+            Item::Space => line.push(" ", Style::default()),
+            Item::Break => {}
+        }
+    }
+    trim_end(line)
 }
 
 /// `line` without trailing blanks.
@@ -578,37 +418,11 @@ fn cut(text: &str, style: Style, width: usize) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::latex::Rendered;
-    use crate::tui::reader::doc::{parse, prepare as prepare_doc};
+    use crate::tui::reader::doc::parse;
 
-    fn laid(rows: &[&str], baseline: usize) -> Laid {
-        Laid {
-            rows: rows.iter().map(|r| r.to_string()).collect(),
-            baseline,
-        }
-    }
-
-    /// A formula with these renderings.
-    fn formula(
-        src: &str,
-        inline: Option<&str>,
-        text: Option<Laid>,
-        block: Option<Laid>,
-    ) -> Formula {
-        Formula::new(
-            src,
-            Rendered {
-                inline: inline.map(str::to_owned),
-                block,
-                text,
-            },
-        )
-    }
-
-    /// `markdown` laid out at `width`, with `formulas` for its tags, as text.
-    fn shown(markdown: &str, formulas: &[Formula], width: usize) -> Vec<String> {
-        let doc = parse(&prepare_doc(markdown));
-        layout(&doc, formulas, width)
+    /// `markdown` laid out at `width`, as text.
+    fn shown(markdown: &str, width: usize) -> Vec<String> {
+        layout(&parse(markdown), width)
             .iter()
             .map(Line::text)
             .collect()
@@ -617,81 +431,42 @@ mod tests {
     #[test]
     fn paragraphs_wrap_at_spaces_and_cut_long_words() {
         assert_eq!(
-            shown("the quick brown fox jumps over the dog", &[], 15),
+            shown("the quick brown fox jumps over the dog", 15),
             ["the quick brown", "fox jumps over", "the dog"]
         );
-        assert_eq!(shown("abcdefghij xy", &[], 4), ["abcd", "efgh", "ij", "xy"]);
-        assert_eq!(shown("one\ntwo  three", &[], 40), ["one two three"]);
-        assert_eq!(shown("hard  \nbreak", &[], 40), ["hard", "break"]);
-        assert_eq!(shown("a\n\nb", &[], 40), ["a", "", "b"]);
+        assert_eq!(shown("abcdefghij xy", 4), ["abcd", "efgh", "ij", "xy"]);
+        assert_eq!(shown("one\ntwo  three", 40), ["one two three"]);
+        assert_eq!(shown("hard  \nbreak", 40), ["hard", "break"]);
+        assert_eq!(shown("a\n\nb", 40), ["a", "", "b"]);
     }
 
+    /// Formulas are their tags as claude wrote them, dimmed like inline
+    /// code, in the text flow; one alone is still just a paragraph.
     #[test]
-    fn inline_formulas_are_line_boxes_on_the_baseline() {
-        let s = formula("S_{i,f}", None, Some(laid(&["S", " i,f"], 0)), None);
-        let e = formula("e^{i\\pi}", None, Some(laid(&[" iπ", "e"], 1)), None);
+    fn formulas_are_their_source_text() {
         let text = "so <latex>S_{i,f}</latex> and <latex>e^{i\\pi}</latex> end";
         assert_eq!(
-            shown(text, &[s.clone(), e], 40),
-            ["             iπ", "so S    and e   end", "    i,f"]
+            shown(text, 80),
+            ["so <latex>S_{i,f}</latex> and <latex>e^{i\\pi}</latex> end"]
         );
-        // A line without boxes is one row; the next line is its own box.
+        let lines = layout(&parse(text), 80);
+        let tag = lines[0].0.iter().find(|s| s.text.contains("S_{i,f}"));
+        assert!(tag.is_some_and(|s| s.style == dim()), "{lines:?}");
+        let display = "Roots:\n\n<latex>x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}</latex>\n\ndone";
         assert_eq!(
-            shown("aaaa bbbb <latex>S_{i,f}</latex>", &[s], 10),
-            ["aaaa bbbb", "S", " i,f"]
-        );
-    }
-
-    #[test]
-    fn tall_or_wide_inline_formulas_fall_back_to_one_line() {
-        // 33 rows: a 32-deep nested script.
-        let rows: Vec<String> = (0..33).map(|i| format!("{}x", " ".repeat(i))).collect();
-        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let deep = formula("deep", Some("x_(…)"), Some(laid(&rows, 0)), None);
-        let lines = shown("a <latex>deep</latex> b", &[deep], 40);
-        assert_eq!(lines, ["a x_(…) b"]);
-        // Wider than the view.
-        let wide = formula("w", Some("w w w"), Some(laid(&["wwwwwwwwww"], 0)), None);
-        assert_eq!(shown("<latex>w</latex>x", &[wide], 8), ["w w wx"]);
-        // Not rendered at all: the source.
-        assert_eq!(
-            shown("a <latex>\\oops</latex>", &[Formula::raw("\\oops")], 40),
-            ["a \\oops"]
-        );
-    }
-
-    #[test]
-    fn display_formulas_are_indented_blocks_with_a_fallback() {
-        let quad = formula(
-            "q",
-            Some("x = (-b ± √(b² - 4ac))/(2a)"),
-            None,
-            Some(laid(
-                &[
-                    "    -b ± √(b² - 4ac)",
-                    "x = ────────────────",
-                    "           2a",
-                ],
-                1,
-            )),
-        );
-        let text = "Roots:\n\n<latex>q</latex>\n\ndone";
-        assert_eq!(
-            shown(text, std::slice::from_ref(&quad), 40),
+            shown(display, 80),
             [
                 "Roots:",
                 "",
-                "      -b ± √(b² - 4ac)",
-                "  x = ────────────────",
-                "             2a",
+                "<latex>x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}</latex>",
                 "",
                 "done"
             ]
         );
-        // Too wide for the view: the one-line form, wrapped, indented.
+        // Wrapped at its spaces like any text.
         assert_eq!(
-            shown("<latex>q</latex>", &[quad], 18),
-            ["  x = (-b ± √(b² -", "  4ac))/(2a)"]
+            shown("<latex>a + b = c</latex>", 12),
+            ["<latex>a + b", "= c</latex>"]
         );
     }
 
@@ -699,7 +474,7 @@ mod tests {
     fn lists_quotes_headings_and_rules() {
         let text = "# Title\n\n- one\n- two words here\n  1. sub\n\n> quoted\n>\n> more\n\n---";
         assert_eq!(
-            shown(text, &[], 12),
+            shown(text, 12),
             [
                 "Title",
                 "",
@@ -715,8 +490,7 @@ mod tests {
                 "────────────",
             ]
         );
-        let doc = parse(&prepare_doc("# Big\n\n## Small"));
-        let lines = layout(&doc, &[], 20);
+        let lines = layout(&parse("# Big\n\n## Small"), 20);
         assert!(lines[0].0[0]
             .style
             .add_modifier
@@ -726,42 +500,47 @@ mod tests {
             .style
             .add_modifier
             .contains(Modifier::UNDERLINED));
-        let ordered = shown("9. a\n10. b", &[], 20);
+        let ordered = shown("9. a\n10. b", 20);
         assert_eq!(ordered, ["9.  a", "10. b"]);
     }
 
     #[test]
     fn code_blocks_are_indented_dim_and_cut() {
-        let doc = parse(&prepare_doc("```\nlet x = 1;\n\tlong line here\n```"));
-        let lines = layout(&doc, &[], 12);
+        let lines = layout(&parse("```\nlet x = 1;\n\tlong line here\n```"), 12);
         let text: Vec<String> = lines.iter().map(Line::text).collect();
         assert_eq!(text, ["  let x = 1;", "      long l"]);
         assert!(lines[0].0[0].style.add_modifier.contains(Modifier::DIM));
     }
 
+    /// A mermaid fence is a code block: its source, as written.
+    #[test]
+    fn diagrams_are_their_source() {
+        let text = "```mermaid\nflowchart LR\n  a --> b\n```";
+        assert_eq!(shown(text, 40), ["  flowchart LR", "    a --> b"]);
+    }
+
     #[test]
     fn tables_align_when_they_fit_and_flow_when_not() {
-        let e = formula(
-            "x",
-            Some("x"),
-            Some(laid(&["x"], 0)),
-            Some(laid(&["a", "─", "b"], 1)),
-        );
         let text = "| name | value |\n|---|---|\n| one | 1 |\n| frac | <latex>x</latex> |";
         assert_eq!(
-            shown(text, std::slice::from_ref(&e), 40),
+            shown(text, 40),
             [
                 "name │ value",
-                "─────┼──────",
+                "─────┼─────────────────",
                 "one  │ 1",
-                "     │ a",
-                "frac │ ─",
-                "     │ b",
+                "frac │ <latex>x</latex>",
             ]
         );
         assert_eq!(
-            shown(text, &[e], 10),
-            ["name │", "value", "one │ 1", "frac │ x"]
+            shown(text, 10),
+            [
+                "name │",
+                "value",
+                "one │ 1",
+                "frac │",
+                "<latex>x</",
+                "latex>"
+            ]
         );
     }
 
@@ -772,41 +551,7 @@ mod tests {
         let wide = "\u{1100}\u{1100}\u{1161}";
         assert_eq!(wide.graphemes(true).count(), 1);
         assert!(wide.width() > 2);
-        let lines = shown(&format!("a {wide} b"), &[], 20);
+        let lines = shown(&format!("a {wide} b"), 20);
         assert_eq!(lines, ["a \u{fffd} b"]);
-    }
-
-    #[test]
-    fn lens_blocks_show_their_rows_or_their_code_with_why() {
-        let lines = vec!["graph TD".to_owned(), "a --> b".to_owned()];
-        let block = |rows: Option<Vec<&str>>| Doc {
-            blocks: vec![Block::Lens {
-                lens: "mermaid".into(),
-                lines: lines.clone(),
-                rows: rows.map(|r| r.iter().map(|s| s.to_string()).collect()),
-            }],
-        };
-        let text = |doc: &Doc, width| -> Vec<String> {
-            layout(doc, &[], width).iter().map(|l| l.text()).collect()
-        };
-        let drawn = block(Some(vec!["┌───┐", "│ a │\u{1b}", "└───┘"]));
-        assert_eq!(text(&drawn, 20), ["  ┌───┐", "  │ a │", "  └───┘"]);
-        // Too wide for the reader: the code, and how wide it is.
-        assert_eq!(
-            text(&drawn, 6),
-            ["  grap", "  a --", "  diag"],
-            "cut to the width"
-        );
-        assert_eq!(text(&drawn, 7)[2], "  └───┘", "two columns in, it fits");
-        let wide = layout(&drawn, &[], 6);
-        assert!(wide[0].0.iter().all(|s| s.style == dim()));
-        assert_eq!(text(&drawn, 40).len(), 3);
-        let narrow = block(Some(vec!["0123456789"]));
-        assert_eq!(
-            text(&narrow, 11),
-            ["  graph TD", "  a --> b", "  diagram i"]
-        );
-        // No rendering: the code block.
-        assert_eq!(text(&block(None), 20), ["  graph TD", "  a --> b"]);
     }
 }

@@ -1,50 +1,37 @@
 //! One of claude's answers as the reader view's document: markdown blocks
-//! (pulldown-cmark) whose `<latex>` formulas are indices into the answer's
-//! formula list. Width-independent; `layout.rs` wraps it.
+//! (pulldown-cmark). Width-independent; `layout.rs` wraps it. Formulas and
+//! diagrams are shown as their source: they render in the web UI only.
 //!
-//! Pure, and run on the render worker (`tui/mod.rs`), never on the UI
-//! thread. The text is attacker-influenced, so:
-//! - [`prepare`] sanitizes it again, then replaces each formula tag (by
-//!   `extract_latex`'s rules) with one private-use placeholder; sanitizing
-//!   removed every private-use character, so the text cannot forge one.
-//! - [`parse`] turns placeholders back into formulas while it reads
-//!   markdown (iterating chars, never graphemes), and sanitizes each text
-//!   run again once its placeholders are gone. In code, a placeholder is
-//!   its tag's text again.
+//! Pure, and run off the UI thread (`tui/mod.rs`). The text is
+//! attacker-influenced, so:
+//! - [`prepare`] sanitizes it again, then replaces each `<latex>` tag (by
+//!   `latex_tags`'s rules) with one private-use placeholder, so markdown
+//!   leaves the formula alone (no `\\` escapes taken, no emphasis);
+//!   sanitizing removed every private-use character, so the text cannot
+//!   forge one.
+//! - [`parse`] turns placeholders back into their tags, as inline code,
+//!   while it reads markdown (iterating chars, never graphemes), and
+//!   sanitizes each text run again once its placeholders are gone.
 //! - Lists and quotes nest at most [`MAX_NEST`] deep; deeper content is
 //!   flattened into the deepest one, so layout recursion is bounded.
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
-use crate::claude::latex::{is_combining, lens_tags, sanitize, MAX_FORMULAS};
+use crate::claude::latex::{is_combining, latex_tags, sanitize, MAX_FORMULAS};
 
-/// The first placeholder: formula `i` of an answer is `PLACEHOLDER + i`.
+/// The first placeholder: tag `i` of an answer is `PLACEHOLDER + i`.
 const PLACEHOLDER: u32 = 0xE000;
 /// How deep lists and block quotes nest.
 pub const MAX_NEST: usize = 8;
 /// What a tab is in a code block (elsewhere it is one space).
 const TAB: &str = "    ";
 
-/// An answer's text ready for [`parse`]: formula tags replaced by
-/// placeholders, and the tags.
+/// An answer's text ready for [`parse`]: `<latex>` tags replaced by
+/// placeholders, and the tags as written.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Prepared {
-    pub text: String,
-    pub tags: Vec<FormulaTag>,
-    /// The tag lens of each of `tags` (`latex`, …).
-    pub lenses: Vec<String>,
-    /// The fence lenses: a fenced code block whose info string starts with
-    /// one becomes a [`Block::Lens`].
-    pub fences: Vec<String>,
-}
-
-/// One formula tag of an answer.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormulaTag {
-    /// The formula, as `extract_latex` gives it (the renderer's input).
-    pub src: String,
-    /// The whole tag as written, shown where markdown made it code.
-    pub raw: String,
+struct Prepared {
+    text: String,
+    tags: Vec<String>,
 }
 
 /// An answer as markdown blocks.
@@ -67,27 +54,13 @@ pub enum Block {
     /// A table's rows, the header first; each row its cells.
     Table(Vec<Vec<Vec<Span>>>),
     Rule,
-    /// A display formula: a paragraph or tight item that is only a formula.
-    Display(usize),
-    /// A fenced code block of fence lens `lens`: its lines (as `Code`'s),
-    /// and its rendering's rows once the render worker (or the extension
-    /// host) made one.
-    Lens {
-        lens: String,
-        lines: Vec<String>,
-        rows: Option<Vec<String>>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Span {
     Text(String, Emphasis),
-    /// Inline code.
+    /// Inline code, or a `<latex>` tag as written.
     Code(String),
-    /// A formula in the text: an index into the answer's formulas.
-    Formula(usize),
-    /// A table cell that is only a formula, typeset in display style.
-    Display(usize),
     /// A hard line break.
     Break,
 }
@@ -100,88 +73,49 @@ pub struct Emphasis {
 }
 
 /// `text` (an answer) [`sanitize`]d, with each of its first
-/// [`MAX_FORMULAS`] formula tags replaced by a placeholder, and a combining
-/// mark right after a tag dropped (it would join the placeholder). Later
-/// tags stay as they are written.
-#[cfg(test)]
-pub fn prepare(text: &str) -> Prepared {
-    prepare_lenses(text, &["latex"], &[])
-}
-
-/// [`prepare`] for the tags of tag lenses `tags` (the first
-/// [`MAX_FORMULAS`] of them all), with fence lenses `fences` for [`parse`].
-pub fn prepare_lenses(text: &str, tags: &[&str], fences: &[&str]) -> Prepared {
+/// [`MAX_FORMULAS`] `<latex>` tags replaced by a placeholder, and a
+/// combining mark right after a tag dropped (it would join the
+/// placeholder). Later tags stay as they are written.
+fn prepare(text: &str) -> Prepared {
     let clean = sanitize(text);
     let mut out = String::with_capacity(clean.len());
-    let mut found = Vec::new();
-    let mut lenses = Vec::new();
+    let mut tags = Vec::new();
     let mut copied = 0;
-    for (range, lens, src) in lens_tags(&clean, tags).into_iter().take(MAX_FORMULAS) {
+    for (range, _) in latex_tags(&clean).into_iter().take(MAX_FORMULAS) {
         out.push_str(&clean[copied..range.start]);
-        out.push(placeholder(found.len()));
-        found.push(FormulaTag {
-            src,
-            raw: clean[range.clone()].to_owned(),
-        });
-        lenses.push(lens);
+        out.push(placeholder(tags.len()));
+        tags.push(clean[range.clone()].to_owned());
         let rest = &clean[range.end..];
         copied = range.end + (rest.len() - rest.trim_start_matches(is_combining).len());
     }
     out.push_str(&clean[copied..]);
-    Prepared {
-        text: out,
-        tags: found,
-        lenses,
-        fences: fences.iter().map(|f| f.to_string()).collect(),
-    }
+    Prepared { text: out, tags }
 }
 
-/// The placeholder of formula `i` (`i` < [`MAX_FORMULAS`]).
+/// The placeholder of tag `i` (`i` < [`MAX_FORMULAS`]).
 fn placeholder(i: usize) -> char {
     char::from_u32(PLACEHOLDER + i as u32).unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
-/// The formula a placeholder stands for, if `c` is one of `count`.
-fn formula_of(c: char, count: usize) -> Option<usize> {
+/// The tag a placeholder stands for, if `c` is one of `count`.
+fn tag_of(c: char, count: usize) -> Option<usize> {
     let i = (c as u32).checked_sub(PLACEHOLDER)? as usize;
     (i < count).then_some(i)
 }
 
-/// The markdown of `prepared` as a [`Doc`]. pulldown-cmark reads it with
-/// tables, strikethrough and task lists only (no math, footnotes or smart
-/// punctuation: `$` is text). A formula is display when its placeholder is
-/// all a paragraph, a tight list item or a table cell holds.
-pub fn parse(prepared: &Prepared) -> Doc {
+/// `text` (an answer) as a [`Doc`]. pulldown-cmark reads it with tables,
+/// strikethrough and task lists only (no math, footnotes or smart
+/// punctuation: `$` is text).
+pub fn parse(text: &str) -> Doc {
+    let prepared = prepare(text);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut b = Builder::new(&prepared.tags, &prepared.fences);
+    let mut b = Builder::new(&prepared.tags);
     for event in Parser::new_ext(&prepared.text, options) {
         b.event(event);
     }
     b.flush();
     Doc { blocks: b.root }
-}
-
-impl Doc {
-    /// Call `f` with each fence-lens block's lens, source (its lines) and
-    /// rows, in document order, inside lists and quotes too.
-    pub fn each_lens(&mut self, f: &mut impl FnMut(&str, String, &mut Option<Vec<String>>)) {
-        fn walk(blocks: &mut [Block], f: &mut impl FnMut(&str, String, &mut Option<Vec<String>>)) {
-            for block in blocks {
-                match block {
-                    Block::Lens { lens, lines, rows } => f(lens, lines.join("\n"), rows),
-                    Block::List(_, items) => {
-                        for item in items {
-                            walk(item, f);
-                        }
-                    }
-                    Block::Quote(inner) => walk(inner, f),
-                    _ => {}
-                }
-            }
-        }
-        walk(&mut self.blocks, f);
-    }
 }
 
 /// A container being read.
@@ -194,10 +128,8 @@ enum Frame {
 /// The state of [`parse`]: the open containers and the inline content
 /// being gathered.
 struct Builder<'a> {
-    tags: &'a [FormulaTag],
-    fences: &'a [String],
-    /// The fence lens of the code block being read, if it is one's.
-    fence: Option<String>,
+    /// The `<latex>` tags the placeholders stand for.
+    tags: &'a [String],
     root: Vec<Block>,
     frames: Vec<Frame>,
     /// Per open container start: whether it got a frame (`false`: it was
@@ -221,11 +153,9 @@ struct Builder<'a> {
 type TableRows = (Vec<Vec<Vec<Span>>>, Vec<Vec<Span>>);
 
 impl<'a> Builder<'a> {
-    fn new(tags: &'a [FormulaTag], fences: &'a [String]) -> Builder<'a> {
+    fn new(tags: &'a [String]) -> Builder<'a> {
         Builder {
             tags,
-            fences,
-            fence: None,
             root: Vec::new(),
             frames: Vec::new(),
             open: Vec::new(),
@@ -273,17 +203,9 @@ impl<'a> Builder<'a> {
                 self.flush();
                 self.heading = Some(level as u8);
             }
-            Tag::CodeBlock(kind) => {
+            Tag::CodeBlock(_) => {
                 self.flush();
                 self.code = Some(String::new());
-                self.fence = match kind {
-                    CodeBlockKind::Fenced(info) => info
-                        .split_whitespace()
-                        .next()
-                        .filter(|word| self.fences.iter().any(|f| f == word))
-                        .map(str::to_owned),
-                    CodeBlockKind::Indented => None,
-                };
             }
             Tag::BlockQuote(_) => self.open_frame(Frame::Quote(Vec::new())),
             Tag::List(start) => self.open_frame(Frame::List(start, Vec::new())),
@@ -315,21 +237,11 @@ impl<'a> Builder<'a> {
                 let code = self.code.take().unwrap_or_default();
                 let code = self.code_text(code.trim_end_matches('\n'), TAB);
                 let lines = code.split('\n').map(str::to_owned).collect();
-                match self.fence.take() {
-                    Some(lens) => self.push(Block::Lens {
-                        lens,
-                        lines,
-                        rows: None,
-                    }),
-                    None => self.push(Block::Code(lines)),
-                }
+                self.push(Block::Code(lines));
             }
             TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item => self.close_frame(),
             TagEnd::TableCell => {
-                let mut cell = trimmed(std::mem::take(&mut self.spans));
-                if let [Span::Formula(i)] = cell.as_slice() {
-                    cell = vec![Span::Display(*i)];
-                }
+                let cell = trimmed(std::mem::take(&mut self.spans));
                 if let Some((_, row)) = &mut self.table {
                     row.push(cell);
                 }
@@ -411,31 +323,28 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// End the inline content gathered so far as a paragraph (a display
-    /// formula when it is only one), unless a heading or table cell is
-    /// gathering it.
+    /// End the inline content gathered so far as a paragraph, unless a
+    /// heading or table cell is gathering it.
     fn flush(&mut self) {
         if self.heading.is_some() || self.table.is_some() {
             return;
         }
         let spans = trimmed(std::mem::take(&mut self.spans));
-        match spans.as_slice() {
-            [] => {}
-            [Span::Formula(i)] => self.push(Block::Display(*i)),
-            _ => self.push(Block::Para(spans)),
+        if !spans.is_empty() {
+            self.push(Block::Para(spans));
         }
     }
 
-    /// Inline text: its placeholders become formulas, the runs between
-    /// them are sanitized (tabs as one space) and joined to the text before
-    /// them when they share its emphasis.
+    /// Inline text: its placeholders become their tags as inline code,
+    /// the runs between them are sanitized (tabs as one space) and joined
+    /// to the text before them when they share its emphasis.
     fn text(&mut self, text: &str) {
         let mut run = String::new();
         for c in text.chars() {
-            match formula_of(c, self.tags.len()) {
+            match tag_of(c, self.tags.len()) {
                 Some(i) => {
                     self.push_run(&mut run);
-                    self.spans.push(Span::Formula(i));
+                    self.spans.push(Span::Code(self.tags[i].clone()));
                 }
                 None if c == '\t' => run.push(' '),
                 None => run.push(c),
@@ -463,8 +372,8 @@ impl<'a> Builder<'a> {
     fn code_text(&self, code: &str, tab: &str) -> String {
         let mut out = String::with_capacity(code.len());
         for c in code.chars() {
-            match formula_of(c, self.tags.len()) {
-                Some(i) => out.push_str(&self.tags[i].raw),
+            match tag_of(c, self.tags.len()) {
+                Some(i) => out.push_str(&self.tags[i]),
                 None if c == '\t' => out.push_str(tab),
                 None => out.push(c),
             }
@@ -499,24 +408,22 @@ mod tests {
     use super::*;
 
     fn doc(text: &str) -> Doc {
-        parse(&prepare(text))
+        parse(text)
     }
 
     fn plain(s: &str) -> Span {
         Span::Text(s.into(), Emphasis::default())
     }
 
+    fn code(s: &str) -> Span {
+        Span::Code(s.into())
+    }
+
     #[test]
     fn tags_become_placeholders_after_sanitizing() {
         let p = prepare("a <latex>x^2</latex>\u{301}b \u{e000}c `<latex>y</latex>`");
         assert_eq!(p.text, "a \u{e000}b c `<latex>y</latex>`");
-        assert_eq!(
-            p.tags,
-            [FormulaTag {
-                src: "x^2".into(),
-                raw: "<latex>x^2</latex>".into(),
-            }]
-        );
+        assert_eq!(p.tags, ["<latex>x^2</latex>"]);
         // Past MAX_FORMULAS, tags stay text.
         let many = "<latex>x</latex> ".repeat(MAX_FORMULAS + 2);
         let p = prepare(&many);
@@ -545,7 +452,7 @@ mod tests {
                     plain(" and "),
                     Span::Text("bold".into(), bold),
                     plain(" "),
-                    Span::Code("code".into()),
+                    code("code"),
                     plain("."),
                 ]),
                 Block::Code(vec!["fn    x".into()]),
@@ -573,41 +480,59 @@ mod tests {
                 Block::Quote(vec![Block::Para(vec![plain("quoted")])]),
                 Block::Table(vec![
                     vec![vec![plain("a")], vec![plain("b")]],
-                    vec![vec![plain("1")], vec![Span::Display(0)]],
+                    vec![vec![plain("1")], vec![code("<latex>x</latex>")]],
                 ]),
             ]
         );
     }
 
+    /// A formula is its tag as claude wrote it, untouched by markdown
+    /// (escapes, emphasis), alone or in the text.
     #[test]
-    fn a_formula_alone_is_display() {
-        let d = doc("Text <latex>a</latex> here.\n\n<latex>b</latex>\n\n- <latex>c</latex>\n- item <latex>d</latex>\n\n> <latex>e</latex>\n");
+    fn formulas_are_their_tags_as_written() {
+        let d = doc("Text <latex>a_1 *b* \\\\ c\\{</latex> here.\n\n<latex>b</latex>\n\n- item <latex>d</latex>\n");
         assert_eq!(
             d.blocks,
             [
-                Block::Para(vec![plain("Text "), Span::Formula(0), plain(" here.")]),
-                Block::Display(1),
+                Block::Para(vec![
+                    plain("Text "),
+                    code("<latex>a_1 *b* \\\\ c\\{</latex>"),
+                    plain(" here."),
+                ]),
+                Block::Para(vec![code("<latex>b</latex>")]),
                 Block::List(
                     None,
-                    vec![
-                        vec![Block::Display(2)],
-                        vec![Block::Para(vec![plain("item "), Span::Formula(3)])],
-                    ]
+                    vec![vec![Block::Para(vec![
+                        plain("item "),
+                        code("<latex>d</latex>")
+                    ])]]
                 ),
-                Block::Quote(vec![Block::Display(4)]),
             ]
+        );
+    }
+
+    /// A mermaid fence is a code block like any other.
+    #[test]
+    fn diagram_fences_are_code() {
+        let d = doc("```mermaid extra\nflowchart LR\n\ta --> b\n```\n");
+        assert_eq!(
+            d.blocks,
+            [Block::Code(vec![
+                "flowchart LR".into(),
+                "    a --> b".into()
+            ])]
         );
     }
 
     #[test]
     fn a_placeholder_in_code_is_its_tag_again() {
-        // Markdown takes this backtick run as code, `extract_latex` does
-        // not (its code spans end at the line).
+        // Markdown takes this backtick run as code, `latex_tags` does not
+        // (its code spans end at the line).
         let p = prepare("``a\n<latex>x</latex> b``");
         assert_eq!(p.tags.len(), 1);
         assert_eq!(
-            parse(&p).blocks,
-            [Block::Para(vec![Span::Code("a <latex>x</latex> b".into())])]
+            parse("``a\n<latex>x</latex> b``").blocks,
+            [Block::Para(vec![code("a <latex>x</latex> b")])]
         );
         // `$` is text: no math extension.
         assert_eq!(doc("$x$").blocks, [Block::Para(vec![plain("$x$")])]);
@@ -645,25 +570,29 @@ mod tests {
         for text in &cases {
             let p = prepare(text);
             assert!(p.tags.len() <= MAX_FORMULAS);
-            let d = parse(&p);
-            check(&d.blocks, p.tags.len(), 0);
+            check(&parse(text).blocks, 0);
         }
         // Debug build, all seven: well under a second each in practice.
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        let p = prepare(&cases[6]);
-        assert!(p.tags.is_empty(), "input cannot forge a placeholder");
-        assert_eq!(parse(&p).blocks, [Block::Para(vec![plain("[2J text")])]);
+        assert!(
+            prepare(&cases[6]).tags.is_empty(),
+            "input cannot forge a placeholder"
+        );
+        assert_eq!(
+            parse(&cases[6]).blocks,
+            [Block::Para(vec![plain("[2J text")])]
+        );
     }
 
-    /// Every string is sanitized, every formula index valid, and lists and
-    /// quotes at most MAX_NEST deep.
-    fn check(blocks: &[Block], formulas: usize, depth: usize) {
+    /// Every string is sanitized (so no placeholder is left: they are
+    /// private-use), and lists and quotes are at most MAX_NEST deep.
+    fn check(blocks: &[Block], depth: usize) {
         assert!(depth <= MAX_NEST);
+        let clean = |t: &str| assert_eq!(*t, sanitize(t));
         let spans = |spans: &[Span]| {
             for s in spans {
                 match s {
-                    Span::Text(t, _) | Span::Code(t) => assert_eq!(*t, sanitize(t)),
-                    Span::Formula(i) | Span::Display(i) => assert!(*i < formulas),
+                    Span::Text(t, _) | Span::Code(t) => clean(t),
                     Span::Break => {}
                 }
             }
@@ -671,63 +600,12 @@ mod tests {
         for b in blocks {
             match b {
                 Block::Para(s) | Block::Heading(_, s) => spans(s),
-                Block::Code(lines) | Block::Lens { lines, .. } => {
-                    lines.iter().for_each(|l| assert_eq!(*l, sanitize(l)))
-                }
-                Block::List(_, items) => items.iter().for_each(|i| check(i, formulas, depth + 1)),
-                Block::Quote(inner) => check(inner, formulas, depth + 1),
+                Block::Code(lines) => lines.iter().for_each(|l| clean(l)),
+                Block::List(_, items) => items.iter().for_each(|i| check(i, depth + 1)),
+                Block::Quote(inner) => check(inner, depth + 1),
                 Block::Table(rows) => rows.iter().flatten().for_each(|c| spans(c)),
                 Block::Rule => {}
-                Block::Display(i) => assert!(*i < formulas),
             }
         }
-    }
-
-    #[test]
-    fn every_tag_lens_gets_placeholders_and_fence_lenses_become_lens_blocks() {
-        let text = "Press <keys>Ctrl+C</keys> for <latex>x</latex> <kbd>k</kbd>.\n\n\
-                    ```mermaid extra\nflowchart LR\n\ta --> b\n```\n\n\
-                    - ```mermaid\n  graph TD\n  ```\n\n```text\nplain\n```\n";
-        let p = prepare_lenses(text, &["latex", "keys"], &["mermaid"]);
-        assert_eq!(p.lenses, ["keys", "latex"]);
-        assert_eq!(p.tags[0].src, "Ctrl+C");
-        assert_eq!(p.tags[0].raw, "<keys>Ctrl+C</keys>");
-        let mut d = parse(&p);
-        assert_eq!(
-            d.blocks[0],
-            Block::Para(vec![
-                plain("Press "),
-                Span::Formula(0),
-                plain(" for "),
-                Span::Formula(1),
-                plain(" <kbd>k</kbd>."),
-            ])
-        );
-        assert_eq!(
-            d.blocks[1],
-            Block::Lens {
-                lens: "mermaid".into(),
-                lines: vec!["flowchart LR".into(), "    a --> b".into()],
-                rows: None,
-            }
-        );
-        assert_eq!(d.blocks[3], Block::Code(vec!["plain".into()]));
-        // Every lens block, nested ones too, in order.
-        let mut seen = Vec::new();
-        d.each_lens(&mut |lens, src, rows| {
-            seen.push((lens.to_owned(), src));
-            *rows = Some(vec!["drawn".into()]);
-        });
-        assert_eq!(
-            seen,
-            [
-                ("mermaid".to_owned(), "flowchart LR\n    a --> b".to_owned()),
-                ("mermaid".to_owned(), "graph TD".to_owned()),
-            ]
-        );
-        assert!(matches!(&d.blocks[1], Block::Lens { rows: Some(r), .. } if r == &["drawn"]));
-        // Without fence lenses, fences are code.
-        let d = parse(&prepare_lenses(text, &["latex"], &[]));
-        assert!(matches!(&d.blocks[1], Block::Code(_)));
     }
 }

@@ -7,15 +7,14 @@
 use uuid::Uuid;
 
 use crate::proto::{
-    GitStatus, LensItem, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState,
-    ShellSpec, SpawnSpec,
+    GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
+    SpawnSpec,
 };
 use crate::term::screen::Screen;
 
 use super::app::{App, Effect, Mode, PendingManifest, ReplyTo, PROJECTS_LIMIT};
 use super::confirm::{Choice, ConfirmAction, ConfirmPrompt};
 use super::interaction::Modal;
-use super::latex::Formula;
 use super::plugins::{compose, with_plugins, PluginPart};
 use super::state::{self, ClientState, KillTombstone, SavedSession};
 use super::wizard::{self, Wizard};
@@ -69,20 +68,6 @@ pub struct SessionView {
     pub turns: Option<u32>,
     /// Claude, or a plain terminal tab.
     pub kind: SessionKind,
-    /// The `seq` of the newest lens list taken (0: none yet; a `Latex`
-    /// list from a daemon without the `lens` feature), and its formulas'
-    /// sources, oldest first.
-    pub latex_seq: u64,
-    pub latex_srcs: Vec<String>,
-    /// Those formulas rendered; until the render worker is done with a new
-    /// list, the previous one.
-    pub latex: Vec<Formula>,
-    /// That list's items of every enabled tag lens (`latex` included),
-    /// oldest first.
-    pub lens_items: Vec<LensItem>,
-    /// The external tag lenses' items rendered, by tag (the extension host
-    /// fills it); until a list's renderings come, the previous ones.
-    pub lens: Vec<(String, Formula)>,
 }
 
 impl SessionView {
@@ -119,21 +104,7 @@ impl SessionView {
             output_tokens: None,
             turns: None,
             kind,
-            latex_seq: 0,
-            latex_srcs: Vec::new(),
-            latex: Vec::new(),
-            lens_items: Vec::new(),
-            lens: Vec::new(),
         }
-    }
-
-    /// Forget the formulas: a new conversation sends its own (any later seq is taken).
-    pub fn clear_latex(&mut self) {
-        self.latex_seq = 0;
-        self.latex_srcs.clear();
-        self.latex.clear();
-        self.lens_items.clear();
-        self.lens.clear();
     }
 
     /// The view of a session `host`'s daemon reports.

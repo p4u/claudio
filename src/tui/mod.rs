@@ -9,16 +9,13 @@ mod builtins;
 mod claude_update;
 mod confirm;
 pub(crate) mod connections;
-mod diagram;
 pub(crate) mod extensions;
 mod extensions_view;
 mod fmt;
-mod formulas;
 mod git_app;
 mod git_view;
 mod interaction;
 mod keymap;
-mod latex;
 mod leader;
 mod notifications;
 mod plain;
@@ -31,7 +28,6 @@ pub(crate) mod sessions;
 pub(crate) mod snippets;
 pub(crate) mod state;
 pub(crate) mod stats_view;
-mod typeset;
 
 /// `recent` without the local directories that no longer exist, so the
 /// wizard never offers a deleted directory (the check is I/O, so it happens
@@ -50,12 +46,9 @@ mod test_support;
 mod ui;
 mod wizard;
 
-use std::cell::Cell;
-use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -92,28 +85,6 @@ const OUTDATED_RETRY: Duration = Duration::from_secs(120);
 
 /// Whether keyboard enhancement flags were pushed (and must be popped).
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
-
-/// How long the render worker waits for one formula before it gives up on
-/// it (it is shown raw).
-const RENDER_BUDGET: Duration = Duration::from_millis(150);
-/// How many renders that ran over budget may still be running before new
-/// formulas are left raw (and tried again on a later list).
-const MAX_ABANDONED: usize = 2;
-/// How many rendered formulas the worker remembers, by source.
-const CACHE_SIZE: usize = 1024;
-/// The stack of a render scratch thread: deep enough for anything that
-/// passes `latex::too_complex`, in a debug or a release build.
-const SCRATCH_STACK: usize = 32 << 20;
-/// The thread names of the render worker and of its scratch threads.
-const RENDER_THREAD: &str = "latex-render";
-const SCRATCH_THREAD: &str = "latex-scratch";
-
-thread_local! {
-    /// Set on a render scratch thread. A panic there is the renderer's,
-    /// caught and shown as a raw formula: the UI's panic hook must not
-    /// touch the terminal for it (see [`panic_hook`]).
-    static QUIET_PANIC: Cell<bool> = const { Cell::new(false) };
-}
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -304,7 +275,6 @@ async fn main(launch: Launch) -> ExitCode {
             dropped.join(", ")
         ));
     }
-    let local_features = local_client.welcome().features.clone();
     let mut app = App::new(AppConfig {
         mode: if plain.is_some() {
             Mode::Plain
@@ -336,7 +306,6 @@ async fn main(launch: Launch) -> ExitCode {
         config.extensions.clone(),
         config.plugins.clone(),
     );
-    app.set_host_features("local", &local_features);
     app.on_plugin_host("local");
     app.check_local_install();
     let start = match plain {
@@ -461,13 +430,9 @@ fn enter_terminal() -> io::Result<(Term, (u16, u16))> {
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 /// The UI's panic hook: put the terminal back (`restore`), then report the
-/// panic as `default` would. A panic on a render scratch thread does
-/// neither: it is caught there, and the UI goes on.
+/// panic as `default` would.
 fn panic_hook(restore: fn(), default: PanicHook) -> PanicHook {
     Box::new(move |info| {
-        if QUIET_PANIC.with(Cell::get) {
-            return;
-        }
         restore();
         default(info);
     })
@@ -549,37 +514,11 @@ enum HostEvent {
     UpgradeAvailable(Option<String>),
     /// The newest claude version on its release channel.
     ClaudeLatest(String),
-    /// The render worker finished a session's formula list.
-    LatexRendered {
-        host: String,
-        id: crate::proto::SessionId,
-        seq: u64,
-        formulas: Vec<latex::Formula>,
-    },
-    /// The render worker finished the answers of a reader view; the
-    /// external lenses' items and blocks in them are still to render.
+    /// The answers of a reader view were parsed (or why not).
     AnswersRendered {
         gen: u64,
         id: crate::proto::SessionId,
-        answers: Vec<reader::RenderedAnswer>,
-        external: Vec<reader::External>,
-    },
-    /// The extension host rendered a session's external lens items (list
-    /// `seq`), in order; `None` stays raw.
-    ExternalRendered {
-        host: String,
-        id: crate::proto::SessionId,
-        seq: u64,
-        items: Vec<(
-            crate::proto::LensItem,
-            Option<extensions::protocol::Rendering>,
-        )>,
-    },
-    /// The extension host rendered the external items of reader view `gen`.
-    ReaderExternalRendered {
-        gen: u64,
-        id: crate::proto::SessionId,
-        rendered: Vec<(reader::External, Option<extensions::protocol::Rendering>)>,
+        answers: Result<Vec<reader::RenderedAnswer>, String>,
     },
     /// A notice from the extension host (an extension was disabled).
     ExtensionNotice(String),
@@ -614,316 +553,6 @@ enum HostEvent {
     },
     /// A notice from a background task.
     Notice(String),
-}
-
-// ── Formula rendering ─────────────────────────────────────────────────────────
-
-/// One [`Effect::RenderLatex`]: session `id`'s formulas as of `seq`.
-struct LatexJob {
-    host: String,
-    id: crate::proto::SessionId,
-    seq: u64,
-    srcs: Vec<String>,
-}
-
-/// One [`Effect::RenderAnswers`]: the answers of the reader view `gen`
-/// shows for session `id`.
-struct AnswersJob {
-    gen: u64,
-    id: crate::proto::SessionId,
-    answers: Vec<crate::proto::Answer>,
-    /// The enabled tag and fence lenses (the registry's, when sent), and
-    /// which of them are external.
-    tags: Vec<String>,
-    fences: Vec<String>,
-    external: Vec<String>,
-}
-
-/// Work for the `latex-render` thread, one job at a time.
-enum RenderJob {
-    Latex(LatexJob),
-    Answers(AnswersJob),
-}
-
-/// What the `latex-render` thread made of a job.
-enum Rendered {
-    Latex(LatexJob, Vec<latex::Formula>),
-    Answers(
-        AnswersJob,
-        Vec<reader::RenderedAnswer>,
-        Vec<reader::External>,
-    ),
-}
-
-/// Start the `latex-render` thread: it renders each job (its formulas from
-/// its cache when it can) and hands the result to `done`. It ends when the
-/// returned sender is dropped. Rendering never runs on the UI thread: one
-/// hostile formula can take a minute to parse, and markdown is parsed here
-/// too.
-fn spawn_latex_worker(
-    done: impl Fn(Rendered) + Send + 'static,
-) -> io::Result<std::sync::mpsc::Sender<RenderJob>> {
-    let (jobs, queue) = std::sync::mpsc::channel::<RenderJob>();
-    std::thread::Builder::new()
-        .name(RENDER_THREAD.to_owned())
-        .spawn(move || {
-            let mut cache = RenderCache::default();
-            let running = Arc::new(AtomicUsize::new(0));
-            for job in queue {
-                match job {
-                    RenderJob::Latex(job) => {
-                        let formulas = job
-                            .srcs
-                            .iter()
-                            .map(|src| cache.formula(src, &running))
-                            .collect();
-                        done(Rendered::Latex(job, formulas));
-                    }
-                    RenderJob::Answers(job) => {
-                        let lenses = (&job.tags[..], &job.fences[..], &job.external[..]);
-                        let (answers, work) =
-                            render_lens_answers(&job.answers, lenses, &mut cache, &running);
-                        done(Rendered::Answers(job, answers, work));
-                    }
-                }
-            }
-        })?;
-    Ok(jobs)
-}
-
-/// `answers` as the reader shows them with only the latex lens (see
-/// [`render_lens_answers`]).
-#[cfg(test)]
-fn render_answers(
-    answers: &[crate::proto::Answer],
-    cache: &mut RenderCache,
-    running: &Arc<AtomicUsize>,
-) -> Vec<reader::RenderedAnswer> {
-    let tags = ["latex".to_owned()];
-    render_lens_answers(answers, (&tags, &[], &[]), cache, running).0
-}
-
-/// `answers` as the reader shows them: each a markdown document whose
-/// items of tag lenses `lenses.0` (the first `MAX_FORMULAS`) and blocks of
-/// fence lenses `lenses.1` are rendered through the guard and its cache,
-/// like the pane's. The external lenses (`lenses.2`) are left raw here and
-/// listed: the extension host renders them.
-fn render_lens_answers(
-    answers: &[crate::proto::Answer],
-    lenses: (&[String], &[String], &[String]),
-    cache: &mut RenderCache,
-    running: &Arc<AtomicUsize>,
-) -> (Vec<reader::RenderedAnswer>, Vec<reader::External>) {
-    use crate::proto::LensKind;
-    let tags: Vec<&str> = lenses.0.iter().map(String::as_str).collect();
-    let fences: Vec<&str> = lenses.1.iter().map(String::as_str).collect();
-    let external = |lens: &str| lenses.2.iter().any(|e| e == lens);
-    let mut work = Vec::new();
-    let rendered = answers
-        .iter()
-        .enumerate()
-        .map(|(a, answer)| {
-            let prepared = reader::doc::prepare_lenses(&answer.text, &tags, &fences);
-            let mut formulas = Vec::with_capacity(prepared.tags.len());
-            for (i, (tag, lens)) in prepared.tags.iter().zip(&prepared.lenses).enumerate() {
-                if external(lens) {
-                    work.push(reader::External {
-                        answer: a,
-                        slot: reader::Slot::Formula(i),
-                        lens: lens.clone(),
-                        kind: LensKind::Tag,
-                        source: tag.src.clone(),
-                    });
-                    formulas.push(latex::Formula::raw(&tag.src));
-                } else {
-                    formulas.push(cache.render(lens, &tag.src, running));
-                }
-            }
-            let mut doc = reader::doc::parse(&prepared);
-            let mut n = 0;
-            doc.each_lens(&mut |lens, src, rows| {
-                if external(lens) {
-                    work.push(reader::External {
-                        answer: a,
-                        slot: reader::Slot::Fence(n),
-                        lens: lens.to_owned(),
-                        kind: LensKind::Fence,
-                        source: src,
-                    });
-                } else {
-                    *rows = cache.render(lens, &src, running).block.map(|b| b.rows);
-                }
-                n += 1;
-            });
-            reader::RenderedAnswer {
-                prompt: answer.prompt.clone(),
-                doc,
-                formulas,
-            }
-        })
-        .collect();
-    (rendered, work)
-}
-
-/// Renderings by lens and source, the [`CACHE_SIZE`] most recently used:
-/// each list resends every item, and a source is rendered once.
-#[derive(Default)]
-struct RenderCache {
-    entries: HashMap<(String, String), (u64, latex::Formula)>,
-    /// Bumped on every lookup; an entry keeps the value of its last use.
-    clock: u64,
-}
-
-impl RenderCache {
-    /// A `<latex>` formula's rendering.
-    fn formula(&mut self, src: &str, running: &Arc<AtomicUsize>) -> latex::Formula {
-        self.render("latex", src, running)
-    }
-
-    fn render(&mut self, lens: &str, src: &str, running: &Arc<AtomicUsize>) -> latex::Formula {
-        self.clock += 1;
-        let key = (lens.to_owned(), src.to_owned());
-        if let Some((used, formula)) = self.entries.get_mut(&key) {
-            *used = self.clock;
-            return formula.clone();
-        }
-        let (formula, keep) = render_lens(lens, src, running);
-        if keep {
-            if self.entries.len() >= CACHE_SIZE {
-                let oldest = self
-                    .entries
-                    .iter()
-                    .min_by_key(|(_, (used, _))| *used)
-                    .map(|(key, _)| key.clone());
-                if let Some(oldest) = oldest {
-                    self.entries.remove(&oldest);
-                }
-            }
-            self.entries.insert(key, (self.clock, formula.clone()));
-        }
-        formula
-    }
-}
-
-/// Render `src` of lens `lens` with its built-in renderer: a tag lens's
-/// item, or a fence lens's block (its rows as `block`). A lens without one
-/// (an external lens's) stays raw. The flag says whether it may be cached.
-fn render_lens(lens: &str, src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
-    match lens {
-        "latex" => render_formula(src, running),
-        "mermaid" => render_diagram(src, running),
-        _ => (latex::Formula::raw(src), true),
-    }
-}
-
-/// Draw one Mermaid diagram within [`RENDER_BUDGET`], as `render_formula`
-/// renders a formula: what the pre-check turns away, is unsupported, times
-/// out or panics stays its code block (raw); its rows are the block.
-fn render_diagram(src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
-    if diagram::too_complex(src) {
-        return (latex::Formula::raw(src), true);
-    }
-    let owned = src.to_owned();
-    match guarded(move || diagram::render(&owned), running) {
-        Guarded::Done(Ok(rows)) => {
-            let block = Some(typeset::Laid { rows, baseline: 0 });
-            let rendered = latex::Rendered {
-                inline: None,
-                block,
-                text: None,
-            };
-            (latex::Formula::new(src, rendered), true)
-        }
-        Guarded::Done(Err(_)) | Guarded::Failed => (latex::Formula::raw(src), true),
-        Guarded::Busy => (latex::Formula::raw(src), false),
-    }
-}
-
-/// Render one formula within [`RENDER_BUDGET`]: what the pre-check turns
-/// away, or what times out or panics, is shown raw. The flag says whether
-/// the result may be cached: not when too many renders were still running
-/// to start this one (a later list tries it again).
-fn render_formula(src: &str, running: &Arc<AtomicUsize>) -> (latex::Formula, bool) {
-    let clean = latex::prepare(src);
-    if latex::too_complex(&clean) {
-        return (latex::Formula::raw(src), true);
-    }
-    match guarded(move || latex::render(&clean), running) {
-        Guarded::Done(rendered) => (latex::Formula::new(src, rendered), true),
-        Guarded::Failed => (latex::Formula::raw(src), true),
-        Guarded::Busy => (latex::Formula::raw(src), false),
-    }
-}
-
-/// How a [`guarded`] call ended.
-enum Guarded<T> {
-    Done(T),
-    /// It panicked or ran over budget.
-    Failed,
-    /// It was not started: [`MAX_ABANDONED`] renders still run (or no
-    /// thread could be made).
-    Busy,
-}
-
-/// Run `f` on a fresh scratch thread with a [`SCRATCH_STACK`] stack and a
-/// panic in it caught quietly ([`QUIET_PANIC`]), waiting at most
-/// [`RENDER_BUDGET`]. A thread still running then is abandoned and ends on
-/// its own. `running` counts the scratch threads alive; when this returns,
-/// those are all abandoned ones.
-fn guarded<T: Send + 'static>(
-    f: impl FnOnce() -> T + Send + 'static,
-    running: &Arc<AtomicUsize>,
-) -> Guarded<T> {
-    if running.load(Ordering::Acquire) >= MAX_ABANDONED {
-        return Guarded::Busy;
-    }
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let alive = Arc::clone(running);
-    alive.fetch_add(1, Ordering::AcqRel);
-    let spawned = std::thread::Builder::new()
-        .name(SCRATCH_THREAD.to_owned())
-        .stack_size(SCRATCH_STACK)
-        .spawn(move || {
-            QUIET_PANIC.with(|quiet| quiet.set(true));
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            // Counted out before the result goes, so a caller that has it
-            // never counts this thread as running.
-            alive.fetch_sub(1, Ordering::AcqRel);
-            let _ = tx.send(result);
-        });
-    if spawned.is_err() {
-        running.fetch_sub(1, Ordering::AcqRel);
-        return Guarded::Busy;
-    }
-    match rx.recv_timeout(RENDER_BUDGET) {
-        Ok(Ok(value)) => Guarded::Done(value),
-        Ok(Err(_)) | Err(_) => Guarded::Failed,
-    }
-}
-
-/// Render each of `requests` (lens, kind, source) with the extension host,
-/// concurrently; the renderings in order (`None`: stays raw).
-fn render_all(
-    host: &extensions::host::ExtensionHost,
-    requests: Vec<(String, crate::proto::LensKind, String)>,
-) -> impl std::future::Future<Output = Vec<Option<extensions::protocol::Rendering>>> + Send + 'static
-{
-    let futures: Vec<_> = requests
-        .iter()
-        .map(|(lens, kind, source)| host.render(lens, *kind, source))
-        .collect();
-    async move {
-        let mut set = tokio::task::JoinSet::new();
-        let count = futures.len();
-        for (i, f) in futures.into_iter().enumerate() {
-            set.spawn(async move { (i, f.await) });
-        }
-        let mut out = vec![None; count];
-        while let Some(Ok((i, rendering))) = set.join_next().await {
-            out[i] = rendering;
-        }
-        out
-    }
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -1023,28 +652,6 @@ async fn event_loop(
         });
     }
 
-    // Formulas and answers are rendered on their own thread; the results
-    // come back here.
-    let rendered = ev_tx.clone();
-    let latex_jobs = spawn_latex_worker(move |done| {
-        let event = match done {
-            Rendered::Latex(job, formulas) => HostEvent::LatexRendered {
-                host: job.host,
-                id: job.id,
-                seq: job.seq,
-                formulas,
-            },
-            Rendered::Answers(job, answers, external) => HostEvent::AnswersRendered {
-                gen: job.gen,
-                id: job.id,
-                answers,
-                external,
-            },
-        };
-        let _ = rendered.blocking_send(event);
-    })
-    .ok();
-
     // External extensions' programs: started on first use, stopped on quit.
     let (notice_tx, mut notice_rx) = mpsc::unbounded_channel();
     let ext_host = extensions::host::ExtensionHost::new(&app.extensions, notice_tx);
@@ -1080,8 +687,7 @@ async fn event_loop(
 
     loop {
         for effect in app.take_effects() {
-            let workers = (latex_jobs.as_ref(), &ext_host);
-            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, workers);
+            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host);
         }
         if app.quit {
             ext_host.shutdown().await;
@@ -1138,7 +744,6 @@ async fn event_loop(
                     }
                     let home = client.welcome().host.home.clone();
                     let remote_claude = client_claude(&client);
-                    app.set_host_features(&host, &client.welcome().features);
                     conns.reset_delay(&host);
                     // Start the reader tagged with the current generation.
                     let cur_gen = conns.current_generation(&host);
@@ -1182,7 +787,6 @@ async fn event_loop(
                         spawn_reader("local".to_owned(), cur_gen, rx, ev_tx.clone());
                     }
                     app.set_local_claude(client_claude(&client));
-                    app.set_host_features("local", &client.welcome().features);
                     conns.connected("local", client);
                     app.on_plugin_host("local");
                     app.check_local_install();
@@ -1231,31 +835,10 @@ async fn event_loop(
                     }
                 }
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
-                Some(HostEvent::LatexRendered { host, id, seq, formulas }) => {
-                    app.on_latex_rendered(&host, id, seq, formulas);
-                }
-                Some(HostEvent::AnswersRendered { gen, id, answers, external }) => {
-                    app.on_answers_rendered(gen, id, answers);
-                    if !external.is_empty() {
-                        let requests = external
-                            .iter()
-                            .map(|w| (w.lens.clone(), w.kind, w.source.clone()))
-                            .collect();
-                        let all = render_all(&ext_host, requests);
-                        let tx = ev_tx.clone();
-                        tokio::spawn(async move {
-                            let rendered = external.into_iter().zip(all.await).collect();
-                            let event = HostEvent::ReaderExternalRendered { gen, id, rendered };
-                            let _ = tx.send(event).await;
-                        });
-                    }
-                }
-                Some(HostEvent::ExternalRendered { host, id, seq, items }) => {
-                    app.on_external_rendered(&host, id, seq, items);
-                }
-                Some(HostEvent::ReaderExternalRendered { gen, id, rendered }) => {
-                    app.on_reader_external(gen, id, rendered);
-                }
+                Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
+                    Ok(answers) => app.on_answers_rendered(gen, id, answers),
+                    Err(why) => app.on_answers_failed(gen, id, &why),
+                },
                 Some(HostEvent::ExtensionNotice(text)) => {
                     app.notify(text);
                     // The one notice the host sends: an extension disabled.
@@ -1308,10 +891,7 @@ fn run_effect(
     conns: &mut Connections,
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
-    (latex_jobs, ext_host): (
-        Option<&std::sync::mpsc::Sender<RenderJob>>,
-        &extensions::host::ExtensionHost,
-    ),
+    ext_host: &extensions::host::ExtensionHost,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -1364,46 +944,6 @@ fn run_effect(
         }
         Effect::LoadSshHosts => app.on_ssh_hosts(crate::remote::hosts::candidates()),
         Effect::CopyToClipboard(text) => copy_to_clipboard(&text),
-        Effect::RenderLatex {
-            host,
-            id,
-            seq,
-            srcs,
-        } => {
-            // Without a worker (it could not start) formulas stay raw.
-            if let Some(jobs) = latex_jobs {
-                let _ = jobs.send(RenderJob::Latex(LatexJob {
-                    host,
-                    id,
-                    seq,
-                    srcs,
-                }));
-            }
-        }
-        Effect::RenderExternal {
-            host,
-            id,
-            seq,
-            items,
-        } => {
-            let requests = items
-                .iter()
-                .map(|i| (i.tag.clone(), crate::proto::LensKind::Tag, i.text.clone()))
-                .collect();
-            let all = render_all(ext_host, requests);
-            let tx = ev_tx.clone();
-            tokio::spawn(async move {
-                let items = items.into_iter().zip(all.await).collect();
-                let _ = tx
-                    .send(HostEvent::ExternalRendered {
-                        host,
-                        id,
-                        seq,
-                        items,
-                    })
-                    .await;
-            });
-        }
         Effect::LoadSnippets { gen } => {
             let tx = ev_tx.clone();
             tokio::spawn(async move {
@@ -1467,26 +1007,15 @@ fn run_effect(
             }
         }
         Effect::RenderAnswers { gen, id, answers } => {
-            let names = |list: Vec<&str>| list.iter().map(|t| t.to_string()).collect::<Vec<_>>();
-            let tags = names(app.extensions.tag_lenses());
-            let fences = names(app.extensions.fence_lenses());
-            let external = tags
-                .iter()
-                .chain(&fences)
-                .filter(|l| app.extensions.external_lens(l).is_some())
-                .cloned()
-                .collect();
-            let job = RenderJob::Answers(AnswersJob {
-                gen,
-                id,
-                answers,
-                tags,
-                fences,
-                external,
+            // Markdown from the transcript is parsed off the UI thread.
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let parsed = tokio::task::spawn_blocking(move || reader::render(&answers)).await;
+                let answers = parsed.map_err(|e| format!("could not lay the answers out: {e}"));
+                let _ = tx
+                    .send(HostEvent::AnswersRendered { gen, id, answers })
+                    .await;
             });
-            if latex_jobs.is_none_or(|jobs| jobs.send(job).is_err()) {
-                app.on_answers_failed(gen, id, "the render thread is not running");
-            }
         }
         Effect::Save => {
             if let Err(e) = app.to_state().save(&paths::client_state()) {
@@ -1926,339 +1455,6 @@ async fn do_connect(host: String, gen: u64, tx: mpsc::Sender<HostEvent>, skip_bo
                     generation: gen,
                 })
                 .await;
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A panic in a render guard leaves the terminal alone: the UI's panic
-    /// hook neither restores it nor prints. One on a thread without the
-    /// guard's flag still does.
-    #[test]
-    fn a_render_panic_does_not_restore_the_terminal() {
-        static RESTORES: AtomicUsize = AtomicUsize::new(0);
-        // Other tests panic too: count only the threads this one names.
-        fn restore() {
-            if std::thread::current().name() == Some(SCRATCH_THREAD) {
-                RESTORES.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send> =
-            std::panic::take_hook().into();
-        let report = Arc::clone(&previous);
-        std::panic::set_hook(panic_hook(restore, Box::new(move |info| report(info))));
-        let running = Arc::new(AtomicUsize::new(0));
-        let caught = guarded(|| -> u8 { panic!("a renderer bug") }, &running);
-        let loud = std::thread::Builder::new()
-            .name(SCRATCH_THREAD.to_owned())
-            .spawn(|| panic!("not a render"))
-            .unwrap()
-            .join();
-        std::panic::set_hook(Box::new(move |info| previous(info)));
-        assert!(matches!(caught, Guarded::Failed));
-        assert!(loud.is_err());
-        assert_eq!(RESTORES.load(Ordering::SeqCst), 1, "only the unguarded one");
-        assert_eq!(running.load(Ordering::SeqCst), 0);
-    }
-
-    /// Hostile formulas go through the worker's own entry point: each
-    /// comes back raw or rendered and sanitized, nothing panics or aborts the
-    /// test binary, and none holds the worker longer than twice the budget.
-    #[test]
-    fn hostile_formulas_are_raw_or_sanitized_and_bounded_in_time() {
-        let corpus = [
-            "\\frac{a}{b".to_owned(),
-            "}}}{{{x".to_owned(),
-            "{".repeat(5000) + "x" + &"}".repeat(5000),
-            "\\frac ".repeat(340),
-            "\\hat ".repeat(400),
-            "\\not".repeat(512),
-            "x/".repeat(1000),
-            // Braceless script chains: no `{`, so not counted by the pre-check.
-            "x^".repeat(1000),
-            "x_".repeat(1000),
-            "sqrt(".repeat(400),
-            "x\u{1b}[2J\u{1b}]52;c;AAAA\u{7}y\u{9b}31m".to_owned(),
-            "a\u{202e}b\u{2066}c\u{200b}d\u{feff}e".to_owned(),
-            "\\binom{}{}".to_owned(),
-            "x".repeat(10 * 1024),
-            // Past the pre-check, but seconds of parsing: it times out.
-            "x/".repeat(255),
-        ];
-        let running = Arc::new(AtomicUsize::new(0));
-        for src in &corpus {
-            let started = Instant::now();
-            let (formula, _) = render_formula(src, &running);
-            let took = started.elapsed();
-            let head: String = src.chars().take(16).collect();
-            assert!(took < 2 * RENDER_BUDGET, "{took:?} for {head:?}…");
-            let laid = formula.block.iter().chain(&formula.text);
-            for text in formula.inline.iter().chain(laid.flat_map(|l| &l.rows)) {
-                assert_eq!(*text, crate::claude::latex::sanitize(text), "{head:?}");
-                assert!(!text.contains(['\u{1b}', '\u{9b}', '\u{202e}', '\u{200b}']));
-            }
-        }
-    }
-
-    /// A render over budget is abandoned. While MAX_ABANDONED of them still
-    /// run, nothing new starts (raw, and not cached); once they end,
-    /// rendering resumes. Sleeps stand in for slow parses, so the test
-    /// burns no CPU.
-    #[test]
-    fn slow_renders_are_abandoned_up_to_a_cap() {
-        let running = Arc::new(AtomicUsize::new(0));
-        for _ in 0..MAX_ABANDONED {
-            let started = Instant::now();
-            let nap = || std::thread::sleep(4 * RENDER_BUDGET);
-            assert!(matches!(guarded(nap, &running), Guarded::Failed));
-            assert!(started.elapsed() < 2 * RENDER_BUDGET);
-        }
-        assert_eq!(running.load(Ordering::SeqCst), MAX_ABANDONED);
-        let started = Instant::now();
-        let (formula, cache) = render_formula("E = mc^2", &running);
-        assert!(started.elapsed() < RENDER_BUDGET, "not even started");
-        assert_eq!(
-            (formula.inline, cache),
-            (None, false),
-            "busy: raw, not cached"
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while running.load(Ordering::SeqCst) > 0 {
-            assert!(
-                Instant::now() < deadline,
-                "the abandoned renders never ended"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let (formula, cache) = render_formula("E = mc^2", &running);
-        assert_eq!((formula.inline.as_deref(), cache), (Some("E = mc²"), true));
-    }
-
-    #[test]
-    fn the_worker_renders_each_job_and_passes_its_seq_on() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let jobs = spawn_latex_worker(move |done| {
-            if let Rendered::Latex(job, formulas) = done {
-                let _ = tx.send((job.seq, formulas));
-            }
-        })
-        .unwrap();
-        let id = uuid::Uuid::new_v4();
-        let job = |seq, srcs: Vec<String>| {
-            RenderJob::Latex(LatexJob {
-                host: "local".into(),
-                id,
-                seq,
-                srcs,
-            })
-        };
-        let deep = "\\frac ".repeat(300);
-        jobs.send(job(1, vec!["E = mc^2".into()])).unwrap();
-        jobs.send(job(2, vec!["E = mc^2".into(), deep.clone()]))
-            .unwrap();
-        let wait = Duration::from_secs(10);
-        let (seq, first) = rx.recv_timeout(wait).unwrap();
-        assert_eq!(seq, 1);
-        assert_eq!(first[0].inline.as_deref(), Some("E = mc²"));
-        let (seq, second) = rx.recv_timeout(wait).unwrap();
-        assert_eq!(seq, 2);
-        assert_eq!(second[0], first[0]);
-        assert_eq!(second[1], latex::Formula::raw(&deep), "too complex: raw");
-    }
-
-    /// AC7: answers go through the same worker and guard. Hostile ones
-    /// (thousands of tags, a 32-deep nested script, the hostile formula
-    /// corpus, a 64 KiB line, private-use input) come back bounded and
-    /// sanitized, and lay out with no inline box taller than three rows.
-    #[test]
-    fn hostile_answers_are_rendered_bounded_and_sanitized() {
-        use crate::proto::Answer;
-        use reader::layout::layout;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let jobs = spawn_latex_worker(move |done| {
-            if let Rendered::Answers(job, answers, _) = done {
-                let _ = tx.send((job.gen, answers));
-            }
-        })
-        .unwrap();
-        let nested = format!("x{}{}", "_{a".repeat(32), "}".repeat(32));
-        let corpus = [
-            "\\frac ".repeat(340),
-            "x/".repeat(255),
-            "x\u{1b}[2J\u{1b}]52;c;AAAA\u{7}y".to_owned(),
-            "a\u{202e}b\u{200b}c".to_owned(),
-        ];
-        let texts = [
-            "<latex>x</latex> ".repeat(4000),
-            format!("inline <latex>{nested}</latex> end\n\n<latex>{nested}</latex>"),
-            corpus
-                .iter()
-                .map(|f| format!("<latex>{f}</latex>\n\n"))
-                .collect(),
-            "w".repeat(64 * 1024),
-            "\u{e000}forged\u{e001} <latex>\u{e002}y</latex>".to_owned(),
-        ];
-        let answers: Vec<Answer> = texts
-            .iter()
-            .map(|text| Answer {
-                prompt: "p\u{1b}[2J".into(),
-                text: text.clone(),
-            })
-            .collect();
-        let started = Instant::now();
-        let job = AnswersJob {
-            gen: 7,
-            id: uuid::Uuid::new_v4(),
-            answers,
-            tags: vec!["latex".into()],
-            fences: vec![],
-            external: vec![],
-        };
-        jobs.send(RenderJob::Answers(job)).unwrap();
-        let (gen, rendered) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
-        assert_eq!(gen, 7);
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "{:?}",
-            started.elapsed()
-        );
-        assert_eq!(rendered.len(), texts.len());
-        assert_eq!(
-            rendered[0].formulas.len(),
-            crate::claude::latex::MAX_FORMULAS
-        );
-        for answer in &rendered {
-            for f in &answer.formulas {
-                let laid = f.block.iter().chain(&f.text);
-                for text in f.inline.iter().chain(laid.flat_map(|l| &l.rows)) {
-                    assert_eq!(*text, crate::claude::latex::sanitize(text));
-                }
-            }
-            for line in layout(&answer.doc, &answer.formulas, 80) {
-                let text = line.text();
-                assert_eq!(text, crate::claude::latex::sanitize(&text));
-                assert!(!text.contains(['\u{e000}', '\u{e001}', '\u{e002}']));
-            }
-        }
-        // The nested script is taller than three rows: inline, it is its
-        // one-line form, so its paragraph is one line.
-        let nested_doc = &rendered[1];
-        assert!(nested_doc.formulas[0].text.as_ref().unwrap().rows.len() > 3);
-        let lines = layout(&nested_doc.doc, &nested_doc.formulas, 200);
-        assert!(
-            lines[0].text().starts_with("inline x"),
-            "{:?}",
-            lines[0].text()
-        );
-        assert!(
-            lines[1].text().is_empty(),
-            "one line, then the display formula"
-        );
-    }
-
-    #[test]
-    fn the_cache_forgets_the_least_recently_used() {
-        let running = Arc::new(AtomicUsize::new(0));
-        let mut cache = RenderCache::default();
-        cache.formula("0", &running);
-        for i in 1..CACHE_SIZE {
-            cache.formula(&i.to_string(), &running);
-        }
-        cache.formula("0", &running); // used again: "1" is now the oldest
-        cache.formula("new", &running);
-        assert_eq!(cache.entries.len(), CACHE_SIZE);
-        let has = |src: &str| {
-            cache
-                .entries
-                .contains_key(&("latex".to_owned(), src.to_owned()))
-        };
-        assert!(has("0") && has("new"));
-        assert!(!has("1"));
-    }
-
-    #[test]
-    fn answers_render_every_tag_lens_and_fence_lens_by_its_renderer() {
-        use crate::proto::Answer;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let jobs = spawn_latex_worker(move |done| {
-            if let Rendered::Answers(_, answers, external) = done {
-                let _ = tx.send((answers, external));
-            }
-        })
-        .unwrap();
-        let text = "Press <keys>Ctrl+C</keys> for <latex>x^2</latex>.\n\n\
-                    ```mermaid\nflowchart LR\n  a --> b\n```\n\n```rust\nfn main() {}\n```\n";
-        let job = AnswersJob {
-            gen: 1,
-            id: uuid::Uuid::new_v4(),
-            answers: vec![Answer {
-                prompt: "p".into(),
-                text: text.into(),
-            }],
-            tags: vec!["latex".into(), "keys".into()],
-            fences: vec!["mermaid".into()],
-            external: vec!["keys".into()],
-        };
-        jobs.send(RenderJob::Answers(job)).unwrap();
-        let (answers, external) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        let answer = &answers[0];
-        // The external lens's item stays raw, listed for the host; latex is
-        // rendered.
-        assert_eq!(answer.formulas[0], latex::Formula::raw("Ctrl+C"));
-        let want = reader::External {
-            answer: 0,
-            slot: reader::Slot::Formula(0),
-            lens: "keys".into(),
-            kind: crate::proto::LensKind::Tag,
-            source: "Ctrl+C".into(),
-        };
-        assert_eq!(external, [want]);
-        assert_eq!(answer.formulas[1].inline.as_deref(), Some("x²"));
-        // The fence lens is a lens block; another fence stays code.
-        let lens: Vec<&reader::doc::Block> = answer
-            .doc
-            .blocks
-            .iter()
-            .filter(|b| matches!(b, reader::doc::Block::Lens { .. }))
-            .collect();
-        assert_eq!(lens.len(), 1);
-        assert!(answer
-            .doc
-            .blocks
-            .iter()
-            .any(|b| matches!(b, reader::doc::Block::Code(lines) if lines == &["fn main() {}"])));
-    }
-
-    #[test]
-    fn the_cache_keeps_lenses_apart() {
-        let running = Arc::new(AtomicUsize::new(0));
-        let mut cache = RenderCache::default();
-        let latex = cache.render("latex", "x^2", &running);
-        let keys = cache.render("keys", "x^2", &running);
-        assert_eq!(latex.inline.as_deref(), Some("x²"));
-        assert_eq!(keys, latex::Formula::raw("x^2"));
-        assert_eq!(cache.entries.len(), 2);
-    }
-
-    /// AC8: a Mermaid fence is drawn on the worker through the guard; an
-    /// unsupported or too large one stays its code block.
-    #[test]
-    fn mermaid_fences_are_drawn_through_the_guard() {
-        let running = Arc::new(AtomicUsize::new(0));
-        let drawn = render_lens("mermaid", "flowchart LR\n  alpha --> beta", &running);
-        let rows = drawn.0.block.expect("drawn").rows;
-        assert!(rows.iter().any(|r| r.contains("alpha")), "{rows:?}");
-        assert!(rows.iter().any(|r| r.contains("beta")), "{rows:?}");
-        for src in [
-            "classDiagram\n  A <|-- B".to_owned(),
-            "flowchart LR\n".repeat(300),
-        ] {
-            let (raw, keep) = render_lens("mermaid", &src, &running);
-            assert_eq!(raw, latex::Formula::raw(&src));
-            assert!(keep);
         }
     }
 }

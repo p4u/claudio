@@ -103,7 +103,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::Help) => draw_help(frame, app),
         Some(Modal::Confirm(prompt)) => draw_confirm(frame, prompt),
         Some(Modal::Git(view)) => draw_git(frame, view, app.now, pane),
-        Some(Modal::Reader(view)) => draw_reader(frame, app, view, pane),
+        Some(Modal::Reader(view)) => draw_reader(frame, view, pane),
         Some(Modal::Leader) => leader::draw_leader(frame, app),
         Some(Modal::ActionInput(input)) => leader::draw_action_input(frame, input),
         Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
@@ -327,29 +327,9 @@ fn draw_pane(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     };
+    // Claude's screen as claude drew it: formulas, diagrams and tag lenses
+    // render in the web UI only.
     view.mirror.render(area, frame.buffer_mut());
-    // Only while the latex extension is on (it may be turned off live).
-    let latex_on = app.extensions.tag_lenses().contains(&"latex");
-    if latex_on && !view.latex.is_empty() {
-        super::latex::overlay(frame.buffer_mut(), area, &view.mirror, &view.latex);
-    }
-    // The external tag lenses' renderings, each over its own tags.
-    for tag in app
-        .extensions
-        .tag_lenses()
-        .into_iter()
-        .filter(|t| *t != "latex")
-    {
-        let items: Vec<super::latex::Formula> = view
-            .lens
-            .iter()
-            .filter(|(t, _)| t == tag)
-            .map(|(_, f)| f.clone())
-            .collect();
-        if !items.is_empty() {
-            super::latex::overlay_tag(frame.buffer_mut(), area, &view.mirror, tag, &items);
-        }
-    }
     if let Some(sel) = app.selection.as_ref().filter(|s| s.session == view.id) {
         highlight_selection(frame.buffer_mut(), area, sel);
     }
@@ -937,37 +917,25 @@ mod tests {
         }
     }
 
-    /// The active session's rendered formulas replace their tags in the
-    /// pane; the mirror (what selection copies) keeps the tags.
+    /// The pane shows claude's text as claude printed it: a `<latex>` tag
+    /// stays a tag, whether the latex extension is on or off (formulas
+    /// render in the web UI only).
     #[test]
-    fn the_pane_shows_formulas_rendered() {
+    fn the_pane_shows_formula_tags_as_claude_printed_them() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut app =
             crate::tui::test_support::app_with(&[crate::tui::test_support::info(Some(1), None)]);
-        let v = &mut app.sessions[0];
-        v.mirror.feed(b"energy: <latex>E = mc^2</latex>.");
-        let rendered = crate::tui::latex::Rendered {
-            inline: Some("E = mc\u{b2}".to_owned()),
-            ..Default::default()
-        };
-        v.latex = vec![crate::tui::latex::Formula::new("E = mc^2", rendered)];
-        let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
-        term.draw(|f| draw(f, &app)).unwrap();
-        let buf = term.backend().buffer();
-        let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
-        assert_eq!(row.trim_end(), "energy: E = mc\u{b2}.");
-        assert!(app.sessions[0]
+        app.sessions[0]
             .mirror
-            .row_chars(0)
-            .iter()
-            .collect::<String>()
-            .contains("<latex>"));
-        // The latex extension turned off: the tags show as written.
-        app.extensions.set_enabled("latex", false);
-        term.draw(|f| draw(f, &app)).unwrap();
-        let buf = term.backend().buffer();
-        let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
-        assert_eq!(row.trim_end(), "energy: <latex>E = mc^2</latex>.");
+            .feed(b"energy: <latex>E = mc^2</latex>.");
+        let mut term = Terminal::new(TestBackend::new(app.width, app.height)).unwrap();
+        for on in [true, false] {
+            app.extensions.set_enabled("latex", on);
+            term.draw(|f| draw(f, &app)).unwrap();
+            let buf = term.backend().buffer();
+            let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+            assert_eq!(row.trim_end(), "energy: <latex>E = mc^2</latex>.");
+        }
     }
 
     fn total_width(titles: &[(String, String)]) -> usize {

@@ -8,7 +8,6 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{ActionResult, ListItem};
 use crate::claude::latex::sanitize;
-use crate::tui::typeset::Laid;
 
 /// The protocol version in `CLAUDIO_EXTENSION_PROTOCOL`.
 pub const VERSION: u32 = 1;
@@ -27,6 +26,12 @@ const TITLE_MAX: usize = 120;
 
 /// A render result: its one-line form and its block, each optional.
 pub type Rendering = (Option<String>, Option<Laid>);
+
+/// A render result's block: its rows, top to bottom, each one line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Laid {
+    pub rows: Vec<String>,
+}
 
 /// What a session an action runs for is, as the program is told.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,11 +110,7 @@ pub fn rendering(result: &Value) -> Option<Rendering> {
             if out.len() > BLOCK_MAX_ROWS {
                 return None;
             }
-            Some(Laid {
-                rows: out,
-                baseline: 0,
-            })
-            .filter(|l| !l.rows.is_empty())
+            Some(Laid { rows: out }).filter(|l| !l.rows.is_empty())
         }
         Some(_) => return None,
     };
