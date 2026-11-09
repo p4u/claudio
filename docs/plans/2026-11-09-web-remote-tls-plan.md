@@ -4,6 +4,8 @@ Spec: `docs/specs/2026-11-09-web-remote-tls-design.md` (audited 2026-11-09, F1�
 Class: architectural (security-sensitive: keys, authentication, a non-loopback listener)
 Repo: `/volumes/repos/claudio`   Branch: `feat/web-remote-tls`   Base: `558a54d`
 Ledger: `.delivery/2026-11-09-web-remote-tls/progress.md` (rulings R1–R5)
+Note: the branch also carries the owner's README rewrite (78dd8e4) after the base; tasks start
+from the branch head.
 
 Every security-relevant function below was compiled, clippy-checked (`-D warnings`) and run in a
 scratch worktree against the base: the TLS listener behind `axum::serve` with `ConnectInfo`, the
@@ -106,7 +108,7 @@ for context):
 | 4 | `--remote`: certificate store, TLS listener, CLI, start-up, token rule | strong | 1 |
 | 5 | Password login over `--remote` | strong | 1 |
 | 6 | The page's password form and the `--remote` e2e | standard | 2 |
-| 7 | User docs, README and CLAUDE.md | standard | 2 |
+| 7 | User docs and CLAUDE.md (README already rewritten by the owner) | standard | 2 |
 
 After Task 7 the controller runs the final check (end of this file).
 
@@ -3287,11 +3289,12 @@ claudio web --remote --rotate-cert   # a new certificate (browsers warn once mor
   `--remote`"; Test adds `over --remote the page asks for the password and the session works`,
   `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate`.
 
-### 7b. `README.md` and `CLAUDE.md`
+### 7b. `CLAUDE.md` (and a README check)
 
-- `README.md` (line 290): "It listens on loopback only; use `ssh -L 7337:127.0.0.1:7337 host`,
-  a TLS reverse proxy, or `claudio web --remote` (TLS with a self-signed certificate and a
-  password, set with `claudio web --set-password`) to reach it from elsewhere."
+- `README.md`: the owner's rewrite (78dd8e4, on this branch after the base) already documents
+  `--remote`, `--set-password` and `--print-cert` (lines 49–52, 177). Only check it against the
+  built behaviour (the token link works from the machine itself, i.e. local requests; the
+  fingerprint is printed at every start) and fix a mismatch if any; do not rewrite it.
 - `CLAUDE.md`:
   - The core map (`crates/core` line in "Workspace"): add `sys` to the module list; under
     "`crates/core/src/term/`" add "`secret.rs` — `read_line_no_echo`: one line from a terminal
@@ -3324,7 +3327,7 @@ claudio web --remote --rotate-cert   # a new certificate (browsers warn once mor
 
 ```bash
 git commit -m "docs(web): claudio web --remote, its security model and how to trust the certificate" -- docs/web.md
-git commit -m "docs: README and CLAUDE.md for claudio web --remote" -- README.md CLAUDE.md
+git commit -m "docs: CLAUDE.md for claudio web --remote" -- CLAUDE.md   # add README.md only if 7b found a mismatch
 ```
 
 ---
