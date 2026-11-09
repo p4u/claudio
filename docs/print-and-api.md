@@ -1,6 +1,6 @@
 # claudio: print mode, API server, and proxy
 
-This document covers `claudio -p` (drop-in for `claude -p`), the `--api` OpenAI-compatible server, and the `claude-proxy` integration.
+This document covers `claudio -p` (drop-in for `claude -p`) and the `--api` OpenAI-compatible server, both the API addon's (`src/addons/api/`, docs/addons.md), and the `claude-proxy` integration (the Vocdoni addon's).
 
 > **Background.** `claudio` demonstrates that client-side restrictions on programmatic Claude Code use cannot be enforced: every signal that would distinguish "human" from "automation" lives on the user's machine, and the model requests produced are identical either way. It uses only your own authenticated session and documented, supported Claude Code features. It does **not** bypass authentication or billing — every request counts against your account.
 
@@ -183,15 +183,15 @@ docker compose up claudio-api        # serves http://127.0.0.1:8080/v1
 
 ## claude-proxy integration
 
-claudio integrates with **[claude-proxy](https://github.com/p4u/claude-proxy)**, an optional self-hosted gateway that lets remote sessions authenticate without a local `claude` login.
+The Vocdoni addon integrates claudio with **[claude-proxy](https://github.com/p4u/claude-proxy)**, an optional gateway that lets sessions authenticate without a local `claude` login. `claudio proxy …` is an alias of `claudio vocdoni …`.
 
 **Login:**
 
 ```bash
-claudio proxy login [URL]
+claudio vocdoni login [URL] [--token]
 ```
 
-The URL is prompted if omitted. The token is **always read interactively** (no echo) or piped on stdin.
+Without a URL it signs in again to the default profile's proxy, else to `https://claude.vocdoni.net`. With `--token` the token is **always read interactively** (no echo) or piped on stdin, never an argument.
 
 **Ephemeral profile (no saved file):**
 
@@ -204,9 +204,9 @@ where `<host>` may be `proxy.example.com`, `https://proxy.example.com`, or `host
 **Other proxy commands:**
 
 ```bash
-claudio proxy status              # show profiles and live stats
-claudio proxy use NAME|none       # set or clear the default profile
-claudio proxy logout [NAME]       # remove a saved profile
+claudio vocdoni status            # show profiles and live stats
+claudio vocdoni use NAME|none     # set or clear the default profile
+claudio vocdoni logout [NAME]     # remove a saved profile
 ```
 
 When a session is spawned with a proxy profile the daemon injects `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and several `CLAUDE_CODE_*` / `ANTHROPIC_DEFAULT_*_MODEL` variables. Secrets are passed through the daemon's environment plumbing and are never written to any state file.

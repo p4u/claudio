@@ -12,6 +12,9 @@ core keeps with an addon and the limits it enforces.
 - [Launches](#launches)
 - [Data, not widgets](#data-not-widgets)
 - [Daemon ops](#daemon-ops)
+- [The API addon](#the-api-addon)
+- [The web addon](#the-web-addon)
+- [The Vocdoni addon](#the-vocdoni-addon)
 - [Config sections and reserved words](#config-sections-and-reserved-words)
 - [Limits](#limits)
 
@@ -42,10 +45,18 @@ pub trait Addon: Send + Sync + 'static {
 `name()` is the addon's registry key, its CLI word when it has commands, and its daemon
 feature (`addon:<name>`).
 
-**Commands.** `is_relay(argv)` is checked before anything else, so a hook relay (a copy of the
-binary that claude runs as a hook) is answered without parsing the command line. `dispatch(argv,
-addons)` runs after the core's own words, in registry order, before passthrough to `claude`;
-`None` means "not mine". `help()` is appended to `claudio --help`.
+**Commands.** `src/main.rs` is wiring: it routes argv (`argv[0]` included) in this order.
+1. `Addons::relay`: the first addon whose `is_relay(argv)` is true runs it through its own
+   `dispatch`, so a hook relay (a copy of the binary that claude runs as a hook) is answered
+   before anything else parses the command line.
+2. The core's words: `__probe`, `--slave`, the diag words (`--features diag`), the manager's
+   `__hook <Event> <socket> <token>`, `__context`, `--daemon`, `upgrade`, `daemon`,
+   `sessions`, `--plain`, no argument (the manager) and the addons' launch flags (the manager,
+   routed as they ask).
+3. `Addons::dispatch`: each addon's `dispatch(argv, addons)`, in registry order; the first
+   `Some(code)` wins, `None` means "not mine".
+4. `-h`/`--help`: claude's help, then every addon's `help()`, in registry order.
+5. Anything else: the real `claude`, unchanged.
 
 **Launch**, **Ui** and **DaemonOps** are described below.
 
@@ -186,10 +197,17 @@ keeps those).
 when it takes a value). The core parses addon flags on `claudio …` and `claudio --plain …`. A
 switch with a `label` is also a wizard checkbox.
 
-**Legacy persistence.** Sessions saved before addons carry `proxy` and `first_party`
-(`LegacyChoice`). The core offers them to each addon's `adopt_legacy`; one that no addon adopts
-fails the launch, never direct. For one release the core also writes the legacy fields an addon
-derives with `legacy(choice)`, so a rolled-back build keeps every session's routing.
+**Persistence.** `state.json` (each `SavedSession`) and `web-state.json` (each `SessionMeta`)
+keep a session's `launch`, its `LaunchChoice` (omitted for a direct one). Sessions saved before
+addons carry only `proxy` and `first_party` (`LegacyChoice`). On load, `launch` wins when an
+addon of this build has it; without `launch`, the core offers the legacy fields to each addon's
+`adopt_legacy` (no `proxy`: direct). A choice this build cannot make (its addon is not
+registered, or no addon adopts the legacy fields) is kept as it was saved and written back
+unchanged, and the session's launches fail with "this session's launch option is not available
+in this build": never direct (AC8). For one release (compat(v0.10)) the core also writes the
+legacy fields an addon derives with `legacy(choice)` beside `launch`, so a rolled-back build
+keeps every session's routing. A session known only from its daemon (started by another
+front-end) stays unknown (`route_unknown`) whatever these say.
 
 ## Data, not widgets
 
@@ -262,10 +280,39 @@ older daemon answers an unknown op with `unsupported op`. A core-only daemon lis
 features. The daemon protocol, its features and the mixed-version table are in
 `docs/daemon-protocol.md`.
 
+## The API addon
+
+`src/addons/api/`: `-p`/`--print` emulation and the OpenAI-compatible `--api` server
+(docs/print-and-api.md), with `Commands` only. `is_relay` takes the print path's hook relays
+(`<Event> <port>`, and `__hook <Event>` unless it is the core's five-word manager relay);
+`dispatch` runs `cli::parse` on whatever argv is left (so `--` keeps its meaning) and takes it
+when it asks for `--api` or `-p`; `help()` is the wrapper's flag and env reference. It is
+registered last, after every addon with words of its own. Its PTY sessions are outside launch
+composition (tools disabled, no addon's share).
+
+## The web addon
+
+`src/addons/web/` (the page is `web/` at the root, embedded by `build.rs`): `Commands` for
+`claudio web …` (docs/web.md, protocol docs/web-protocol.md). Its `Launch` is `Optional` for
+every launch, from every front-end: `prepare` gives the `latex` tag lens (with the
+`<latex>` instruction) unless `extension_on("latex")` is false, and the `mermaid` fence lens
+(with the diagram instruction) unless `extension_on("diagram")` is false, so the daemon
+extracts what the page renders. `[claude] latex = false` is an alias of `[extensions] latex =
+false` (the runtime maps it, and it wins). Its `Ui` lists the `latex` and `diagram` extension
+rows (on by default); their toggles are the core's to write. A build without the web addon asks
+claude for no tags.
+
 ## The Vocdoni addon
 
 `src/addons/vocdoni/`: the claude-proxy client and the team plugins. It owns the `[proxy]` and
 `[plugins]` sections and lists `addon:vocdoni` in a daemon's features.
+
+**Commands.** `claudio vocdoni login [URL] [--name NAME] [--token] [--unverified] | status |
+use NAME|none | logout [NAME]`, and `claudio proxy …` as an alias with the same subcommands.
+`login` without a URL signs in again to the default profile's proxy, else to
+`https://claude.vocdoni.net` (`DEFAULT_URL`); `--token` reads a pasted token (stdin when it is
+not a terminal), never an argument. Under `--features diag`, `__remote-manifest` drives
+`vocdoni/apply` on an ssh host for the remote tests.
 
 **Daemon op `apply`.** Apply one plugin manifest on the host: what was the `Manifest` op of the
 releases before addons, unchanged in behaviour.
@@ -346,8 +393,9 @@ lock shared with every other writer of `config.toml` (B3).
 The core owns these sections: `ui`, `keys`, `update`, `claude`, `extensions`. No addon may
 claim them.
 
-The core's command words are reserved and are never dispatched to an addon: `__probe`,
-`--slave`, `__hook`, `__context`, `--daemon`, `upgrade`, `daemon`, `sessions`, `--plain`. So are
+The core's command words are reserved (no addon may be named after one, and the core runs them
+before any addon's `dispatch`): `__probe`, `--slave`, `__hook`, `__context`, `--daemon`,
+`upgrade`, `daemon`, `sessions`, `--plain`. Only a relay (`is_relay`) is answered before them. So are
 its flags: `--plain`, `--daemon`, `--slave`, `-p`, `--print`, `--api`, `-h`, `--help`.
 
 ## Limits

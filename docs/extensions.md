@@ -95,7 +95,7 @@ latex instruction out of that host's sessions, and its daemon extracts no
 A claude-proxy profile can serve plugins (`GET /v1/claudio/plugins`): for
 each, a pinned manifest (a TOML file, by URL and SHA-256) and the env its MCP
 servers need (their secrets). claudio fetches the list of every profile in
-use at start, every 15 minutes, after `claudio proxy login` and on `r` in
+use at start, every 15 minutes, after `claudio vocdoni login` and on `r` in
 the extensions screen, and caches it in `~/.config/claudio/plugins.json`
 (mode 0600: it holds the secrets). It fetches each manifest itself (https,
 256 KiB at most, hash-checked, kept in memory).

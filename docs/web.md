@@ -3,8 +3,20 @@
 `claudio web` serves the session manager to a browser. It is one more client of the claudio
 daemons, like the TUI: the same sessions, the same hosts (local and over SSH), the same
 `config.toml`. Sessions keep running when you close the tab. The wire contract between the
-server and the page is [web-protocol.md](web-protocol.md); the design is in
-[specs/2026-11-08-web-ui-design.md](specs/2026-11-08-web-ui-design.md).
+server and the page is [web-protocol.md](web-protocol.md), version 2; the design is in
+[specs/2026-11-08-web-ui-design.md](specs/2026-11-08-web-ui-design.md). `claudio web` is the
+web addon (docs/addons.md, "The web addon"): it reaches the other addons only through the
+registry, and the latex and mermaid lenses it renders are its own share of every launch.
+
+**Protocol 2 and the addons.** What an addon shows comes as data and is drawn by generic
+components: a session's `segments` (the Vocdoni addon's route, credential and 5h/7d windows)
+in the top bar and the session card, an addon's **panel** (pages of blocks, windows, actions;
+the Vocdoni addon's "Proxy stats" on `Alt+s`) in a dialog, and an addon's **checklist** (a
+plugin's setup) when a launch answers `review`: Save keeps the choices and spawns, Skip spawns
+without that plugin this once, Cancel spawns nothing. The wizard has one select per launch
+option group and a checkbox per labelled launch flag (`addons.list`). The ops are `addons.*`;
+the version-1 `proxy.*` and `plugins.*` ops are gone, and a tab of an older page reloads once
+through the version handshake. Addon text is rendered as text only.
 
 ## Usage
 
@@ -70,7 +82,8 @@ the terminal in it, and the page's own keys are not fighting the browser's.
 - **What is logged** (INFO, to stderr): `session.shell`, `session.spawn`, `session.kill`,
   `session.approve` and `extensions.action`, with the op, the host and the session id. Never
   values, typed text or tokens.
-- **State.** The web writes `web-state.json` (layout, order, proxy choice per session) and
+- **State.** The web writes `web-state.json` (layout, order, each session's `launch`, still
+  with its `proxy`/`first_party` for one release, remote hosts) and
   `web-token` in the config dir. It reads the TUI's `state.json` and never writes it.
 
 ## Keys
