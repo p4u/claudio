@@ -271,7 +271,6 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest",
- "rust-latex-parser",
  "serde",
  "serde_json",
  "sha2",
@@ -2048,12 +2047,6 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
-
-[[package]]
-name = "rust-latex-parser"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d8acd59feae81354fa3e31bb843418e76d83c49941f417ae5fbaa8a6c97fac5"
 
 [[package]]
 name = "rustc-hash"
