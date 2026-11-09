@@ -9,8 +9,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::*;
 use crate::freshness::{ensure_current, DaemonCheck};
 use crate::remote::probe::Probe;
+use std::future::Future;
 
 /// This test binary, as the newer build.
+/// [`ensure_current`] for the daemon `config` describes, as its callers do:
+/// connect first.
+async fn check_current<F, Fut>(config: &Config, start: F) -> std::io::Result<DaemonCheck>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let daemon = crate::client::connect(&config.socket).await?;
+    ensure_current(daemon, &config.lock, &own(), start).await
+}
+
 fn own() -> Probe {
     Probe::own().expect("the test binary is readable").clone()
 }
@@ -107,7 +119,7 @@ async fn an_outdated_idle_daemon_is_replaced_and_its_sessions_come_back() {
         tokio::spawn(listening.serve());
         Ok(())
     };
-    let check = ensure_current(&old.config.socket, &old.config.lock, &own(), start).await;
+    let check = check_current(&old.config, start).await;
     assert_eq!(check.unwrap(), DaemonCheck::Restarted);
 
     // The new daemon runs our build, and has both sessions, dormant.
@@ -168,7 +180,7 @@ async fn an_outdated_busy_daemon_is_left_running() {
         started.store(true, Ordering::Relaxed);
         Ok(())
     };
-    let check = ensure_current(&old.config.socket, &old.config.lock, &own(), start).await;
+    let check = check_current(&old.config, start).await;
     assert_eq!(check.unwrap(), DaemonCheck::Deferred);
     assert!(!started.load(Ordering::Relaxed));
 
@@ -189,7 +201,7 @@ async fn a_current_or_newer_daemon_is_left_alone() {
     for build in [own(), newer] {
         let d = daemon_running(build, fake_claude());
         let start = || async { panic!("no restart") };
-        let check = ensure_current(&d.config.socket, &d.config.lock, &own(), start).await;
+        let check = check_current(&d.config, start).await;
         assert_eq!(check.unwrap(), DaemonCheck::UpToDate);
         welcome(&d.config.socket).await;
     }

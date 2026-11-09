@@ -784,7 +784,11 @@ pub async fn ensure_local_daemon() -> io::Result<DaemonCheck> {
         return Ok(DaemonCheck::UpToDate);
     };
     let (socket, lock) = (paths::daemon_socket(), paths::daemon_lock());
-    match crate::freshness::ensure_current(&socket, &lock, own, start).await {
+    let checked = async {
+        let daemon = connect(&socket).await?;
+        crate::freshness::ensure_current(daemon, &lock, own, start).await
+    };
+    match checked.await {
         Ok(check) => Ok(check),
         Err(e) => {
             tracing::warn!(error = %e, "could not check the daemon's version");
