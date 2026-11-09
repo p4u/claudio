@@ -47,23 +47,12 @@ pub fn probe(claude: &Path, path: Option<&OsStr>) -> HostInfo {
 /// Host facts that need no subprocess (`claude` reported as missing).
 pub fn basic() -> HostInfo {
     HostInfo {
-        hostname: hostname(),
+        hostname: crate::sys::hostname(),
         os: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
         home: home().to_string_lossy().into_owned(),
         claude: None,
     }
-}
-
-fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: the pointer and length describe a valid, writable buffer.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-    if rc != 0 {
-        return String::new();
-    }
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
 /// `Some` when `claude` resolves to a file and `--version` answers in time.

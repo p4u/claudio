@@ -5,6 +5,9 @@
 
 #![allow(dead_code)]
 
+/// `claudio web --remote`: a TLS server and a pinned client.
+pub mod tls;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -247,6 +250,21 @@ pub fn http_at(
 ) -> Reply {
     let mut s = TcpStream::connect((ip, port)).unwrap();
     s.set_read_timeout(Some(WAIT)).unwrap();
+    let req = request_text(method, path, host, extra, body);
+    s.write_all(req.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    parse_reply(&raw)
+}
+
+/// One raw HTTP/1.1 request's text (`Connection: close`).
+pub fn request_text(
+    method: &str,
+    path: &str,
+    host: &str,
+    extra: &[(&str, &str)],
+    body: &str,
+) -> String {
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
@@ -259,10 +277,12 @@ pub fn http_at(
     }
     req.push_str("\r\n");
     req.push_str(body);
-    s.write_all(req.as_bytes()).unwrap();
-    let mut raw = Vec::new();
-    let _ = s.read_to_end(&mut raw);
-    let text = String::from_utf8_lossy(&raw).into_owned();
+    req
+}
+
+/// A raw HTTP/1.1 answer: status (0 when there is none), headers, body.
+pub fn parse_reply(raw: &[u8]) -> Reply {
+    let text = String::from_utf8_lossy(raw).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let mut lines = head.lines();
     let status = lines

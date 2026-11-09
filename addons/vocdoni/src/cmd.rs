@@ -338,136 +338,29 @@ fn store_login(
     );
 }
 
-/// Read a token with no-echo (raw TTY or plain stdin).
+/// Read a token: with echo off from a terminal, else one line of stdin.
 fn read_token_from_tty_or_stdin() -> String {
     use std::io::IsTerminal;
 
-    eprint!("Token: ");
-    let _ = io::stderr().flush();
-
     if io::stdin().is_terminal() {
-        // Use libc termios to suppress echo.
-        read_token_no_echo()
+        match claudio_core::term::secret::read_line_no_echo("Token: ") {
+            Ok(line) => line.trim().to_owned(),
+            Err(e) => {
+                // Never fall back to echoing a secret token.
+                eprintln!(
+                    "claudio vocdoni login: cannot read the token with echo off ({e}); aborting"
+                );
+                std::process::exit(1);
+            }
+        }
     } else {
+        eprint!("Token: ");
+        let _ = io::stderr().flush();
         let mut line = String::new();
         let _ = io::stdin().lock().read_line(&mut line);
         eprintln!(); // mimic the newline the terminal would print.
         line.trim().to_owned()
     }
-}
-
-// ── No-echo token reader ───────────────────────────────────────────────────────
-//
-// Uses libc termios to disable echo. Portable across Linux and macOS via
-// MaybeUninit + tcgetattr (no struct literal with platform-specific fields).
-// An RAII guard restores the terminal on every exit path. A temporary SIGINT
-// handler restores the terminal before the process is terminated by Ctrl-C.
-
-use std::sync::atomic::{AtomicI32, Ordering};
-
-/// File descriptor saved for the SIGINT handler. -1 = handler not installed.
-static SIGINT_FD: AtomicI32 = AtomicI32::new(-1);
-
-/// Saved termios bytes for the SIGINT handler.
-struct TermCell(std::cell::UnsafeCell<std::mem::MaybeUninit<libc::termios>>);
-// SAFETY: written by the main thread before the handler is installed (Release
-// store on SIGINT_FD), read only by the handler (Acquire load). No concurrent
-// writes after initialization.
-unsafe impl Sync for TermCell {}
-static SIGINT_SAVED: TermCell =
-    TermCell(std::cell::UnsafeCell::new(std::mem::MaybeUninit::uninit()));
-
-/// SIGINT handler: restore terminal and re-raise with the default handler.
-extern "C" fn on_sigint(_: libc::c_int) {
-    let fd = SIGINT_FD.load(Ordering::Acquire);
-    if fd >= 0 {
-        // SAFETY: initialized before SIGINT_FD was set to a non-negative value.
-        unsafe {
-            let saved = (*SIGINT_SAVED.0.get()).assume_init_ref();
-            libc::tcsetattr(fd, libc::TCSANOW, saved);
-        }
-    }
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-        libc::raise(libc::SIGINT);
-    }
-}
-
-/// RAII guard: restores termios and the previous SIGINT handler on drop.
-struct NoEchoGuard {
-    fd: i32,
-    saved: libc::termios,
-    old_sigint: libc::sighandler_t,
-}
-
-impl Drop for NoEchoGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved);
-            libc::signal(libc::SIGINT, self.old_sigint);
-        }
-        SIGINT_FD.store(-1, Ordering::Release);
-    }
-}
-
-/// Read a line from stdin with echo disabled using libc termios.
-///
-/// Aborts the process (via `eprintln!` + `process::exit`) if echo cannot be
-/// disabled — we never fall back to echoing a secret token.
-fn read_token_no_echo() -> String {
-    use std::mem::MaybeUninit;
-    use std::os::unix::io::AsRawFd;
-
-    let stdin_fd = io::stdin().as_raw_fd();
-
-    // Fetch the current termios using MaybeUninit — avoids naming any
-    // platform-specific struct fields (c_line exists on Linux but not macOS).
-    let mut saved = MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: tcgetattr writes into the pointer on success.
-    if unsafe { libc::tcgetattr(stdin_fd, saved.as_mut_ptr()) } != 0 {
-        eprintln!("\nclaudio vocdoni login: cannot query terminal state; aborting");
-        std::process::exit(1);
-    }
-    // SAFETY: tcgetattr succeeded, so saved is fully initialized.
-    let saved = unsafe { saved.assume_init() };
-
-    // Store for the signal handler before installing it.
-    unsafe {
-        (*SIGINT_SAVED.0.get()).write(saved);
-    }
-    SIGINT_FD.store(stdin_fd, Ordering::Release);
-
-    // Install temporary SIGINT handler.
-    // SAFETY: on_sigint is a valid extern "C" fn.
-    let old_sigint =
-        unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
-
-    // Disable echo (keep ICANON so read_line still works line-by-line).
-    let mut raw = saved;
-    raw.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
-    if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) } != 0 {
-        // Restore signal handler — the RAII guard hasn't been created yet.
-        unsafe {
-            libc::signal(libc::SIGINT, old_sigint);
-        }
-        SIGINT_FD.store(-1, Ordering::Release);
-        eprintln!("\nclaudio vocdoni login: cannot disable echo; aborting");
-        std::process::exit(1);
-    }
-
-    // RAII guard: restores termios and signal handler on every exit path
-    // (normal return, panic, early return, etc.).
-    let _guard = NoEchoGuard {
-        fd: stdin_fd,
-        saved,
-        old_sigint,
-    };
-
-    let mut line = String::new();
-    let _ = io::stdin().lock().read_line(&mut line);
-    eprintln!(); // newline after the hidden input
-
-    line.trim().to_owned()
 }
 
 // ── status ────────────────────────────────────────────────────────────────────

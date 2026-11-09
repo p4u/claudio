@@ -105,8 +105,9 @@ scrubbed env and stdin `/dev/null` unless interactive.
 (`paths::write_atomic`); executables keep their executable mode; claudio never chmods a
 directory it does not own.
 
-**C5. The web UI keeps its perimeter.** Loopback only, guard order Host → Origin → cookie, the
-import map is the only inline script, no eval or CDN, vendored files byte-identical.
+**C5. The web UI keeps its perimeter.** Loopback only, or with `--remote` one TLS listener where
+every non-local request needs the password (docs/web.md); guard order Host → Origin → cookie,
+the import map is the only inline script, no eval or CDN, vendored files byte-identical.
 
 ## D. Code quality
 

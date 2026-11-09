@@ -9,14 +9,19 @@ autotests = false
 
 [dependencies]
 claudio-core.workspace = true
+argon2.workspace = true
 axum.workspace = true
 base64.workspace = true
 flate2.workspace = true
 futures.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -31,4 +36,6 @@ sha2.workspace = true
 claudio-core = { workspace = true, features = ["test-support"] }
 # A test AddonCtx returns these (the addon API's http() and config()).
 reqwest.workspace = true
+# login.rs's paused-clock test (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true

@@ -16,6 +16,9 @@ claudio-api = { path = "addons/api" }
 claudio-web = { path = "addons/web" }
 claudio-vocdoni = { path = "addons/vocdoni" }
 alacritty_terminal = "0.26"
+# `claudio web --set-password` and --remote's password check: argon2id, pure
+# Rust. Pinned exactly: it hashes what a browser sends (D7).
+argon2 = "=0.6.0"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 crossterm = { version = "0.29", features = ["event-stream"] }
@@ -28,12 +31,22 @@ portable-pty = "0.8"
 # bounds were measured against this version.
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 ratatui = "0.30"
+# The --remote self-signed certificate (local input only).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `claudio web --remote` (claudio-web only). TLS on ring, the provider the
+# tree already builds through reqwest: never aws_lc_rs (C and cmake; it
+# breaks `make static`, and two providers break rustls' default lookup).
+# rustls and tokio-rustls parse what the network sends: pinned exactly (D7).
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# Which names the kept certificate covers; already in the tree via rustls.
+rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 # `claudio web`'s WebSocket in the web suites: the version axum's `ws` feature
 # pulls, so one copy builds.
 tokio-tungstenite = "0.29"
@@ -128,6 +141,8 @@ portable-pty.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# The --remote suites' pinned TLS client.
+tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 
@@ -137,4 +152,12 @@ strip = true
 # Every daemon start and connect hashes the claudio binary (the freshness
 # check); unoptimized, that takes seconds on a debug build.
 [profile.dev.package.sha2]
+opt-level = 3
+
+# A debug build verifies the --remote password in the suites: unoptimized
+# argon2 takes ~250 ms a check, optimized ~15 ms.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
 opt-level = 3

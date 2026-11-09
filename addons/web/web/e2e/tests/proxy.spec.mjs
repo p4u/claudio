@@ -27,6 +27,26 @@ test('a plugin without choices asks for its checklist before spawn and Skip spaw
   expect(env).not.toContain('VOCDONI_TEST_TOKEN');
 });
 
+test('a wizard opened before the page connects shows the launch options once they arrive', async ({ page }) => {
+  // The page draws before its WebSocket is open: hold the socket off (refuse it) until the
+  // wizard is open, so the addons' declarations reach a wizard that is already showing.
+  let refused = 0;
+  let admit = false;
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    if (!admit) { refused++; ws.close(); return; }
+    ws.connectToServer();
+  });
+  await page.goto(srv.url);
+  await expect(page.getByTestId('rail')).toBeVisible();
+  await expect.poll(() => refused).toBeGreaterThan(0);
+  await page.keyboard.press('n');
+  await expect(page.getByTestId('wizard')).toBeVisible();
+  await expect(page.getByTestId('wizard-launch')).toBeVisible(); // no options yet
+  admit = true;
+  await expect(page.getByTestId('wizard-proxy')).toHaveValue('default');
+  await expect(page.getByTestId('wizard-first-party')).toBeVisible();
+});
+
 test('proxy stats render the fixture window', async ({ page }) => {
   const sid = await srv.spawn(srv.dirs.b, { launch: { pick: 'default' }, defer: [{ addon: 'vocdoni', id: PLUGIN }] });
   await page.goto(srv.url);

@@ -4,6 +4,8 @@ pub mod probe;
 
 pub mod screen;
 
+pub mod secret;
+
 /// Strip CSI / OSC / DCS escape sequences so plain-text matching is robust
 /// against cursor-positioning escapes that pad words.
 pub fn strip_escapes(bytes: &[u8]) -> String {

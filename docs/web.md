@@ -25,6 +25,11 @@ claudio web                      # serve on 127.0.0.1:7337 and open the browser
 claudio web --listen 127.0.0.1:9000 --no-open
 claudio web --print-url          # print the sign-in URL for the stored token and exit
 claudio web --rotate-token       # make a new token (every browser signs in again)
+claudio web --set-password       # set the password other machines log in with (asks twice)
+claudio web --remote             # TLS on 0.0.0.0:7337 for other machines; needs the password
+claudio web --remote [::]:8443   # IPv6 and IPv4, port 8443
+claudio web --print-cert         # the certificate, to install as trusted on a laptop or phone
+claudio web --remote --rotate-cert   # a new certificate (browsers warn once more)
 ```
 
 On start it prints `claudio web: http://127.0.0.1:7337/#t=<token>`. Open that URL once: the
@@ -35,17 +40,65 @@ Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; defaul
 `127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
 `--rotate-token`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
 
+`--remote [ADDR][:PORT]` serves TLS for other machines (below). Its value is `ADDR`,
+`ADDR:PORT`, `:PORT`, `[V6]` or `[V6]:PORT` (a bare IPv6 address needs brackets, `[::]:7337`);
+without one it listens on `0.0.0.0:7337`, IPv4 only. It is the one listener: `--remote` with
+`--listen` is refused, and an `--allow-host` port must be the `--remote` port. `--rotate-cert`
+(with `--remote`) makes a new certificate. `--set-password` and `--print-cert` take no other
+argument and exit.
+
 ### From another machine
 
-The server never listens on a non-loopback address. Two ways to reach it:
+Without `--remote` the server never listens on a non-loopback address. Three ways to reach it:
 
 - **SSH tunnel** (the simple one): `ssh -L 7337:127.0.0.1:7337 host`, then open the URL on the
   laptop.
+- **`--remote`**: claudio serves TLS itself, and other machines log in with a password (next
+  section).
 - **A TLS reverse proxy** on the same host (Caddy, nginx) that forwards to the loopback port.
   Tell the server the name the browser uses: `claudio web --allow-host claudio.example.org`. That
   name is then accepted in `Host` and `Origin`, and the cookie gets `Secure`. The proxy must pass
   WebSocket upgrades on `/ws` and keep the `Host` header. If the proxy is not on 443, name its
-  port: `--allow-host claudio.example.org:8443`.
+  port: `--allow-host claudio.example.org:8443`. Keep using plain `--listen` with it; a proxy
+  in front of `--remote` is unsupported, and one that rewrites `Host` to a loopback name would
+  make every proxied browser local (a token holder), so never configure that.
+
+### `--remote`: TLS and a password
+
+1. **Set the password**: `claudio web --set-password`. It asks twice and never echoes; 12 to
+   1024 bytes. A running server keeps the old one until it restarts, and a restart signs every
+   browser out.
+2. **Start the server**: `claudio web --remote`. Without a password it exits before it makes a
+   certificate or opens a port. On stderr it prints `TLS certificate SHA-256 AB:CD:…` (at every
+   start), the names the certificate covers, and the token link for this machine
+   (`https://127.0.0.1:7337/#t=…`); on stdout, the URL for other machines (no token). If a
+   firewall (ufw, firewalld, macOS's) blocks the port, open it. Another machine may not
+   resolve the host name: use `<host>.local` or the machine's address. A name the certificate
+   does not cover is named on stderr; `--rotate-cert` adds it (the fingerprint changes).
+3. **On the other machine**, open `https://<host>.local:7337/`. The browser warns that the
+   certificate is not trusted. **Check the fingerprint** before you accept it: Chromium and
+   Brave: "Not secure" → Certificate details → SHA-256 fingerprint; Firefox: Advanced → View
+   Certificate → SHA-256. It must equal the printed one. Then log in with the password.
+4. **Or install the certificate** (no warning, and the install-as-app button appears):
+   `claudio web --print-cert > claudio.pem`, copy it to the device, and add it to the trust
+   store. *These steps are checked by hand in AC9(b); not yet checked on any platform.* The
+   certificate is a self-signed server certificate, not a CA, and some trust stores may refuse
+   it; then use the exception path (step 3).
+   - Firefox: Settings → Privacy & Security → Certificates → View Certificates → Servers → Add
+     Exception, or Authorities → Import. *Not yet checked.*
+   - Chromium on Linux: Settings → Privacy and security → Security → Manage certificates →
+     Import. *Not yet checked.*
+   - macOS: Keychain Access → System → import, then Get Info → Trust → Always Trust. *Not yet
+     checked.*
+   - Android: Settings → Security → Encryption & credentials → Install a certificate → CA
+     certificate. *Not yet checked.*
+   - iOS: open the file, install the profile, then Settings → General → About → Certificate
+     Trust Settings → turn it on. *Not yet checked.*
+5. **With the exception alone** (AC9(a), *not yet checked*): Chromium keeps the exception 7
+   days, then asks again (Firefox until you remove it); the install-as-app affordance is not
+   expected; Capture all keys and copy still work, because the page is a secure context. On a
+   phone the warning cannot show the fingerprint: install the certificate instead of clicking
+   through.
 
 **Installed window.** Chromium and Safari can install the page as an app (Install, or Add to
 Dock). An app window has no tab strip, so `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and friends stay with
@@ -53,20 +106,53 @@ the terminal in it, and the page's own keys are not fighting the browser's.
 
 ## Security model
 
-- **Loopback only.** `--listen` refuses anything else. Remote access goes through SSH or a TLS
-  proxy you run.
+- **Loopback only, unless `--remote`.** `--listen` refuses anything else. With `--remote` there
+  is one TLS listener on the address given, and every request that is not local needs the
+  password. Otherwise remote access goes through SSH or a TLS proxy you run.
+- **Local requests.** A request is local when its TCP peer is a loopback address (from the
+  connection, never a header) **and** its `Host` is a loopback form (`127.0.0.1`, `localhost`,
+  `[::1]` at the port). Without `--remote` the token works for every request; with it, only for
+  local ones, so a browser on another machine (or behind a proxy that keeps `Host`) never logs
+  in with the token.
+- **The password** (`--remote` only). An argon2id hash (m=19 MiB, t=2, p=1) in
+  `~/.config/claudio/web-password`, mode 0600; 12 to 1024 bytes. It is never in argv, a log, a
+  notice or the page's storage (the page clears the field before it posts it). Whoever has it
+  can type into your sessions.
+- **The certificate** (`--remote` only). A self-signed P-256 server certificate (10 years) and
+  its key in `~/.config/claudio/web-tls/` (0600 files in a 0700 directory), made on the first
+  start and kept. Its SHA-256 fingerprint is printed at every start. `--rotate-cert` replaces
+  it; a missing half, a foreign mode, a symlink or a key that does not match is refused (naming
+  `--rotate-cert`), never replaced silently. No `Strict-Transport-Security` header, on purpose:
+  it would stop a browser from accepting the self-signed certificate later.
+- **Limits.** Login attempts are reserved before any check: 5 per address (an IPv6 /64 counts
+  as one) per minute, and 30 a minute for all password attempts and non-local token attempts
+  together; past a limit the answer is `429`. Password checks run 4 at once; one that waits 2 s
+  for a slot answers `503` and does not count. With `--remote`: a TLS handshake gets 10 s and
+  64 run at once, 8 at once per address; 256 connections in all, 32 per address; the headers
+  of a connection's first request must arrive within 30 s; an idle connection afterwards keeps
+  its slot until the browser closes it.
+- **Accepted risks.** The first fingerprint check is yours: a browser remembers the exception
+  per host and certificate, and a changed certificate warns again; clicking through a changed
+  one without checking can be attacked. An attacker who keeps the global window full locks
+  every remote password login (yours included) while the attack lasts; loopback use is
+  unaffected. Many addresses together can fill the 256 connection slots while an attack lasts.
 - **The token is a key.** It lives in `~/.config/claudio/web-token` (mode 0600, 64 hex),
   is reused across runs and is compared in constant time. Treat it like an SSH private key:
   whoever has it can type into your sessions. `--rotate-token` replaces it. It is printed on
   stdout at start and by `--print-url`, and nowhere else (never in a log, a query string, a
-  WebSocket frame or an HTTP body).
-- **Cookie.** `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when
-  `--allow-host` is set. Sessions are kept in the server's memory: 24 h idle expiry, at most 64.
-  Five failed logins in 60 s lock the login for the rest of that minute (`429`).
+  WebSocket frame or an HTTP body). With `--remote` it is printed on stderr instead, in the
+  link for this machine (when the listen address is loopback or every interface), and by
+  `--print-url`, and accepted only from local requests.
+- **Cookie.** `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` with
+  `--remote` or when `--allow-host` is set. Sessions are kept in the server's memory: 24 h idle
+  expiry, at most 64.
 - **Host and Origin.** Every request needs an accepted `Host` (the listen address and the
-  loopback names with the port, plus `--allow-host` names), else `421`. A `POST` or a WebSocket upgrade also needs an
-  accepted `Origin`, else `403`. `/ws` and `/api/*` need the cookie, else `401`. This stops DNS
-  rebinding and cross-site requests.
+  loopback names with the port, plus `--allow-host` names), else `421`. With `--remote` the
+  accepted `Host`s are also any IP literal at the port, this machine's host name and
+  `<host>.local`, and the `Origin` must be `https://`. A `POST` or a WebSocket upgrade also needs an
+  accepted `Origin`, else `403`. `/ws` and `/api/*` need the cookie, else `401`; `/api/me`'s
+  `401` lists the login methods the request may use. This stops DNS rebinding and cross-site
+  requests.
 - **CSP.** `default-src 'self'; script-src 'self' 'sha256-<import map>'; …`, with
   `frame-ancestors 'none'`, `object-src 'none'` and `connect-src 'self'`, plus `nosniff` and
   `Referrer-Policy: no-referrer`, on every response. The only inline script is the import map
@@ -80,11 +166,13 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   goes through DOMPurify, formulas through KaTeX (`trust: false`), diagrams through mermaid
   (`securityLevel: "strict"`) and DOMPurify's SVG profile.
 - **What is logged** (INFO, to stderr): `session.shell`, `session.spawn`, `session.kill`,
-  `session.approve` and `extensions.action`, with the op, the host and the session id. Never
-  values, typed text or tokens.
+  `session.approve` and `extensions.action`, with the op, the host and the session id; `web:
+  login refused` with the status and whether the request was local. Never values, typed text,
+  tokens or passwords.
 - **State.** The web writes `web-state.json` (layout, order, each session's `launch`, still
   with its `proxy`/`first_party` for one release, remote hosts) and
-  `web-token` in the config dir. It reads the TUI's `state.json` and never writes it.
+  `web-token` in the config dir (with `--set-password` and `--remote`, also `web-password` and
+  `web-tls/`). It reads the TUI's `state.json` and never writes it.
 
 ## Keys
 
@@ -182,7 +270,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
 | Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
-| Login and security | n/a | token URL, cookie | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests |
+| Login and security | n/a | token URL, cookie; password form with `--remote` | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `over --remote the page asks for the password and the session works`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests; `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate` |
 | Layout and style | n/a | dark only ([DESIGN.md](../DESIGN.md)); Settings → Text size | `layout.save` | `the page follows DESIGN.md`; `web_order_and_layout_persist_in_web_state` |
 | Keys | `Alt+…` (see Keys) | the same Alt keys, `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette`; `Alt+u in a terminal opens the reader and sends nothing to claude`; `Alt+a focuses the session that needs attention, Alt+Right switches session` |
 | Newline in the prompt | `Shift+Enter` | `Shift+Enter` in a terminal | `session.input` | `Shift+Enter puts ESC CR into the input, Enter submits` |

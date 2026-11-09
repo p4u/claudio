@@ -15,6 +15,7 @@ pub mod paths;
 pub mod proto;
 pub mod release;
 pub mod remote;
+pub mod sys;
 pub mod term;
 pub mod text;
 pub mod upgrade;
