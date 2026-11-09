@@ -22,7 +22,7 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
       - name: Unit tests
-        run: cargo test --locked --bin claudio
+        run: cargo test --locked --workspace --lib --bins
         env:
           RUST_BACKTRACE: 1
       # End-to-end tests require an authenticated `claude` and are gated behind
