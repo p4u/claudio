@@ -9,7 +9,8 @@ use super::SessionId;
 /// How to start a session. `args` are extra claude arguments (e.g.
 /// `["--resume", "<uuid>"]`); the daemon adds the claude binary and its own
 /// hook settings. `env` may carry secrets and is redacted from `Debug`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// `Default` is for literals that name the fields they set (its `id` is nil).
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpawnSpec {
     pub id: SessionId,
     pub cwd: String,
@@ -33,12 +34,18 @@ pub struct SpawnSpec {
     /// daemon, which goes by its own `[claude] latex`.
     #[serde(default)]
     pub extensions: Option<SessionExtensions>,
+    /// What the process loses from the daemon's env (names, never values;
+    /// docs/daemon-protocol.md, "Spawn env"). `None`: an old client, and the
+    /// daemon applies its compatibility scrub (the previous release's rule).
+    /// `Some(list)`: exactly `claude::SESSION_MARKERS` plus `list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_remove: Option<Vec<String>>,
 }
 
 /// How to restart a session. Everything else (cwd, name, claude arguments,
 /// kind) comes from the daemon's journal. `env` may carry secrets and is
-/// redacted from `Debug`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// redacted from `Debug`. `Default` as [`SpawnSpec`]'s.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RespawnSpec {
     pub id: SessionId,
     /// Start a new conversation instead of resuming the journaled one.
@@ -52,6 +59,9 @@ pub struct RespawnSpec {
     /// [`SpawnSpec::extensions`]).
     #[serde(default)]
     pub extensions: Option<SessionExtensions>,
+    /// As [`SpawnSpec::env_remove`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_remove: Option<Vec<String>>,
 }
 
 /// The lenses of a claude session, in the client's registry order, and
@@ -208,6 +218,7 @@ impl std::fmt::Debug for RespawnSpec {
             .field("rows", &self.rows)
             .field("cols", &self.cols)
             .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
+            .field("env_remove", &self.env_remove)
             .finish()
     }
 }
@@ -225,6 +236,7 @@ impl std::fmt::Debug for SpawnSpec {
             .field("cols", &self.cols)
             .field("ephemeral", &self.ephemeral)
             .field("extensions", &self.extensions.as_ref().map(|e| e.names()))
+            .field("env_remove", &self.env_remove)
             .finish()
     }
 }

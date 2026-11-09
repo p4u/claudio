@@ -925,6 +925,38 @@ exec cat
             .unwrap_or_default()
     }
 
+    /// The harness daemon's control socket (`daemon-v<PROTO>.sock`).
+    pub fn daemon_socket(&self) -> PathBuf {
+        self.runtime_dir.join("claudio").join("daemon-v1.sock")
+    }
+
+    /// Send `msg` (one control message, as raw JSON: what an older or newer
+    /// client would send) to the running harness daemon and return its
+    /// reply. Says `Hello` first, then reads frames until the one whose
+    /// `req` matches, skipping `Welcome`, events and terminal bytes.
+    pub fn daemon_request(&self, mut msg: serde_json::Value) -> serde_json::Value {
+        use std::os::unix::net::UnixStream;
+        const REQ: u64 = 4242;
+        let mut s = UnixStream::connect(self.daemon_socket()).expect("connect to the daemon");
+        s.set_read_timeout(Some(WAIT)).expect("read timeout");
+        let hello = serde_json::json!({"op": "hello", "claudio_version": "0.0.0-test", "proto": 1});
+        write_control(&mut s, &hello);
+        msg["req"] = REQ.into();
+        write_control(&mut s, &msg);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            assert!(Instant::now() < deadline, "no reply from the daemon");
+            let (tag, payload) = read_frame(&mut s);
+            if tag != b'J' {
+                continue;
+            }
+            let reply: serde_json::Value = serde_json::from_slice(&payload).expect("JSON frame");
+            if reply["req"] == REQ {
+                return reply;
+            }
+        }
+    }
+
     /// Start a `claudio` TUI with a custom setup closure applied AFTER the
     /// default env vars.
     pub fn start_tui_with<F: FnOnce(&mut CommandBuilder)>(&self, setup: F) -> TuiProcess {
@@ -942,6 +974,26 @@ impl Drop for ManagerHarness {
         self.kill_daemon();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// One `J` frame: `[u32 BE length][b'J'][JSON]`, the length counting the tag.
+fn write_control(s: &mut impl Write, msg: &serde_json::Value) {
+    let body = serde_json::to_vec(msg).expect("encode");
+    let len = u32::try_from(body.len() + 1).expect("frame size");
+    s.write_all(&len.to_be_bytes()).expect("write frame");
+    s.write_all(b"J").expect("write frame");
+    s.write_all(&body).expect("write frame");
+}
+
+/// One frame's tag and payload.
+fn read_frame(s: &mut impl Read) -> (u8, Vec<u8>) {
+    let mut len = [0u8; 4];
+    s.read_exact(&mut len).expect("read frame length");
+    let len = u32::from_be_bytes(len) as usize;
+    assert!((1..=1 << 20).contains(&len), "bad frame length {len}");
+    let mut frame = vec![0u8; len];
+    s.read_exact(&mut frame).expect("read frame");
+    (frame[0], frame.split_off(1))
 }
 
 // ── Wizard helper ─────────────────────────────────────────────────────────────

@@ -169,6 +169,7 @@ impl TestDaemon {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         }
     }
 
@@ -992,6 +993,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         cols: 80,
         ephemeral: false,
         extensions: None,
+        env_remove: None,
     };
 
     // spawner handles the Spawn/Spawned handshake; observer watches events.
@@ -1087,6 +1089,7 @@ async fn immediate_exit_leaves_session_dormant() {
         cols: 80,
         ephemeral: false,
         extensions: None,
+        env_remove: None,
     };
     c.spawn(spec).await;
 
@@ -1407,6 +1410,7 @@ mod addon_ops;
 mod freshness;
 mod git;
 mod login_path;
+mod spawn_env;
 
 // ── Respawn (reset a session in place) ───────────────────────────────────────
 
@@ -1487,6 +1491,7 @@ impl Client {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         };
         match self.call_seen(Msg::Respawn(spec)).await {
             (Msg::Spawned { id: spawned, pid }, seen) => {
@@ -1632,6 +1637,7 @@ async fn respawn_revives_a_dormant_session_and_rejects_unknown_ones() {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         }))
         .await;
     assert!(matches!(unknown, Msg::Error { message } if message.contains("no such session")));
@@ -1715,6 +1721,7 @@ fn respawn_spec(id: SessionId, fresh: bool) -> proto::RespawnSpec {
         rows: 24,
         cols: 80,
         extensions: None,
+        env_remove: None,
     }
 }
 

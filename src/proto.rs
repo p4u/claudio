@@ -1189,6 +1189,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         });
         let merged = spawn
             .merge_env(vec![pair("API_TIMEOUT_MS", "30000")])
@@ -1216,6 +1217,7 @@ mod tests {
             rows: 24,
             cols: 80,
             extensions: None,
+            env_remove: None,
         });
         let json = serde_json::to_string(&Envelope::request(4, respawn.clone())).unwrap();
         assert!(json.contains(r#""op":"respawn""#) && json.contains(r#""fresh":true"#));
@@ -1232,6 +1234,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 extensions: None,
+                env_remove: None,
             })
         );
     }
@@ -1320,6 +1323,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         };
         let dbg = format!("{spec:?}");
         assert!(dbg.contains("ANTHROPIC_AUTH_TOKEN"));
@@ -1916,6 +1920,7 @@ mod tests {
             cols: 1,
             ephemeral: false,
             extensions: Some(ext.clone()),
+            env_remove: None,
         };
         let shown = format!("{spec:?}");
         assert!(
@@ -1930,6 +1935,7 @@ mod tests {
             rows: 1,
             cols: 1,
             extensions: Some(ext),
+            env_remove: None,
         };
         assert!(!format!("{respawn:?}").contains("Keys."));
     }

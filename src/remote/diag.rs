@@ -125,12 +125,9 @@ pub fn remote_session_cmd(host: &str, cwd: &str) -> ExitCode {
             id: session_id,
             cwd: cwd.clone(),
             name: None,
-            args: vec![],
-            env: vec![],
             rows: 24,
             cols: 80,
-            ephemeral: false,
-            extensions: None,
+            ..Default::default()
         };
 
         // Spawn the session.
@@ -271,7 +268,6 @@ pub fn remote_manifest_cmd(
         let spec = SpawnSpec {
             id,
             cwd: cwd.to_owned(),
-            name: None,
             args,
             env,
             rows: 24,
@@ -281,6 +277,7 @@ pub fn remote_manifest_cmd(
                 instructions: applied.instructions.clone(),
                 ..Default::default()
             }),
+            ..Default::default()
         };
         match client.request(Msg::Spawn(spec)).await {
             Ok(Msg::Spawned { pid, .. }) => {

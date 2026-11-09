@@ -409,12 +409,12 @@ impl App {
             cwd,
             name,
             args,
-            env: Vec::new(),
             rows,
             cols,
             // `--plain`'s session is not one for a manager to show.
             ephemeral: self.mode == Mode::Plain,
             extensions: Some(self.extensions.session_extensions()),
+            ..Default::default()
         };
         let to = ReplyTo::Spawned(id);
         self.send_with_proxy(
@@ -559,10 +559,10 @@ impl App {
         let msg = Msg::Respawn(RespawnSpec {
             id,
             fresh,
-            env: Vec::new(),
             rows,
             cols,
             extensions: Some(self.extensions.session_extensions()),
+            ..Default::default()
         });
         match self.send_with_proxy(
             &host,

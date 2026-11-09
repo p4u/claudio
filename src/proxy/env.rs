@@ -105,44 +105,6 @@ pub fn session_env(profile: &Profile, config: Option<&ConfigResponse>) -> Vec<(S
     env
 }
 
-/// How to alter the environment a `claude` process inherits.
-///
-/// Returned by [`env_diff`] so every launcher (the daemon's PTY builder,
-/// `--plain`'s `std::process::Command`) applies the same rules with its own
-/// builder type.
-#[derive(Debug, PartialEq)]
-pub struct EnvDiff<'a> {
-    /// Variables to remove from the inherited environment.
-    pub remove: Vec<&'static str>,
-    /// Variables to set.
-    pub set: &'a [(String, String)],
-}
-
-/// The env changes for a claude session that carries `env` (a proxy's
-/// [`session_env`], or empty).
-///
-/// Scrubs the markers of a parent claude session (see
-/// [`crate::claude::SESSION_MARKERS`]). A proxy token replaces any
-/// `ANTHROPIC_API_KEY`, which would otherwise win over it.
-///
-/// A first-party proxy env (no `CLAUDE_CODE_USE_GATEWAY`, see
-/// [`session_env`]) also drops an inherited `CLAUDE_CODE_USE_GATEWAY`: it
-/// would turn the feature flags off again. An inherited
-/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept, since it may be set on
-/// purpose; it turns the feature flags off too, so it has to be unset by hand
-/// for first-party sessions. An inherited `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-/// is kept as well: claude clamps it to the model's window anyway.
-pub fn env_diff(env: &[(String, String)]) -> EnvDiff<'_> {
-    let mut remove = crate::claude::SESSION_MARKERS.to_vec();
-    if env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
-        remove.push("ANTHROPIC_API_KEY");
-        if !env.iter().any(|(k, _)| k == "CLAUDE_CODE_USE_GATEWAY") {
-            remove.push("CLAUDE_CODE_USE_GATEWAY");
-        }
-    }
-    EnvDiff { remove, set: env }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -251,25 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn env_diff_scrubs_markers_and_keeps_api_key_without_token() {
-        let diff = env_diff(&[]);
-        assert_eq!(diff.remove, crate::claude::SESSION_MARKERS);
-        assert!(diff.set.is_empty());
-    }
-
-    #[test]
-    fn env_diff_drops_api_key_only_with_auth_token() {
-        let env = session_env(&profile("https://x.net", "tok"), None);
-        let diff = env_diff(&env);
-        assert!(diff.remove.contains(&"CLAUDECODE"));
-        assert!(diff.remove.contains(&"ANTHROPIC_API_KEY"));
-        assert_eq!(diff.set, env.as_slice());
-        // Other entries alone don't count as a token.
-        let other = [("API_TIMEOUT_MS".to_owned(), "1".to_owned())];
-        assert!(!env_diff(&other).remove.contains(&"ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
     fn gateway_env_is_exactly_these_pairs_in_order() {
         // The whole gateway env, pair for pair and in order.
         let env = session_env(&profile("https://x.net", "tok"), None);
@@ -337,28 +280,6 @@ mod tests {
     }
 
     #[test]
-    fn env_diff_removes_inherited_gateway_use_for_first_party_only() {
-        let env = session_env(&first_party_profile("https://x.net", "tok"), None);
-        let diff = env_diff(&env);
-        assert!(diff.remove.contains(&"CLAUDE_CODE_USE_GATEWAY"));
-        assert!(diff.remove.contains(&"ANTHROPIC_API_KEY"));
-        // A user's own NONESSENTIAL_TRAFFIC setting is not touched.
-        assert!(!diff
-            .remove
-            .contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
-    }
-
-    #[test]
-    fn env_diff_keeps_gateway_vars_for_gateway_envs() {
-        let env = session_env(&profile("https://x.net", "tok"), None);
-        let diff = env_diff(&env);
-        assert!(!diff.remove.contains(&"CLAUDE_CODE_USE_GATEWAY"));
-        assert!(!diff
-            .remove
-            .contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
-    }
-
-    #[test]
     fn neither_mode_sets_the_auto_compact_window() {
         // claude clamps it to the window it believes the model has, so it
         // can only shrink that window, and it hides claude's "model not
@@ -376,9 +297,5 @@ mod tests {
             .insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "1000000".into());
         let env = session_env(&profile("https://x.net", "tok"), Some(&cfg));
         assert!(env_get(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW").is_none());
-        // A user's own setting is inherited untouched (claude clamps it too).
-        assert!(!env_diff(&env)
-            .remove
-            .contains(&"CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
     }
 }

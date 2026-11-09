@@ -5,17 +5,26 @@
 
 use std::io;
 
-use super::Daemon;
+use super::{command, Daemon};
 use crate::proto::{LensKind, LensSpec, RespawnSpec, SessionExtensions, SessionKind, SpawnSpec};
 
 /// Refuse a spawn whose request breaks a cap, before anything is reserved.
 pub(super) fn check_spawn(spec: &SpawnSpec) -> io::Result<()> {
-    check_extensions(spec.extensions.as_ref())
+    check_extensions(spec.extensions.as_ref())?;
+    check_env_remove(spec.env_remove.as_deref())
 }
 
 /// Refuse a respawn whose request breaks a cap, before anything is stopped.
 pub(super) fn check_respawn(req: &RespawnSpec) -> io::Result<()> {
-    check_extensions(req.extensions.as_ref())
+    check_extensions(req.extensions.as_ref())?;
+    check_env_remove(req.env_remove.as_deref())
+}
+
+fn check_env_remove(list: Option<&[String]>) -> io::Result<()> {
+    match list.map(command::env_remove_ok) {
+        Some(Err(why)) => Err(io::Error::other(format!("bad env_remove: {why}"))),
+        _ => Ok(()),
+    }
 }
 
 fn check_extensions(ext: Option<&SessionExtensions>) -> io::Result<()> {

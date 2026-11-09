@@ -30,6 +30,7 @@ impl Daemon {
                     cols: 80,
                     ephemeral: e.ephemeral,
                     extensions: e.extensions.clone(),
+                    env_remove: None,
                 };
                 (spec, e.kind)
             })
@@ -208,6 +209,7 @@ fn respawn_spec(entry: Entry, req: RespawnSpec) -> SpawnSpec {
         cols: req.cols,
         ephemeral: entry.ephemeral,
         extensions: req.extensions.or(entry.extensions),
+        env_remove: req.env_remove,
     }
 }
 

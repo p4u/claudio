@@ -27,7 +27,8 @@ use std::process::{Command, ExitCode};
 /// believes it is a child: it turns off transcript saving (breaking `--resume`)
 /// and talks to the parent's messaging socket. User settings are deliberately
 /// kept, except that a first-party proxy session removes an inherited
-/// `CLAUDE_CODE_USE_GATEWAY` (see `proxy::env::env_diff`).
+/// `CLAUDE_CODE_USE_GATEWAY` (see `daemon::command::legacy_scrub`, and the
+/// spawn's `env_remove`).
 pub const SESSION_MARKERS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",

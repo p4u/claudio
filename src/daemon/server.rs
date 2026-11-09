@@ -435,12 +435,9 @@ impl Client {
                     id: shell.id,
                     cwd: shell.cwd,
                     name: shell.name,
-                    args: Vec::new(),
-                    env: Vec::new(),
                     rows: shell.rows,
                     cols: shell.cols,
-                    ephemeral: false,
-                    extensions: None,
+                    ..Default::default()
                 };
                 self.spawn(spec, SessionKind::Shell).await
             }

@@ -9,8 +9,8 @@ use portable_pty::CommandBuilder;
 use super::host;
 use crate::addon::ClaudeFlags;
 use crate::claude::hooks;
+use crate::claude::SESSION_MARKERS;
 use crate::proto::SpawnSpec;
-use crate::proxy::env::env_diff;
 
 /// `<claude> --settings <hooks> [--allow-dangerously-skip-permissions]
 /// [args…] [-n <name>]`, in `cwd`, with the session env applied. With a
@@ -64,18 +64,22 @@ pub(super) fn command(
         cmd.arg(name);
     }
     cmd.cwd(cwd);
-    apply_env(&mut cmd, cfg.path.as_deref(), &spec.env);
+    let env_remove = spec.env_remove.as_deref();
+    apply_env(&mut cmd, cfg.path.as_deref(), &spec.env, env_remove);
     cmd
 }
 
-/// Start from the daemon's env (the builder's default), apply the shared
-/// [`env_diff`] (scrubs what would leak from a daemon started inside claude;
-/// a proxy token replaces any API key), set the terminal type and the
-/// daemon's login-shell `PATH` ([`super::Config::path`]), then set the spec's
-/// env (an explicit `PATH` there wins).
-fn apply_env(cmd: &mut CommandBuilder, path: Option<&OsStr>, env: &[(String, String)]) {
-    let diff = env_diff(env);
-    for key in diff.remove {
+/// Start from the daemon's env (the builder's default), remove what the
+/// session loses ([`removed_env`]), set the terminal type and the daemon's
+/// login-shell `PATH` ([`super::Config::path`]), then set the spec's env
+/// (an explicit `PATH` there wins).
+fn apply_env(
+    cmd: &mut CommandBuilder,
+    path: Option<&OsStr>,
+    env: &[(String, String)],
+    env_remove: Option<&[String]>,
+) {
+    for key in removed_env(env, env_remove) {
         cmd.env_remove(key);
     }
     cmd.env("TERM", "xterm-256color");
@@ -83,19 +87,78 @@ fn apply_env(cmd: &mut CommandBuilder, path: Option<&OsStr>, env: &[(String, Str
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
-    for (k, v) in diff.set {
+    for (k, v) in env {
         cmd.env(k, v);
     }
 }
 
-/// `<shell> -l` in `cwd`: a plain terminal. No hooks, no proxy env, and the
-/// claude session markers are scrubbed so a `claude` typed into it is a
-/// top-level session, not a child of whatever started the daemon.
+/// What a session's process loses from the daemon's env: the claude
+/// session markers (which would make it a child of whatever started the
+/// daemon) plus the spawn's `env_remove`, or the [`legacy_scrub`] for a
+/// client that sends none.
+fn removed_env<'a>(env: &[(String, String)], env_remove: Option<&'a [String]>) -> Vec<&'a str> {
+    match env_remove {
+        None => legacy_scrub(env),
+        Some(list) => SESSION_MARKERS
+            .iter()
+            .copied()
+            .chain(list.iter().map(String::as_str))
+            .collect(),
+    }
+}
+
+/// compat(v0.10): the previous release's rule, for clients that send no
+/// `env_remove` (docs/daemon-protocol.md, "Mixed versions"). The session
+/// markers go; a proxy token (`ANTHROPIC_AUTH_TOKEN` in the env) replaces
+/// any inherited `ANTHROPIC_API_KEY`, which would otherwise win over it; and
+/// a first-party proxy env (one without `CLAUDE_CODE_USE_GATEWAY`) drops an
+/// inherited `CLAUDE_CODE_USE_GATEWAY`, which would turn the feature flags
+/// off again.
+fn legacy_scrub(env: &[(String, String)]) -> Vec<&'static str> {
+    let has = |key: &str| env.iter().any(|(k, _)| k == key);
+    let mut remove = SESSION_MARKERS.to_vec();
+    if has("ANTHROPIC_AUTH_TOKEN") {
+        remove.push("ANTHROPIC_API_KEY");
+        if !has("CLAUDE_CODE_USE_GATEWAY") {
+            remove.push("CLAUDE_CODE_USE_GATEWAY");
+        }
+    }
+    remove
+}
+
+/// At most this many names in a spawn's `env_remove`.
+const MAX_ENV_REMOVE: usize = 64;
+
+/// Why a spawn's `env_remove` is refused: more than [`MAX_ENV_REMOVE`]
+/// names, or a name that is not `[A-Za-z_][A-Za-z0-9_]{0,127}`. The
+/// reason gives the name's position, never the name (it may be a value
+/// sent by mistake).
+pub(super) fn env_remove_ok(list: &[String]) -> Result<(), String> {
+    if list.len() > MAX_ENV_REMOVE {
+        return Err(format!("more than {MAX_ENV_REMOVE} names"));
+    }
+    let ok = |name: &str| {
+        let mut chars = name.chars();
+        name.len() <= 128
+            && chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    match list.iter().position(|name| !ok(name)) {
+        Some(i) => Err(format!("name {} is not an env var name", i + 1)),
+        None => Ok(()),
+    }
+}
+
+/// `<shell> -l` in `cwd`: a plain terminal. No hooks, no proxy env, and
+/// only the claude session markers are scrubbed, so a `claude` typed into it
+/// is a top-level session, not a child of whatever started the daemon.
 pub(super) fn shell_command(shell: &Path, cwd: &Path, path: Option<&OsStr>) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(shell);
     cmd.arg("-l");
     cmd.cwd(cwd);
-    apply_env(&mut cmd, path, &[]);
+    apply_env(&mut cmd, path, &[], Some(&[]));
     cmd
 }
 
@@ -147,6 +210,7 @@ mod tests {
             &mut cmd,
             None,
             &[("ANTHROPIC_AUTH_TOKEN".into(), "tok".into())],
+            None,
         );
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_ENTRYPOINT"), None);
@@ -190,6 +254,7 @@ mod tests {
             &mut cmd,
             Some(login),
             &[("ANTHROPIC_AUTH_TOKEN".into(), "t".into())],
+            None,
         );
         assert_eq!(cmd.get_env("PATH"), Some(login));
         let mut cmd = CommandBuilder::new("claude");
@@ -197,12 +262,13 @@ mod tests {
             &mut cmd,
             Some(login),
             &[("PATH".into(), "/explicit".into())],
+            Some(&[]),
         );
         assert_eq!(cmd.get_env("PATH"), Some(OsStr::new("/explicit")));
         // Without a login PATH, the daemon's own stays.
         let mut cmd = CommandBuilder::new("claude");
         cmd.env("PATH", "/usr/bin");
-        apply_env(&mut cmd, None, &[]);
+        apply_env(&mut cmd, None, &[], None);
         assert_eq!(cmd.get_env("PATH"), Some(OsStr::new("/usr/bin")));
         // Terminals get it too.
         let cmd = shell_command(Path::new("/bin/sh"), Path::new("/tmp"), Some(login));
@@ -213,7 +279,7 @@ mod tests {
     fn api_key_kept_without_auth_token() {
         let mut cmd = CommandBuilder::new("claude");
         cmd.env("ANTHROPIC_API_KEY", "key");
-        apply_env(&mut cmd, None, &[]);
+        apply_env(&mut cmd, None, &[], None);
         assert_eq!(cmd.get_env("ANTHROPIC_API_KEY"), Some(OsStr::new("key")));
     }
 
@@ -241,6 +307,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         };
         let flags = ClaudeFlags::default();
         let cmd = command(&cfg, &spec, Path::new("/"), "tok123", false, &flags, None);
@@ -319,6 +386,7 @@ mod tests {
                 cols: 80,
                 ephemeral: false,
                 extensions: None,
+                env_remove: None,
             };
             let flags = ClaudeFlags::default();
             let argv = argv_of(&command(
@@ -365,6 +433,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         };
         let argv = |plugin_dir: bool| {
             let flags = knowing(&[("--plugin-dir", plugin_dir)]);
@@ -422,6 +491,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         };
         let argv = |agents: bool, mcp_config: bool| {
             let flags = knowing(&[("--agents", agents), ("--mcp-config", mcp_config)]);
@@ -448,5 +518,138 @@ mod tests {
             ["--resume", "abc", "--agents", agents, "--agents", agents, "-n", "s1"]
         );
         assert_eq!(&argv(false, false)[3..], ["--resume", "abc", "-n", "s1"]);
+    }
+
+    /// A builder whose inherited env holds `vars`.
+    fn inheriting(vars: &[(&str, &str)]) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("claude");
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// Whether `cmd` sets `key` (values are never printed, C1).
+    fn has(cmd: &CommandBuilder, key: &str) -> bool {
+        cmd.get_env(key).is_some()
+    }
+
+    const INHERITED: [(&str, &str); 4] = [
+        ("ANTHROPIC_API_KEY", "inherited-key"),
+        ("CLAUDE_CODE_USE_GATEWAY", "1"),
+        ("CLAUDECODE", "1"),
+        ("MY_SETTING", "keep"),
+    ];
+
+    /// compat(v0.10): a spawn without `env_remove` gets the previous
+    /// release's rule (it replaces the tests of `proxy::env::env_diff`).
+    #[test]
+    fn old_client_without_env_remove_gets_the_compatibility_scrub() {
+        // A proxy token replaces the inherited key; a first-party env (no
+        // gateway flag of its own) drops the inherited gateway flag.
+        let mut cmd = inheriting(&INHERITED);
+        let token = pairs(&[("ANTHROPIC_AUTH_TOKEN", "t")]);
+        apply_env(&mut cmd, None, &token, None);
+        assert!(!has(&cmd, "ANTHROPIC_API_KEY"));
+        assert!(!has(&cmd, "CLAUDE_CODE_USE_GATEWAY"));
+        assert!(!has(&cmd, "CLAUDECODE"));
+        assert!(has(&cmd, "MY_SETTING") && has(&cmd, "ANTHROPIC_AUTH_TOKEN"));
+        // A gateway env brings its own flag.
+        let mut cmd = inheriting(&INHERITED);
+        let gateway = pairs(&[
+            ("ANTHROPIC_AUTH_TOKEN", "t"),
+            ("CLAUDE_CODE_USE_GATEWAY", "env"),
+        ]);
+        apply_env(&mut cmd, None, &gateway, None);
+        assert!(!has(&cmd, "ANTHROPIC_API_KEY"));
+        assert!(
+            cmd.get_env("CLAUDE_CODE_USE_GATEWAY") == Some(OsStr::new("env")),
+            "the env's gateway flag wins"
+        );
+        // A user's own traffic and compact-window settings stay in both.
+        for env in [&token, &gateway] {
+            let mut cmd = inheriting(&[
+                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000"),
+            ]);
+            apply_env(&mut cmd, None, env, None);
+            assert!(has(&cmd, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
+            assert!(has(&cmd, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+        }
+        // No token (other entries alone do not count as one): the key and
+        // the gateway flag stay, the markers go.
+        for env in [vec![], pairs(&[("API_TIMEOUT_MS", "1")])] {
+            let mut cmd = inheriting(&INHERITED);
+            apply_env(&mut cmd, None, &env, None);
+            assert!(has(&cmd, "ANTHROPIC_API_KEY") && has(&cmd, "CLAUDE_CODE_USE_GATEWAY"));
+            assert!(!has(&cmd, "CLAUDECODE"));
+        }
+        let mut markers = removed_env(&[], None);
+        markers.sort_unstable();
+        let mut expected = SESSION_MARKERS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(markers, expected);
+    }
+
+    #[test]
+    fn env_remove_some_removes_exactly_the_markers_and_the_list() {
+        let token = pairs(&[("ANTHROPIC_AUTH_TOKEN", "t")]);
+        // `Some([])`: the markers only, even with a token in the env.
+        let mut cmd = inheriting(&INHERITED);
+        apply_env(&mut cmd, None, &token, Some(&[]));
+        assert!(has(&cmd, "ANTHROPIC_API_KEY") && has(&cmd, "CLAUDE_CODE_USE_GATEWAY"));
+        assert!(!has(&cmd, "CLAUDECODE"));
+        // The list goes as well, and nothing else.
+        let list = ["ANTHROPIC_API_KEY".to_owned()];
+        let mut cmd = inheriting(&INHERITED);
+        apply_env(&mut cmd, None, &token, Some(&list));
+        assert!(!has(&cmd, "ANTHROPIC_API_KEY") && !has(&cmd, "CLAUDECODE"));
+        assert!(has(&cmd, "CLAUDE_CODE_USE_GATEWAY") && has(&cmd, "MY_SETTING"));
+        let removed = removed_env(&token, Some(&list));
+        assert_eq!(removed.len(), SESSION_MARKERS.len() + 1);
+        assert!(SESSION_MARKERS.iter().all(|m| removed.contains(m)));
+        // A name the env also sets: the env's value is the one claude sees.
+        let mut cmd = inheriting(&INHERITED);
+        let own = pairs(&[("ANTHROPIC_API_KEY", "own")]);
+        apply_env(&mut cmd, None, &own, Some(&list));
+        assert!(cmd.get_env("ANTHROPIC_API_KEY") == Some(OsStr::new("own")));
+    }
+
+    #[test]
+    fn a_shell_loses_only_the_markers() {
+        let cmd = shell_command(Path::new("/bin/sh"), Path::new("/"), None);
+        // Every inherited variable but the markers is still there.
+        for (key, _) in std::env::vars_os() {
+            let key = key.to_string_lossy();
+            let marker = SESSION_MARKERS.contains(&&*key);
+            assert_eq!(has(&cmd, &key), !marker, "{key}");
+        }
+        assert!(!has(&cmd, "CLAUDECODE"));
+        // Never the key, whatever env a shell spec carried.
+        let token = pairs(&[("ANTHROPIC_AUTH_TOKEN", "t")]);
+        assert_eq!(removed_env(&token, Some(&[])), SESSION_MARKERS.to_vec());
+    }
+
+    #[test]
+    fn env_remove_is_capped_and_holds_names_only() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert!(env_remove_ok(&[]).is_ok());
+        assert!(env_remove_ok(&names(&["ANTHROPIC_API_KEY", "_x", "a1"])).is_ok());
+        assert!(env_remove_ok(&names(&[&"A".repeat(128)])).is_ok());
+        for bad in ["", "1A", "A-B", "A=B", "sk-ant secret", &"A".repeat(129)] {
+            let why = env_remove_ok(&names(&["OK", bad])).unwrap_err();
+            assert_eq!(why, "name 2 is not an env var name");
+        }
+        assert_eq!(
+            env_remove_ok(&vec!["A".to_owned(); 65]).unwrap_err(),
+            "more than 64 names"
+        );
+        assert!(env_remove_ok(&vec!["A".to_owned(); 64]).is_ok());
     }
 }

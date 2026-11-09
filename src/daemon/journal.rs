@@ -293,6 +293,7 @@ mod tests {
             cols: 80,
             ephemeral: false,
             extensions: None,
+            env_remove: None,
         }
     }
 

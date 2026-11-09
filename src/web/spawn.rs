@@ -230,6 +230,7 @@ pub(crate) async fn spawn_claude(ctx: &SpawnCtx, req: SpawnReq) -> Result<Sessio
         cols: req.cols,
         ephemeral: false,
         extensions: Some(ctx.ext.session_extensions()),
+        env_remove: None,
     };
     let msg = with_proxy(
         ctx,
@@ -296,6 +297,7 @@ pub(crate) async fn respawn(ctx: &SpawnCtx, req: RespawnReq) -> Result<SessionId
         rows: req.rows,
         cols: req.cols,
         extensions: None,
+        env_remove: None,
     };
     let (msg, profile, first_party) = if session.info.kind == SessionKind::Claude {
         let (profile, first_party) = match &req.proxy {

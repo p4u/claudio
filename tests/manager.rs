@@ -1980,6 +1980,48 @@ fn test_plain_no_proxy_keeps_api_key() {
     drop(tui);
 }
 
+/// An old client's spawn (no `env_remove`) gets the compatibility scrub
+/// from a new daemon: the proxy token in its env replaces the inherited
+/// `ANTHROPIC_API_KEY`, and the session markers go (docs/daemon-protocol.md,
+/// "Mixed versions"; B1). The spawn is the raw JSON an older client sends.
+#[test]
+fn test_old_client_spawn_is_scrubbed_by_a_new_daemon() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("old-client.env");
+    harness.write_env_dumping_fake_claude(&env_file);
+    // The daemon inherits the TUI's env: the harness's API key and a marker.
+    let tui = harness.start_tui_with(|cmd| {
+        cmd.env("CLAUDECODE", "1");
+    });
+    let id = "6d1f6a52-3c55-4a8e-9a39-5d1c0b0e0001";
+    let reply = harness.daemon_request(serde_json::json!({
+        "op": "spawn",
+        "id": id,
+        "cwd": harness.dirs[0],
+        "env": [["ANTHROPIC_AUTH_TOKEN", "old-client-token"]],
+        "rows": 24,
+        "cols": 80,
+    }));
+    assert_eq!(reply["op"], "spawned", "the daemon refused the spawn");
+    let deadline = Instant::now() + WAIT;
+    let env = loop {
+        let env = fs::read_to_string(&env_file).unwrap_or_default();
+        if env.lines().any(|l| l.starts_with("ANTHROPIC_AUTH_TOKEN=")) {
+            break env;
+        }
+        assert!(Instant::now() < deadline, "the session never started");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let set = |key: &str| env.lines().any(|l| l.starts_with(&format!("{key}=")));
+    // Values are never printed (C1): the messages name the keys only.
+    assert!(
+        !set("ANTHROPIC_API_KEY"),
+        "the inherited API key reached claude"
+    );
+    assert!(!set("CLAUDECODE"), "a session marker reached claude");
+    drop(tui);
+}
+
 /// A proxy profile is gateway by default; `--first-party` makes one run
 /// first-party. Nothing listens on the profile's port, so the config fetch
 /// falls back to the built-in model defaults. An inherited
