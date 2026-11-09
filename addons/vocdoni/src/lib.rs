@@ -35,6 +35,12 @@ pub struct Vocdoni {
     runner: Arc<runner::Runner>,
 }
 
+impl Default for Vocdoni {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vocdoni {
     /// The addon as this build registers it.
     pub fn new() -> Vocdoni {
