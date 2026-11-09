@@ -327,6 +327,7 @@ async fn build_state(
         proxy: proxy::ProxyCache::new(),
         plugins,
         ext: Arc::clone(&ext),
+        runtime: runtime.clone(),
     });
     Ok(AppState {
         auth: Arc::new(auth),

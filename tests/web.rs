@@ -1639,6 +1639,54 @@ async fn web_respawn_without_a_known_proxy_asks() {
     assert!(meta["proxy"].is_null(), "{saved}");
 }
 
+/// Wait for the env-dumping fake claude's `env_file`.
+async fn read_env_file(env_file: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if let Ok(env) = fs::read_to_string(env_file) {
+            return env;
+        }
+        assert!(std::time::Instant::now() < deadline, "claude never started");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A direct session goes through the launch composer (env_remove: the
+/// session markers only): spawned or respawned, claude keeps the inherited
+/// API key and never sees a parent claude's markers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_direct_launches_keep_the_inherited_api_key() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dir = h.dirs[0].clone();
+    let web = Web::start_with(h, &[], |cmd| {
+        cmd.env("CLAUDECODE", "1");
+    });
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    let reply = tab
+        .req(
+            "session.spawn",
+            json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}}),
+        )
+        .await
+        .expect("spawn");
+    let sid = reply["sid"].as_str().unwrap().to_owned();
+    let env = read_env_file(&env_file).await;
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(!env.contains("CLAUDECODE="), "a parent claude's marker");
+    fs::remove_file(&env_file).unwrap();
+    let ask =
+        json!({"sid": sid, "fresh": true, "rows": 24, "cols": 80, "proxy": {"kind": "direct"}});
+    let reply = tab.req("session.respawn", ask).await.expect("respawn");
+    assert_eq!(reply["sid"], sid.as_str());
+    let env = read_env_file(&env_file).await;
+    assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
+    assert!(!env.contains("CLAUDECODE="), "a parent claude's marker");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_plugin_without_choices_is_left_out_until_saved() {
     let h = ManagerHarness::new();
