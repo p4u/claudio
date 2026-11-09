@@ -28,7 +28,7 @@ pub(crate) fn follow(hub: HubHandle, runtime: AddonRuntime, mut rx: RuntimeRx, m
                     hub.broadcast(ev("notice", fields));
                 }
                 RuntimeOut::Changed { .. } => feed.changed().await,
-                RuntimeOut::Offer { .. } => {}
+                RuntimeOut::Offer { .. } | RuntimeOut::ConfigChanged => {}
             }
         }
     });

@@ -582,3 +582,47 @@ async fn shutdown_drops_a_reload_in_flight() {
     assert_eq!(rt.ctx("echo").config("team")["url"].as_str(), Some("a"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn rows_are_cleaned_and_a_toggle_is_written_before_the_addon_hears_it() {
+    let (dir, path) = scratch("# mine\n");
+    let row = crate::addon::ExtensionRow {
+        name: "kb".into(),
+        description: "evil\u{1b}[31m red".into(),
+        default_on: true,
+        refused: None,
+        details: vec!["one\ntwo".into()],
+        setup: Some("kb".into()),
+    };
+    let a = Arc::new(TestAddon::new("a").rows(vec![row]));
+    let (rt, mut rx) = runtime(vec![a.clone()], &path, Limits::default());
+    let rows = rt.extension_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].0, rows[0].1.name.as_str()), ("a", "kb"));
+    assert!(!rows[0].1.description.contains('\u{1b}'), "{rows:?}");
+    assert!(!rows[0].1.details[0].contains('\n'), "{rows:?}");
+
+    assert_eq!(rt.toggle_row("a", "kb".into(), false).await, Ok(None));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "# mine\n\n[extensions]\nkb = false\n");
+    assert!(a
+        .calls()
+        .contains(&"row_action kb Toggled(false)".to_owned()));
+    // The core's write is re-read: the addon and the front-end hear of it.
+    loop {
+        if next(&mut rx).await == RuntimeOut::ConfigChanged {
+            break;
+        }
+    }
+    assert_eq!(rt.ctx("a").extension_on("kb"), Some(false));
+
+    assert_eq!(rt.refresh_rows().await, [Ok(None)]);
+    assert!(a.calls().contains(&"row_action kb Refresh".to_owned()));
+    assert!(rt.ctx("a").core_extensions().is_empty());
+    rt.set_core_extensions(vec!["latex".into()]);
+    assert_eq!(rt.ctx("a").core_extensions(), ["latex"]);
+    let missing = rt.row_action("nope", "kb".into(), crate::addon::RowAction::Refresh);
+    assert_eq!(missing.await, Err("no addon nope".to_owned()));
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -277,6 +277,8 @@ pub(super) fn on_out(app: &mut App, runtime: &AddonRuntime, out: RuntimeOut) {
             addon,
             id: checklist,
         }),
+        // The TUI reads config.toml at its start only (D15).
+        RuntimeOut::ConfigChanged => {}
     }
 }
 

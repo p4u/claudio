@@ -217,6 +217,13 @@ impl AddonCtx for Ctx {
         state.config.get("extensions")?.get(name)?.as_bool()
     }
 
+    fn core_extensions(&self) -> Vec<String> {
+        self.inner
+            .upgrade()
+            .map(|i| i.state().core_extensions.clone())
+            .unwrap_or_default()
+    }
+
     fn notify(&self, text: String) {
         if let Some(inner) = self.inner.upgrade() {
             let notice = addon::notice(Notice {

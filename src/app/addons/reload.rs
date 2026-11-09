@@ -115,6 +115,7 @@ async fn run(weak: Weak<Inner>) {
         drop(state);
         if changed {
             inner.event(AddonEvent::ConfigChanged);
+            inner.outbox.push(super::RuntimeOut::ConfigChanged);
         }
         if !again {
             return;

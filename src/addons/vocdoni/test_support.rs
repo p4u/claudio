@@ -415,6 +415,8 @@ pub(crate) struct TestCtx {
     pub(crate) changed: AtomicUsize,
     pub(crate) offers: Mutex<Vec<String>>,
     pub(crate) sessions: Mutex<Vec<SessionSnap>>,
+    /// What `core_extensions` answers.
+    pub(crate) taken: Mutex<Vec<String>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -472,6 +474,9 @@ impl AddonCtx for TestCtx {
     }
     fn extension_on(&self, _name: &str) -> Option<bool> {
         None
+    }
+    fn core_extensions(&self) -> Vec<String> {
+        lock(&self.taken).clone()
     }
     fn notify(&self, text: String) {
         lock(&self.notices).push(text);

@@ -128,6 +128,9 @@ pub trait AddonCtx: Send + Sync {
     ) -> BoxFuture<'static, Result<(), String>>;
     /// `[extensions] <name>` as config.toml has it (D10).
     fn extension_on(&self, name: &str) -> Option<bool>;
+    /// The names the core's own extensions hold (built-in and external):
+    /// an addon row of such a name is refused.
+    fn core_extensions(&self) -> Vec<String>;
     /// A notice in the front-end.
     fn notify(&self, text: String);
     /// Segments, rows, options or an open panel changed: front-ends re-read them.

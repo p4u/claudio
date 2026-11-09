@@ -9,6 +9,7 @@
 mod ctx;
 mod events;
 mod reload;
+mod rows;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -53,6 +54,9 @@ pub enum RuntimeOut {
         addon: &'static str,
         checklist: String,
     },
+    /// config.toml was re-read (the front-end re-reads its own
+    /// tables: `[extensions]`, `[claude]`).
+    ConfigChanged,
 }
 
 /// The bounds of the runtime (D13); tests shorten them.
@@ -113,6 +117,8 @@ struct State {
     config: toml::Table,
     /// The config re-reads (single flight, coalesced, generation-checked).
     reload: reload::Reload,
+    /// The names the front-end's own extensions hold.
+    core_extensions: Vec<String>,
 }
 
 /// Every task the runtime owns, aborted at shutdown.
@@ -274,6 +280,12 @@ impl AddonRuntime {
             s.focused = sids.contains(&s.sid);
         }
         self.sessions_reset(list);
+    }
+
+    /// The names the front-end's own extensions hold (built-in and
+    /// external), for `AddonCtx::core_extensions`.
+    pub fn set_core_extensions(&self, names: Vec<String>) {
+        self.inner.state().core_extensions = names;
     }
 
     /// Re-read config.toml (off the executor) and send `ConfigChanged`.
