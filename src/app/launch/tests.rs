@@ -462,6 +462,53 @@ async fn needs_review_parks_with_the_remaining_budget_and_resume_continues() {
     rt.shutdown();
 }
 
+/// The items changed while the checklist was open: the save of the old
+/// revision is refused, and the launch parks again on the new one (the
+/// checklist reopens); the launch is never failed or sent for it.
+#[tokio::test]
+async fn a_stale_save_reopens_the_review_with_the_new_revision() {
+    let route = reviewing(Duration::ZERO);
+    let (rt, _rx) = runtime(vec![route.clone()]);
+    let (client, sent) = daemon().await;
+    let launch = spec(LaunchOp::New, LaunchSelect::default());
+    let Step::Review { parked, .. } = run(&rt, launch, client.clone()).await else {
+        panic!("not parked")
+    };
+    route.set_checklist(Checklist {
+        id: "setup".into(),
+        revision: "2".into(),
+        title: "Set up".into(),
+        intro: String::new(),
+        items: Vec::new(),
+    });
+    let old = |revision: &str| {
+        ReviewAnswer::Save(ChecklistAnswer::Save {
+            revision: revision.into(),
+            off: Vec::new(),
+        })
+    };
+    let step = resume(&rt, parked, old("1"), client.clone()).await;
+    let Step::Review {
+        checklist,
+        revision,
+        parked,
+        ..
+    } = step
+    else {
+        panic!("not parked again: {step:?}")
+    };
+    assert_eq!((checklist.as_str(), revision.as_str()), ("setup", "2"));
+    assert!(!route.saved());
+    assert!(nothing_sent(&sent).await);
+    let step = resume(&rt, parked, old("2"), client).await;
+    let Step::Sent { notices, reply, .. } = step else {
+        panic!("not sent: {step:?}")
+    };
+    assert!(reply.is_ok() && route.saved());
+    assert_eq!(notices, ["route: not saved: stale revision"]);
+    rt.shutdown();
+}
+
 #[tokio::test]
 async fn skip_defers_only_for_that_launch() {
     let route = reviewing(Duration::ZERO);

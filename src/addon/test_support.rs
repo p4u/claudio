@@ -120,6 +120,11 @@ impl TestAddon {
         self
     }
 
+    /// The checklist from now on (a new revision: the items changed).
+    pub fn set_checklist(&self, checklist: Checklist) {
+        *lock(&self.checklist) = Some(checklist);
+    }
+
     /// Has `Ui` with these extension rows.
     pub fn rows(mut self, rows: Vec<ExtensionRow>) -> Self {
         self.rows = Mutex::new(rows);

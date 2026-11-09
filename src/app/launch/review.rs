@@ -153,7 +153,8 @@ impl fmt::Debug for Parked {
 }
 
 /// Continue a parked launch: Save → `ui.save_checklist`, then that addon's
-/// prepare again; Skip → its prepare again with the checklist deferred;
+/// prepare again (whether or not the save took: a stale one asks again);
+/// Skip → its prepare again with the checklist deferred;
 /// Cancel → `Failed("cancelled")`. The budget left runs again from now.
 pub async fn resume(
     rt: &AddonRuntime,
@@ -168,11 +169,12 @@ pub async fn resume(
         ReviewAnswer::Cancel => return Step::Failed("cancelled".to_owned()),
         ReviewAnswer::Skip => parked.defer(addon, checklist),
         ReviewAnswer::Save(answer) => {
+            // A save that failed (a stale revision: the items changed
+            // while the checklist was open) prepares the addon again,
+            // which asks for the review again if it still needs one.
             if let Err(why) = save(rt, &mut parked, addon, checklist, answer).await {
-                parked.todo.retain(|a| *a != addon);
-                if let Err(failed) = parked.failed(addon, &why) {
-                    return Step::Failed(failed);
-                }
+                let why = line(&why, TEXT_BYTES);
+                parked.notices.push(format!("{addon}: not saved: {why}"));
             }
         }
     }

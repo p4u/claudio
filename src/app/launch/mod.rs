@@ -27,11 +27,7 @@ use crate::client::Client;
 use crate::proto::{Msg, SessionExtensions, SessionId};
 
 pub use compose::compose;
-pub use review::Parked;
-// P3: answering a review comes with the checklists (P3.11); until then the
-// front-ends fail a launch that needs one.
-#[allow(unused_imports)]
-pub use review::{resume, ReviewAnswer};
+pub use review::{resume, Parked, ReviewAnswer};
 
 /// The prepare budget of one launch (5 s proxy config + 20 s manifests,
 /// before addons). The clock stops while a review is open.
