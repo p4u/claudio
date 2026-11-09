@@ -72,10 +72,6 @@ pub trait Addon: Send + Sync + 'static {
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
         let _ = (event, ctx);
     }
-    /// The addon as `Any`, written `{ self }` (no default body can turn a
-    /// `?Sized` `Self` into `Any`). Transitional: only the Vocdoni bridge
-    /// downcasts, until P3.13 removes both (docs/addons.md).
-    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// An addon's command-line words.

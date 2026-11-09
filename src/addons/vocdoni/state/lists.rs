@@ -4,7 +4,7 @@
 use super::{State, Task};
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, PluginsFetch};
-use crate::addons::vocdoni::proxy::plugins::{Plugin, PluginList};
+use crate::addons::vocdoni::proxy::plugins::Plugin;
 
 /// A launch's plugins without saved choices ([`State::unreviewed`]).
 #[derive(Debug, Default, PartialEq)]
@@ -80,12 +80,6 @@ impl State {
         lists
             .flat_map(|(list, _)| list.admitted().into_iter().cloned())
             .collect()
-    }
-
-    /// The lists, for the registry's plugin rows.
-    pub fn lists(&self) -> Vec<PluginList> {
-        let lists = self.plugins.lists.values();
-        lists.map(|(list, _)| list.clone()).collect()
     }
 
     /// A list arrived (or failed): keep it, fetch the manifests it changed

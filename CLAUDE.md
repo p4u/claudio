@@ -280,11 +280,12 @@ ratatui, crossterm or axum. `src/web` imports nothing from `src/tui`:
   details, toggles. A toggle flips the registry at once and emits
   `Effect::SetExtension` (host; externals) and `Effect::SaveExtension`
   (`mod.rs` writes `[extensions] name = on` with `config::save_extension`,
-  a minimal line edit of config.toml, never a whole-file rewrite); a
-  plugin's toggle (Space) also goes to the Vocdoni addon
-  (`Effect::Bridge`), Enter on a plugin's row opens its setup screen, and
-  `r` has the addon refetch the plugin lists and manifests and ask every
-  host again. Drawn by `ui/extensions.rs`.
+  a minimal line edit of config.toml, never a whole-file rewrite); an
+  addon's row (`Source::Addon`, set by `Registry::set_addon_rows`) is
+  toggled through `AddonCall::ToggleRow` (the runtime writes
+  `[extensions]`, re-reads the file, then tells the addon), Enter on a row
+  with a setup opens that checklist, and `r` sends every addon with rows
+  `RowAction::Refresh`. Drawn by `ui/extensions.rs`.
   The leader keys `u` and `e` are reserved.
 - `plugin_setup.rs` — a proxy plugin's setup screen, pure (the saved choices
   are `plugins::choices::choices_for`): every item of

@@ -5,8 +5,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::*;
-use crate::addon::Addons;
-use crate::addons::vocdoni::bridge::Bridge;
 use crate::addons::vocdoni::plugins::choices::PluginChoices;
 use crate::addons::vocdoni::plugins::state::ApplyState;
 use crate::addons::vocdoni::proxy::plugins::sample;
@@ -206,11 +204,4 @@ async fn an_over_count_list_is_never_cached() {
     assert_eq!((fetch, notice), (PluginsFetch::Unreachable, None));
     assert_eq!(cache::load_cache_from(&path, "work"), Some(cached));
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn the_bridge_finds_the_registered_vocdoni() {
-    let addons = Addons::new(crate::addons::all()).unwrap();
-    assert!(Bridge::of(&addons).is_some());
-    assert!(Bridge::of(&Addons::empty()).is_none());
 }

@@ -1,6 +1,5 @@
 //! The Vocdoni addon: the claude-proxy client and the team plugins.
 
-pub mod bridge;
 pub mod daemon;
 pub mod launch;
 pub mod panel;
@@ -76,9 +75,5 @@ impl Addon for Vocdoni {
 
     fn on_event(&self, event: &AddonEvent, ctx: &Arc<dyn AddonCtx>) {
         self.runner.on_event(event, ctx);
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }

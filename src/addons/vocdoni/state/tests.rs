@@ -761,7 +761,7 @@ fn a_taken_name_is_refused_and_never_enabled() {
         ]
     );
     assert!(s.enabled_plugins("work").is_empty());
-    assert_eq!(s.lists().len(), 2);
+    assert_eq!(s.plugins.lists.len(), 2);
 }
 
 #[test]

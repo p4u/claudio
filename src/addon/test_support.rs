@@ -234,9 +234,6 @@ impl Addon for TestAddon {
     fn name(&self) -> &'static str {
         self.name
     }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn config_sections(&self) -> &'static [&'static str] {
         self.sections
     }
