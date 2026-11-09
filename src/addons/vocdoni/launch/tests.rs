@@ -402,10 +402,7 @@ async fn plugin_share_becomes_optional_args_secrets_and_instructions() {
     let flags: Vec<&str> = part
         .args
         .iter()
-        .map(|a| match a {
-            LaunchArg::Optional { flag, .. } => flag.as_str(),
-            LaunchArg::Plain(p) => p.as_str(),
-        })
+        .map(|LaunchArg::Optional { flag, .. }| flag.as_str())
         .collect();
     assert_eq!(flags, ["--agents", "--mcp-config"]);
     // The plugin's [env] and secret first, the proxy's after; no key twice.

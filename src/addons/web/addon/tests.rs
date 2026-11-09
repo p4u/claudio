@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 
 use super::*;
-use crate::addon::{AddonError, ConfigEdit, Frontend, HostSnap, LaunchOp, Routing, SessionSnap};
+use crate::addon::{AddonError, ConfigEdit, Frontend, LaunchOp, Routing, SessionSnap};
 
 /// A context that answers `extension_on` from `on` and nothing else.
 #[derive(Default)]
@@ -25,13 +25,7 @@ impl Ctx {
 }
 
 impl AddonCtx for Ctx {
-    fn addon(&self) -> &'static str {
-        "web"
-    }
     fn spawn(&self, _task: BoxFuture<'static, ()>) {}
-    fn http(&self) -> reqwest::Client {
-        reqwest::Client::new()
-    }
     fn request(
         &self,
         host: &str,
@@ -45,9 +39,6 @@ impl AddonCtx for Ctx {
         false
     }
     fn sessions(&self) -> Vec<SessionSnap> {
-        Vec::new()
-    }
-    fn hosts(&self) -> Vec<HostSnap> {
         Vec::new()
     }
     fn config(&self, _section: &str) -> toml::Table {

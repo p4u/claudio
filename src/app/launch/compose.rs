@@ -50,16 +50,11 @@ pub fn compose(
             }
         }
         env_remove.extend(part.env_remove);
-        for arg in part.args {
-            match arg {
-                LaunchArg::Plain(a) => args.push(a),
-                LaunchArg::Optional { flag, value } => {
-                    if !optional.contains(&flag) {
-                        optional.push(flag.clone());
-                    }
-                    args.extend([flag, value]);
-                }
+        for LaunchArg::Optional { flag, value } in part.args {
+            if !optional.contains(&flag) {
+                optional.push(flag.clone());
             }
+            args.extend([flag, value]);
         }
         lenses.add(addon, part.lenses, &mut notices);
         instructions.add(addon, &part.instructions);

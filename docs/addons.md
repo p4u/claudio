@@ -82,16 +82,15 @@ and claudio exits with the reason, when:
 An addon is a **pure state machine** (A6: no files, network, processes or sockets; unit tested)
 wrapped by its capability impls, which are its **runner**. The runner does the I/O through
 `AddonCtx`, which the core implements once (`src/app/addons/`) for both front-ends: the TUI
-runner and the web hub. Each addon gets its own context (`ctx.addon()` is its name), so every
+runner and the web hub. Each addon gets its own context, bound to its name, so every
 request, config read and edit is attributed to it.
 
 | `AddonCtx` | |
 |---|---|
 | `spawn(task)` | a task on the front-end's runtime: at most 64 live per addon, each under 300 s, aborted at shutdown |
-| `http()` | the one shared HTTP client |
 | `request(host, op, body)` | an `AddonOp` to that host's daemon; `Missing` unless its features list `addon:<name>`; 170 s |
 | `host_has(host)` | that host is connected and lists `addon:<name>` |
-| `sessions()`, `hosts()` | snapshots (`SessionSnap`, `HostSnap`) |
+| `sessions()` | a snapshot of the sessions (`SessionSnap`) |
 | `config(section)` | a declared section of `config.toml` (empty when undeclared) |
 | `edit_config(section, edit)` | an atomic, minimal edit of a declared section (below) |
 | `extension_on(name)` | `[extensions] <name>` as `config.toml` has it, or `None`; `[claude] latex = false` answers `Some(false)` for `latex` (its documented alias) |
@@ -231,7 +230,7 @@ Blocks are plain text: the web renders them as text nodes, never markup; the TUI
 | `ChecklistAnswer` | `Save { revision, off }` or `Defer` |
 | `ExtensionRow` | `name`, `description`, `default_on`, `refused`, `details`, `setup` (the checklist Enter opens) |
 | `RowAction` | `Toggled(bool)` or `Refresh` |
-| `Notice` | `text`, `level` (`info`, `warn`, `error`) |
+| `Notice` | `text`, `level` (`info`, `warn`) |
 
 **Segments** follow each session's status. A lower number comes first. The TUI draws
 priorities 0-99 on status line 1, after the core's own, left to right, and 100-255 on line 2,

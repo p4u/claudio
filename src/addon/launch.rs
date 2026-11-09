@@ -159,9 +159,6 @@ pub struct LaunchRequest {
 /// One claude argument of a launch.
 #[derive(Clone, PartialEq, Eq)]
 pub enum LaunchArg {
-    /// Passed as is.
-    #[allow(dead_code)] // API surface (docs/addons.md); this build's addons use Optional.
-    Plain(String),
     /// `flag value`, dropped by the daemon when its claude lacks `flag` (D6).
     Optional { flag: String, value: String },
 }
@@ -202,14 +199,11 @@ impl fmt::Debug for LaunchPart {
 
 impl fmt::Debug for LaunchArg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LaunchArg::Plain(s) => f.debug_tuple("Plain").field(s).finish(),
-            LaunchArg::Optional { flag, value } => f
-                .debug_struct("Optional")
-                .field("flag", flag)
-                .field("value", &format_args!("<{} bytes>", value.len()))
-                .finish(),
-        }
+        let LaunchArg::Optional { flag, value } = self;
+        f.debug_struct("Optional")
+            .field("flag", flag)
+            .field("value", &format_args!("<{} bytes>", value.len()))
+            .finish()
     }
 }
 
@@ -276,13 +270,10 @@ mod tests {
         let part = LaunchPart {
             env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "sekret-token-value".into())],
             env_remove: vec!["ANTHROPIC_API_KEY".into()],
-            args: vec![
-                LaunchArg::Plain("--verbose".into()),
-                LaunchArg::Optional {
-                    flag: "--mcp-config".into(),
-                    value: "{\"secret\":\"sekret-arg-value\"}".into(),
-                },
-            ],
+            args: vec![LaunchArg::Optional {
+                flag: "--mcp-config".into(),
+                value: "{\"secret\":\"sekret-arg-value\"}".into(),
+            }],
             lenses: Vec::new(),
             instructions: "sekret-instructions".into(),
             notices: vec!["hello".into()],
@@ -290,7 +281,7 @@ mod tests {
         let shown = format!("{part:?}");
         assert!(shown.contains("ANTHROPIC_AUTH_TOKEN"), "{shown}");
         assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
-        assert!(shown.contains("--verbose") && shown.contains("--mcp-config"));
+        assert!(shown.contains("--mcp-config"), "{shown}");
         assert!(shown.contains("<19 bytes>"), "{shown}");
         assert!(!shown.contains("sekret"), "{shown}");
         let pretty = format!("{part:#?}");

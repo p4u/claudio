@@ -226,9 +226,6 @@ pub enum Level {
     Info,
     /// A warning.
     Warn,
-    /// An error.
-    #[allow(dead_code)] // API surface (docs/addons.md); no addon reports one yet.
-    Error,
 }
 
 /// A line the front-end shows the member.

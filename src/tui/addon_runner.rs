@@ -508,7 +508,7 @@ pub(super) fn launch(
     tokio::spawn(async move {
         let Some(client) = client else {
             let failed = Err(format!("{host}: not connected"));
-            report(&tx, (id, op, sid), None, Vec::new(), failed).await;
+            report(&tx, (op, sid), None, Vec::new(), failed).await;
             return;
         };
         let spec = LaunchSpec {
@@ -579,7 +579,7 @@ async fn settle(edge: &Edge, mut step: Step, pending: Pending, tx: &mpsc::Sender
             }
         }
     };
-    report(tx, key, choice, notices, result).await;
+    report(tx, (key.1, key.2), choice, notices, result).await;
 }
 
 /// Keep `waiting` until its answer; `false` when [`MAX_PARKED`] wait.
@@ -595,13 +595,12 @@ fn park(edge: &Edge, waiting: Waiting) -> bool {
 /// A launch's outcome, for `App::on_launched`.
 async fn report(
     tx: &mpsc::Sender<HostEvent>,
-    (id, op, sid): (u64, LaunchOp, SessionId),
+    (op, sid): (LaunchOp, SessionId),
     choice: Option<crate::addon::LaunchChoice>,
     notices: Vec<String>,
     result: Result<Msg, String>,
 ) {
     let done = Launched {
-        id,
         op,
         sid,
         choice,
@@ -755,7 +754,7 @@ mod tests {
         let Some(HostEvent::Launched(done)) = rx.recv().await else {
             panic!("no outcome")
         };
-        assert_eq!((done.id, done.sid, done.op), (3, sid, LaunchOp::New));
+        assert_eq!((done.sid, done.op), (sid, LaunchOp::New));
         assert!(matches!(done.result, Ok(Msg::Spawned { id, .. }) if id == sid));
         assert!(done.choice.is_none() && done.notices.is_empty());
         // Direct: no env, the markers-only env_remove, the core's lenses.
@@ -899,7 +898,7 @@ mod tests {
         });
         answer_review(&edge, 1, save, &tx);
         let done = launched(&mut rx).await;
-        assert_eq!((done.id, done.sid), (1, sid));
+        assert_eq!(done.sid, sid);
         assert!(done.result.is_ok(), "{:?}", done.result);
         assert!(route.saved());
         let Some(Msg::Spawn(spec)) = seen.recv().await else {
@@ -963,7 +962,7 @@ mod tests {
         };
         launch(call, Mode::Manager, &edge, &conns, &tx);
         let done = launched(&mut rx).await;
-        assert_eq!(done.id, 99);
+        assert_eq!(done.sid, sid);
         assert_eq!(
             done.result.unwrap_err(),
             "too many launches wait for a review"

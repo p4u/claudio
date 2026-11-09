@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::addon::{AddonCtx, AddonEvent, Addons, HostSnap, Notice, SessionSnap};
+use crate::addon::{AddonCtx, AddonEvent, Addons, Notice, SessionSnap};
 use crate::client::Client;
 use crate::proto::SessionId;
 
@@ -105,7 +105,6 @@ pub struct AddonRuntime {
 struct Host {
     client: Option<Client>,
     features: Vec<String>,
-    claude: bool,
 }
 
 /// What the runtime knows; never locked across an await or an addon call.
@@ -135,7 +134,6 @@ struct Tasks {
 
 pub(crate) struct Inner {
     addons: Arc<Addons>,
-    http: reqwest::Client,
     opts: RuntimeOptions,
     limits: Limits,
     runtime: tokio::runtime::Handle,
@@ -165,12 +163,8 @@ impl AddonRuntime {
     ) -> (AddonRuntime, RuntimeRx) {
         let (events, rx) = mpsc::channel(EVENT_QUEUE);
         let outbox = Arc::new(Outbox::default());
-        let http = reqwest::Client::builder()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
         let inner = Arc::new(Inner {
             addons,
-            http,
             opts,
             limits,
             runtime: tokio::runtime::Handle::current(),
@@ -204,13 +198,12 @@ impl AddonRuntime {
         Arc::new(ctx::Ctx::new(&self.inner, addon))
     }
 
-    /// `host`'s daemon connected through `client`: its features and claude
-    /// come from the `Welcome`.
+    /// `host`'s daemon connected through `client`: its features come from
+    /// the `Welcome`.
     pub fn host_up(&self, host: &str, client: Client) {
         let welcome = client.welcome();
         let features = welcome.features.clone();
         let entry = Host {
-            claude: welcome.host.claude.is_some(),
             features: features.clone(),
             client: Some(client),
         };
@@ -236,9 +229,6 @@ impl AddonRuntime {
 
     /// claude was just installed on `host`.
     pub fn claude_installed(&self, host: &str) {
-        if let Some(h) = self.inner.state().hosts.get_mut(host) {
-            h.claude = true;
-        }
         self.inner.event(AddonEvent::ClaudeInstalled {
             host: host.to_owned(),
         });
@@ -351,20 +341,6 @@ impl Inner {
         }
         drop(tasks);
         self.outbox.close();
-    }
-
-    /// The hosts as addons see them.
-    fn host_snaps(&self) -> Vec<HostSnap> {
-        self.state()
-            .hosts
-            .iter()
-            .map(|(name, h)| HostSnap {
-                name: name.clone(),
-                connected: h.client.is_some(),
-                features: h.features.clone(),
-                claude: h.claude,
-            })
-            .collect()
     }
 }
 

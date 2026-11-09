@@ -7,9 +7,7 @@ use std::sync::{Arc, Weak};
 use serde_json::Value;
 
 use super::{Inner, RuntimeOut};
-use crate::addon::{
-    self, AddonCtx, AddonError, BoxFuture, ConfigEdit, HostSnap, Level, Notice, SessionSnap,
-};
+use crate::addon::{self, AddonCtx, AddonError, BoxFuture, ConfigEdit, Level, Notice, SessionSnap};
 use crate::proto::{self, Msg};
 
 /// The cap of an offered checklist id.
@@ -43,10 +41,6 @@ fn failed<T: Send + 'static>(err: T) -> BoxFuture<'static, T> {
 }
 
 impl AddonCtx for Ctx {
-    fn addon(&self) -> &'static str {
-        self.addon
-    }
-
     fn spawn(&self, task: BoxFuture<'static, ()>) {
         let Some(inner) = self.inner.upgrade() else {
             return;
@@ -76,13 +70,6 @@ impl AddonCtx for Ctx {
             }
         };
         set.spawn_on(run, &inner.runtime);
-    }
-
-    fn http(&self) -> reqwest::Client {
-        match self.inner.upgrade() {
-            Some(inner) => inner.http.clone(),
-            None => reqwest::Client::new(),
-        }
     }
 
     fn request(
@@ -148,13 +135,6 @@ impl AddonCtx for Ctx {
         self.inner
             .upgrade()
             .map(|i| i.state().sessions.clone())
-            .unwrap_or_default()
-    }
-
-    fn hosts(&self) -> Vec<HostSnap> {
-        self.inner
-            .upgrade()
-            .map(|i| i.host_snaps())
             .unwrap_or_default()
     }
 

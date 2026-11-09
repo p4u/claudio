@@ -154,8 +154,6 @@ fn select(given: &[FlagArg]) -> Result<LaunchSelect, String> {
 }
 
 /// One option per profile, the default marked.
-// Read by the TUI's wizard from P3.9b on (core-addons plan).
-#[allow(dead_code)]
 fn options(p: &Profiles) -> Vec<LaunchOption> {
     p.names
         .iter()

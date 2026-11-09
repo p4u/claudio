@@ -178,7 +178,6 @@ pub fn launches(effects: &[Effect]) -> Vec<&LaunchCall> {
 pub fn finish_launches(app: &mut App, effects: &[Effect]) -> Vec<Effect> {
     for call in launches(effects) {
         let done = super::app::Launched {
-            id: call.id,
             op: call.op,
             sid: call.sid,
             // A chosen option is the effective choice; a default one direct.

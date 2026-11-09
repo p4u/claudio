@@ -89,18 +89,10 @@ pub trait Commands: Send + Sync {
 /// What the core offers an addon on a front-end (the TUI or the web hub).
 /// Each addon gets its own (D2).
 pub trait AddonCtx: Send + Sync {
-    /// The addon this context belongs to.
-    // The API's own surface (docs/addons.md): no addon of this build calls
-    // it yet; it stays for the addons P4 makes crates (one allow per item).
-    #[allow(dead_code)]
-    fn addon(&self) -> &'static str;
     /// A task on the front-end's runtime: ≤ 64 live per addon, 300 s each,
     /// aborted at shutdown.
     fn spawn(&self, task: BoxFuture<'static, ()>);
-    /// The one shared HTTP client (cheap clone).
-    #[allow(dead_code)] // API surface, as `addon` above.
-    fn http(&self) -> reqwest::Client;
-    /// `AddonOp { addon: self.addon(), op, body }` to `host`'s daemon;
+    /// `AddonOp { addon: <this addon>, op, body }` to `host`'s daemon;
     /// `Missing` without `addon:<name>` in its features; bodies ≤ 512 KiB
     /// both ways; 170 s.
     fn request(
@@ -113,9 +105,6 @@ pub trait AddonCtx: Send + Sync {
     fn host_has(&self, host: &str) -> bool;
     /// The sessions the front-end knows.
     fn sessions(&self) -> Vec<SessionSnap>;
-    /// The hosts the front-end knows.
-    #[allow(dead_code)] // API surface, as `addon` above.
-    fn hosts(&self) -> Vec<HostSnap>;
     /// A declared section of config.toml (empty for an undeclared one).
     fn config(&self, section: &str) -> toml::Table;
     /// Serialised, atomic, minimal edit of a declared section (`app::config_edit`).
@@ -156,19 +145,6 @@ pub struct SessionSnap {
     pub launch: Option<LaunchChoice>,
     /// The TUI's active session, or one a browser tab has attached.
     pub focused: bool,
-}
-
-/// A host as an addon sees it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HostSnap {
-    /// `local` or an ssh alias.
-    pub name: String,
-    /// Whether its daemon is connected.
-    pub connected: bool,
-    /// Its daemon's `Welcome.features`.
-    pub features: Vec<String>,
-    /// Whether claude is installed there.
-    pub claude: bool,
 }
 
 /// What `Addon::on_event` receives (docs/addons.md, "Events").

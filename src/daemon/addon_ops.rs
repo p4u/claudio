@@ -48,10 +48,6 @@ pub(crate) struct Ctx {
 }
 
 impl DaemonCtx for Ctx {
-    fn addon(&self) -> &'static str {
-        self.addon
-    }
-
     fn claude_bin(&self) -> PathBuf {
         self.daemon.config.claude_bin()
     }

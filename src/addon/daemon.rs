@@ -28,9 +28,6 @@ pub trait DaemonOps: Send + Sync {
 
 /// What the daemon offers an addon's op.
 pub trait DaemonCtx: Send + Sync {
-    /// The addon this context belongs to.
-    #[allow(dead_code)] // API surface (docs/addons.md); no op asks it yet.
-    fn addon(&self) -> &'static str;
     /// The claude this daemon runs.
     fn claude_bin(&self) -> PathBuf;
     /// The daemon's login-shell PATH (`daemon::Config::path`).

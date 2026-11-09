@@ -156,9 +156,6 @@ pub struct LaunchCall {
 /// A launch's outcome, for [`App::on_launched`]: no env, no addon's share.
 #[derive(Debug)]
 pub struct Launched {
-    // Read from P3.11 on, to answer a launch parked for a review.
-    #[allow(dead_code)]
-    pub id: u64,
     pub op: LaunchOp,
     pub sid: SessionId,
     /// The launch's effective choice (`None`: direct), recorded with the
@@ -1407,7 +1404,6 @@ mod tests {
         let id = app.sessions[1].id;
         app.take_effects();
         let done = |notices: &[&str], result| Launched {
-            id: 1,
             op: LaunchOp::New,
             sid: id,
             choice: None,

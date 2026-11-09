@@ -13,9 +13,7 @@ use super::daemon::applied::apply_msg;
 use super::daemon::{retrying, Applied, ApplyRequest, Manifests, VocdoniDaemon};
 use super::plugins::state::applied as applied_for;
 use super::Vocdoni;
-use crate::addon::{
-    Addon, AddonCtx, AddonError, Addons, BoxFuture, ConfigEdit, HostSnap, SessionSnap,
-};
+use crate::addon::{Addon, AddonCtx, AddonError, Addons, BoxFuture, ConfigEdit, SessionSnap};
 use crate::daemon::test_support::{private_temp_dir, within, TestDaemon};
 use crate::daemon::Config;
 use crate::proto::Msg;
@@ -424,14 +422,8 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl AddonCtx for TestCtx {
-    fn addon(&self) -> &'static str {
-        "vocdoni"
-    }
     fn spawn(&self, task: BoxFuture<'static, ()>) {
         tokio::spawn(task);
-    }
-    fn http(&self) -> reqwest::Client {
-        reqwest::Client::new()
     }
     fn request(
         &self,
@@ -448,9 +440,6 @@ impl AddonCtx for TestCtx {
     }
     fn sessions(&self) -> Vec<SessionSnap> {
         lock(&self.sessions).clone()
-    }
-    fn hosts(&self) -> Vec<HostSnap> {
-        Vec::new()
     }
     fn config(&self, section: &str) -> toml::Table {
         match lock(&self.config).get(section) {

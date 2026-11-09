@@ -170,9 +170,6 @@ async fn a_request_needs_the_hosts_addon_feature() {
         ctx.request("new", "ping", json!({"a": 1})).await,
         Ok(json!({"a": 1}))
     );
-    let hosts = ctx.hosts();
-    assert_eq!(hosts.len(), 2);
-    assert!(hosts.iter().all(|h| h.connected && !h.claude));
     // Gone: not connected any more.
     rt.host_down("new");
     assert!(!ctx.host_has("new"));

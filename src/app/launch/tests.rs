@@ -183,13 +183,10 @@ fn compose_unions_env_remove_and_always_sends_some() {
 fn compose_marks_optional_args_and_respawn_drops_args() {
     let part = |value: &str| LaunchPart {
         env: vec![("T".into(), "t".into())],
-        args: vec![
-            LaunchArg::Plain("--verbose".into()),
-            LaunchArg::Optional {
-                flag: "--mcp-config".into(),
-                value: value.into(),
-            },
-        ],
+        args: vec![LaunchArg::Optional {
+            flag: "--mcp-config".into(),
+            value: value.into(),
+        }],
         ..Default::default()
     };
     let parts = vec![("a", part("{1}")), ("b", part("{2}"))];
@@ -201,10 +198,8 @@ fn compose_marks_optional_args_and_respawn_drops_args() {
         [
             "--resume",
             "c1",
-            "--verbose",
             "--mcp-config",
             "{1}",
-            "--verbose",
             "--mcp-config",
             "{2}"
         ]
