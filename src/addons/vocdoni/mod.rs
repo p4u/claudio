@@ -3,6 +3,9 @@
 pub mod bridge;
 pub mod daemon;
 pub mod launch;
+// The TUI draws it from P3.12b on (core-addons plan).
+#[allow(dead_code)]
+pub mod panel;
 pub mod plugins;
 pub mod profiles;
 pub mod proxy;

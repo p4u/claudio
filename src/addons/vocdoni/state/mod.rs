@@ -11,6 +11,7 @@
 
 mod applies;
 mod lists;
+pub mod stats;
 #[cfg(test)]
 mod tests;
 
@@ -22,6 +23,7 @@ use crate::addons::vocdoni::plugins::state::{ListState, ManifestState, Plugins, 
 use crate::addons::vocdoni::profiles::Profiles;
 use crate::addons::vocdoni::proxy::api::ConfigResponse;
 use crate::addons::vocdoni::proxy::plugins::PluginList;
+use crate::proto::SessionId;
 
 /// How long a profile's proxy config is kept (seconds).
 pub const CONFIG_TTL: u64 = 5 * 60;
@@ -59,6 +61,13 @@ pub enum Task {
     /// Offer plugin `name`'s checklist (its first-sight setup) to the
     /// front-ends (D8).
     Offer(String),
+    /// Ask `profile`'s proxy which credential session `sid`'s
+    /// `conversation` uses: the answer goes to [`State::on_cred`].
+    FetchCred {
+        sid: SessionId,
+        profile: String,
+        conversation: String,
+    },
 }
 
 /// The addon's client state.
@@ -91,6 +100,10 @@ pub struct State {
     pub refreshed: u64,
     /// Unix seconds, as the runner last set it.
     pub now: u64,
+    /// Per profile: its stats, pool health and model catalogue.
+    pub stats: HashMap<String, stats::ProxyStatus>,
+    /// Per session: the credential the proxy last named.
+    pub creds: HashMap<SessionId, stats::SessionCred>,
 }
 
 impl State {

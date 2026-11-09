@@ -17,6 +17,7 @@ use super::profiles::{ProfileSource, Profiles};
 use super::proxy::api::{self, ApiError, ConfigResponse};
 use super::proxy::plugins::{self as cache, PluginList};
 use super::proxy::profile::Profile;
+use super::state::stats::Focused;
 use super::state::{State, Task};
 use crate::addon::{AddonCtx, AddonError, AddonEvent};
 
@@ -129,9 +130,16 @@ impl Runner {
             AddonEvent::ClaudeInstalled { host } => self.transition(|s| s.claude_installed(host)),
             AddonEvent::Tick => {
                 let now = crate::paths::unix_now();
-                let tasks = self.state().tick(now);
+                let focused = focused(ctx.as_ref());
+                let tasks = {
+                    let mut state = self.state();
+                    let mut tasks = state.tick(now);
+                    tasks.extend(state.creds_due(focused));
+                    tasks
+                };
                 self.run(tasks);
             }
+            AddonEvent::SessionRemoved { sid } => self.state().forget_session(*sid),
             _ => {}
         }
     }
@@ -239,6 +247,19 @@ impl Runner {
             Task::Notice(text) => ctx.notify(text),
             Task::Changed => ctx.changed(),
             Task::Offer(name) => ctx.offer_checklist(name),
+            Task::FetchCred {
+                sid,
+                profile,
+                conversation,
+            } => {
+                let result = match self.find_profile(&profile).await {
+                    Some(p) => api::fetch_session(&p.url, &p.token, &conversation)
+                        .await
+                        .map_err(super::proxy::stats::describe),
+                    None => Err(super::profiles::missing(&profile)),
+                };
+                self.transition(|s| s.on_cred(sid, &conversation, result));
+            }
         }
     }
 
@@ -284,6 +305,23 @@ impl Runner {
         let p = self.find_profile(profile).await?;
         api::fetch_config(&p.url, &p.token).await.ok().flatten()
     }
+}
+
+/// The focused claude sessions this addon routes, with a conversation:
+/// the ones whose credential is looked up.
+fn focused(ctx: &dyn AddonCtx) -> Vec<Focused> {
+    let sessions = ctx.sessions().into_iter();
+    let claude = sessions.filter(|s| s.focused && s.kind == crate::proto::SessionKind::Claude);
+    claude
+        .filter_map(|s| {
+            let conversation = s.conversation.clone().filter(|c| !c.is_empty())?;
+            Some(Focused {
+                sid: s.sid,
+                profile: super::panel::profile_of(&s)?,
+                conversation,
+            })
+        })
+        .collect()
 }
 
 /// The `Applied` of a reply body.

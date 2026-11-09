@@ -176,3 +176,133 @@ fn first_sight_offers_once() {
     let tasks = saved.on_manifest("kb", &sha(), Ok(m));
     assert!(!tasks.iter().any(|t| matches!(t, Task::Offer(_))));
 }
+
+// ── Segments (the status bar's proxy and credential parts) ──────────────────
+
+mod segment_tests {
+    use crate::addon::{LaunchChoice, Segment, SessionSnap, Tone};
+    use crate::addons::vocdoni::proxy::api::{
+        CredentialInfo, CredentialUtilization, SessionCredential,
+    };
+    use crate::addons::vocdoni::state::stats::Focused;
+    use crate::addons::vocdoni::state::State;
+    use crate::addons::vocdoni::ui::segments;
+    use crate::proto::{SessionId, SessionKind};
+
+    fn snap(profile: Option<&str>, conversation: Option<&str>) -> SessionSnap {
+        SessionSnap {
+            sid: SessionId::from_u128(1),
+            host: "local".into(),
+            kind: SessionKind::Claude,
+            cwd: "/w".into(),
+            label: "s".into(),
+            conversation: conversation.map(str::to_owned),
+            launch: profile.map(|p| LaunchChoice {
+                addon: "vocdoni".into(),
+                option: p.into(),
+                flags: Vec::new(),
+            }),
+            focused: true,
+        }
+    }
+
+    fn cred(five_hour: Option<f64>, switched_at: Option<&str>) -> SessionCredential {
+        SessionCredential {
+            credential: CredentialInfo {
+                label: "work-max".into(),
+                plan: "max".into(),
+                ..Default::default()
+            },
+            switched_at: switched_at.map(str::to_owned),
+            utilization: five_hour.map(|p| CredentialUtilization {
+                five_hour_pct: Some(p),
+                seven_day_pct: Some(91.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A state that has `c` for session 1's conversation `c1`, at `now`.
+    fn with(c: SessionCredential, now: u64) -> State {
+        let mut s = State {
+            now,
+            ..State::default()
+        };
+        let focused = Focused {
+            sid: SessionId::from_u128(1),
+            profile: "work".into(),
+            conversation: "c1".into(),
+        };
+        s.creds_due(vec![focused]);
+        s.on_cred(SessionId::from_u128(1), "c1", Ok(Some(c)));
+        s
+    }
+
+    fn texts(segs: &[Segment]) -> Vec<(&str, u8)> {
+        segs.iter().map(|s| (s.text.as_str(), s.priority)).collect()
+    }
+
+    #[test]
+    fn credential_shows_label_and_plan_and_the_windows_go_to_line_two() {
+        let s = with(cred(Some(37.5), None), 0);
+        let segs = segments(&s, &snap(Some("work"), Some("c1")));
+        assert_eq!(
+            texts(&segs),
+            [
+                ("⇄ proxy:work", 10),
+                ("work-max (max)", 20),
+                ("5h 37%", 110),
+                ("7d 91%", 150)
+            ]
+        );
+        assert_eq!(segs[0].tone, Tone::Accent);
+        assert_eq!((segs[2].tone, segs[3].tone), (Tone::Ok, Tone::Hot));
+        // A cached credential of a previous conversation is not shown;
+        // a direct session gets nothing.
+        let segs = segments(&s, &snap(Some("work"), Some("c2")));
+        assert_eq!(texts(&segs), [("⇄ proxy:work", 10)]);
+        assert!(segments(&s, &snap(None, Some("c1"))).is_empty());
+    }
+
+    #[test]
+    fn credential_without_utilization_or_plan_is_just_the_label() {
+        let mut c = cred(None, None);
+        c.credential.plan.clear();
+        let line = |c: &SessionCredential| {
+            let segs = segments(&with(c.clone(), 0), &snap(Some("work"), Some("c1")));
+            segs.into_iter().skip(1).map(|s| s.text).collect::<Vec<_>>()
+        };
+        assert_eq!(line(&c), ["work-max"]);
+        // The id stands in for a missing label; nothing to name shows nothing.
+        c.credential.label.clear();
+        c.credential.id = "cred_ab12".into();
+        assert_eq!(line(&c), ["cred_ab12"]);
+        c.credential.id.clear();
+        assert!(line(&c).is_empty());
+        // A long name is cut.
+        c.credential.label = "a-very-long-credential-name-indeed".into();
+        assert_eq!(line(&c), ["a-very-long-credential-…"]);
+    }
+
+    #[test]
+    fn switch_notice_lasts_ten_minutes() {
+        let at = "2026-10-09T10:07:02Z";
+        let t0 = crate::text::parse_rfc3339(at).unwrap();
+        let line = |now| {
+            let segs = segments(
+                &with(cred(None, Some(at)), now),
+                &snap(Some("w"), Some("c1")),
+            );
+            segs.into_iter().skip(1).map(|s| s.text).collect::<Vec<_>>()
+        };
+        assert_eq!(line(t0 + 180), ["work-max (max)", "⇆ switched 3m ago"]);
+        assert_eq!(line(t0 + 599), ["work-max (max)", "⇆ switched 9m ago"]);
+        assert_eq!(line(t0 + 600), ["work-max (max)"]);
+        let segs = segments(
+            &with(cred(None, Some(at)), t0 + 5),
+            &snap(Some("w"), Some("c1")),
+        );
+        assert_eq!((segs[2].tone, segs[2].priority), (Tone::Warn, 21));
+    }
+}

@@ -361,6 +361,7 @@ pub(crate) struct TestCtx {
     pub(crate) notices: Mutex<Vec<String>>,
     pub(crate) changed: AtomicUsize,
     pub(crate) offers: Mutex<Vec<String>>,
+    pub(crate) sessions: Mutex<Vec<SessionSnap>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -391,7 +392,7 @@ impl AddonCtx for TestCtx {
         !self.old.load(Ordering::SeqCst)
     }
     fn sessions(&self) -> Vec<SessionSnap> {
-        Vec::new()
+        lock(&self.sessions).clone()
     }
     fn hosts(&self) -> Vec<HostSnap> {
         Vec::new()
