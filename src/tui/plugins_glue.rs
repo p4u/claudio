@@ -498,7 +498,7 @@ fn ready_lines(host: &str, a: &Applied) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::state::{applied, compose, part, with_plugins};
+    use crate::plugins::state::{applied, compose, with_plugins};
     use crate::proxy::plugins::sample;
     use crate::tui::test_support::app_with;
 

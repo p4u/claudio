@@ -817,8 +817,3 @@ impl App {
         self.redraw = true;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
