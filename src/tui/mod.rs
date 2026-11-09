@@ -74,6 +74,7 @@ use crate::paths;
 use crate::proto::{Msg, SessionInfo};
 
 use crate::addon::Addons;
+use crate::app::addons::AddonRuntime;
 use crate::app::connections::Connections;
 use crate::app::extensions;
 use crate::app::snippets;
@@ -539,6 +540,8 @@ enum HostEvent {
     },
     /// A notice from a background task.
     Notice(String),
+    /// A launch through the composer ended (`addon_runner::launch`).
+    Launched(app::Launched),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -672,7 +675,9 @@ async fn event_loop(
 
     loop {
         for effect in app.take_effects() {
-            run_effect(effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host);
+            run_effect(
+                effect, &mut app, conns, &reply_tx, &ev_tx, &ext_host, &runtime,
+            );
         }
         addon_runner::sync(&runtime, &app);
         if app.quit {
@@ -801,6 +806,7 @@ async fn event_loop(
                     app.on_manifest(&name, &sha256, result);
                 }
                 Some(HostEvent::Notice(text)) => app.notify(text),
+                Some(HostEvent::Launched(done)) => app.on_launched(done),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
@@ -828,6 +834,7 @@ fn run_effect(
     reply_tx: &mpsc::UnboundedSender<(ReplyTo, io::Result<Msg>)>,
     ev_tx: &mpsc::Sender<HostEvent>,
     ext_host: &extensions::host::ExtensionHost,
+    runtime: &AddonRuntime,
 ) {
     match effect {
         Effect::Request { host, msg, to } => {
@@ -1026,6 +1033,7 @@ fn run_effect(
                     .await;
             });
         }
+        Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
         effect @ Effect::SpawnWithProxy { .. } => {
             addon_runner::spawn_with_proxy(effect, app, conns, reply_tx, ev_tx)
         }

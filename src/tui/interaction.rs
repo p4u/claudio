@@ -1034,7 +1034,7 @@ pub fn overview_matches(v: &SessionView, filter: &str) -> bool {
 mod tests {
     use super::*;
     use crate::app::extensions::Registry;
-    use crate::tui::app::AppConfig;
+    use crate::tui::app::{AppConfig, LaunchCall};
     use crate::tui::test_support::{self, app_with, info, press};
     use crossterm::event::Event;
     use ratatui::{backend::TestBackend, Terminal};
@@ -1301,11 +1301,12 @@ mod tests {
             let id = app.sessions[0].id;
             app.take_effects();
             app.reset_session(id, false);
+            // A direct session is restarted through the launch composer.
             let sent = app.take_effects().into_iter().find_map(|e| match e {
-                Effect::Request {
-                    msg: Msg::Respawn(spec),
+                Effect::Launch(LaunchCall {
+                    base: Msg::Respawn(spec),
                     ..
-                } => Some(spec),
+                }) => Some(spec),
                 _ => None,
             });
             let ext = sent.expect("a respawn").extensions.expect("extensions");

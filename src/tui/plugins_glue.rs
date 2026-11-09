@@ -500,6 +500,7 @@ mod tests {
     use super::*;
     use crate::plugins::state::{applied, compose, with_plugins};
     use crate::proxy::plugins::sample;
+    use crate::tui::app::LaunchCall;
     use crate::tui::test_support::app_with;
 
     fn list(profile: &str, plugins: Vec<Plugin>) -> PluginList {
@@ -857,10 +858,11 @@ KB_REGION = "eu"
                     let ext = spec.extensions.unwrap_or_default();
                     return (spec.args, spec.env, ext.instructions, names);
                 }
-                Effect::Request {
-                    msg: Msg::Spawn(spec),
+                // A direct session goes through the launch composer.
+                Effect::Launch(LaunchCall {
+                    base: Msg::Spawn(spec),
                     ..
-                } => {
+                }) => {
                     let ext = spec.extensions.unwrap_or_default();
                     return (spec.args, spec.env, ext.instructions, Vec::new());
                 }

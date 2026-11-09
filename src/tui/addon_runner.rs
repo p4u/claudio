@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::app::{App, Effect, ReplyTo};
+use super::app::{App, Effect, LaunchCall, Launched, Mode, ReplyTo};
 use super::{fetch_proxy_config, wait_manifests, HostEvent};
-use crate::addon::{Addons, SessionSnap};
+use crate::addon::{Addons, Frontend, SessionSnap};
 use crate::app::addons::{AddonRuntime, RuntimeOptions, RuntimeOut, RuntimeRx};
 use crate::app::connections::Connections;
+use crate::app::launch::{self, LaunchSpec, Step};
 use crate::client::Incoming;
 use crate::paths;
 use crate::proto::Msg;
@@ -102,6 +103,77 @@ pub(super) fn on_out(app: &mut App, out: RuntimeOut) {
     if let RuntimeOut::Notice { addon, notice } = out {
         app.notify(format!("{addon}: {}", notice.text));
     }
+}
+
+/// Run an [`Effect::Launch`] on a task: `app::launch::run` with this
+/// host's client; the outcome comes back as [`HostEvent::Launched`]. The
+/// addons' parts (their env) live only in that task.
+pub(super) fn launch(
+    call: LaunchCall,
+    mode: Mode,
+    runtime: &AddonRuntime,
+    conns: &Connections,
+    tx: &mpsc::Sender<HostEvent>,
+) {
+    let LaunchCall {
+        id,
+        op,
+        sid,
+        host,
+        cwd,
+        select,
+        mut base,
+    } = call;
+    let core_lenses = match &mut base {
+        Msg::Spawn(spec) => spec.extensions.take(),
+        Msg::Respawn(spec) => spec.extensions.take(),
+        _ => None,
+    };
+    let frontend = match mode {
+        Mode::Plain => Frontend::Plain,
+        Mode::Manager => Frontend::Tui,
+    };
+    let client = conns.client(&host).cloned();
+    let (rt, tx) = (runtime.clone(), tx.clone());
+    tokio::spawn(async move {
+        let (choice, notices, result) = match client {
+            None => (None, Vec::new(), Err(format!("{host}: not connected"))),
+            Some(client) => {
+                let spec = LaunchSpec {
+                    op,
+                    sid,
+                    host,
+                    cwd,
+                    select,
+                    frontend,
+                    base,
+                    core_lenses: core_lenses.unwrap_or_default(),
+                };
+                match launch::run(&rt, spec, client).await {
+                    Step::Sent {
+                        choice,
+                        notices,
+                        reply,
+                    } => (choice, notices, reply.map_err(|e| e.to_string())),
+                    // The TUI shows checklists from P3.11 on; until then
+                    // such a launch fails (the parked parts are dropped).
+                    Step::Review { addon, .. } => {
+                        (None, Vec::new(), Err(format!("{addon}: review needed")))
+                    }
+                    Step::Failed(why) => (None, Vec::new(), Err(why)),
+                }
+            }
+        };
+        let done = Launched {
+            id,
+            op,
+            sid,
+            choice,
+            notices,
+            result,
+        };
+        let _ = tx.send(HostEvent::Launched(done)).await;
+    });
 }
 
 /// Set `[extensions] name = on` in config.toml off the UI thread; the
@@ -286,5 +358,95 @@ mod tests {
             format!("event SessionRemoved {{ sid: {sid} }}")
         );
         runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_launch_is_composed_sent_and_reported_back() {
+        use crate::addon::{LaunchOp, LaunchSelect};
+        use crate::app::addons::test_support::{fake_host, next_request, reply};
+        use crate::proto::{LensKind, LensSpec, SessionExtensions, SpawnSpec};
+
+        let opts = RuntimeOptions {
+            config_path: "/nonexistent/claudio/config.toml".into(),
+            watch_config: false,
+        };
+        let (runtime, _rx) = AddonRuntime::start(Arc::new(Addons::empty()), opts);
+        let (seen_tx, mut seen) = mpsc::unbounded_channel();
+        let client = fake_host(&[], move |mut s| async move {
+            while let Some((req, msg)) = next_request(&mut s).await {
+                if let Msg::Spawn(spec) = &msg {
+                    let id = spec.id;
+                    let _ = seen_tx.send(msg);
+                    reply(&mut s, req, Msg::Spawned { id, pid: None }).await;
+                }
+            }
+        })
+        .await;
+        let conns = Connections::with_local(client);
+        let sid = uuid::Uuid::new_v4();
+        let core = SessionExtensions {
+            lenses: vec![LensSpec {
+                name: "latex".into(),
+                kind: LensKind::Tag,
+                instruction: "write <latex>".into(),
+            }],
+            ..Default::default()
+        };
+        let call = LaunchCall {
+            id: 3,
+            op: LaunchOp::New,
+            sid,
+            host: "local".into(),
+            cwd: "/w".into(),
+            select: LaunchSelect::of(None),
+            base: Msg::Spawn(SpawnSpec {
+                id: sid,
+                cwd: "/w".into(),
+                extensions: Some(core.clone()),
+                ..Default::default()
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        launch(call, Mode::Plain, &runtime, &conns, &tx);
+        let Some(HostEvent::Launched(done)) = rx.recv().await else {
+            panic!("no outcome")
+        };
+        assert_eq!((done.id, done.sid, done.op), (3, sid, LaunchOp::New));
+        assert!(matches!(done.result, Ok(Msg::Spawned { id, .. }) if id == sid));
+        assert!(done.choice.is_none() && done.notices.is_empty());
+        // Direct: no env, the markers-only env_remove, the core's lenses.
+        let Some(Msg::Spawn(spec)) = seen.recv().await else {
+            panic!("no spawn")
+        };
+        assert!(spec.env.is_empty());
+        assert_eq!(spec.env_remove, Some(Vec::new()));
+        assert_eq!(spec.extensions, Some(core));
+
+        // Without a connection the launch fails, and nothing is sent.
+        let call = LaunchCall {
+            host: "far".into(),
+            ..launch_call_like(sid)
+        };
+        launch(call, Mode::Manager, &runtime, &conns, &tx);
+        let Some(HostEvent::Launched(done)) = rx.recv().await else {
+            panic!("no outcome")
+        };
+        assert_eq!(done.result.unwrap_err(), "far: not connected");
+        runtime.shutdown();
+    }
+
+    fn launch_call_like(sid: crate::proto::SessionId) -> LaunchCall {
+        LaunchCall {
+            id: 4,
+            op: crate::addon::LaunchOp::New,
+            sid,
+            host: "local".into(),
+            cwd: "/w".into(),
+            select: crate::addon::LaunchSelect::of(None),
+            base: Msg::Spawn(crate::proto::SpawnSpec {
+                id: sid,
+                ..Default::default()
+            }),
+        }
     }
 }

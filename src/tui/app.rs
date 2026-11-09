@@ -23,6 +23,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
+use crate::addon::{LaunchChoice, LaunchOp, LaunchSelect};
 use crate::proto::{Msg, SessionId, SessionState};
 use crate::proxy::api::ConfigResponse;
 use crate::proxy::ProxyChoice;
@@ -149,6 +150,9 @@ pub enum Effect {
         /// The `Manifest` requests of the plugins `host` has not answered.
         pending: Vec<PendingManifest>,
     },
+    /// Launch a claude session through the launch composer
+    /// ([`crate::app::launch`]); the outcome goes to [`App::on_launched`].
+    Launch(LaunchCall),
     /// Put this text on the outer terminal's clipboard (OSC 52).
     CopyToClipboard(String),
     /// Read the snippets (off the UI thread); they go to
@@ -195,6 +199,39 @@ pub enum Effect {
         name: String,
         choices: crate::config::PluginChoices,
     },
+}
+
+/// A launch for the event loop's runner (`addon_runner::launch`). It holds
+/// no env and no addon's share: the runner composes them, off `App` (A6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaunchCall {
+    /// This launch, among the run's.
+    pub id: u64,
+    pub op: LaunchOp,
+    pub sid: SessionId,
+    pub host: String,
+    pub cwd: String,
+    /// What the member asked for.
+    pub select: LaunchSelect,
+    /// A `Spawn` or `Respawn` without env, carrying the core's extensions.
+    pub base: Msg,
+}
+
+/// A launch's outcome, for [`App::on_launched`]: no env, no addon's share.
+#[derive(Debug)]
+pub struct Launched {
+    // Read from P3.11 on, to answer a launch parked for a review.
+    #[allow(dead_code)]
+    pub id: u64,
+    pub op: LaunchOp,
+    pub sid: SessionId,
+    // Recorded with the session from P3.9 on (a direct launch has none).
+    #[allow(dead_code)]
+    pub choice: Option<LaunchChoice>,
+    /// The addons' notices, cleaned.
+    pub notices: Vec<String>,
+    /// The daemon's reply, or why the launch failed.
+    pub result: Result<Msg, String>,
 }
 
 /// A plugin manifest a deferred spawn waits for: its `Manifest` request,
@@ -309,6 +346,10 @@ pub struct App {
     /// What the event loop is to do next: queued by [`App::emit`], drained
     /// by [`App::take_effects`].
     effects: Vec<Effect>,
+    /// The last [`LaunchCall::id`].
+    launch_seq: u64,
+    /// Sessions whose launch has not ended: not attached until it has.
+    pub(super) launching: HashSet<SessionId>,
     /// Cached proxy config (env vars) per profile name, with fetch time.
     pub proxy_config: HashMap<String, (ConfigResponse, Instant)>,
     /// Live proxy stats per profile name.
@@ -447,6 +488,8 @@ impl App {
             quit: false,
             redraw: true,
             effects: Vec::new(),
+            launch_seq: 0,
+            launching: HashSet::new(),
             proxy_config: HashMap::new(),
             proxy_status: HashMap::new(),
             models_requested: HashSet::new(),
@@ -513,6 +556,45 @@ impl App {
             msg,
             to,
         });
+    }
+
+    /// Launch session `sid` on `host` through the composer: `base` is its
+    /// `Spawn` or `Respawn` without env.
+    pub(super) fn launch(
+        &mut self,
+        op: LaunchOp,
+        sid: SessionId,
+        host: &str,
+        cwd: String,
+        base: Msg,
+    ) {
+        self.launch_seq += 1;
+        self.launching.insert(sid);
+        self.emit(Effect::Launch(LaunchCall {
+            id: self.launch_seq,
+            op,
+            sid,
+            host: host.to_owned(),
+            cwd,
+            // Sessions with a proxy profile take the old path until P3.9.
+            select: LaunchSelect::of(None),
+            base,
+        }));
+    }
+
+    /// A launch ended: its notices are shown, and its result is the reply
+    /// to its `Respawn`, or to its `Spawn` as [`ReplyTo::SpawnedDeferred`]
+    /// (which attaches the active tab, held back while it launched).
+    pub fn on_launched(&mut self, done: Launched) {
+        self.launching.remove(&done.sid);
+        for notice in done.notices {
+            self.notify(notice);
+        }
+        let to = match done.op {
+            LaunchOp::Respawn => ReplyTo::Respawned(done.sid),
+            _ => ReplyTo::SpawnedDeferred(done.sid),
+        };
+        self.on_reply(to, done.result.map_err(std::io::Error::other));
     }
 
     /// Queue a write of state.json; back-to-back saves are one write.
@@ -751,17 +833,10 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use uuid::Uuid;
 
+    /// The daemon messages queued: each request's, and each launch's base
+    /// (a claude session without a proxy goes through the composer).
     fn requests(effects: &[Effect]) -> Vec<&Msg> {
-        effects
-            .iter()
-            .filter_map(|e| {
-                if let Effect::Request { msg: m, .. } = e {
-                    Some(m)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        test_support::messages(effects)
     }
 
     /// The LOCAL rows on the wizard's first screen.
@@ -846,15 +921,18 @@ mod tests {
         };
         assert_eq!((spec.id, spec.rows), (live[1].id, 27));
         assert_eq!(spec.args, ["--resume", "c2"]);
+        assert!(matches!(effects.last(), Some(Effect::Save)));
+        // The saved active tab attaches once its launch has ended.
+        assert!(!reqs.iter().any(|m| matches!(m, Msg::Attach { .. })));
+        let after = test_support::finish_launches(&mut app, &effects);
         assert_eq!(
-            *reqs[1],
+            *requests(&after)[0],
             Msg::Attach {
                 id: live[1].id,
                 rows: 27,
                 cols: 100
             }
         );
-        assert!(matches!(effects.last(), Some(Effect::Save)));
         assert_eq!(app.active, Some(1));
         assert!(app.modal.is_none());
     }
@@ -1359,8 +1437,11 @@ mod tests {
             panic!("expected Spawn, got {reqs:?}")
         };
         assert_eq!((spec.cwd.as_str(), spec.args.len()), ("/w", 0));
+        // The tab attaches once its launch has ended, not before.
+        assert!(!reqs.iter().any(|m| matches!(m, Msg::Attach { .. })));
+        let after = test_support::finish_launches(&mut app, &effects);
         assert_eq!(
-            *reqs[1],
+            *requests(&after)[0],
             Msg::Attach {
                 id: spec.id,
                 rows: 27,
@@ -1472,6 +1553,87 @@ mod tests {
             _ => None,
         });
         assert!(!spawn.expect("a Spawn").ephemeral);
+    }
+
+    #[test]
+    fn a_direct_spawn_is_a_launch_whose_base_has_no_env() {
+        let mut app = app_with(&[info(Some(1), Some("c1"))]);
+        app.spawn("local".into(), "/w".into(), Some("c9".into()), None);
+        let id = app.sessions[1].id;
+        let effects = app.take_effects();
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::Request {
+                    msg: Msg::Spawn(_),
+                    ..
+                }
+            )),
+            "no Spawn request of its own: {effects:?}"
+        );
+        let launch = test_support::launches(&effects);
+        assert_eq!(launch.len(), 1);
+        let call = launch[0];
+        assert_eq!((call.op, call.sid), (LaunchOp::Resume, id));
+        assert_eq!((call.host.as_str(), call.cwd.as_str()), ("local", "/w"));
+        assert_eq!(call.select, LaunchSelect::of(None), "direct");
+        let Msg::Spawn(spec) = &call.base else {
+            panic!("not a spawn: {call:?}")
+        };
+        assert!(spec.env.is_empty() && spec.env_remove.is_none());
+        assert!(spec.optional.is_empty());
+        assert_eq!(spec.args, ["--resume", "c9"]);
+        assert!(spec.extensions.is_some(), "the core's lenses ride along");
+        // A second launch gets its own id.
+        app.spawn("local".into(), "/v".into(), None, None);
+        let effects = app.take_effects();
+        assert_eq!(test_support::launches(&effects)[0].id, call.id + 1);
+    }
+
+    #[test]
+    fn launched_routes_the_reply_like_a_spawn() {
+        let mut app = app_with(&[info(Some(1), None)]);
+        app.spawn("local".into(), "/w".into(), None, None);
+        let id = app.sessions[1].id;
+        app.take_effects();
+        let done = |notices: &[&str], result| Launched {
+            id: 1,
+            op: LaunchOp::New,
+            sid: id,
+            choice: None,
+            notices: notices.iter().map(|n| n.to_string()).collect(),
+            result,
+        };
+        // Sent: the notices are shown, and the active tab attaches again
+        // (its first Attach went before the Spawn).
+        app.on_launched(done(
+            &["extra: no host"],
+            Ok(Msg::Spawned { id, pid: None }),
+        ));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("extra: no host")
+        );
+        let effects = app.take_effects();
+        assert!(requests(&effects)
+            .iter()
+            .any(|m| matches!(m, Msg::Attach { id: a, .. } if *a == id)));
+        // Failed: as a refused Spawn.
+        app.on_launched(done(&[], Err("route: proxy down".into())));
+        assert_eq!(app.sessions[1].state, SessionState::Exited);
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("could not start claude: route: proxy down")
+        );
+        // A respawn's result is the reset's answer.
+        app.on_launched(Launched {
+            op: LaunchOp::Respawn,
+            ..done(&[], Err("gone".into()))
+        });
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("could not restart: gone")
+        );
     }
 
     #[test]
@@ -1762,9 +1924,12 @@ mod tests {
             matches!(&effects[0], Effect::Request { msg: Msg::SpawnShell(s), .. } if s.id == live[0].id),
             "{effects:?}"
         );
-        assert!(
-            matches!(&effects[1], Effect::Request { msg: Msg::Spawn(s), .. } if s.args == ["--resume", "c2"])
-        );
+        // The claude session is recovered through the launch composer.
+        assert!(matches!(
+            &effects[1],
+            Effect::Launch(LaunchCall { op: LaunchOp::Recover, base: Msg::Spawn(s), .. })
+                if s.args == ["--resume", "c2"]
+        ));
         assert_eq!(app.sessions[0].kind, SessionKind::Shell);
         assert_eq!(app.to_state().sessions[0].kind, SessionKind::Shell);
     }
@@ -1793,13 +1958,11 @@ mod tests {
         assert_eq!(app.sessions[1].state, SessionState::Exited);
     }
 
-    fn respawn_of(effects: &[Effect]) -> Option<(&RespawnSpec, &ReplyTo)> {
-        effects.iter().find_map(|e| match e {
-            Effect::Request {
-                msg: Msg::Respawn(spec),
-                to,
-                ..
-            } => Some((spec, to)),
+    /// The `Respawn` queued, as a request (a terminal's) or a launch's base
+    /// (a claude session's without a proxy).
+    fn respawn_of(effects: &[Effect]) -> Option<&RespawnSpec> {
+        requests(effects).into_iter().find_map(|m| match m {
+            Msg::Respawn(spec) => Some(spec),
             _ => None,
         })
     }
@@ -1845,19 +2008,21 @@ mod tests {
         app.on_terminal(press(KeyCode::Char('r')));
         assert!(app.modal.is_none());
         let effects = app.take_effects();
-        let (spec, to) = respawn_of(&effects).expect("a Respawn request");
+        let spec = respawn_of(&effects).expect("a Respawn");
         assert_eq!(
             (spec.id, spec.fresh, (spec.rows, spec.cols)),
             (id, false, (27, 100))
         );
-        assert_eq!(*to, ReplyTo::Respawned(id));
+        // A direct claude session is restarted through the composer.
+        let launch = test_support::launches(&effects);
+        assert_eq!((launch[0].op, launch[0].sid), (LaunchOp::Respawn, id));
         assert_eq!(app.sessions.len(), 1);
 
         // `n` starts a new conversation.
         app.on_terminal(alt('e'));
         app.on_terminal(press(KeyCode::Char('N')));
         let effects = app.take_effects();
-        assert!(respawn_of(&effects).is_some_and(|(spec, _)| spec.fresh));
+        assert!(respawn_of(&effects).is_some_and(|spec| spec.fresh));
     }
 
     #[test]
@@ -1878,7 +2043,7 @@ mod tests {
         assert!(app.modal.is_some(), "there is no `n` here");
         app.on_terminal(press(KeyCode::Char('r')));
         let effects = app.take_effects();
-        assert!(respawn_of(&effects).is_some_and(|(spec, _)| !spec.fresh));
+        assert!(respawn_of(&effects).is_some_and(|spec| !spec.fresh));
     }
 
     #[test]

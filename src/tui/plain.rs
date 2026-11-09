@@ -128,6 +128,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::{LaunchOp, LaunchSelect};
     use crate::client::Incoming;
     use crate::proto::{Msg, SessionState};
     use crate::proxy::ProxyChoice;
@@ -181,23 +182,24 @@ mod tests {
     fn spawns_one_local_session_in_the_cwd_with_the_given_args() {
         let (mut app, id) = plain_app(&["--resume", "abc"]);
         let effects = app.take_effects();
+        // A direct session goes through the launch composer.
         let spawn = effects.iter().find_map(|e| match e {
-            Effect::Request {
-                host,
-                msg: Msg::Spawn(spec),
-                to,
-            } => Some((host, spec, to)),
+            Effect::Launch(call) => match &call.base {
+                Msg::Spawn(spec) => Some((call, spec)),
+                _ => None,
+            },
             _ => None,
         });
-        let (host, spec, to) = spawn.expect("a Spawn request");
-        assert_eq!(host, "local");
+        let (call, spec) = spawn.expect("a launch of a Spawn");
+        assert_eq!(call.host, "local");
+        assert_eq!((call.op, call.sid), (LaunchOp::Resume, id));
+        assert_eq!(call.select, LaunchSelect::of(None), "direct");
         assert_eq!((spec.id, spec.cwd.as_str()), (id, "/work"));
         assert_eq!(spec.args, ["--resume", "abc"]);
         assert!(spec.env.is_empty(), "no proxy, no env");
         assert!(spec.ephemeral, "not a session for a manager to show");
         // The pane is the whole screen.
         assert_eq!((spec.rows, spec.cols), (30, 100));
-        assert_eq!(*to, ReplyTo::Spawned(id));
         assert_eq!(app.sessions.len(), 1);
         assert!(app.modal.is_none(), "no wizard");
     }
@@ -228,18 +230,9 @@ mod tests {
             app
         };
         let spawns = |app: &mut App| {
-            app.take_effects()
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e,
-                        Effect::Request {
-                            msg: Msg::Spawn(_),
-                            ..
-                        }
-                    )
-                })
-                .count()
+            let effects = app.take_effects();
+            let msgs = test_support::messages(&effects);
+            msgs.iter().filter(|m| matches!(m, Msg::Spawn(_))).count()
         };
         let reply = |app: &mut App, ok: bool, tail: &str| {
             let msg = Msg::ClaudeUpdated {
@@ -311,7 +304,9 @@ mod tests {
     #[test]
     fn manager_keys_go_to_claude_and_only_the_plain_keys_act() {
         let (mut app, id) = plain_app(&[]);
-        app.take_effects();
+        // The session runs: its launch ended.
+        let launched = app.take_effects();
+        test_support::finish_launches(&mut app, &launched);
         for c in ['n', 'x', 'r', 'g', 'c', 'a', 'q'] {
             app.on_terminal(alt(c));
             let effects = app.take_effects();
@@ -447,7 +442,9 @@ mod tests {
     #[test]
     fn foreign_sessions_never_appear() {
         let (mut app, _) = plain_app(&[]);
-        app.take_effects();
+        // The session runs: its launch ended.
+        let launched = app.take_effects();
+        test_support::finish_launches(&mut app, &launched);
         let other = test_support::info(Some(1), None);
         event(
             &mut app,

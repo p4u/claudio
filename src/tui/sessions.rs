@@ -6,6 +6,7 @@
 
 use uuid::Uuid;
 
+use crate::addon::LaunchOp;
 use crate::proto::{
     GitStatus, Msg, RespawnSpec, SessionId, SessionInfo, SessionKind, SessionState, ShellSpec,
     SpawnSpec,
@@ -168,6 +169,8 @@ impl SessionView {
 pub(super) struct SpawnRequest {
     pub id: SessionId,
     pub kind: SessionKind,
+    /// New, resume or recover (a claude session's launch).
+    pub op: LaunchOp,
     pub cwd: String,
     pub name: Option<String>,
     /// Extra claude arguments (`--resume …`); ignored for a terminal.
@@ -240,16 +243,18 @@ impl App {
         self.clear_selection();
         let (rows, cols) = self.pane_size();
         let view = &mut self.sessions[i];
-        view.attached = true;
+        // One still being launched is attached once its launch ends
+        // (`App::on_launched`): the daemon does not know it yet.
+        let launching = self.launching.contains(&view.id);
+        view.attached = !launching;
         // Blank until the daemon's `Attached` + snapshot arrive.
         view.mirror = Screen::new(rows, cols);
         let id = view.id;
         let host = view.host.clone();
-        self.request(
-            &host,
-            Msg::Attach { id, rows, cols },
-            ReplyTo::Ack("attach"),
-        );
+        if !launching {
+            let attach = Msg::Attach { id, rows, cols };
+            self.request(&host, attach, ReplyTo::Ack("attach"));
+        }
         self.redraw = true;
         self.save();
         self.refresh_session_cred(super::proxy_state::SESSION_CRED_MIN_GAP_SECS);
@@ -340,9 +345,15 @@ impl App {
         proxy: Option<String>,
         at: usize,
     ) -> Result<(), String> {
+        let resumes = args.iter().any(|a| a == "--resume");
         let req = SpawnRequest {
             id,
             kind,
+            op: if resumes {
+                LaunchOp::Resume
+            } else {
+                LaunchOp::New
+            },
             cwd: cwd.clone(),
             name: None,
             args,
@@ -365,6 +376,8 @@ impl App {
     /// how a spawn is built:
     ///
     /// - a terminal is a `SpawnShell` with no `--resume` and no proxy env;
+    /// - claude without a proxy goes through the launch composer
+    ///   ([`App::launch`]);
     /// - claude with a proxy builds its env at once when the profile's config
     ///   is cached. When the cache is cold (first spawn), the effect runner
     ///   fetches it (5 s timeout) first, so the proxy's model/rate-limit
@@ -382,6 +395,7 @@ impl App {
         let SpawnRequest {
             id,
             kind,
+            op,
             cwd,
             name,
             args,
@@ -397,15 +411,9 @@ impl App {
             self.request(host, Msg::SpawnShell(shell), ReplyTo::Spawned(id));
             return Ok(());
         }
-        // The profile's plugins: their share now when this host answered
-        // for each, else once it has (the spawn waits for it).
-        let (plugins, pending) = match proxy {
-            Some(profile) => self.plugin_parts(host, profile),
-            None => (Vec::new(), Vec::new()),
-        };
         let spec = SpawnSpec {
             id,
-            cwd,
+            cwd: cwd.clone(),
             name,
             args,
             rows,
@@ -415,6 +423,13 @@ impl App {
             extensions: Some(self.extensions.session_extensions()),
             ..Default::default()
         };
+        let Some(profile) = proxy else {
+            self.launch(op, id, host, cwd, Msg::Spawn(spec));
+            return Ok(());
+        };
+        // The profile's plugins: their share now when this host answered
+        // for each, else once it has (the spawn waits for it).
+        let (plugins, pending) = self.plugin_parts(host, profile);
         let to = ReplyTo::Spawned(id);
         self.send_with_proxy(
             host,
@@ -517,15 +532,16 @@ impl App {
             extensions: Some(self.extensions.session_extensions()),
             ..Default::default()
         });
-        match self.send_with_proxy(
-            &host,
-            msg,
-            proxy.as_deref(),
-            first_party,
-            ReplyTo::Respawned(id),
-            plugins,
-            Vec::new(),
-        ) {
+        let sent = if kind == SessionKind::Claude && proxy.is_none() {
+            let cwd = self.sessions[i].cwd.clone();
+            self.launch(LaunchOp::Respawn, id, &host, cwd, msg);
+            Ok(())
+        } else {
+            let to = ReplyTo::Respawned(id);
+            let profile = proxy.as_deref();
+            self.send_with_proxy(&host, msg, profile, first_party, to, plugins, Vec::new())
+        };
+        match sent {
             Ok(()) => {
                 // Keep the effective choice, so a later restart keeps the env.
                 if first_party != stored {
@@ -702,6 +718,7 @@ impl App {
                 let req = SpawnRequest {
                     id: r.saved.id,
                     kind: r.saved.kind,
+                    op: LaunchOp::Recover,
                     cwd: r.saved.cwd.clone(),
                     name: r.saved.name.clone(),
                     args,

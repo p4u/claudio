@@ -237,6 +237,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::LaunchCall;
     use crate::tui::test_support::{app_with, info};
 
     fn hit(conversation: &str, cwd: &str) -> SearchHit {
@@ -310,11 +311,12 @@ mod tests {
             conversation: "new-conv".into(),
         });
         assert_eq!(app.sessions.len(), tabs + 1);
+        // A direct session goes through the launch composer.
         let spawned = app.take_effects().into_iter().find_map(|e| match e {
-            Effect::Request {
-                msg: Msg::Spawn(spec),
+            Effect::Launch(LaunchCall {
+                base: Msg::Spawn(spec),
                 ..
-            } => Some(spec),
+            }) => Some(spec),
             _ => None,
         });
         let spec = spawned.expect("a spawn");
