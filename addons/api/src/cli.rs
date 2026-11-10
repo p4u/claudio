@@ -381,8 +381,12 @@ pub const HELP_APPENDIX: &str = "\n\
 \n\
 \x20Web UI:\n\
 \x20  claudio web [--listen 127.0.0.1:7337] [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]\n\
+\x20  claudio web stop | status | --foreground [flags]\n\
 \x20                              Serve the session manager to a browser on this machine (loopback only).\n\
-\x20                              Prints http://127.0.0.1:7337/#t=<token> and opens it. The token (in\n\
+\x20                              Saves its settings in [web] of config.toml; this host's daemon runs the\n\
+\x20                              server and restarts it. Prints http://127.0.0.1:7337/#t=<token>, opens\n\
+\x20                              it and exits. stop turns it off; status says whether it runs;\n\
+\x20                              --foreground serves from this terminal instead. The token (in\n\
 \x20                              ~/.config/claudio/web-token, 0600) is as sensitive as an SSH key: it\n\
 \x20                              reaches every session on every connected host. From another machine:\n\
 \x20                              ssh -L 7337:127.0.0.1:7337 HOST. Behind a TLS reverse proxy on this\n\
