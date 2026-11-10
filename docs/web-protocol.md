@@ -50,9 +50,9 @@ request with it, `["password"]` for any other request.
   each `--allow-host` name; all at the listen port, and also bare when the port is 443.
 - Accepted `Origin`: `https://` (and, without `--remote`, `http://`) followed by an accepted
   Host value, nothing after it. `null` is refused.
-- Cookie: `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `; Secure` when the
-  server runs with `--remote` or with any `--allow-host`. Server-side sessions: 24 h idle expiry, at most 64
-  (the least recently used goes).
+- Cookie: `claudio_web=<64 hex>; Max-Age=34560000; HttpOnly; SameSite=Strict; Path=/`, plus
+  `; Secure` when the server runs with `--remote` or with any `--allow-host`. Server-side sessions:
+  30 days idle, kept across restarts, at most 64 (the least recently used goes).
 - Login limits, taken **before** a token is compared or a password hashed (a reservation,
   so concurrent attempts cannot all pass): 5 attempts per peer per 60 s (every loopback
   address is one peer; an IPv4 address is one, an IPv6 address counts as its /64), 30 per
