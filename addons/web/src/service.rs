@@ -6,10 +6,11 @@
 use std::net::SocketAddr;
 
 use claudio_core::addon::ServiceState;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use toml::Table;
 
-use crate::{host_name_ok, listen_addr, parse_args, remote, DEFAULT_PORT};
+use crate::{host_name_ok, listen_addr, parse_args, remote, WebArgs, DEFAULT_PORT};
 
 /// What `[web]` stores as one unit: the listener and its allowed hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,15 @@ impl Default for Unit {
 }
 
 impl Unit {
+    /// The unit the command line names.
+    pub(crate) fn of(args: &WebArgs) -> Unit {
+        Unit {
+            remote: args.remote.is_some(),
+            addr: args.remote.unwrap_or(args.listen),
+            allow_hosts: args.allow_hosts.clone(),
+        }
+    }
+
     /// Its flags, each value in its flag's word (`--listen=…`): no value
     /// can be read as another flag.
     pub(crate) fn flags(&self) -> Vec<String> {
@@ -118,6 +128,32 @@ pub(crate) fn argv(t: &Table) -> Result<Option<Vec<String>>, String> {
     Ok(Some(head.into_iter().chain(unit.flags()).collect()))
 }
 
+/// The unit `claudio web` serves: the command line's when it names any of
+/// `--listen`, `--remote` or `--allow-host` (what it does not name takes
+/// its default), else the stored one (`web`, the `[web]` table), else the
+/// defaults. A stored unit is checked only when it is used.
+pub(crate) fn merge(web: &Table, args: &WebArgs) -> Result<Unit, String> {
+    if args.listen_given || args.remote.is_some() || !args.allow_hosts.is_empty() {
+        return Ok(Unit::of(args));
+    }
+    Ok(unit(web)?.unwrap_or_default())
+}
+
+/// The command line `claudio web` acts on: `unit`'s flags (checked as
+/// flags are) with `args`' one-shot flags. `--rotate-cert` needs a
+/// `--remote` unit.
+pub(crate) fn run_args(unit: &Unit, args: &WebArgs) -> Result<WebArgs, String> {
+    if args.rotate_cert && !unit.remote {
+        return Err("--rotate-cert needs --remote (here, or stored in [web])".to_owned());
+    }
+    let mut run = parse_args(&unit.flags())?;
+    run.no_open = args.no_open;
+    run.print_url = args.print_url;
+    run.rotate_token = args.rotate_token;
+    run.rotate_cert = args.rotate_cert;
+    Ok(run)
+}
+
 /// The one reply of `apply` and `status` (docs/addons.md, "The web addon").
 pub(crate) fn reply(state: &ServiceState) -> Value {
     match state {
@@ -138,6 +174,67 @@ pub(crate) fn reply(state: &ServiceState) -> Value {
             "tail": tail,
             "retry_in": retry_in.map(|d| d.as_secs()),
         }),
+    }
+}
+
+/// A reply as this claudio reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reported {
+    Off,
+    Starting,
+    Running {
+        pid: u32,
+        since: u64,
+        argv: Vec<String>,
+    },
+    Failed {
+        exit: Option<i32>,
+        signal: Option<i32>,
+        tail: String,
+        retry_in: Option<u64>,
+    },
+    /// A state (or shape) this claudio does not know: the daemon is newer.
+    Newer,
+}
+
+/// The wire form of [`reply`]; unknown fields are ignored.
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+enum Wire {
+    Off,
+    Starting,
+    Running {
+        pid: u32,
+        since: u64,
+        argv: Vec<String>,
+    },
+    Failed {
+        exit: Option<i32>,
+        signal: Option<i32>,
+        #[serde(default)]
+        tail: String,
+        retry_in: Option<u64>,
+    },
+}
+
+/// `body` of an `apply` or `status` reply.
+pub(crate) fn read_reply(body: &Value) -> Reported {
+    match Wire::deserialize(body) {
+        Ok(Wire::Off) => Reported::Off,
+        Ok(Wire::Starting) => Reported::Starting,
+        Ok(Wire::Running { pid, since, argv }) => Reported::Running { pid, since, argv },
+        Ok(Wire::Failed {
+            exit,
+            signal,
+            tail,
+            retry_in,
+        }) => Reported::Failed {
+            exit,
+            signal,
+            tail,
+            retry_in,
+        },
+        Err(_) => Reported::Newer,
     }
 }
 
@@ -225,6 +322,102 @@ mod tests {
             e.starts_with("[web] remote, allow_hosts: ") && e.contains("one port"),
             "{e}"
         );
+    }
+
+    fn flags(list: &[&str]) -> WebArgs {
+        parse_args(&words(list)).unwrap()
+    }
+
+    #[test]
+    fn any_listener_flag_replaces_the_stored_unit_and_none_keeps_it() {
+        let stored = table("enabled = true\nremote = \":8443\"\nallow_hosts = [\"a.example\"]");
+        let kept = merge(&stored, &flags(&["--no-open"])).unwrap();
+        assert_eq!(kept, unit(&stored).unwrap().unwrap(), "none given: stored");
+        let hosts = merge(&stored, &flags(&["--allow-host", "b.example"])).unwrap();
+        assert_eq!(
+            hosts,
+            Unit {
+                allow_hosts: words(&["b.example"]),
+                ..Unit::default()
+            },
+            "--allow-host alone: the whole unit, the listener at its default"
+        );
+        let listen = merge(&stored, &flags(&["--listen", "127.0.0.1:9000"])).unwrap();
+        assert_eq!(
+            (
+                listen.remote,
+                listen.addr.to_string(),
+                listen.allow_hosts.len()
+            ),
+            (false, "127.0.0.1:9000".to_owned(), 0),
+            "hosts cleared too"
+        );
+        assert_eq!(merge(&table(""), &flags(&[])).unwrap(), Unit::default());
+        let bad = table("listen = \"0.0.0.0:1\"");
+        assert!(merge(&bad, &flags(&[]))
+            .unwrap_err()
+            .starts_with("[web] listen: "));
+        assert!(
+            merge(&bad, &flags(&["--listen", "127.0.0.1:1"])).is_ok(),
+            "replaced"
+        );
+    }
+
+    #[test]
+    fn run_args_check_the_merged_unit() {
+        let remote = unit(&table("remote = \":7999\"")).unwrap().unwrap();
+        let asked = flags(&["--rotate-cert", "--no-open", "--rotate-token"]);
+        let run = run_args(&remote, &asked).unwrap();
+        assert!(run.rotate_cert && run.no_open && run.rotate_token && !run.print_url);
+        assert_eq!(
+            run.remote.map(|a| a.to_string()),
+            Some("0.0.0.0:7999".into())
+        );
+        let err = run_args(&Unit::default(), &asked).unwrap_err();
+        assert!(err.contains("--rotate-cert needs --remote"), "{err}");
+        let foreign = Unit {
+            allow_hosts: words(&["a.example:8443"]),
+            ..remote
+        };
+        assert!(run_args(&foreign, &flags(&[]))
+            .unwrap_err()
+            .contains("one port"));
+    }
+
+    #[test]
+    fn replies_read_back_and_an_unknown_state_is_a_newer_daemon() {
+        let running = ServiceState::Running {
+            pid: 7,
+            since: 9,
+            argv: words(&["web", "--service", "--listen=127.0.0.1:1"]),
+        };
+        assert_eq!(
+            read_reply(&reply(&running)),
+            Reported::Running {
+                pid: 7,
+                since: 9,
+                argv: words(&["web", "--service", "--listen=127.0.0.1:1"])
+            }
+        );
+        let failed = ServiceState::Failed {
+            exit: None,
+            signal: Some(9),
+            tail: "killed".into(),
+            retry_in: None,
+        };
+        assert!(matches!(
+            read_reply(&reply(&failed)),
+            Reported::Failed {
+                signal: Some(9),
+                retry_in: None,
+                ..
+            }
+        ));
+        assert_eq!(read_reply(&reply(&ServiceState::Off)), Reported::Off);
+        let extra = json!({"state": "off", "later": true});
+        assert_eq!(read_reply(&extra), Reported::Off, "unknown fields ignored");
+        assert_eq!(read_reply(&json!({"state": "paused"})), Reported::Newer);
+        assert_eq!(read_reply(&json!("off")), Reported::Newer);
     }
 
     #[test]

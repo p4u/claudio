@@ -8,6 +8,7 @@ mod addons;
 pub(crate) mod assets;
 mod atomic;
 pub(crate) mod auth;
+mod cli;
 mod dto;
 mod events;
 mod ext;
@@ -58,6 +59,7 @@ pub(crate) fn version() -> String {
 const USAGE: &str =
     "usage: claudio web [--foreground] [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
 [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]
+       claudio web stop | status
        claudio web --set-password
        claudio web --print-cert";
 
@@ -178,7 +180,9 @@ fn combination_ok(a: &WebArgs, n_args: usize) -> Result<(), String> {
     if a.remote.is_some() && a.listen_given {
         return Err("--remote is the one listener: drop --listen".to_owned());
     }
-    if a.rotate_cert && a.remote.is_none() {
+    // Without --foreground the stored [web] may be a --remote one: `cli`
+    // checks the settings it merges.
+    if a.rotate_cert && a.remote.is_none() && a.foreground {
         return Err("--rotate-cert needs --remote".to_owned());
     }
     if let Some(remote) = a.remote {
@@ -259,6 +263,11 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    match args {
+        [word] if word == "stop" => return cli::stop(),
+        [word] if word == "status" => return cli::status(),
+        _ => {}
+    }
     let args = match parse_args(args) {
         Ok(args) => args,
         Err(e) => {
@@ -269,11 +278,15 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
     if let Some(code) = one_shot(&args) {
         return code;
     }
-    serve_here(args, addons)
+    match args.foreground || args.service {
+        true => serve_here(args, addons),
+        // The daemon serves it (docs/web.md, "The web service").
+        false => cli::start(args),
+    }
 }
 
-/// Serve from this process: `claudio web --foreground` (and, until the daemon
-/// serves it, a bare `claudio web`), or `--service`, the daemon's child.
+/// Serve from this process: `claudio web --foreground`, or `--service`, the
+/// daemon's child.
 fn serve_here(args: WebArgs, addons: Arc<claudio_core::addon::Addons>) -> ExitCode {
     // First thing: a daemon that stops us (or dies) during the start is obeyed.
     let eof = args.service.then(watch_stdin);
@@ -556,7 +569,7 @@ fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
 
 /// The start lines: with `--remote` the banner's stderr lines first, then
 /// the one stdout line the tests read.
-fn announce(url: &str, remote: Option<&remote::Remote>) {
+pub(crate) fn announce(url: &str, remote: Option<&remote::Remote>) {
     let line = match remote {
         Some(r) => {
             for l in &r.banner.stderr {
@@ -766,9 +779,12 @@ mod tests {
         );
         let a = parse_args(&args(&["--remote", ":7999", "--rotate-cert"])).unwrap();
         assert!(a.rotate_cert);
+        // Without --foreground, --rotate-cert is checked on the merged
+        // settings (`service::run_args`), which may be a stored --remote.
+        assert!(parse_args(&args(&["--rotate-cert"])).is_ok());
         for bad in [
             &["--remote", "--listen", "127.0.0.1:1"][..],
-            &["--rotate-cert"][..],
+            &["--rotate-cert", "--foreground"][..],
             &["--remote", ":7999", "--allow-host", "a.example:8443"][..],
             &["--print-cert", "--no-open"][..],
             &["--remote", "fe80::1"][..],

@@ -15,6 +15,7 @@ use common::{ManagerHarness, BINARY, WAIT};
 use futures::SinkExt;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
+use web_harness::service::*;
 use web_harness::tls::*;
 use web_harness::*;
 
@@ -402,6 +403,192 @@ fn web_service_takes_sigterm_from_the_moment_it_says_ready() {
         };
         assert_eq!(status.code(), Some(0), "a graceful stop: {status:?}");
     }
+}
+
+// ── The web service: claudio web hands its server to the daemon ─────────────
+
+/// AC3.
+#[test]
+fn web_hands_its_server_to_the_daemon_and_stop_takes_it_back() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let cookie = svc.login();
+    assert_eq!(svc.me(&cookie), 204, "the printed URL logs in");
+    let (code, out) = svc.status();
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("web: enabled"), "{out}");
+    assert!(
+        out.contains(&format!("url: http://127.0.0.1:{}/\n", svc.port)),
+        "{out}"
+    );
+    let first = pid_in(&out).expect("a pid");
+    let restart = svc.claudio(&["daemon", "restart"]);
+    assert!(restart.status.success(), "{restart:?}");
+    assert!(gone_within(first, std::time::Duration::from_secs(5)));
+    svc.running_other_than(Some(first), common::DAEMON_WAIT);
+    let stop = svc.claudio(&["web", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", svc.port)).is_ok(),
+        "the port is closed"
+    );
+    let config = fs::read_to_string(svc.h().config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains("[web]\nenabled = false"), "{config}");
+    let (code, out) = svc.status();
+    assert_eq!(code, Some(3), "{out}");
+    assert!(
+        out.contains("web: disabled") && out.contains("service: off"),
+        "{out}"
+    );
+    svc.finish();
+}
+
+/// `stop` and `status` reach a daemon only if one runs: they never start one.
+#[test]
+fn web_stop_and_status_never_start_a_daemon() {
+    let h = ManagerHarness::new();
+    let status = claudio(&h, &["web", "status"], |_| {});
+    assert_eq!(status.status.code(), Some(3), "{status:?}");
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        out.contains("web: disabled") && out.contains("daemon: not running"),
+        "{out}"
+    );
+    let stop = claudio(&h, &["web", "stop"], |_| {});
+    assert_eq!(stop.status.code(), Some(0), "{stop:?}");
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains("[web]\nenabled = false"), "{config}");
+    assert!(
+        !h.runtime_dir.join("claudio/daemon.log").exists(),
+        "no daemon started"
+    );
+}
+
+/// AC9.
+#[test]
+fn web_service_comes_back_after_a_sigkill() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let first = svc.running_other_than(None, common::WAIT);
+    // SAFETY: kill(2); `first` is the service this test started.
+    unsafe { libc::kill(first as libc::pid_t, libc::SIGKILL) };
+    svc.running_other_than(Some(first), std::time::Duration::from_secs(5));
+    svc.finish();
+}
+
+/// AC2, AC11: a daemon killed by a signal stops nothing; its web service
+/// sees stdin's EOF and ends by itself, leaving the port free.
+#[test]
+fn web_service_ends_when_its_daemon_is_killed() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let pid = svc.running_other_than(None, WAIT);
+    // SIGTERM: the daemon has no handler, so it dies at once and stops nothing.
+    svc.h().kill_daemon();
+    assert!(
+        gone_within(pid, std::time::Duration::from_secs(5)),
+        "the service outlived its daemon"
+    );
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", svc.port)).is_ok(),
+        "the port is free"
+    );
+    svc.finish();
+}
+
+/// AC4.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_through_the_daemon_serves_tls_and_prints_the_banner() {
+    let h = ManagerHarness::new();
+    let port = free_port();
+    let remote = format!("127.0.0.1:{port}");
+    let args = ["web", "--remote", remote.as_str(), "--no-open"];
+    let config = h.config_home.join("claudio/config.toml");
+    let before = fs::read_to_string(&config).unwrap();
+    let refused = claudio(&h, &args, |_| {});
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--set-password"));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        before,
+        "config.toml untouched"
+    );
+    write_test_password(&h);
+    let out = claudio(&h, &args, |_| {});
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let mut svc = ServiceWeb::adopt(h, port);
+    let token = svc.token();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, format!("claudio web: https://{remote}/\n"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let fp = kept_fingerprint(svc.h());
+    assert!(
+        stderr.contains(&format!("claudio web: TLS certificate SHA-256 {fp}\n")),
+        "{stderr}"
+    );
+    let here = format!("claudio web: on this machine: https://{remote}/#t={token}");
+    assert!(stderr.contains(&here), "{stderr}");
+    let page = request_text("GET", "/", &remote, &[], "");
+    let reply = https_from("127.0.0.1", port, &fp, &page).await.unwrap();
+    assert_eq!(reply.status, 200, "TLS through the daemon");
+    let (code, status) = svc.status();
+    assert_eq!(code, Some(0), "{status}");
+    assert!(
+        status.contains(&format!("certificate SHA-256 {fp}")),
+        "{status}"
+    );
+    svc.finish();
+}
+
+/// AC7.
+#[test]
+fn web_against_the_previous_release_s_daemon_saves_and_does_not_serve() {
+    let h = ManagerHarness::new();
+    let port = free_port();
+    let listen = format!("127.0.0.1:{port}");
+    let args = ["web", "--listen", listen.as_str(), "--no-open"];
+    let out = claudio(&h, &args, |cmd| {
+        cmd.env("CLAUDIO_TEST_OLD_DAEMON", "1");
+    });
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the daemon has no web service (older, or built without"),
+        "{err}"
+    );
+    // An AddonOp would have been refused as `unsupported op`: none was sent.
+    assert!(!err.contains("unsupported op"), "{err}");
+    let config = fs::read_to_string(h.config_home.join("claudio/config.toml")).unwrap();
+    assert!(config.contains("[web]\nenabled = true"), "{config}");
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "nothing listens"
+    );
+    let mut svc = ServiceWeb::adopt(h, port);
+    let restart = svc.claudio(&["daemon", "restart"]);
+    assert!(restart.status.success(), "{restart:?}");
+    svc.running_other_than(None, common::DAEMON_WAIT);
+    assert_eq!(http(port, "GET", "/", &svc.host(), &[], "").status, 200);
+    svc.token();
+    svc.finish();
+}
+
+/// AC3: a service that ignores SIGTERM (and stdin's EOF) is SIGKILLed
+/// after 3 s, and the new daemon still starts.
+#[test]
+fn web_daemon_restart_kills_a_service_that_ignores_its_stop() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |cmd| {
+        // The daemon this starts, and so its service, inherit it.
+        cmd.env("CLAUDIO_TEST_SERVICE_HANG", "1");
+    });
+    let first = svc.running_other_than(None, WAIT);
+    let started = std::time::Instant::now();
+    let restart = svc.claudio(&["daemon", "restart"]);
+    assert!(restart.status.success(), "{restart:?}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(3),
+        "SIGKILL after 3 s"
+    );
+    assert!(!alive(first));
+    svc.running_other_than(Some(first), common::DAEMON_WAIT);
+    svc.finish();
 }
 
 // ── Persistent sign-ins ───────────────────────────────────────────────────────

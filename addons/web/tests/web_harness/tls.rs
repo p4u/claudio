@@ -36,6 +36,12 @@ pub fn fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+/// The fingerprint of the certificate `h`'s config dir keeps.
+pub fn kept_fingerprint(h: &ManagerHarness) -> String {
+    let pem = h.config_home.join("claudio/web-tls/cert.pem");
+    fingerprint(&CertificateDer::from_pem_file(&pem).unwrap())
+}
+
 /// Write the fixture password file (0600) into `h`'s config dir.
 pub fn write_test_password(h: &ManagerHarness) {
     let dir = h.config_home.join("claudio");

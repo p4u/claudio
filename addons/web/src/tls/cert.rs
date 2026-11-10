@@ -104,6 +104,13 @@ pub(crate) fn read_cert_pem(dir: &Path) -> Result<String, String> {
     Ok(pem)
 }
 
+/// The kept certificate's SHA-256 fingerprint (`claudio web status`).
+pub(crate) fn kept_fingerprint(dir: &Path) -> Result<String, String> {
+    let pem = read_cert_pem(dir)?;
+    let der = CertificateDer::from_pem_slice(pem.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(fingerprint(&der))
+}
+
 /// A private regular file of ours, at most [`PEM_MAX`] bytes, as text.
 fn read_private(path: &Path) -> Result<String, String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
