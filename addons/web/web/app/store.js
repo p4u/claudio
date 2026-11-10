@@ -71,6 +71,9 @@ export function connect() {
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   connection = new Connection({
     url,
+    // A deadline: an answer that never comes must not hold the reconnect back.
+    me: () => fetch('/api/me', { credentials: 'same-origin', signal: AbortSignal.timeout(10_000) }).then((r) => r.status),
+    reload: () => location.reload(),
     onHello,
     onSnapshot: (snap) => {
       model.value = applySnapshot(model.value, snap);

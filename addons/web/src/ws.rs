@@ -3,6 +3,7 @@
 //! (binary frames), each checked against the protocol's limits, and the
 //! request ops of §5.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
 
-use super::hub::{daemon_error, Out, TabId, TabTx, MAX_TABS};
+use super::hub::{daemon_error, HubHandle, Out, TabId, TabTx, MAX_TABS};
 use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
@@ -60,8 +61,27 @@ impl Drop for TabSlot {
     }
 }
 
+/// A tab's place in the hub and its writer, ended however the tab ends,
+/// its future dropped included: the hub forgets the tab and the writer
+/// stops, which drops the socket.
+struct TabEnd {
+    hub: HubHandle,
+    tab: TabId,
+    writer: tokio::task::AbortHandle,
+}
+
+impl Drop for TabEnd {
+    fn drop(&mut self) {
+        self.hub.close_tab(self.tab);
+        self.writer.abort();
+    }
+}
+
 /// `GET /ws` (the guard checked Host, Origin and the cookie). While the
-/// tab is open, its session counts as used (`sessions::OpenTab`).
+/// tab is open, its session counts as used (`sessions::OpenTab`); when the
+/// session is gone (`Sessions::gone`), the tab ends, and its socket and
+/// `TabSlot` with it. The tab watches for that itself and is never dropped
+/// half open: a tab dropped while the hub registers it would stay there.
 pub(crate) async fn upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -74,9 +94,12 @@ pub(crate) async fn upgrade(
     ws.max_message_size(2 << 20)
         .max_frame_size(2 << 20)
         .on_upgrade(move |socket| async move {
+            let Some(hash) = session else {
+                return tab(state, socket, slot, std::future::pending()).await;
+            };
             let kept = Arc::clone(&state.auth.sessions);
-            let _open = session.map(|hash| sessions::OpenTab::start(kept, hash, paths::unix_now));
-            tab(state, socket, slot).await;
+            let _open = sessions::OpenTab::start(Arc::clone(&kept), hash, paths::unix_now);
+            tab(state, socket, slot, kept.gone(&hash)).await;
         })
 }
 
@@ -126,8 +149,9 @@ fn binary_frame(bytes: &[u8]) -> Frame {
 }
 
 /// One browser tab: `hello`, then the hub's snapshot and replay, then a
-/// writer draining the tab's queue while this task reads its frames.
-async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
+/// writer draining the tab's queue while this task reads its frames, until
+/// the socket ends or `gone` does (the tab's sign-in ended).
+async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot, gone: impl Future<Output = ()>) {
     let (tx, mut rx) = TabTx::new();
     let hello = json!({
         "t": "hello",
@@ -170,16 +194,19 @@ async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
             }
         }
     });
+    let _end = TabEnd {
+        hub: state.hub.clone(),
+        tab,
+        writer: writer.abort_handle(),
+    };
     let slots = Arc::new(Semaphore::new(IN_FLIGHT));
-    let mut writer_done = false;
     let mut closing = false;
+    tokio::pin!(gone);
     loop {
         let msg = tokio::select! {
             msg = stream.next() => msg,
-            _ = &mut writer => {
-                writer_done = true;
-                break;
-            }
+            _ = &mut writer => break,
+            () = &mut gone => break,
         };
         let Some(Ok(msg)) = msg else { break };
         let frame = match &msg {
@@ -220,14 +247,10 @@ async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
             break;
         }
     }
-    state.hub.close_tab(tab);
     drop(tx);
-    if !writer_done {
-        if closing {
-            // Let the writer flush the close frame.
-            let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
-        }
-        writer.abort();
+    if closing {
+        // Let the writer flush the close frame (`_end` then stops it).
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
     }
 }
 

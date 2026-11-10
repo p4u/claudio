@@ -7,7 +7,8 @@
 //! gone, and past 64 the least recently used goes. `now` is a parameter
 //! (A6). The file format, [`epoch`], [`load`] and the writer task of
 //! [`Sessions`] are the I/O edge. The file holds hashes only: a copy of it
-//! signs no one in.
+//! signs no one in. A tab opened with a session ends with it
+//! ([`Sessions::gone`]).
 
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -104,12 +105,15 @@ struct Entry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Store {
     entries: Vec<Entry>,
+    /// Sessions removed so far: signed out, replaced, evicted or idle.
+    removed: u64,
 }
 
 impl Store {
     /// A `seen` later than `now` pulled back to `now`, idle entries
     /// dropped, and of more than [`MAX`] the most recently seen kept.
     fn tidy(&mut self, now: u64) {
+        let before = self.entries.len();
         for e in &mut self.entries {
             e.seen = e.seen.min(now);
         }
@@ -118,6 +122,7 @@ impl Store {
             self.entries.sort_by_key(|e| std::cmp::Reverse(e.seen));
             self.entries.truncate(MAX);
         }
+        self.removed += (before - self.entries.len()) as u64;
     }
 
     /// The entry `hash` names, every hash compared in constant time.
@@ -142,6 +147,7 @@ impl Store {
             let oldest = (0..self.entries.len()).min_by_key(|&i| self.entries[i].seen);
             if let Some(i) = oldest {
                 self.entries.remove(i);
+                self.removed += 1;
             }
         }
         self.entries.push(Entry {
@@ -171,6 +177,7 @@ impl Store {
     pub(crate) fn remove(&mut self, value: &str) {
         if let Some(i) = hash_of(value).and_then(|h| self.find(&h)) {
             self.entries.remove(i);
+            self.removed += 1;
         }
     }
 
@@ -304,6 +311,9 @@ pub(crate) struct Sessions {
     wanted: watch::Sender<u64>,
     /// The last change the writer has tried to write (or failed to).
     tried: watch::Sender<u64>,
+    /// The store's `removed` as last published: open tabs re-check their
+    /// session when it grows ([`Sessions::gone`]).
+    removals: watch::Sender<u64>,
 }
 
 impl Sessions {
@@ -315,6 +325,7 @@ impl Sessions {
             path: Some(path),
             wanted: watch::Sender::new(0),
             tried: watch::Sender::new(0),
+            removals: watch::Sender::new(0),
         }
     }
 
@@ -327,6 +338,7 @@ impl Sessions {
             path: None,
             wanted: watch::Sender::new(0),
             tried: watch::Sender::new(0),
+            removals: watch::Sender::new(0),
         }
     }
 
@@ -345,9 +357,24 @@ impl Sessions {
         gen
     }
 
+    /// `edit` on the store; open tabs are told when it removed a session.
+    fn edit<R>(&self, edit: impl FnOnce(&mut Store) -> R) -> R {
+        let (out, removed) = {
+            let mut store = self.lock();
+            let out = edit(&mut store);
+            (out, store.removed)
+        };
+        self.removals.send_if_modified(|seen| {
+            let more = removed > *seen;
+            *seen = (*seen).max(removed);
+            more
+        });
+        out
+    }
+
     /// [`Store::login`]; the change a reply waits for ([`Sessions::written`]).
     pub(crate) fn login(&self, new: Hash, old: Option<&str>, now: u64) -> u64 {
-        self.lock().login(new, old, now);
+        self.edit(|s| s.login(new, old, now));
         self.change()
     }
 
@@ -362,7 +389,7 @@ impl Sessions {
 
     /// A use of `hash`'s session; `false` when it is gone (nothing happens).
     pub(crate) fn mark(&self, hash: &Hash, now: u64) -> bool {
-        let used = self.lock().use_hash(hash, now);
+        let used = self.edit(|s| s.use_hash(hash, now));
         if used == Some(true) {
             self.change();
         }
@@ -371,8 +398,20 @@ impl Sessions {
 
     /// [`Store::remove`]; the change a reply waits for.
     pub(crate) fn sign_out(&self, value: &str) -> u64 {
-        self.lock().remove(value);
+        self.edit(|s| s.remove(value));
         self.change()
+    }
+
+    /// Until `hash`'s session is gone: signed out, replaced by a login,
+    /// evicted past [`MAX`] or idle. Subscribed before the first look, so a
+    /// removal in between is not missed; a `watch` keeps one value (A10).
+    pub(crate) async fn gone(&self, hash: &Hash) {
+        let mut removals = self.removals.subscribe();
+        while self.lock().find(hash).is_some() {
+            if removals.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Until the writer has tried change `gen` (written or failed), at most
@@ -786,6 +825,57 @@ mod tests {
         assert!(s.check(&open, clock()), "an open tab's session is live");
         assert!(!s.check(&idle, clock()), "the other idled out");
         drop(tab);
+    }
+
+    #[tokio::test]
+    async fn a_wait_on_a_session_ends_with_each_kind_of_removal() {
+        use futures::FutureExt;
+        let s = Sessions::memory();
+        let (out, kept) = (value(1), value(2));
+        for v in [&out, &kept] {
+            s.login(hash_of(v).unwrap(), None, T0);
+        }
+        let out_hash = hash_of(&out).unwrap();
+        let mut wait = Box::pin(s.gone(&out_hash));
+        assert!((&mut wait).now_or_never().is_none(), "live");
+        s.login(hash_of(&value(3)).unwrap(), None, T0 + 1);
+        assert!(s.check(&kept, T0 + 1));
+        s.sign_out(&kept);
+        assert!((&mut wait).now_or_never().is_none(), "other changes");
+        s.sign_out(&out);
+        assert!((&mut wait).now_or_never().is_some(), "a sign-out");
+        assert!(s.gone(&out_hash).now_or_never().is_some(), "already gone");
+
+        // A login that came with the cookie replaces its session.
+        let old = value(4);
+        s.login(hash_of(&old).unwrap(), None, T0 + 2);
+        let old_hash = hash_of(&old).unwrap();
+        let mut wait = Box::pin(s.gone(&old_hash));
+        assert!((&mut wait).now_or_never().is_none());
+        s.login(hash_of(&value(5)).unwrap(), Some(&old), T0 + 3);
+        assert!((&mut wait).now_or_never().is_some(), "replaced");
+
+        // Idle: found by the tidy of any later use.
+        let s = Sessions::memory();
+        let (idle, busy) = (value(1), value(2));
+        s.login(hash_of(&idle).unwrap(), None, T0);
+        s.login(hash_of(&busy).unwrap(), None, T0 + DAY);
+        let idle_hash = hash_of(&idle).unwrap();
+        let mut wait = Box::pin(s.gone(&idle_hash));
+        assert!((&mut wait).now_or_never().is_none());
+        assert!(s.check(&busy, T0 + IDLE));
+        assert!((&mut wait).now_or_never().is_some(), "idle");
+
+        // Evicted: the least recently seen, by a login past MAX.
+        let s = Sessions::memory();
+        for n in 0..MAX as u64 {
+            s.login(hash_of(&value(n)).unwrap(), None, T0 + n);
+        }
+        let oldest = hash_of(&value(0)).unwrap();
+        let mut wait = Box::pin(s.gone(&oldest));
+        assert!((&mut wait).now_or_never().is_none());
+        s.login(hash_of(&value(999)).unwrap(), None, T0 + 100);
+        assert!((&mut wait).now_or_never().is_some(), "evicted");
     }
 
     #[tokio::test]

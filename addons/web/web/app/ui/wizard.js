@@ -40,26 +40,43 @@ function HostField({ w, set }) {
   const [busy, setBusy] = useState(null);
   const [err, setErr] = useState(null);
   useEffect(() => { reqQuiet('hosts.candidates').then((r) => setCands((r.hosts ?? []).filter((h) => !connected.includes(h)))).catch(() => {}); }, []);
-  async function pick(v) {
-    setErr(null);
-    if (!v.startsWith('ssh:')) { set({ host: v, resume: null }); return; }
-    const name = v.slice(4);
+  // In the wizard's state, not here: while a host is being typed the wizard starts nothing.
+  const other = !!w.other;
+  const setOther = (v) => set({ other: v });
+  const [typed, setTyped] = useState('');
+  async function connectTo(name) {
     setBusy(name);
     try {
       await reqQuiet('hosts.connect', { host: name });
-      set({ host: name, hosts: [...new Set([...w.hosts, name])], resume: null });
+      set({ host: name, hosts: [...new Set([...w.hosts, name])], resume: null, other: false });
+      setTyped('');
     } catch (e) {
       setErr(e.message);
     }
     setBusy(null);
   }
+  async function pick(v) {
+    setErr(null);
+    if (v === 'other:') { setOther(true); return; }
+    if (!v.startsWith('ssh:')) { set({ host: v, resume: null, other: false }); return; }
+    setOther(false);
+    await connectTo(v.slice(4));
+  }
+  const typedHost = typed.trim();
+  const connectTyped = () => { if (typedHost && busy === null) { setErr(null); connectTo(typedHost); } };
   return html`<div class="wz-field">
     <label for="wz-host">Host</label>
-    <select id="wz-host" class="select" data-testid="wizard-host" value=${w.host} disabled=${busy !== null} onChange=${(e) => pick(e.target.value)}>
-      ${connected.map((h) => html`<option value=${h} selected=${h === w.host}>${h === 'local' ? 'local (this machine)' : h}</option>`)}
-      ${w.host && !connected.includes(w.host) ? html`<option value=${w.host} selected>${w.host}</option>` : null}
+    <select id="wz-host" class="select" data-testid="wizard-host" value=${other ? 'other:' : w.host} disabled=${busy !== null} onChange=${(e) => pick(e.target.value)}>
+      ${connected.map((h) => html`<option value=${h} selected=${!other && h === w.host}>${h === 'local' ? 'local (this machine)' : h}</option>`)}
+      ${w.host && !connected.includes(w.host) ? html`<option value=${w.host} selected=${!other}>${w.host}</option>` : null}
       ${cands.length ? html`<optgroup label="Connect over SSH">${cands.map((c) => html`<option value=${`ssh:${c}`}>${c}</option>`)}</optgroup>` : null}
+      <option value="other:" selected=${other} data-testid="wizard-host-other">Another host…</option>
     </select>
+    ${other ? html`<div class="host-add-row">
+      <input class="input" data-testid="wizard-host-input" data-autofocus placeholder="alias or user@host" autocomplete="off" spellcheck=${false} value=${typed} disabled=${busy !== null}
+        onInput=${(e) => setTyped(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); connectTyped(); } }} />
+      <button type="button" class="btn btn-primary" data-testid="wizard-host-connect" disabled=${busy !== null || !typedHost} onClick=${connectTyped}>Connect</button>
+    </div>` : null}
     ${busy ? html`<p class="wz-note">Connecting to ${busy}… (first time it uploads claudio)</p>` : null}
     ${err ? html`<pre class="wz-error" role="alert" data-testid="wizard-host-error">${err}</pre>` : null}
   </div>`;
@@ -188,7 +205,7 @@ export function Wizard() {
   const set = (patch) => setW((cur) => ({ ...cur, ...patch }));
   useEffect(() => { loadAddonDecls(); }, []);
   const shell = w.kind === 'shell';
-  const ready = abs(w.cwd) && !busy;
+  const ready = abs(w.cwd) && !busy && !w.other;
 
   async function start() {
     if (!ready || busyRef.current) return;

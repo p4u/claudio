@@ -31,7 +31,11 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 
 /// Build the standard `ssh` invocation shared by bootstrap and the client
 /// bridge: `-T -o BatchMode=yes -o ConnectTimeout=15
-/// -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- HOST`.
+/// -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+/// -o StrictHostKeyChecking=accept-new -- HOST`.
+///
+/// `accept-new` trusts a host's key on first contact (BatchMode cannot ask)
+/// and still refuses a changed key.
 ///
 /// Callers append the remote command as one more `.arg(…)` call.
 pub fn ssh_cmd(host: &str) -> Command {
@@ -46,6 +50,8 @@ pub fn ssh_cmd(host: &str) -> Command {
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         "--",
         host,
     ]);
@@ -79,6 +85,25 @@ mod tests {
         assert!(validate_host("devbox").is_ok());
         assert!(validate_host("user@host.example.com").is_ok());
         assert!(validate_host("192.168.1.1").is_ok());
+    }
+
+    #[test]
+    fn ssh_cmd_accepts_new_host_keys_before_the_host() {
+        let cmd = ssh_cmd("devbox");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let opt = args
+            .iter()
+            .position(|a| a == "StrictHostKeyChecking=accept-new")
+            .expect("accept-new option");
+        assert_eq!(args[opt - 1], "-o");
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert!(opt < dd);
+        assert_eq!(args.last().unwrap(), "devbox");
+        assert_eq!(args.len(), dd + 2);
     }
 
     #[test]

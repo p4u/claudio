@@ -118,7 +118,9 @@ A bare `claudio` (no args) now opens the manager TUI. Scope is Linux and macOS.
 - **Transport is the system `ssh` binary**, used as a subprocess. One ssh
   process per host carries every session for that host. claudio honours the
   user's `~/.ssh/config`, agent, ProxyJump and ControlMaster, and never manages
-  ControlMaster itself.
+  ControlMaster itself. The options it sets on ssh's command line (`ssh_cmd`)
+  win over the config, `BatchMode=yes` and `StrictHostKeyChecking=accept-new`
+  among them.
 
 ### 2.0.1 Screen model (byte stream + mirror, the tmux model)
 

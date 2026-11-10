@@ -162,8 +162,7 @@ pub async fn connect(socket: &Path) -> io::Result<Client> {
 
 /// Connect to a remote daemon over SSH and perform the handshake.
 ///
-/// Uses the shared [`remote::ssh_cmd`] builder: `-T -o BatchMode=yes
-/// -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- HOST`.
+/// Uses the shared [`remote::ssh_cmd`] builder (its options are listed there).
 /// `kill_on_drop(true)` ensures the ssh process is killed when the Client
 /// is dropped.  The child is owned by a supervisor task so handshake failures
 /// don't leak it.
