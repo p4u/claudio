@@ -71,23 +71,30 @@ pub(crate) fn token_ok(s: &str) -> bool {
     s.len() == 2 * TOKEN_BYTES && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The saved token, or a new one written 0600 when there is none, it is not
-/// a regular private file of ours holding a well-formed token, or `rotate`.
-/// Blocking I/O: call before the runtime starts (or in `spawn_blocking`).
-pub(crate) fn load_or_create_token(path: &Path, rotate: bool) -> io::Result<String> {
+/// The saved token, if `path` is a regular private file of ours holding a
+/// well-formed one. Blocking I/O.
+pub(crate) fn load_token(path: &Path) -> io::Result<Option<String>> {
     use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    let private =
+        meta.file_type().is_file() && meta.mode() & 0o077 == 0 && meta.uid() == paths::uid();
+    if !private {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)?;
+    let token = text.trim();
+    Ok(token_ok(token).then(|| token.to_owned()))
+}
+
+/// The saved token ([`load_token`]), or a new one written 0600 when there
+/// is none or `rotate`. Blocking I/O: call before the runtime starts (or in
+/// `spawn_blocking`).
+pub(crate) fn load_or_create_token(path: &Path, rotate: bool) -> io::Result<String> {
     if !rotate {
-        if let Ok(meta) = std::fs::symlink_metadata(path) {
-            let private = meta.file_type().is_file()
-                && meta.mode() & 0o077 == 0
-                && meta.uid() == paths::uid();
-            if private {
-                let text = std::fs::read_to_string(path)?;
-                let token = text.trim();
-                if token_ok(token) {
-                    return Ok(token.to_owned());
-                }
-            }
+        if let Some(token) = load_token(path)? {
+            return Ok(token);
         }
     }
     let token = random_hex(TOKEN_BYTES)?;

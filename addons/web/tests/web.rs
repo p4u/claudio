@@ -289,6 +289,78 @@ fn web_answers_on_its_listen_address_and_a_proxy_port() {
     assert!(reply.header("set-cookie").unwrap().contains("; Secure"));
 }
 
+// ── --service: what the daemon runs ──────────────────────────────────────────
+
+#[test]
+fn web_service_says_ready_never_prints_the_token_and_stops_at_eof() {
+    let h = ManagerHarness::new();
+    let port = free_port();
+    let listen = format!("--listen=127.0.0.1:{port}");
+    // It only loads the token: without one it refuses to start, and makes none.
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--service", &listen]);
+    apply_env(&h, &mut cmd);
+    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no token in ") && err.contains("run claudio web"),
+        "{err}"
+    );
+    assert!(out.stdout.is_empty(), "no ready line");
+    let token_file = h.config_home.join("claudio/web-token");
+    assert!(!token_file.exists(), "it made no token");
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--foreground", "--print-url"]);
+    apply_env(&h, &mut cmd);
+    assert!(cmd.output().unwrap().status.success(), "the token is made");
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--service", &listen]);
+    apply_env(&h, &mut cmd);
+    let err = fs::File::create(h.root.join("service.err")).unwrap();
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(err);
+    let mut child = cmd.spawn().expect("start claudio web --service");
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    let token = fs::read_to_string(h.config_home.join("claudio/web-token")).unwrap();
+    let token = token.trim();
+    let (host, origin) = (
+        format!("127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
+    );
+    let body = json!({"token": token}).to_string();
+    let login = http(
+        port,
+        "POST",
+        "/api/login",
+        &host,
+        &[("Origin", &origin)],
+        &body,
+    );
+    assert_eq!(login.status, 204, "it serves: {login:?}");
+    // The daemon's stop (or death): stdin closes.
+    drop(child.stdin.take());
+    let deadline = std::time::Instant::now() + WAIT;
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still running after EOF"
+        );
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+    assert_eq!(rest, "", "stdout carries the ready line only");
+    let log = fs::read_to_string(h.root.join("service.err")).unwrap();
+    assert!(!log.contains(token), "the token is never printed: {log}");
+    assert!(
+        !h.runtime_dir.join("claudio/daemon.log").exists(),
+        "it never starts a daemon"
+    );
+}
+
 // ── Persistent sign-ins ───────────────────────────────────────────────────────
 
 fn cookie_header(cookie: &str) -> String {
