@@ -24,6 +24,8 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+# `[web]`, the service's config section (`DaemonOps::service`).
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -40,4 +42,3 @@ claudio-core = { workspace = true, features = ["test-support"] }
 reqwest.workspace = true
 # login.rs's paused-clock test (`start_paused`).
 tokio = { workspace = true, features = ["test-util"] }
-toml.workspace = true

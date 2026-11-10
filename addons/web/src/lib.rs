@@ -21,6 +21,7 @@ mod login;
 mod password;
 mod peer;
 mod remote;
+mod service;
 mod session_events;
 mod sessions;
 mod spawn;
@@ -207,7 +208,7 @@ fn value(
 
 /// `[A-Za-z0-9.-]{1,253}`, not starting with `-`, optionally `:<port>`
 /// (1..=65535).
-fn host_name_ok(name: &str) -> bool {
+pub(crate) fn host_name_ok(name: &str) -> bool {
     let (host, port) = match name.rsplit_once(':') {
         Some((h, p)) => (h, Some(p)),
         None => (name, None),

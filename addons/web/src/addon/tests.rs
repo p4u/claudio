@@ -161,3 +161,60 @@ fn web_claims_its_word_only() {
         Some(ExitCode::SUCCESS)
     );
 }
+
+/// The web addon in a real daemon: `[web] enabled` in the test's
+/// config.toml makes the daemon run its claudio (a fake that records its
+/// argv and says `ready`) as `web --service …`; the ops answer the state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_daemon_runs_web_service_from_the_web_section() {
+    use claudio_core::daemon::test_support::{write_executable, Client, TestDaemon};
+    use claudio_core::daemon::Config;
+    use claudio_core::proto::Msg;
+    let dir = TestDaemon::new_dir();
+    let fake = dir.join("fake-claudio");
+    let script = "#!/bin/sh\n[ \"$1\" = --version ] && exit 0\n\
+                  printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\necho ready\nexec cat > /dev/null\n";
+    write_executable(&fake, script);
+    std::fs::write(dir.join("config.toml"), "[web]\nenabled = true\n").unwrap();
+    let config = Config {
+        claudio: fake,
+        config_file: Some(dir.join("config.toml")),
+        ..TestDaemon::config(&dir)
+    };
+    let addons = Addons::new(vec![Arc::new(WebAddon)]).unwrap();
+    let d = TestDaemon::start_with_addons(dir, config, addons);
+    let mut c = Client::connect(&d.config.socket).await;
+    let op = |op: &str, body: Value| Msg::AddonOp {
+        addon: "web".into(),
+        op: op.into(),
+        body,
+    };
+    let running = |m: &Msg| matches!(m, Msg::AddonReply { body } if body["state"] == "running");
+    let mut reply = c.call(op("status", serde_json::json!({}))).await;
+    for _ in 0..200 {
+        if running(&reply) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        reply = c.call(op("status", serde_json::json!({}))).await;
+    }
+    let Msg::AddonReply { body } = reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        body["argv"],
+        serde_json::json!(["web", "--service", "--listen=127.0.0.1:7337"])
+    );
+    let argv = std::fs::read_to_string(d.dir.join("argv")).unwrap();
+    assert_eq!(argv, "web\n--service\n--listen=127.0.0.1:7337\n");
+    std::fs::write(d.dir.join("config.toml"), "[web]\nenabled = false\n").unwrap();
+    let off = c
+        .call(op("apply", serde_json::json!({"force": false})))
+        .await;
+    assert_eq!(
+        off,
+        Msg::AddonReply {
+            body: serde_json::json!({"state": "off"})
+        }
+    );
+}
