@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -22,7 +22,8 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{addons, ext, git_ops};
+use super::{addons, auth, ext, git_ops, sessions};
+use claudio_core::paths;
 use claudio_core::proto::{Msg, SearchHit, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
@@ -59,14 +60,24 @@ impl Drop for TabSlot {
     }
 }
 
-/// `GET /ws` (the guard checked Host, Origin and the cookie).
-pub(crate) async fn upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+/// `GET /ws` (the guard checked Host, Origin and the cookie). While the
+/// tab is open, its session counts as used (`sessions::OpenTab`).
+pub(crate) async fn upgrade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let Some(slot) = TabSlot::take(&state.tabs) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many tabs").into_response();
     };
+    let session = auth::cookie_value(&headers).and_then(|v| sessions::hash_of(&v));
     ws.max_message_size(2 << 20)
         .max_frame_size(2 << 20)
-        .on_upgrade(move |socket| tab(state, socket, slot))
+        .on_upgrade(move |socket| async move {
+            let kept = Arc::clone(&state.auth.sessions);
+            let _open = session.map(|hash| sessions::OpenTab::start(kept, hash, paths::unix_now));
+            tab(state, socket, slot).await;
+        })
 }
 
 /// What a client frame asks for.

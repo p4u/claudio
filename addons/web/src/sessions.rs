@@ -33,6 +33,8 @@ pub(crate) const WRITE_EVERY: u64 = 60 * 60;
 /// How long a login or a sign-out waits for its write, and the last write
 /// at stop.
 pub(crate) const WRITE_WAIT: Duration = Duration::from_secs(2);
+/// An open tab marks its session used this often ([`OpenTab`]).
+pub(crate) const MARK_EVERY: Duration = Duration::from_secs(60 * 60);
 /// A failed write is tried again after this, doubling up to [`RETRY_MAX`].
 const RETRY_FIRST: Duration = Duration::from_secs(60);
 const RETRY_MAX: Duration = Duration::from_secs(60 * 60);
@@ -435,6 +437,34 @@ async fn writer(sessions: Arc<Sessions>, path: PathBuf, mut wanted: watch::Recei
     }
 }
 
+/// While a tab's WebSocket is open its session counts as used: the page
+/// talks over the socket only after it loads. Marks it every
+/// [`MARK_EVERY`]; stops when the session is gone or the tab drops this.
+pub(crate) struct OpenTab(tokio::task::JoinHandle<()>);
+
+impl OpenTab {
+    /// Mark `hash`'s session used every [`MARK_EVERY`], at `clock()` (Unix
+    /// seconds).
+    pub(crate) fn start(sessions: Arc<Sessions>, hash: Hash, clock: fn() -> u64) -> OpenTab {
+        OpenTab(tokio::spawn(async move {
+            let first = tokio::time::Instant::now() + MARK_EVERY;
+            let mut every = tokio::time::interval_at(first, MARK_EVERY);
+            loop {
+                every.tick().await;
+                if !sessions.mark(&hash, clock()) {
+                    return;
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for OpenTab {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The next retry delay after a failed write.
 fn next_retry(retry: Option<Duration>) -> Duration {
     retry.map_or(RETRY_FIRST, |r| (r * 2).min(RETRY_MAX))
@@ -729,6 +759,33 @@ mod tests {
         let text = std::fs::read_to_string(dir.file()).unwrap();
         assert!(!text.contains(&hex(&hash_of(&v).unwrap())));
         writer.abort();
+    }
+
+    /// The marker's clock in the test below (its only user).
+    static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn clock() -> u64 {
+        CLOCK.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_open_tab_keeps_its_session_alive() {
+        use std::sync::atomic::Ordering::SeqCst;
+        CLOCK.store(T0, SeqCst);
+        let s = Arc::new(Sessions::memory());
+        let (open, idle) = (value(1), value(2));
+        s.login(hash_of(&open).unwrap(), None, T0);
+        s.login(hash_of(&idle).unwrap(), None, T0);
+        let tab = OpenTab::start(Arc::clone(&s), hash_of(&open).unwrap(), clock);
+        for _ in 0..31 * 24 {
+            CLOCK.fetch_add(60 * 60, SeqCst);
+            tokio::time::advance(MARK_EVERY).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(clock(), T0 + 31 * DAY);
+        assert!(s.check(&open, clock()), "an open tab's session is live");
+        assert!(!s.check(&idle, clock()), "the other idled out");
+        drop(tab);
     }
 
     #[tokio::test]
