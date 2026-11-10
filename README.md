@@ -11,10 +11,11 @@ Run many [Claude Code](https://claude.ai/claude-code) sessions, on this machine 
 ## The web UI
 
 ```bash
-claudio web          # serves http://127.0.0.1:7337 and opens it in your browser
+claudio web          # serves http://127.0.0.1:7337 through the daemon and opens it in your browser
+claudio web status   # is it running? (claudio web stop turns it off)
 ```
 
-It prints `claudio web: http://127.0.0.1:7337/#t=<token>`. The first visit trades the token for a cookie; later visits need nothing. The page is one more client of your daemons, like the terminal UI: the same sessions, hosts and `config.toml`. The page makes no external requests and runs under a strict CSP.
+It prints `claudio web: http://127.0.0.1:7337/#t=<token>` and exits: the daemon keeps the web running, restarts it if it stops, and starts it again with the daemon (after a reboot, at the next `claudio`). `claudio web --foreground` serves from the terminal instead. The first visit trades the token for a cookie; later visits need nothing until the sign-in goes unused for 30 days, and closing the browser keeps it (the palette's Sign out ends it). The page is one more client of your daemons, like the terminal UI: the same sessions, hosts and `config.toml`. The page makes no external requests and runs under a strict CSP.
 
 ![The board: one row per session, with state, host, branch, what it needs, model and context](docs/screenshots/web-board.png)
 
@@ -49,7 +50,7 @@ Also: one, two or four panes, terminal tabs, search across every conversation (`
 By default (without `--remote`), `claudio web` listens on loopback only. Two ways to reach it from a laptop or a phone:
 
 - **An SSH tunnel.** `ssh -L 7337:127.0.0.1:7337 host`, then open the URL `claudio web` printed on the host.
-- **`--remote`.** Set a password once with `claudio web --set-password`, then run `claudio web --remote`. It serves HTTPS on the network (port 7337 by default) with a self-signed certificate made on the first start and kept. The terminal prints the certificate's SHA-256 fingerprint at every start: check it against the one your browser shows before you accept the certificate. Remote browsers sign in with the password; the token link works only from the machine itself. `claudio web --print-cert` prints the certificate, to install it as trusted on the devices you use.
+- **`--remote`.** Set a password once with `claudio web --set-password` (8 bytes or more), then run `claudio web --remote`. The daemon serves HTTPS on the network (port 7337 by default) with a self-signed certificate made on the first start and kept. `claudio web --remote` and `claudio web status` print the certificate's SHA-256 fingerprint: check it against the one your browser shows before you accept the certificate. Remote browsers sign in with the password; the token link works only from the machine itself. `claudio web --print-cert` prints the certificate, to install it as trusted on the devices you use.
 
 The token, the password's hash and the certificate's key stay in `~/.config/claudio/` (mode 0600). Whoever has the token or the password can type into your sessions. The security model is in [docs/web.md](docs/web.md).
 
@@ -174,7 +175,7 @@ An exported `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept and turns the fea
 | Command | What it does |
 |---|---|
 | `claudio [--proxy NAME\|--no-proxy] [--first-party]` | The terminal UI |
-| `claudio web [--listen ADDR] [--no-open]` | The web UI (also `--remote`, `--set-password`, `--print-cert`, `--print-url`, `--rotate-token`) |
+| `claudio web [--listen ADDR] [--no-open]` | The web UI, served by the daemon (also `stop`, `status`, `--foreground`, `--remote`, `--set-password`, `--print-cert`, `--print-url`, `--rotate-token`) |
 | `claudio --plain [claude args…]` | One full-screen claude session |
 | `claudio sessions` | List the local sessions as a table |
 | `claudio daemon status\|stop\|restart` | Inspect or control this host's daemon |

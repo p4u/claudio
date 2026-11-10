@@ -21,10 +21,13 @@ through the version handshake. Addon text is rendered as text only.
 ## Usage
 
 ```bash
-claudio web                      # serve on 127.0.0.1:7337 and open the browser
+claudio web                      # the daemon serves on 127.0.0.1:7337; open the browser, exit
 claudio web --listen 127.0.0.1:9000 --no-open
-claudio web --print-url          # print the sign-in URL for the stored token and exit
-claudio web --rotate-token       # make a new token (every browser signs in again)
+claudio web status               # whether it runs, where, and why not (exit 0 while it runs)
+claudio web stop                 # stop it, and keep it off
+claudio web --foreground         # serve from this terminal instead, until Ctrl+C
+claudio web --print-url          # print the sign-in URL (stored settings and token) and exit
+claudio web --rotate-token       # make a new token: every browser signs in again
 claudio web --set-password       # set the password other machines log in with (asks twice)
 claudio web --remote             # TLS on 0.0.0.0:7337 for other machines; needs the password
 claudio web --remote [::]:8443   # IPv6 and IPv4, port 8443
@@ -32,13 +35,56 @@ claudio web --print-cert         # the certificate, to install as trusted on a l
 claudio web --remote --rotate-cert   # a new certificate (browsers warn once more)
 ```
 
-On start it prints `claudio web: http://127.0.0.1:7337/#t=<token>`. Open that URL once: the
-page posts the token to `/api/login`, gets a cookie and removes the token from the address bar.
-Later visits need no token while the cookie lives (24 h idle).
+It prints `claudio web: http://127.0.0.1:7337/#t=<token>` and exits; the server keeps running in
+the background (next section). Open that URL once: the page posts the token to `/api/login`,
+gets a cookie and removes the token from the address bar. Later visits need no token while the
+sign-in lives: until it goes unused for 30 days (an open tab counts as use), across server and
+daemon restarts and closed browsers. The palette's (`k`) **Sign out** ends this browser's
+sign-in; `--rotate-token` (or a new password) ends every browser's.
 
 Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
 `127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
-`--rotate-token`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
+`--rotate-token`, `--foreground`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
+
+### The web service
+
+`claudio web` checks its flags in the terminal, saves them in `config.toml`, has this host's
+daemon start the server, prints what a start prints (with `--remote`, the certificate banner on
+stderr too), opens the browser and exits. The daemon runs `claudio web --service` from `[web]`:
+
+```toml
+[web]
+enabled = true
+listen = "127.0.0.1:7337"         # or: remote = "0.0.0.0:7337" (TLS, the password)
+allow_hosts = ["claudio.example.org"]
+```
+
+- `--listen`, `--remote` and `--allow-host` replace the stored settings as one unit (what you do
+  not give takes its default); with none of them, `claudio web` uses the stored ones. The one-shot
+  flags are never stored. `[web]` is checked like the flags: a hand-edited
+  `listen = "0.0.0.0:7337"` fails with the flag's message and never binds; a hand edit takes
+  effect at the next `claudio web` or daemon start.
+- While `enabled = true`, every start of the daemon starts the web, and the daemon starts it again
+  when it exits (after 1 s, doubling to 60 s while it keeps failing). A new build takes over with
+  the daemon (`claudio upgrade`, `make dev`, or an outdated idle daemon being replaced). After a
+  reboot it comes back when the daemon next starts: the next `claudio` of any kind. No systemd
+  unit or launchd agent is installed, so it survives a logout only where the daemon does.
+- `claudio web stop` turns it off (`enabled = false`). `claudio web status` shows whether it
+  runs (its pid), the URL without the token, with `--remote` the certificate's SHA-256
+  fingerprint, or why it failed and its log, `<runtime>/web.log` (the server's stderr; 2 MiB at
+  most with `web.log.1`; never the token). It exits 0 while the web runs, 3 otherwise.
+- `claudio web --rotate-token`, `--print-url --rotate-token` and `--set-password` restart a
+  running service at once: every browser signs in again.
+- The server runs with the daemon's environment, not the terminal's that ran `claudio web`: its
+  SSH hosts use the daemon's `SSH_AUTH_SOCK` (stale or absent when the daemon was started over ssh
+  or by `systemd-run`), and `CLAUDIO_*` set in the terminal do not reach it. Run
+  `claudio daemon restart` from a shell with the environment you want, or use `--foreground`.
+- A daemon older than this claudio (or a build without the web addon) has no web service:
+  `claudio web` says so, keeps `[web]` saved, and exits 1. `claudio daemon restart` when its
+  sessions are idle, or `claudio web --foreground`.
+- **`--foreground`** keeps the old behaviour exactly: the server runs in this terminal until
+  Ctrl+C and never reads or writes `[web]`. A script or unit that ran `claudio web` as a
+  long-running process adds `--foreground`.
 
 `--remote [ADDR][:PORT]` serves TLS for other machines (below). Its value is `ADDR`,
 `ADDR:PORT`, `:PORT`, `[V6]` or `[V6]:PORT` (a bare IPv6 address needs brackets, `[::]:7337`);
@@ -65,12 +111,13 @@ Without `--remote` the server never listens on a non-loopback address. Three way
 
 ### `--remote`: TLS and a password
 
-1. **Set the password**: `claudio web --set-password`. It asks twice and never echoes; 12 to
-   1024 bytes. A running server keeps the old one until it restarts, and a restart signs every
-   browser out.
-2. **Start the server**: `claudio web --remote`. Without a password it exits before it makes a
-   certificate or opens a port. On stderr it prints `TLS certificate SHA-256 AB:CD:…` (at every
-   start), the names the certificate covers, and the token link for this machine
+1. **Set the password**: `claudio web --set-password`. It asks twice and never echoes; 8 to
+   1024 bytes. It restarts a running web service at once, which signs every browser out; a
+   `--foreground` server keeps the old password until it restarts (that restart signs every
+   browser out).
+2. **Start the server**: `claudio web --remote`. Without a password it exits before it saves
+   anything, makes a certificate or opens a port. On stderr it prints `TLS certificate SHA-256
+   AB:CD:…` (at every start), the names the certificate covers, and the token link for this machine
    (`https://127.0.0.1:7337/#t=…`); on stdout, the URL for other machines (no token). If a
    firewall (ufw, firewalld, macOS's) blocks the port, open it. Another machine may not
    resolve the host name: use `<host>.local` or the machine's address. A name the certificate
@@ -115,7 +162,8 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   local ones, so a browser on another machine (or behind a proxy that keeps `Host`) never logs
   in with the token.
 - **The password** (`--remote` only). An argon2id hash (m=19 MiB, t=2, p=1) in
-  `~/.config/claudio/web-password`, mode 0600; 12 to 1024 bytes. It is never in argv, a log, a
+  `~/.config/claudio/web-password`, mode 0600; 8 to 1024 bytes (the length counts bytes). It is
+  never in argv, a log, a
   notice or the page's storage (the page clears the field before it posts it). Whoever has it
   can type into your sessions.
 - **The certificate** (`--remote` only). A self-signed P-256 server certificate (10 years) and
@@ -138,14 +186,26 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   unaffected. Many addresses together can fill the 256 connection slots while an attack lasts.
 - **The token is a key.** It lives in `~/.config/claudio/web-token` (mode 0600, 64 hex),
   is reused across runs and is compared in constant time. Treat it like an SSH private key:
-  whoever has it can type into your sessions. `--rotate-token` replaces it. It is printed on
-  stdout at start and by `--print-url`, and nowhere else (never in a log, a query string, a
-  WebSocket frame or an HTTP body). With `--remote` it is printed on stderr instead, in the
-  link for this machine (when the listen address is loopback or every interface), and by
-  `--print-url`, and accepted only from local requests.
-- **Cookie.** `claudio_web=<64 hex>; HttpOnly; SameSite=Strict; Path=/`, plus `Secure` with
-  `--remote` or when `--allow-host` is set. Sessions are kept in the server's memory: 24 h idle
-  expiry, at most 64.
+  whoever has it can type into your sessions. `--rotate-token` replaces it. `claudio web` prints
+  it on stdout, from the token file, and so does `--print-url`; nothing else does (never a log,
+  the web service's included, a query string, a WebSocket frame or an HTTP body). With
+  `--remote` it is printed on stderr instead, in the link for this machine (when the listen
+  address is loopback or every interface), and by `--print-url`, and accepted only from local
+  requests.
+- **Cookie.** `claudio_web=<64 hex>; Max-Age=34560000; HttpOnly; SameSite=Strict; Path=/`, plus
+  `Secure` with `--remote` or when `--allow-host` is set. 400 days is the longest a browser keeps
+  a cookie; the server decides when a sign-in ends: 30 days unused (an open tab marks it used
+  once an hour), a sign-out, the least recently used of more than 64, or a server start after
+  the token, the password or the mode (loopback or `--remote`) changed. Sign-ins are kept in
+  `~/.config/claudio/web-sessions.json` (0600) as the SHA-256 of each cookie and its last use,
+  never a cookie: a copy of the file signs no one in. The file is bound to an epoch, the SHA-256
+  of the mode, the token and the password file as read at the server's start, so a new token or
+  password, or the other mode, empties it at the next start. A stolen cookie is worth more than
+  before (up to 30 days of disuse); sign out of a browser you no longer trust, or rotate the
+  token. Two servers on one config dir (a `--foreground` one beside the service) share the file
+  unlocked: one may forget a sign-in the other made, or bring back one the other signed out
+  (it still holds it in memory); with two, a sign-out is sure only when made on each, or with
+  `--rotate-token` and a restart of both.
 - **Host and Origin.** Every request needs an accepted `Host` (the listen address and the
   loopback names with the port, plus `--allow-host` names), else `421`. With `--remote` the
   accepted `Host`s are also any IP literal at the port, this machine's host name and
@@ -170,9 +230,10 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   login refused` with the status and whether the request was local. Never values, typed text,
   tokens or passwords.
 - **State.** The web writes `web-state.json` (layout, order, each session's `launch`, still
-  with its `proxy`/`first_party` for one release, remote hosts) and
+  with its `proxy`/`first_party` for one release, remote hosts), `web-sessions.json` and
   `web-token` in the config dir (with `--set-password` and `--remote`, also `web-password` and
-  `web-tls/`). It reads the TUI's `state.json` and never writes it.
+  `web-tls/`), and `claudio web` writes `[web]` in `config.toml`. It reads the TUI's
+  `state.json` and never writes it.
 
 ## Keys
 
@@ -270,7 +331,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
 | Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
-| Login and security | n/a | token URL, cookie; password form with `--remote` | `/api/login`, `/api/me` | `logs in from the token URL and clears the fragment`; `over --remote the page asks for the password and the session works`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests; `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate` |
+| Login and security | n/a | token URL, cookie; password form with `--remote`; palette: Sign out | `/api/login`, `/api/me`, `/api/logout` | `logs in from the token URL and clears the fragment`; `over --remote the page asks for the password and the session works`; `the palette signs this browser out, and its cookie stays refused`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests; `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate`, `web_sign_ins_and_sign_outs_survive_a_killed_server` |
 | Layout and style | n/a | dark only ([DESIGN.md](../DESIGN.md)); Settings → Text size | `layout.save` | `the page follows DESIGN.md`; `web_order_and_layout_persist_in_web_state` |
 | Keys | `Alt+…` (see Keys) | the same Alt keys, `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette`; `Alt+u in a terminal opens the reader and sends nothing to claude`; `Alt+a focuses the session that needs attention, Alt+Right switches session` |
 | Newline in the prompt | `Shift+Enter` | `Shift+Enter` in a terminal | `session.input` | `Shift+Enter puts ESC CR into the input, Enter submits` |
@@ -288,10 +349,11 @@ cargo test --test web --test web_manager -- --test-threads=1   # the server, wit
 make test-web                                 # node tests, then Playwright against a debug build
 ```
 
-A debug build run with `CLAUDIO_WEB_DIR=addons/web/web` serves the files from disk, so edits
-show on reload; every build embeds them gzipped (`addons/web/build.rs`). `make test-web` needs
-the Playwright browsers in `~/.cache/ms-playwright` (`npx playwright install chromium` once, in
-`addons/web/web/e2e`).
+A debug build run as `CLAUDIO_WEB_DIR=addons/web/web claudio web --foreground` serves the files
+from disk, so edits show on reload (without `--foreground` the daemon's service runs, with the
+daemon's environment); every build embeds them gzipped (`addons/web/build.rs`).
+`make test-web` needs the Playwright browsers in `~/.cache/ms-playwright`
+(`npx playwright install chromium` once, in `addons/web/web/e2e`).
 
 A file added or removed directly under `addons/web/web/` is not noticed by cargo until another
 embedded file changes or `build.rs` is touched (the directory itself is not watched because of
