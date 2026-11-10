@@ -40,14 +40,16 @@ function HostField({ w, set }) {
   const [busy, setBusy] = useState(null);
   const [err, setErr] = useState(null);
   useEffect(() => { reqQuiet('hosts.candidates').then((r) => setCands((r.hosts ?? []).filter((h) => !connected.includes(h)))).catch(() => {}); }, []);
-  const [other, setOther] = useState(false);
+  // In the wizard's state, not here: while a host is being typed the wizard starts nothing.
+  const other = !!w.other;
+  const setOther = (v) => set({ other: v });
   const [typed, setTyped] = useState('');
   async function connectTo(name) {
     setBusy(name);
     try {
       await reqQuiet('hosts.connect', { host: name });
-      set({ host: name, hosts: [...new Set([...w.hosts, name])], resume: null });
-      setOther(false); setTyped('');
+      set({ host: name, hosts: [...new Set([...w.hosts, name])], resume: null, other: false });
+      setTyped('');
     } catch (e) {
       setErr(e.message);
     }
@@ -56,8 +58,8 @@ function HostField({ w, set }) {
   async function pick(v) {
     setErr(null);
     if (v === 'other:') { setOther(true); return; }
+    if (!v.startsWith('ssh:')) { set({ host: v, resume: null, other: false }); return; }
     setOther(false);
-    if (!v.startsWith('ssh:')) { set({ host: v, resume: null }); return; }
     await connectTo(v.slice(4));
   }
   const typedHost = typed.trim();
@@ -72,7 +74,7 @@ function HostField({ w, set }) {
     </select>
     ${other ? html`<div class="host-add-row">
       <input class="input" data-testid="wizard-host-input" data-autofocus placeholder="alias or user@host" autocomplete="off" spellcheck=${false} value=${typed} disabled=${busy !== null}
-        onInput=${(e) => setTyped(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); connectTyped(); } }} />
+        onInput=${(e) => setTyped(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); connectTyped(); } }} />
       <button type="button" class="btn btn-primary" data-testid="wizard-host-connect" disabled=${busy !== null || !typedHost} onClick=${connectTyped}>Connect</button>
     </div>` : null}
     ${busy ? html`<p class="wz-note">Connecting to ${busy}… (first time it uploads claudio)</p>` : null}
@@ -203,7 +205,7 @@ export function Wizard() {
   const set = (patch) => setW((cur) => ({ ...cur, ...patch }));
   useEffect(() => { loadAddonDecls(); }, []);
   const shell = w.kind === 'shell';
-  const ready = abs(w.cwd) && !busy;
+  const ready = abs(w.cwd) && !busy && !w.other;
 
   async function start() {
     if (!ready || busyRef.current) return;

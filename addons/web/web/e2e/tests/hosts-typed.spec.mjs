@@ -26,3 +26,30 @@ test('the wizard connects a host typed by hand and shows ssh\'s own error', asyn
   await expect(connect).toBeEnabled();
   expect(await page.evaluate(() => window.__claudioCsp ?? [])).toEqual([]);
 });
+
+test('Enter in the typed host connects it and starts no session on the host shown before', async ({ page }) => {
+  await page.goto(srv.url);
+  await expect(page.getByTestId('rail')).toBeVisible();
+  await page.keyboard.press('Alt+n');
+  await expect(page.getByTestId('wizard')).toBeVisible();
+  // A folder makes the wizard ready: Enter in any of its other text fields starts the session.
+  await page.getByTestId('wizard-dir-input').fill(srv.dirs.a);
+  const start = page.getByTestId('wizard-start');
+  await expect(start).toBeEnabled();
+  await page.getByTestId('wizard-host').selectOption('other:');
+  // The form no longer shows a host: nothing starts until one is connected or picked.
+  await expect(start).toBeDisabled();
+  // Nor does Enter in another text field, the wizard's keyboard Start.
+  await page.getByTestId('wizard-name').press('Enter');
+  const input = page.getByTestId('wizard-host-input');
+  await input.fill('nonexistent.invalid');
+  await input.press('Enter');
+  await expect(page.getByTestId('wizard-host-error')).toContainText(/resolve|ssh failed/i, { timeout: 60_000 });
+  await expect(page.getByTestId('wizard')).toBeVisible();
+  await expect(page.getByTestId('session-card')).toHaveCount(0);
+  await expect(start).toBeDisabled();
+  await page.getByTestId('wizard-host').selectOption('local');
+  await expect(input).toHaveCount(0);
+  await expect(start).toBeEnabled();
+  expect(await page.evaluate(() => window.__claudioCsp ?? [])).toEqual([]);
+});
