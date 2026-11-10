@@ -84,7 +84,7 @@ impl Web {
     pub fn start_with(h: ManagerHarness, args: &[&str], setup: impl FnOnce(&mut Command)) -> Web {
         let port = free_port();
         let mut cmd = Command::new(BINARY);
-        cmd.arg("web")
+        cmd.args(["web", "--foreground"])
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--no-open")

@@ -78,7 +78,7 @@ impl RemoteWeb {
     ) -> RemoteWeb {
         let port = free_port();
         let mut cmd = Command::new(BINARY);
-        cmd.arg("web")
+        cmd.args(["web", "--foreground"])
             .arg("--remote")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--no-open")

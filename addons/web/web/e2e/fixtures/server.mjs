@@ -159,8 +159,8 @@ export async function startServer({ proxy = false, hosts = [], remote = false, a
   const port = await freePort();
   const log = fs.openSync(path.join(root, 'web.log'), 'a');
   const args = remote
-    ? ['web', '--remote', `127.0.0.1:${port}`, '--no-open', ...allowHosts.flatMap((h) => ['--allow-host', h])]
-    : ['web', '--listen', `127.0.0.1:${port}`, '--no-open'];
+    ? ['web', '--foreground', '--remote', `127.0.0.1:${port}`, '--no-open', ...allowHosts.flatMap((h) => ['--allow-host', h])]
+    : ['web', '--foreground', '--listen', `127.0.0.1:${port}`, '--no-open'];
   const child = spawn(BIN, args, { env, stdio: ['ignore', 'pipe', log] });
   const url = await new Promise((resolve, reject) => {
     let buf = '';

@@ -55,7 +55,7 @@ pub(crate) fn version() -> String {
 }
 
 const USAGE: &str =
-    "usage: claudio web [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
+    "usage: claudio web [--foreground] [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
 [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]
        claudio web --set-password
        claudio web --print-cert";
@@ -78,6 +78,8 @@ pub(crate) struct WebArgs {
     pub rotate_token: bool,
     /// `--set-password`: store the `--remote` password, then exit.
     pub set_password: bool,
+    /// `--foreground`: serve from this terminal, as `claudio web` always did.
+    pub foreground: bool,
 }
 
 /// Shared by every handler.
@@ -116,6 +118,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
         print_url: false,
         rotate_token: false,
         set_password: false,
+        foreground: false,
     };
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -149,6 +152,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
             "--print-url" => out.print_url = true,
             "--rotate-token" => out.rotate_token = true,
             "--set-password" => out.set_password = true,
+            "--foreground" => out.foreground = true,
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -659,5 +663,10 @@ mod tests {
         ]))
         .is_ok());
         assert!(parse_args(&args(&["--print-cert"])).unwrap().print_cert);
+        assert!(!a.foreground);
+        let a = parse_args(&args(&["--foreground", "--listen", "127.0.0.1:9000"])).unwrap();
+        assert!(a.foreground && a.listen_given);
+        let err = parse_args(&args(&["--set-password", "--foreground"])).unwrap_err();
+        assert!(err.contains("no other argument"), "{err}");
     }
 }

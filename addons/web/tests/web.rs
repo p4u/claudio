@@ -236,7 +236,7 @@ fn web_answers_on_its_listen_address_and_a_proxy_port() {
     };
     let h = ManagerHarness::new();
     let mut cmd = Command::new(BINARY);
-    cmd.arg("web")
+    cmd.args(["web", "--foreground"])
         .arg("--listen")
         .arg(format!("127.0.0.2:{port}"))
         .args(["--no-open", "--allow-host", "proxy.example:8443"]);
@@ -407,7 +407,7 @@ fn web_remote_refuses_to_start_without_a_password() {
     let h = ManagerHarness::new();
     let port = free_port();
     let mut cmd = Command::new(BINARY);
-    cmd.arg("web")
+    cmd.args(["web", "--foreground"])
         .arg("--remote")
         .arg(format!("127.0.0.1:{port}"))
         .arg("--no-open");
