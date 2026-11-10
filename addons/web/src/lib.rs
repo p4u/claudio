@@ -448,6 +448,7 @@ fn one_shot(args: &WebArgs) -> Option<ExitCode> {
         return Some(match password::set_password() {
             Ok(done) => {
                 eprintln!("claudio web: {done}");
+                cli::restart_if_enabled("the new password");
                 ExitCode::SUCCESS
             }
             Err(e) => {

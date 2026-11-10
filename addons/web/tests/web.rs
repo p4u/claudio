@@ -591,6 +591,42 @@ fn web_daemon_restart_kills_a_service_that_ignores_its_stop() {
     svc.finish();
 }
 
+/// AC13, service mode: sign-ins outlive a daemon restart; a new token
+/// (`claudio web --rotate-token`, `--print-url --rotate-token`) or a new
+/// password (`--set-password`, typed) restarts the service and signs
+/// everyone out at once.
+#[test]
+fn web_service_sign_ins_outlive_a_daemon_restart_but_not_a_new_secret() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let cookie = svc.login();
+    let first = svc.running_other_than(None, WAIT);
+    let restart = svc.claudio(&["daemon", "restart"]);
+    assert!(restart.status.success(), "{restart:?}");
+    let pid = svc.running_other_than(Some(first), common::DAEMON_WAIT);
+    assert_eq!(svc.me(&cookie), 204, "kept across the daemon restart");
+
+    let out = svc.claudio(&["web", "--rotate-token", "--no-open"]);
+    assert!(out.status.success(), "{out:?}");
+    let token = svc.token();
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("#t={token}")));
+    let pid = svc.running_other_than(Some(pid), WAIT);
+    assert_eq!(svc.me(&cookie), 401, "a new token signs everyone out");
+
+    let cookie = svc.login();
+    let out = svc.claudio(&["web", "--print-url", "--rotate-token"]);
+    assert!(out.status.success(), "{out:?}");
+    let token = svc.token();
+    assert!(String::from_utf8_lossy(&out.stdout).ends_with(&format!("#t={token}\n")));
+    let pid = svc.running_other_than(Some(pid), WAIT);
+    assert_eq!(svc.me(&cookie), 401, "--print-url --rotate-token too");
+
+    let cookie = svc.login();
+    assert_eq!(set_password_typed(svc.h(), "8-bytes!"), 0);
+    svc.running_other_than(Some(pid), WAIT);
+    assert_eq!(svc.me(&cookie), 401, "a new password signs everyone out");
+    svc.finish();
+}
+
 // ── Persistent sign-ins ───────────────────────────────────────────────────────
 
 fn cookie_header(cookie: &str) -> String {

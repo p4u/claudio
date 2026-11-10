@@ -1,9 +1,10 @@
 //! `claudio web` without `--foreground` (docs/web.md, "The web service"):
 //! the settings go to `[web]` in config.toml, the local daemon serves them
 //! (`apply`), and this command prints what a foreground start prints, then
-//! exits. Also `claudio web stop` and `status`. Whether the daemon has the
-//! service is decided on `Welcome.features` (`addon:web`) only, never on
-//! an error's text.
+//! exits. Also `claudio web stop` and `status`, and the service restart
+//! `--set-password` and `--print-url --rotate-token` ask for. Whether the
+//! daemon has the service is decided on `Welcome.features` (`addon:web`)
+//! only, never on an error's text.
 
 use std::future::Future;
 use std::io::{self, IsTerminal};
@@ -140,6 +141,9 @@ pub(crate) fn start(args: WebArgs) -> ExitCode {
     };
     if run.print_url {
         println!("{}", start_url(&run, &token));
+        if run.rotate_token {
+            restart_if_enabled("a new token");
+        }
         return ExitCode::SUCCESS;
     }
     // The password and the certificate are checked (or made) here, so
@@ -312,5 +316,27 @@ fn listener(args: &WebArgs) {
     match tls::cert::kept_fingerprint(&tls::cert::dir()) {
         Ok(fp) => println!("certificate SHA-256 {fp}"),
         Err(e) => println!("certificate: {e}"),
+    }
+}
+
+/// After `--set-password` or `--print-url --rotate-token`: restart the
+/// service (`apply { force: true }`) so `what` takes effect now, when
+/// `[web]` is enabled and the daemon has the service; else nothing.
+pub(crate) fn restart_if_enabled(what_changed: &str) {
+    let enabled = stored(&paths::config_file())
+        .ok()
+        .and_then(|web| service::enabled(&web).ok());
+    if enabled != Some(true) {
+        return;
+    }
+    match block_on(ask("apply", json!({ "force": true }), false)) {
+        Ok(Answer::Replied(Reported::Running { .. })) => eprintln!(
+            "claudio web: the web service restarted with {what_changed}; browsers sign in again"
+        ),
+        Ok(Answer::Replied(other)) => {
+            eprintln!("claudio web: the web service is {}", what(&other))
+        }
+        Ok(Answer::NotRunning | Answer::NoService) => {}
+        Err(e) => eprintln!("claudio web: {e}"),
     }
 }
