@@ -21,7 +21,7 @@ is in git history.
 | Method and path | Cookie | Origin check | Answer |
 |---|---|---|---|
 | `GET`/`HEAD` `/`, `/index.html`, any embedded asset path | no | no | the asset; `404` when unknown |
-| `POST /api/login` body `{"token":"<64 hex>"}` or `{"password":"<12–1024 bytes>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token or password, or a token from a non-local request with `--remote`; `429` locked; `400` bad body (neither or both fields, or a password without `--remote`); `413` too large; `503` no hashing slot within 2 s (does not count) |
+| `POST /api/login` body `{"token":"<64 hex>"}` or `{"password":"<8–1024 bytes>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token or password, or a token from a non-local request with `--remote`; `429` locked; `400` bad body (neither or both fields, or a password without `--remote`); `413` too large; `503` no hashing slot within 2 s (does not count) |
 | `POST /api/logout` | yes | yes | `204` + an expiring `Set-Cookie` |
 | `GET /api/me` **(decided here)** | yes | no | `204`: the cookie is live (the page asks this at load when the URL has no token). `401` without one, body `{"login":[…]}`: the methods this request may use, `"token"` and/or `"password"` (below) |
 | `GET /ws` (WebSocket upgrade) | yes | yes | `101`; `503` past 16 tabs **(decided here)** |
