@@ -386,8 +386,9 @@ async fn an_addon_reloads_and_reads_its_service_through_its_ctx() {
 
 /// An unasked exit is reported under the slot's turn: a reload that comes
 /// while the report waits for the child's last stderr is not overwritten by
-/// it. (`orphan` leaves a process outside its group holding stderr, where
-/// `setsid` exists; elsewhere the wait is short and the test still holds.)
+/// it. (`orphan` leaves a process outside its group holding stderr, which
+/// opens the race window only where `setsid` exists; elsewhere the test
+/// still checks that nothing replaces the reload's child.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reload_during_an_exit_report_is_not_overwritten() {
     let d = start_svc(Some(&["orphan"]), fast(), false);
@@ -396,7 +397,8 @@ async fn a_reload_during_an_exit_report_is_not_overwritten() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     write_config(&d.dir, Some(&["serve"]));
     let new = pid_of(&reload(&d, false).await).expect("running");
+    let before = starts(&d);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(pid_of(&state(&d)), Some(new), "{:?}", state(&d));
-    assert_eq!(starts(&d), 2);
+    assert_eq!(starts(&d), before, "nothing replaced the reload's child");
 }
