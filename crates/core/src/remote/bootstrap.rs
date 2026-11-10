@@ -169,10 +169,45 @@ async fn probe_and_platform(host: &str) -> Result<(Option<Probe>, String, String
         .map_err(|_| format!("ssh probe/uname timed out on {host}"))?
         .map_err(|e| format!("ssh failed: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (probe_part, uname_part) = stdout
-        .split_once("---UNAME---")
-        .unwrap_or(("", stdout.as_ref()));
+    parse_probe(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+/// The last lines of ssh's stderr, sanitised, trimmed, at most 1024 bytes.
+fn stderr_tail(stderr: &str) -> String {
+    let clean = crate::text::sanitize(stderr);
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return "no output from the ssh probe".to_owned();
+    }
+    let mut start = clean.len().saturating_sub(1024);
+    while !clean.is_char_boundary(start) {
+        start += 1;
+    }
+    clean[start..].trim_start().to_owned()
+}
+
+/// Parse the probe command's output. Without the `---UNAME---` marker, or
+/// with a failing exit and no uname output, ssh itself failed: its stderr
+/// is the error, not "unknown remote OS".
+fn parse_probe(
+    status: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<(Option<Probe>, String, String), String> {
+    let split = stdout.split_once("---UNAME---");
+    let failed = match split {
+        None => true,
+        Some((_, uname)) => status != Some(0) && uname.trim().is_empty(),
+    };
+    if failed {
+        let code = status.map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        return Err(format!("ssh failed (exit {code}): {}", stderr_tail(stderr)));
+    }
+    let (probe_part, uname_part) = split.unwrap_or(("", stdout));
 
     // Parse uname output: e.g. "Linux x86_64" or "Darwin arm64"
     let uname_line = uname_part.trim();
@@ -464,6 +499,71 @@ async fn download_asset(url: &str, dest: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_probe_ssh_failure_reports_stderr() {
+        let e = parse_probe(
+            Some(255),
+            "",
+            "ssh: Could not resolve hostname nonexistent-host.invalid: Name or service not known\n",
+        )
+        .unwrap_err();
+        assert!(e.starts_with("ssh failed (exit 255): "), "{e}");
+        assert!(e.contains("Could not resolve hostname"), "{e}");
+        assert!(!e.contains("uname"), "{e}");
+    }
+
+    #[test]
+    fn parse_probe_host_key_failure_keeps_last_lines() {
+        let e = parse_probe(
+            Some(255),
+            "",
+            "No ED25519 host key is known for 127.0.0.1 and you have requested strict checking.\nHost key verification failed.\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("Host key verification failed."), "{e}");
+    }
+
+    #[test]
+    fn parse_probe_empty_stderr_says_no_output() {
+        let e = parse_probe(Some(255), "", "").unwrap_err();
+        assert!(
+            e.starts_with("ssh failed (exit 255): no output from"),
+            "{e}"
+        );
+        let e = parse_probe(None, "", "").unwrap_err();
+        assert!(e.contains("no output from"), "{e}");
+    }
+
+    #[test]
+    fn parse_probe_nonzero_with_empty_uname_is_ssh_error() {
+        let e = parse_probe(Some(1), "x\n---UNAME---\n", "boom\n").unwrap_err();
+        assert!(e.starts_with("ssh failed (exit 1): boom"), "{e}");
+    }
+
+    #[test]
+    fn parse_probe_stderr_is_sanitised_and_capped() {
+        let big = format!("\x1b[31mred\x1b[0m\n{}", "é".repeat(2000));
+        let e = parse_probe(Some(255), "", &big).unwrap_err();
+        let tail = e.strip_prefix("ssh failed (exit 255): ").unwrap();
+        assert!(tail.len() <= 1024, "{}", tail.len());
+        assert!(!tail.contains('\x1b'));
+    }
+
+    #[test]
+    fn parse_probe_maps_uname() {
+        let (p, os, arch) = parse_probe(Some(0), "---UNAME---\nLinux x86_64\n", "").unwrap();
+        assert!(p.is_none());
+        assert_eq!((os.as_str(), arch.as_str()), ("linux", "x86_64"));
+        let (_, os, arch) = parse_probe(Some(0), "junk\n---UNAME---\nDarwin arm64\n", "").unwrap();
+        assert_eq!((os.as_str(), arch.as_str()), ("macos", "aarch64"));
+    }
+
+    #[test]
+    fn parse_probe_unknown_os_keeps_its_error() {
+        let e = parse_probe(Some(0), "---UNAME---\nPlan9 x\n", "").unwrap_err();
+        assert!(e.contains("unknown remote OS from uname"), "{e}");
+    }
 
     #[test]
     fn release_asset_name_macos() {
