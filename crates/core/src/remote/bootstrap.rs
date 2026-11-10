@@ -190,24 +190,27 @@ fn stderr_tail(stderr: &str) -> String {
     clean[start..].trim_start().to_owned()
 }
 
-/// Parse the probe command's output. Without the `---UNAME---` marker, or
-/// with a failing exit and no uname output, ssh itself failed: its stderr
-/// is the error, not "unknown remote OS".
+/// Parse the probe command's output. With a failing exit and no uname
+/// output, ssh itself failed: its stderr is the error, not "unknown remote
+/// OS". Without the `---UNAME---` marker after a clean exit, ssh did its
+/// part and the host did not run the probe (a forced command, a restricted
+/// shell): the error names the marker.
 fn parse_probe(
     status: Option<i32>,
     stdout: &str,
     stderr: &str,
 ) -> Result<(Option<Probe>, String, String), String> {
-    let split = stdout.split_once("---UNAME---");
-    let failed = match split {
-        None => true,
-        Some((_, uname)) => status != Some(0) && uname.trim().is_empty(),
+    let split = stdout
+        .split_once("---UNAME---")
+        .filter(|(_, uname)| status == Some(0) || !uname.trim().is_empty());
+    let Some((probe_part, uname_part)) = split else {
+        let tail = stderr_tail(stderr);
+        return Err(match status {
+            Some(0) => format!("the host did not run the probe (no ---UNAME--- marker): {tail}"),
+            Some(code) => format!("ssh failed (exit {code}): {tail}"),
+            None => format!("ssh failed (killed by a signal): {tail}"),
+        });
     };
-    if failed {
-        let code = status.map_or_else(|| "signal".to_owned(), |c| c.to_string());
-        return Err(format!("ssh failed (exit {code}): {}", stderr_tail(stderr)));
-    }
-    let (probe_part, uname_part) = split.unwrap_or(("", stdout));
 
     // Parse uname output: e.g. "Linux x86_64" or "Darwin arm64"
     let uname_line = uname_part.trim();
@@ -533,6 +536,17 @@ mod tests {
         );
         let e = parse_probe(None, "", "").unwrap_err();
         assert!(e.contains("no output from"), "{e}");
+    }
+
+    #[test]
+    fn parse_probe_clean_exit_without_the_marker_names_the_marker() {
+        let e = parse_probe(Some(0), "This account is currently not available.\n", "").unwrap_err();
+        assert!(e.contains("no ---UNAME--- marker"), "{e}");
+        assert!(!e.contains("ssh failed"), "{e}");
+        assert!(!e.contains("unknown remote OS"), "{e}");
+        let e = parse_probe(Some(0), "", "forced command only\n").unwrap_err();
+        assert!(e.contains("no ---UNAME--- marker"), "{e}");
+        assert!(e.ends_with("forced command only"), "{e}");
     }
 
     #[test]
