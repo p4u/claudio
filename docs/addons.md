@@ -308,6 +308,21 @@ the addon creates 0700), and `updating()`, the lock held while `claude update` o
 plugin …` runs, so `~/.claude` has one writer. `on_claude_installed` is called after the daemon
 installs claude.
 
+**Services.** `DaemonOps::service(config)` maps the addon's own config sections (`config` hands it
+only those) to the argv of one long-running child the daemon keeps running: `Ok(Some(argv))`, the
+words after the claudio binary; `Ok(None)` for none (the default); or `Err(msg)` when the
+sections are invalid, `msg` naming the key. It is pure, no I/O. The daemon asks at its start and
+whenever the addon calls `DaemonCtx::service_reload(force)`, which converges: stop, start, or
+restart when the argv changed or `force`; a `Failed` service starts at once, its backoff reset,
+even with the same argv. It resolves once the child is ready, has failed its first attempt, or is
+off (≤ 25 s: a 3 s stop and a 20 s start). Reloads of one addon run one at a time; those queued
+behind a running one run as one. `DaemonCtx::service_state()` reads it: `ServiceState::Off |
+Starting | Running { pid, since, argv } | Failed { exit, signal, tail, retry_in }` (`since` in Unix
+seconds; `tail` the child's last ≤ 4 KiB of stderr, sanitised, or why it did not start;
+`retry_in` until the next start, `None` when only a reload starts it). The child's contract (ready
+line, stdin, exit, logs, stop, mixed versions) is in docs/daemon-protocol.md, "Addon services". A
+daemon playing the previous release runs no service.
+
 **Mixed versions (B1).** A client sends an `AddonOp` only to a host whose `Welcome.features`
 lists `addon:<name>`; `ctx.request` returns `AddonError::Missing` otherwise, and the addon goes on
 without that host's share and says so once (the Vocdoni addon: "daemon on <host> is older:
@@ -336,6 +351,26 @@ extracts what the page renders. `[claude] latex` is an alias of `[extensions] la
 maps it; an explicit `[extensions] latex` wins). Its `Ui` lists the `latex` and `diagram` extension
 rows (on by default); their toggles are the core's to write. A build without the web addon asks
 claude for no tags.
+
+Its `DaemonOps` make the web a daemon service (docs/web.md, "The web service"). It claims the
+`[web]` config section, which only `claudio web` writes (through `app::config_edit`): `enabled`,
+and one unit of `listen` (loopback) or `remote` (TLS) with `allow_hosts`. While `enabled = true`,
+`service()` answers `web --service`, then `--listen=<addr>` or `--remote=<addr>`, then one
+`--allow-host=<name>` per host (each value in its flag's word, so none can be read as another
+flag), after checking the section as the flags are checked; else nothing, or an error naming the
+key. Its ops:
+
+| Op | Body | Does |
+|---|---|---|
+| `apply` | `{"force": bool}` | `service_reload(force)`: re-reads `[web]` and converges |
+| `status` | `{}` | `service_state()` |
+
+Both answer one object: `{"state":"off"}`, `{"state":"starting"}`,
+`{"state":"running","pid":<u32>,"since":<unix seconds>,"argv":[…]}` or
+`{"state":"failed","exit":<code|null>,"signal":<number|null>,"tail":"…","retry_in":<seconds|null>}`.
+Unknown fields are ignored, and a `state` the CLI does not know means the daemon is newer than it.
+Bodies carry no secret. The CLI sends an op only to a daemon whose `Welcome.features` list
+`addon:web`, and prints the URL of the reply's `argv`, so it describes what runs.
 
 ## The Vocdoni addon
 
