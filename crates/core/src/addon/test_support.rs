@@ -37,6 +37,7 @@ pub struct TestAddon {
     has_launch: bool,
     has_ui: bool,
     has_daemon: bool,
+    has_service: bool,
     adopts: bool,
     routing: Mutex<Result<Routing, String>>,
     prepare: Mutex<Script>,
@@ -66,6 +67,7 @@ impl TestAddon {
             has_launch: false,
             has_ui: false,
             has_daemon: false,
+            has_service: false,
             adopts: false,
             routing: Mutex::new(Ok(Routing::Optional)),
             prepare: Mutex::new(Script::Ok(LaunchPart::default())),
@@ -160,6 +162,15 @@ impl TestAddon {
     /// Has `DaemonOps`: `echo`, `sleep` (`{"secs": n}`), `big` (600 KiB), `fail`.
     pub fn with_daemon(mut self) -> Self {
         self.has_daemon = true;
+        self
+    }
+
+    /// Has `DaemonOps` with a service: its first declared section's `argv`
+    /// (a list of strings; absent: no service), and ops `reload`
+    /// (`{"force": bool}`) and `state`, both answering the state's `Debug`.
+    pub fn with_service(mut self) -> Self {
+        self.has_daemon = true;
+        self.has_service = true;
         self
     }
 
@@ -449,7 +460,6 @@ impl DaemonOps for TestAddon {
         body: Value,
         ctx: Arc<dyn DaemonCtx>,
     ) -> BoxFuture<'a, Result<Value, String>> {
-        let _ = ctx;
         self.record(format!("daemon {op}"));
         Box::pin(async move {
             match op {
@@ -461,6 +471,12 @@ impl DaemonOps for TestAddon {
                 }
                 "big" => Ok(Value::String("x".repeat(600 * 1024))),
                 "fail" => Err("echo failed".into()),
+                "reload" => {
+                    let force = body.get("force").and_then(Value::as_bool) == Some(true);
+                    let state = ctx.service_reload(force).await;
+                    Ok(Value::String(format!("{state:?}")))
+                }
+                "state" => Ok(Value::String(format!("{:?}", ctx.service_state()))),
                 other => Err(format!("unknown op {other}")),
             }
         })
@@ -469,5 +485,20 @@ impl DaemonOps for TestAddon {
         let _ = ctx;
         self.record("installed".into());
         self.installs.fetch_add(1, Ordering::SeqCst);
+    }
+    fn service(&self, config: &dyn Fn(&str) -> toml::Table) -> Result<Option<Vec<String>>, String> {
+        let Some(section) = self.sections.first().filter(|_| self.has_service) else {
+            return Ok(None);
+        };
+        let bad = || format!("[{section}] argv: not a list of strings");
+        match config(section).get("argv") {
+            None => Ok(None),
+            Some(toml::Value::Array(words)) => words
+                .iter()
+                .map(|w| w.as_str().map(str::to_owned).ok_or_else(bad))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            Some(_) => Err(bad()),
+        }
     }
 }

@@ -125,8 +125,8 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 impl Listening {
-    /// The shared state, for tests that drive it directly.
-    #[cfg(any(test, feature = "test-support"))]
+    /// The shared state: the services stop through it after `serve`, and
+    /// tests drive it directly.
     pub(super) fn daemon(&self) -> Arc<Daemon> {
         Arc::clone(&self.daemon)
     }
