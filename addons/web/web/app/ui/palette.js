@@ -14,6 +14,13 @@ const SKIP = new Set(['palette', 'palette-ctrl', 'close-overlay', 'leave-termina
 
 const quiet = (p) => p.catch(() => {});
 
+// Ends this browser's sign-in (POST /api/logout), then reloads: the page shows its login (the
+// password form, or the card that asks for the URL `claudio web` printed).
+async function signOut() {
+  try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* reload anyway */ }
+  location.reload();
+}
+
 export function sessionCommands(s) {
   const name = s.label || s.id.slice(0, 8);
   const tag = s.host === 'local' ? name : `${name} @${s.host}`;
@@ -59,6 +66,7 @@ export function buildCommands(m, cfg) {
     out.push({ id: `action:${b.action}`, group: 'Actions', title: b.help[0].toUpperCase() + b.help.slice(1), keys: b.keys, when: () => hasAction(b.action), run: () => runAction(b.action) });
   }
   out.push({ id: 'settings', group: 'App', title: 'Settings', run: () => { overlay.value = 'settings'; } });
+  out.push({ id: 'sign-out', group: 'App', title: 'Sign out', run: signOut });
   out.push(...addonCommands(addonDecls.value, panelActions.value, m.sessions[focused.value]));
   for (const s of orderedSessions(m)) out.push(...sessionCommands(s));
   return out;
