@@ -273,7 +273,11 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
         println!("{url}");
         return ExitCode::SUCCESS;
     }
-    let remote = match args.remote.map(|addr| remote::prepare(&args, addr, &token)) {
+    let password = password::read(&password::path());
+    let remote = match args
+        .remote
+        .map(|addr| remote::prepare(&args, addr, &token, &password))
+    {
         None => None,
         Some(Ok(r)) => Some(r),
         Some(Err(e)) => {
@@ -281,6 +285,7 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
+    let sessions = load_sessions(&args, &token, &password);
 
     // A fixed filter, not RUST_LOG: a dependency's trace output could carry
     // request headers (the cookie).
@@ -304,13 +309,38 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(serve(args, token, url, remote, addons)) {
+    match runtime.block_on(serve(args, token, url, remote, sessions, addons)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("claudio web: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The sign-ins of earlier runs, bound to this start's mode, token and
+/// password bytes (a file of another epoch: none, silently). Blocking I/O,
+/// before the runtime exists and before `serve` binds.
+fn load_sessions(
+    args: &WebArgs,
+    token: &str,
+    password: &Result<Vec<u8>, String>,
+) -> sessions::Sessions {
+    let mode = match args.remote {
+        Some(_) => sessions::Mode::Remote,
+        None => sessions::Mode::Local,
+    };
+    let epoch = sessions::epoch(mode, token, password.as_deref().unwrap_or_default());
+    let path = sessions::path();
+    let (store, why) = sessions::load(&path, &epoch, claudio_core::paths::unix_now());
+    if let Some(why) = why {
+        // The tracing subscriber is not installed yet.
+        eprintln!(
+            "claudio web: ignoring {}: {why}; browsers sign in again",
+            path.display()
+        );
+    }
+    sessions::Sessions::new(store, epoch, path)
 }
 
 /// `--set-password` or `--print-cert`: one thing, then exit.
@@ -349,6 +379,7 @@ async fn serve(
     token: String,
     url: String,
     remote: Option<remote::Remote>,
+    sessions: sessions::Sessions,
     addons: Arc<claudio_core::addon::Addons>,
 ) -> Result<(), String> {
     let listen = remote.as_ref().map_or(args.listen, |r| r.addr);
@@ -361,17 +392,19 @@ async fn serve(
         None => auth::Allowed::new(args.listen, &args.allow_hosts),
     };
     let csp = auth::csp(assets.importmap_sha256());
-    let mut auth = auth::Auth::new(token, allowed, csp, sessions::Sessions::memory())
+    let mut auth = auth::Auth::new(token, allowed, csp, sessions)
         .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
     if let Some(r) = &remote {
         auth = auth.with_password(r.password.clone());
     }
     let state = build_state(auth, assets, addons).await?;
-    let (hub, ext, addon_rt) = (
+    let (hub, ext, addon_rt, sessions) = (
         state.hub.clone(),
         Arc::clone(&state.ctx.ext),
         state.addons.clone(),
+        Arc::clone(&state.auth.sessions),
     );
+    let writer = sessions.start_writer();
     if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
         eprintln!("claudio web: local build {}", version());
     }
@@ -386,11 +419,13 @@ async fn serve(
     }
     tracing::info!(listen = %listen, tls = remote.is_some(), "web: serving");
 
-    // Tabs are closed (1001) and web-state.json written before the server
-    // stops waiting for its connections.
+    // Tabs are closed (1001), web-state.json and the sessions written
+    // before the server stops waiting for its connections.
     let stop = async move {
         shutdown().await;
         hub.shutdown().await;
+        sessions.flush().await;
+        writer.inspect(|w| w.abort());
         ext.shutdown().await;
         addon_rt.shutdown();
     };

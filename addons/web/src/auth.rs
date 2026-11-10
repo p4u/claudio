@@ -32,6 +32,9 @@ use crate::peer::{Peer, PeerKey};
 use crate::sessions::{self, Sessions};
 
 pub(crate) const COOKIE: &str = "claudio_web";
+/// The cookie's life (400 days, the longest browsers keep): closing the
+/// browser does not drop it; the server decides when a session ends.
+pub(crate) const COOKIE_MAX_AGE: u64 = 34_560_000;
 pub(crate) const TOKEN_BYTES: usize = 32;
 pub(crate) const LOGIN_BODY_MAX: usize = 4096;
 /// Concurrent argon2 verifications (each 19 MiB).
@@ -414,13 +417,14 @@ impl Auth {
         ct_eq(token.as_bytes(), self.token.as_bytes())
     }
 
-    /// A new session's cookie value; the session of `old` (the cookie the
-    /// login came with) goes in the same step. `now`: Unix seconds.
-    pub(crate) fn create_session(&self, old: Option<&str>, now: u64) -> io::Result<String> {
+    /// A new session's cookie value, and the change its reply waits for
+    /// (`Sessions::written`); the session of `old` (the cookie the login
+    /// came with) goes in the same step. `now`: Unix seconds.
+    pub(crate) fn create_session(&self, old: Option<&str>, now: u64) -> io::Result<(String, u64)> {
         let value = self.random_hex(TOKEN_BYTES)?;
         let hash = sessions::hash_of(&value).ok_or_else(|| io::Error::other("not a token"))?;
-        self.sessions.login(hash, old, now);
-        Ok(value)
+        let change = self.sessions.login(hash, old, now);
+        Ok((value, change))
     }
 
     /// Whether `value` names a live session (a use).
@@ -428,9 +432,9 @@ impl Auth {
         self.sessions.check(value, now)
     }
 
-    /// Sign `value`'s session out.
-    pub(crate) fn end_session(&self, value: &str) {
-        self.sessions.sign_out(value);
+    /// Sign `value`'s session out; the change its reply waits for.
+    pub(crate) fn end_session(&self, value: &str) -> u64 {
+        self.sessions.sign_out(value)
     }
 }
 
@@ -449,7 +453,7 @@ pub(crate) fn cookie_value(headers: &HeaderMap) -> Option<String> {
 pub(crate) fn set_cookie(value: &str, secure: bool) -> HeaderValue {
     let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "{COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/{secure}"
+        "{COOKIE}={value}; Max-Age={COOKIE_MAX_AGE}; HttpOnly; SameSite=Strict; Path=/{secure}"
     ))
     .expect("an ASCII cookie")
 }
@@ -533,10 +537,12 @@ pub(crate) async fn me() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// `POST /api/logout`: forget the session (the guard required it).
+/// `POST /api/logout`: forget the session (the guard required it); the
+/// reply waits until the sessions file no longer has it (≤ 2 s).
 pub(crate) async fn logout(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Response {
     if let Some(value) = cookie_value(&headers) {
-        auth.end_session(&value);
+        let change = auth.end_session(&value);
+        auth.sessions.written(change).await;
     }
     let mut res = StatusCode::NO_CONTENT.into_response();
     let cookie = clear_cookie(auth.allowed.secure_cookie());
@@ -872,15 +878,36 @@ mod tests {
     fn a_session_is_made_used_replaced_and_ended_on_unix_seconds() {
         let a = auth();
         let t0 = 1_800_000_000;
-        let s = a.create_session(None, t0).unwrap();
+        let (s, _) = a.create_session(None, t0).unwrap();
         assert!(token_ok(&s));
         assert!(a.session_ok(&s, t0 + sessions::IDLE - 1));
-        let replaced = a.create_session(Some(&s), t0 + 10).unwrap();
+        let (replaced, _) = a.create_session(Some(&s), t0 + 10).unwrap();
         assert!(!a.session_ok(&s, t0 + 11), "the login replaced it");
         assert!(a.session_ok(&replaced, t0 + 11));
         a.end_session(&replaced);
         assert!(!a.session_ok(&replaced, t0 + 12));
         a.end_session("nothing");
+    }
+
+    #[test]
+    fn the_cookie_outlives_the_browser_and_the_sign_out_cookie_expires_it() {
+        let set = set_cookie(&"ab".repeat(32), false);
+        assert_eq!(
+            set.to_str().unwrap(),
+            format!(
+                "claudio_web={}; Max-Age=34560000; HttpOnly; SameSite=Strict; Path=/",
+                "ab".repeat(32)
+            )
+        );
+        assert!(set_cookie("x", true)
+            .to_str()
+            .unwrap()
+            .ends_with("; Path=/; Secure"));
+        let clear = clear_cookie(true);
+        assert_eq!(
+            clear.to_str().unwrap(),
+            "claudio_web=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/; Secure"
+        );
     }
 
     #[test]

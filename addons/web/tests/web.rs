@@ -289,6 +289,80 @@ fn web_answers_on_its_listen_address_and_a_proxy_port() {
     assert!(reply.header("set-cookie").unwrap().contains("; Secure"));
 }
 
+// ── Persistent sign-ins ───────────────────────────────────────────────────────
+
+fn cookie_header(cookie: &str) -> String {
+    format!("claudio_web={cookie}")
+}
+
+/// `/api/me` with `cookie`.
+fn me_with(web: &Web, cookie: &str) -> u16 {
+    web.get("/api/me", &[("Cookie", &cookie_header(cookie))])
+        .status
+}
+
+#[test]
+fn web_cookie_outlives_the_browser_and_logout_expires_it() {
+    let web = Web::start();
+    let body = json!({"token": web.token}).to_string();
+    let reply = web.post("/api/login", Some(&web.origin()), &body, &[]);
+    assert_eq!(reply.status, 204);
+    let set = reply.header("set-cookie").unwrap().to_owned();
+    let cookie = cookie_of(&set);
+    assert_eq!(
+        set,
+        format!("claudio_web={cookie}; Max-Age=34560000; HttpOnly; SameSite=Strict; Path=/")
+    );
+    let out = web.post(
+        "/api/logout",
+        Some(&web.origin()),
+        "",
+        &[("Cookie", &cookie_header(&cookie))],
+    );
+    assert_eq!(out.status, 204);
+    assert_eq!(
+        out.header("set-cookie"),
+        Some("claudio_web=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/")
+    );
+}
+
+#[test]
+fn web_sign_ins_and_sign_outs_survive_a_killed_server() {
+    let web = Web::start();
+    let (kept, ended) = (web.login(), web.login());
+    let out = web.post(
+        "/api/logout",
+        Some(&web.origin()),
+        "",
+        &[("Cookie", &cookie_header(&ended))],
+    );
+    assert_eq!(out.status, 204);
+    // SIGKILL: only what was written before each reply is in the file.
+    let h = web.stop();
+    let web = Web::start_with(h, &[], |_| {});
+    assert_eq!(me_with(&web, &kept), 204, "kept across the restart");
+    assert_eq!(me_with(&web, &ended), 401, "a sign-out stays");
+    let h = web.stop();
+    let web = Web::start_with(h, &["--rotate-token"], |_| {});
+    assert_eq!(me_with(&web, &kept), 401, "a new token signs everyone out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_a_loopback_sign_in_is_refused_by_a_remote_start() {
+    let h = ManagerHarness::new();
+    // The same password bytes in both starts: only the mode differs.
+    write_test_password(&h);
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    assert_eq!(me_with(&web, &cookie), 204);
+    let h = web.stop();
+    let r = RemoteWeb::start(h, &[], |_| {});
+    let me = r
+        .req("GET", "/api/me", &[("Cookie", &cookie_header(&cookie))], "")
+        .await;
+    assert_eq!(me.status, 401);
+}
+
 // ── --set-password (AC3) ──────────────────────────────────────────────────────
 
 #[test]

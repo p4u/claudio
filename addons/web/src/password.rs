@@ -97,6 +97,14 @@ impl Stored {
 /// Read the stored hash: a regular file of ours, not readable by others,
 /// at most 512 bytes, one valid PHC string. Every failure says how to fix it.
 pub(crate) fn load(path: &Path) -> Result<Stored, String> {
+    parse_file(path, &read(path)?)
+}
+
+/// The password file's bytes: a regular file of ours, not readable by
+/// others, at most 512 bytes. Every failure says how to fix it. One read
+/// feeds both the password a `--remote` server checks and its sessions'
+/// epoch (`sessions::epoch`). Blocking I/O.
+pub(crate) fn read(path: &Path) -> Result<Vec<u8>, String> {
     let fix = "set one with `claudio web --set-password`";
     let meta = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => format!("--remote needs a password: {fix}"),
@@ -110,9 +118,15 @@ pub(crate) fn load(path: &Path) -> Result<Stored, String> {
             path.display()
         ));
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}; {fix}", path.display()))?;
-    Stored::parse(&text).map_err(|e| format!("{}: {e}; {fix}", path.display()))
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}; {fix}", path.display()))
+}
+
+/// The stored hash in `bytes`, as [`read`] read them from `path`.
+pub(crate) fn parse_file(path: &Path, bytes: &[u8]) -> Result<Stored, String> {
+    let fix = "set one with `claudio web --set-password`";
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| format!("{}: not text; {fix}", path.display()))?;
+    Stored::parse(text).map_err(|e| format!("{}: {e}; {fix}", path.display()))
 }
 
 /// `claudio web --set-password`: the password twice from the terminal

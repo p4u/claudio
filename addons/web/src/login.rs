@@ -54,7 +54,9 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
         return status.into_response();
     }
     match auth.create_session(old.as_deref(), paths::unix_now()) {
-        Ok(value) => {
+        Ok((value, change)) => {
+            // The cookie goes out once the sessions file has it (≤ 2 s).
+            auth.sessions.written(change).await;
             let mut res = StatusCode::NO_CONTENT.into_response();
             let cookie = auth::set_cookie(&value, auth.allowed.secure_cookie());
             res.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -312,6 +314,53 @@ mod tests {
         );
         drop(held);
         assert_eq!(token_login(&a, &LOCAL, &"ab".repeat(32), t0), Ok(()));
+    }
+
+    /// A login's cookie is in the sessions file (as its hash) before the
+    /// reply carries it, and a sign-out is out of it before its reply.
+    #[tokio::test]
+    async fn a_login_and_a_sign_out_are_written_before_their_replies() {
+        use crate::sessions::{self, Mode, Store};
+        use sha2::{Digest, Sha256};
+        let dir = paths::socket_test_dir("web-login");
+        let file = dir.join("web-sessions.json");
+        let token = "ab".repeat(32);
+        let epoch = sessions::epoch(Mode::Local, &token, b"");
+        let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 7337));
+        let kept = Sessions::new(Store::default(), epoch, file.clone());
+        let a = Arc::new(Auth::new(token.clone(), Allowed::new(lo, &[]), csp(None), kept).unwrap());
+        let writer = a.sessions.start_writer().unwrap();
+        let body = serde_json::json!({ "token": token }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let res = login(State(Arc::clone(&a)), req).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let set = res.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let value = set["claudio_web=".len()..]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let hash: String = Sha256::digest(value.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&hash) && !text.contains(&value), "{text}");
+        let mut headers = axum::http::HeaderMap::new();
+        let cookie = format!("claudio_web={value}");
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let res = auth::logout(State(Arc::clone(&a)), headers).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!std::fs::read_to_string(&file).unwrap().contains(&hash));
+        writer.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
