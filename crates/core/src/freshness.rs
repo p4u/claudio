@@ -40,8 +40,11 @@ use crate::remote::probe::Probe;
 /// What the bridge prints on stderr when it left an outdated daemon running.
 pub const DEFERRED: &str = "daemon-update-deferred";
 
-/// How long an old daemon may take to exit after `Shutdown`.
-const EXIT_WAIT: Duration = Duration::from_secs(10);
+/// How long an old daemon may take to exit after `Shutdown`: it stops its
+/// addons' services first (≤ 3 s), then its blocking tasks (≤ 1 s), and
+/// holds its startup lock until then. Also how long a starter waits for a
+/// predecessor's lock ([`wait_for_lock`]).
+pub const EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// How a daemon's binary relates to ours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use super::Daemon;
-use crate::addon::{Addons, BoxFuture, ClaudeFlags, DaemonCtx};
+use crate::addon::{Addons, BoxFuture, ClaudeFlags, DaemonCtx, ServiceState};
 use crate::proto::{self, Msg};
 
 /// How long one addon op may run (`Config::addon_timeout`).
@@ -72,6 +72,15 @@ impl DaemonCtx for Ctx {
 
     fn updating(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.daemon.updating)
+    }
+
+    fn service_reload(&self, force: bool) -> BoxFuture<'static, ServiceState> {
+        let (daemon, addon) = (Arc::clone(&self.daemon), self.addon);
+        Box::pin(async move { daemon.services.reload(&daemon, addon, force).await })
+    }
+
+    fn service_state(&self) -> ServiceState {
+        self.daemon.services.state(self.addon)
     }
 }
 

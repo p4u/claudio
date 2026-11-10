@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::auth::{self, Auth, Caller};
+use claudio_core::paths;
 
 /// How long a password login waits for a hashing slot before `503`.
 pub(crate) const HASH_WAIT: Duration = Duration::from_secs(2);
@@ -27,6 +28,8 @@ struct LoginBody {
 
 pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Response {
     let caller = auth.caller(auth::peer_of(&req), auth::host_of(&req));
+    // A login with a cookie replaces that cookie's session.
+    let old = auth::cookie_value(req.headers());
     let body = match axum::body::to_bytes(req.into_body(), auth::LOGIN_BODY_MAX).await {
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
@@ -50,8 +53,10 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
         );
         return status.into_response();
     }
-    match auth.create_session(Instant::now()) {
-        Ok(value) => {
+    match auth.create_session(old.as_deref(), paths::unix_now()) {
+        Ok((value, change)) => {
+            // The cookie goes out once the sessions file has it (≤ 2 s).
+            auth.sessions.written(change).await;
             let mut res = StatusCode::NO_CONTENT.into_response();
             let cookie = auth::set_cookie(&value, auth.allowed.secure_cookie());
             res.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -127,15 +132,21 @@ mod tests {
     use crate::limit::GLOBAL;
     use crate::password;
     use crate::peer::PeerKey;
+    use crate::sessions::Sessions;
 
     const FIXTURE: &str = include_str!("../web/e2e/fixtures/web-password");
     const TEST_PASSWORD: &str = "claudio-e2e-password";
 
     fn remote() -> Auth {
         let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
-        Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None))
-            .unwrap()
-            .with_password(password::Stored::parse(FIXTURE).unwrap())
+        Auth::new(
+            "ab".repeat(32),
+            Allowed::remote(any, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap()
+        .with_password(password::Stored::parse(FIXTURE).unwrap())
     }
 
     const REMOTE: Caller = Caller {
@@ -145,7 +156,13 @@ mod tests {
 
     fn plain() -> Auth {
         let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 7337));
-        Auth::new("ab".repeat(32), Allowed::new(lo, &[]), csp(None)).unwrap()
+        Auth::new(
+            "ab".repeat(32),
+            Allowed::new(lo, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap()
     }
 
     const LOCAL: Caller = Caller {
@@ -180,7 +197,13 @@ mod tests {
     #[test]
     fn with_remote_a_non_local_token_is_refused_and_counts() {
         let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
-        let a = Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None)).unwrap();
+        let a = Auth::new(
+            "ab".repeat(32),
+            Allowed::remote(any, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap();
         let right = "ab".repeat(32);
         let remote = Caller {
             local: false,
@@ -291,6 +314,53 @@ mod tests {
         );
         drop(held);
         assert_eq!(token_login(&a, &LOCAL, &"ab".repeat(32), t0), Ok(()));
+    }
+
+    /// A login's cookie is in the sessions file (as its hash) before the
+    /// reply carries it, and a sign-out is out of it before its reply.
+    #[tokio::test]
+    async fn a_login_and_a_sign_out_are_written_before_their_replies() {
+        use crate::sessions::{self, Mode, Store};
+        use sha2::{Digest, Sha256};
+        let dir = paths::socket_test_dir("web-login");
+        let file = dir.join("web-sessions.json");
+        let token = "ab".repeat(32);
+        let epoch = sessions::epoch(Mode::Local, &token, b"");
+        let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 7337));
+        let kept = Sessions::new(Store::default(), epoch, file.clone());
+        let a = Arc::new(Auth::new(token.clone(), Allowed::new(lo, &[]), csp(None), kept).unwrap());
+        let writer = a.sessions.start_writer().unwrap();
+        let body = serde_json::json!({ "token": token }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let res = login(State(Arc::clone(&a)), req).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let set = res.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let value = set["claudio_web=".len()..]
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let hash: String = Sha256::digest(value.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&hash) && !text.contains(&value), "{text}");
+        let mut headers = axum::http::HeaderMap::new();
+        let cookie = format!("claudio_web={value}");
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let res = auth::logout(State(Arc::clone(&a)), headers).await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!std::fs::read_to_string(&file).unwrap().contains(&hash));
+        writer.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

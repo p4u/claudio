@@ -325,6 +325,8 @@ mod tests {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -405,6 +407,8 @@ mod tests {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         };
         for given in [ALLOW, "--dangerously-skip-permissions"] {
             let spec = SpawnSpec {
@@ -448,6 +452,8 @@ mod tests {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         };
         let spec = SpawnSpec {
             id: uuid::Uuid::nil(),
@@ -503,6 +509,8 @@ mod tests {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         };
         let agents = r#"{"reviewer":{"description":"d","prompt":"p"}}"#;
         let mcp = r#"{"mcpServers":{"kb":{"type":"http","url":"https://e.org"}}}"#;
@@ -573,6 +581,8 @@ mod tests {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         };
         let spec = SpawnSpec {
             args: vec![

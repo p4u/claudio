@@ -185,14 +185,17 @@ pub(crate) struct Remote {
     pub banner: Banner,
 }
 
-/// Check the password file first (nothing is made or bound without one),
-/// then load or make the certificate. Blocking I/O.
+/// Check the password file first (`password`, as `password::read` read it:
+/// nothing is made or bound without one), then load or make the
+/// certificate. Blocking I/O.
 pub(crate) fn prepare(
     args: &crate::WebArgs,
     addr: SocketAddr,
     token: &str,
+    password: &Result<Vec<u8>, String>,
 ) -> Result<Remote, String> {
-    let password = crate::password::load(&crate::password::path())?;
+    let bytes = password.as_deref().map_err(Clone::clone)?;
+    let password = crate::password::parse_file(&crate::password::path(), bytes)?;
     let hostname = claudio_core::sys::hostname();
     let names = cert_names(&hostname, addr, &args.allow_hosts);
     let cert =

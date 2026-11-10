@@ -1,0 +1,553 @@
+# `claudio web` as a daemon service: design
+
+Status: approved (2026-11-09)   Class: architectural
+Owner decisions so far:
+- 2026-11-09: `claudio web` and `claudio web --remote` save their settings in `config.toml` and
+  hand the server to the daemon; the terminal is not kept open.
+- 2026-11-09: after a reboot the web comes back when the daemon next starts (the next `claudio`
+  use of any kind); no systemd unit or launchd agent is installed.
+- 2026-11-09: browsers must not have to sign in again after restarts: sign-ins persist, with a
+  30-day idle limit, and survive closing the browser.
+- 2026-11-09: the `--remote` password minimum drops from 12 to 8 bytes.
+
+## Problem
+
+`claudio web` serves in the foreground (`addons/web/src/lib.rs` `run` → `serve`): it lives as
+long as the terminal that started it. To keep the web up, a user has to leave a terminal (or a
+tmux pane) open, and must run it again after every logout, crash or upgrade. The daemon
+(`crates/core/src/daemon/`) already outlives terminals and is restarted onto new builds
+(`freshness.rs`), but it knows nothing about the web, and A3 forbids the core to branch on an
+addon's name.
+
+Sign-ins are lost too easily already, and a daemon-run web would restart more often. Cookie
+sessions live only in the server's memory (`auth.rs:291`, 24 h idle, `SESSION_IDLE` at
+`auth.rs:36`), and the cookie has no `Max-Age` (`auth.rs:490`), so a server restart or a closed
+browser means signing in again. The password minimum of 12 bytes (`password.rs:22`) is more
+than the owner wants to type.
+
+## Goals
+
+1. `claudio web [--listen … | --remote …] [--allow-host …]` validates its settings in the
+   terminal, stores them in a `[web]` section of `config.toml`, has the local daemon start the
+   server, prints what a foreground start prints today (and opens the browser as today), and
+   exits.
+2. While `[web] enabled = true`, every start of that host's daemon starts the web server, and the
+   daemon restarts it whenever it exits unasked.
+3. `claudio web stop` turns it off (stops it, `enabled = false`); `claudio web status` says
+   whether it runs, where, and why not.
+4. A new build takes over the web with the daemon: after a daemon restart onto a new binary the
+   web runs that binary.
+5. The daemon side is a generic addon capability (A3): the core supervises "an addon's service"
+   and never names the web addon.
+6. `claudio web --foreground` keeps today's behaviour exactly, apart from goals 7 and 8 (the
+   test suites and anyone who wants a foreground server use it).
+7. A signed-in browser stays signed in across web and daemon restarts and across closing the
+   browser. Its sign-in ends when it goes unused for 30 days, when it signs out (the page's
+   palette gets "Sign out"), when it is the least recently used of more than 64, 400 days after
+   it signed in (the cookie's life), or when the server next starts after the token, the
+   password or the mode (loopback or `--remote`) changed.
+8. A `--remote` password may be 8 to 1024 bytes.
+
+## Non-goals
+
+- Starting at boot or login (no systemd unit, launchd agent, linger).
+- Hot reload of the listener when `config.toml` is hand-edited: a hand edit takes effect at
+  the next `claudio web` or daemon start.
+- Showing the web's state in the TUI or in `claudio daemon status`.
+- More than one service per addon, or services for addons other than web (the API allows
+  them; nothing else uses it in this work).
+- Any change to the login methods (token, password), the rate limits, TLS, the wire
+  protocol's messages or the DTOs. The page changes only by the palette's "Sign out" (§3).
+  `docs/web-protocol.md` changes only in its Cookie bullet (lines 53-55): the cookie's
+  `Max-Age` and the session lifetime.
+
+## Current state
+
+- `claudio web` flags and their combination rules: `addons/web/src/lib.rs:56-190`
+  (`WebArgs`, `parse_args`, `combination_ok`); one-shots `--set-password`, `--print-cert`
+  (`one_shot`, `lib.rs:316`); `--print-url` and `--rotate-token` handled in `run`
+  (`lib.rs:242-275`).
+- Start-up prints one URL on stdout: the token URL, or with `--remote` the public URL
+  (`announce`, `lib.rs:415`). With `--remote` the banner's stderr lines carry the certificate
+  fingerprint, the names it covers and `on this machine: https://…/#t=<token>`
+  (`remote.rs:143-176`).
+- `remote::prepare` (`remote.rs:190`) refuses to go on without a password, then loads or makes
+  the certificate (`--rotate-cert`).
+- The web logs every refused login at info, the limiter's 429 included (`login.rs:45-50`).
+- The web hub connects the local daemon with `client::ensure_local_daemon` (`hub_io.rs:22`),
+  which starts the daemon and can replace an older one (`client.rs:776`).
+- `WebAddon` (`addons/web/src/addon.rs`) has `Commands`, `Launch` and `Ui`, no `DaemonOps`,
+  and declares no config section. `web` is free to claim (`addon/registry.rs:10`).
+- `DaemonOps` (`crates/core/src/addon/daemon.rs`) answers `AddonOp`s (≤ 8 in flight, 150 s) and
+  gets `on_claude_installed`; there is no hook at daemon start or stop. `DaemonCtx` offers
+  `claude_bin`, `path`, `claude_flags`, `cache_dir`, `updating`.
+- The daemon's `Config` (`daemon/mod.rs:69`) reads `config.toml` once in `from_env`
+  (`mod.rs:113`, through the global `paths::config_file()`; no path field) and knows its own
+  binary path (`Config::claudio`, `current_exe()` at start, `mod.rs:116`). The file at that
+  path is replaced under a running daemon by `claudio upgrade` and `make install`/`dev`.
+- Daemon shutdown: `Msg::Shutdown` (`server.rs:423`) notifies `Daemon::shutdown`; `daemon::run`
+  then calls `runtime.shutdown_timeout(1 s)` (blocking tasks only) and drops the startup lock
+  (`mod.rs:177-225`). The daemon has no SIGTERM handler; `freshness` and `daemon stop` fall back
+  to killing it by pid. A local daemon is started by `client::ensure_daemon` (`client.rs:712`:
+  `setsid`, stderr to `<runtime>/daemon.log`), which waits 5 s for a predecessor's lock.
+
+## Design
+
+### 1. Core: addon services (generic, `crates/core`)
+
+`DaemonOps` gains one optional method that maps the addon's own config sections to the argv of
+a long-running child, and `DaemonCtx` gains the means to re-ask it and read its state:
+
+```rust
+/// What the daemon should keep running for this addon: argv after the claudio binary,
+/// from the addon's declared config sections. `Ok(None)`: nothing. `Err(msg)`: the
+/// sections are invalid; `msg` names the key. Pure, no I/O.
+fn service(&self, config: &dyn Fn(&str) -> toml::Table) -> Result<Option<Vec<String>>, String> {
+    Ok(None)
+}
+
+// DaemonCtx
+/// Re-ask `service()` and converge: stop, start, or restart when the argv changed (or
+/// `force`). A service that is `Failed` is started now and its backoff reset, even with
+/// the same argv. Resolves once the child is ready, has failed its first attempt, or is
+/// off (≤ 25 s: a 3 s stop and a 20 s start). A second reload for the same addon waits for
+/// the first; reloads that queue behind it run as one.
+fn service_reload(&self, force: bool) -> BoxFuture<'static, ServiceState>;
+fn service_state(&self) -> ServiceState;
+```
+
+`ServiceState` is `Off | Starting | Running { pid, since, argv } | Failed { exit, signal, tail,
+retry_in }`. `tail` is the last ≤ 4 KiB the child wrote to stderr since this start (held in
+memory by the supervisor, below), through `text::sanitize`. `Err(msg)` from `service()` gives
+`Failed { exit: None, signal: None, tail: msg, retry_in: None }` (`msg` cleaned and capped at
+4096 bytes like any addon string). Nothing is spawned and nothing is retried until the next
+reload or daemon start. A `config.toml` that cannot be read or is not TOML is the same failure
+for every addon ("config.toml does not parse"), never a service built from defaults.
+
+The daemon's **supervisor** (new module under `crates/core/src/daemon/`, which names no addon):
+
+- `daemon::Config` gains `config_file: Option<PathBuf>`: `paths::config_file()` in `from_env`,
+  `None` in `TestDaemon::config`. The supervisor reads only that path, in `spawn_blocking`, at
+  daemon start (after the socket listens) and at every reload, and hands each addon with
+  `DaemonOps` only its declared sections. `None` means no addon has a service. A daemon
+  playing the previous release (`Config::old_peer`) runs no service.
+- **Spawn:** `Config::claudio` with that argv, in its own process group. Env: the daemon's,
+  with `PATH = Config::path` and `SESSION_MARKERS` removed.
+  - stdin is a pipe the daemon holds and never writes, so the child sees its owner's death
+    (C3 amended, below).
+  - stdout is a pipe for the ready line.
+  - stderr is a pipe too: a daemon task copies it into `<runtime>/<addon>.log` (0600), renaming
+    the file to `<addon>.log.1` whenever a write would take it past 1 MiB. It also keeps the
+    last 4 KiB of this start in memory for `tail`. An addon's logs never exceed 2 MiB, however
+    much the child writes (a `--remote` listener logs every refused login, so the size must not
+    depend on what remote peers send).
+- **Ready:** the child writes a line starting with `ready` on stdout once it serves; until then
+  the state is `Starting`. The daemon reads at most 4 KiB waiting for it (more counts as a
+  failed start). Afterwards it keeps reading and discarding stdout until EOF and never closes
+  its end while the child runs. No ready line within 20 s: the child is stopped and counts as
+  failed.
+- **Exit:** an exit the supervisor did not ask for is a failure whatever its status (0
+  included). The service restarts after a backoff of 1 s, doubling to at most 60 s; the backoff
+  resets after 5 min of running. `Off` is reached only when `service()` returns `Ok(None)`.
+- **Stop** (daemon shutdown, a reload to `None`, or a restart): close stdin, SIGTERM to the
+  group, SIGKILL to the group after 3 s, then reap.
+  - At daemon shutdown every service is stopped in parallel, after `serve()` has returned and
+    before `runtime.shutdown_timeout(SHUTDOWN_GRACE)` (`daemon/mod.rs:219`). The startup lock
+    is released only after that, so a successor's service never starts beside it.
+  - `SHUTDOWN_GRACE` (1 s, blocking tasks only) does not bound the stop: the worst case is
+    3 s + 1 s. To keep a margin, the 5 s `wait_for_lock` in `client::ensure_daemon` and
+    `bridge::ensure_daemon_detached` becomes 10 s (`freshness::EXIT_WAIT`).
+- **A daemon killed by a signal** runs no stop. That covers the pid fallbacks of `freshness`
+  and `daemon stop`, a logout and the test harness. The child then ends by stdin EOF (its
+  watchdog, §2). A successor's first start may find the port still held; that is a `Failed`
+  start retried after 1 s, not an error to report as final.
+- **Reloads** are serialised per addon as `service_reload` says. The service's state is per
+  daemon, never journaled.
+
+### 2. The web addon (`addons/web`)
+
+- `WebAddon` declares the config section `web` and implements `DaemonOps`.
+- `service()` runs the flag checks itself (`listen_addr`, `remote_addr`, `host_name_ok`,
+  `combination_ok`, and the value types). It returns `Err` naming the key, or
+  `["web", "--service", "--listen=<addr>" | "--remote=<addr>", "--allow-host=<name>"…]` when
+  `enabled = true`, else `Ok(None)`. Every value is in the same word as its flag, so no value
+  can be read as another flag. `--service` refuses every one-shot flag.
+- Ops (wire names `apply` and `status` of addon `web`; documented in `docs/addons.md`, "The web
+  addon", before the code):
+  - `apply` body `{"force": bool}` calls `service_reload(force)`; `status` body `{}` calls
+    `service_state()`.
+  - Both reply with one object: `{"state":"off"}` | `{"state":"starting"}` |
+    `{"state":"running","pid":u32,"since":<unix seconds>,"argv":[…]}` |
+    `{"state":"failed","exit":<code|null>,"signal":<number|null>,"tail":"…","retry_in":<seconds|null>}`.
+  - Unknown fields are ignored; an unknown `state` is reported as "the daemon is newer than
+    this claudio". Bodies carry no secret. The CLI builds the URL it prints from the reply's
+    `argv`, so it always describes what runs.
+
+`[web]` (written only by `claudio web`, through `app::config_edit`):
+
+```toml
+[web]
+enabled = true
+listen = "127.0.0.1:7337"         # loopback mode; absent with remote
+remote = "0.0.0.0:7337"           # --remote mode (TLS, password); absent with listen
+allow_hosts = ["claudio.example.org"]
+```
+
+`listen`/`remote` and `allow_hosts` are stored as one unit. One-shot flags (`--no-open`,
+`--print-url`, `--rotate-token`, `--rotate-cert`, `--set-password`, `--print-cert`) never are.
+
+**CLI** (`claudio web …`):
+
+| Command | Effect |
+|---|---|
+| `claudio web [--listen …\|--remote …] [--allow-host …] [--no-open] [--rotate-token] [--rotate-cert]` | Parse and check as today. The token is created or rotated in the terminal first, before `[web]` is written and before any op; the service only ever loads it. If any of `--listen`, `--remote` or `--allow-host` is given, the command line replaces the whole stored unit (what is not given takes its default: `127.0.0.1:7337`, no allowed hosts). If none is given, the stored unit is used unchanged (or the defaults when there is none). `combination_ok` runs on the result; `--rotate-cert` needs the result to be a `remote` one. With `remote`, check the password and load or make the certificate in the terminal (`remote::prepare`), so those errors show here. Write `[web]` with `enabled = true`. Ensure the local daemon (`ensure_local_daemon`), then send `apply { force: rotate-token or rotate-cert }`. On `Running`: print what a foreground start prints, from the terminal's own `remote::prepare`. Without `remote` that is `claudio web: <token URL>` on stdout. With it, the banner's stderr lines (certificate SHA-256, covered and missing names, the listening note, `on this machine: <token URL>`, the password hint) and `claudio web: <public URL>` on stdout. Then open the browser unless `--no-open`, and exit 0. On `Failed`: print the tail and the log path, exit 1 (the config stays enabled, and the daemon keeps retrying). A `config.toml` that `config_edit` refuses: exit 1, nothing started. |
+| `claudio web stop` | `enabled = false`, then `apply`; exit 0 when `Off`. |
+| `claudio web status` | Enabled or not, the listener, the daemon's `status` (running since, or failed with the tail), the URL without the token, and with `remote` the certificate's SHA-256 fingerprint. Exit 0 if running, 3 if not. |
+| `claudio web --set-password` | As today, then `apply { force: true }` if `[web] enabled` and the daemon lists `addon:web` (a new password takes effect; browsers sign in again). |
+| `claudio web --foreground [flags]` | Today's `claudio web [flags]`, unchanged; never reads or writes `[web]`. |
+| `--print-url` | The URL of the stored `[web]` settings when no listener flag is given (else of the flags, as today); never writes `[web]`. With `--rotate-token` it also sends `apply { force: true }` when `[web] enabled` and the daemon lists `addon:web`. |
+| `--print-cert` | Unchanged. |
+| `claudio web --service [--listen=…\|--remote=…] [--allow-host=…]…` | Internal; what the daemon runs. Serves like `--foreground`, but: never prints or logs the token (no `announce` URL, no `on this machine:` banner line); never opens a browser; connects the local daemon with plain `client::connect` plus reconnect (never `ensure_local_daemon`: the parent daemon is the authority, and a child must not start or replace it); writes `ready` on stdout after the listener is bound; and shuts down gracefully on stdin EOF as on SIGTERM. A dedicated OS thread (not a runtime task) reads stdin; at EOF it starts the graceful shutdown and, 3 s later, exits the process if it still runs, so a blocked runtime or an open connection cannot leave an orphan on the port. |
+
+`stop`, `status`, `--set-password` and `--print-url` reach the daemon with plain
+`client::connect`: they never start or replace one. With no daemon running, `stop` writes
+`enabled = false` and exits 0, and `status` prints `daemon: not running` and exits 3. With a
+daemon that has no `addon:web`, `stop` exits 0 (nothing of ours runs there) and `status` exits 3.
+
+**Daemon without the service.** The CLI decides on `Welcome.features` only: without `addon:web`
+it sends no op, and it never matches on an error's text (`unsupported op` from a pre-addon
+daemon, `no such addon web` from the last release). `claudio web` then prints `the daemon has
+no web service (older, or built without the web addon): claudio daemon restart when idle, or
+claudio web --foreground`. It exits 1 with `[web]` already saved: the next daemon start brings
+the web up.
+
+### 3. Persistent sign-ins (`addons/web/src/sessions.rs`, new; used by `auth.rs`)
+
+The store is a pure type (entries, the epoch, the cap, the idle rule; `now` is a parameter: A6).
+Its file format, the loader and the writer task are the module's I/O edge. `auth.rs` keeps the
+cookie, the guard and the login rules. This applies to every server mode (`--service` and
+`--foreground`).
+
+- **Lifetime:** `SESSION_IDLE` becomes 30 days; `MAX_SESSIONS` stays 64 (least recently used
+  goes). The server is the authority on expiry. The cookie gets `Max-Age=34560000` (400 days,
+  the longest browsers keep) so that closing the browser does not drop it, and never needs
+  re-sending. `HttpOnly; SameSite=Strict; Path=/` and `Secure` (TLS or `--allow-host`) are
+  unchanged; the sign-out cookie keeps `Max-Age=0`.
+  - A cookie the server no longer knows is refused as today. A page load shows the password
+    form, or without a password the "open the URL `claudio web` printed" card. A page that is
+    already open keeps retrying its socket until it is reloaded.
+  - A login that arrives with a live session cookie replaces that session (the old entry is
+    removed in the same step). So opening the token link again, which `claudio web` does at
+    every run, does not fill the 64 slots with sessions no browser holds.
+- **Use** is a request that passes the cookie check (`/api/*` and the `/ws` upgrade). Because
+  the page talks over one WebSocket after it loads, an open socket counts too: `ws::upgrade`
+  keeps the hash of the session it was opened with, and the tab task marks that session used
+  once an hour while the socket is open. A mark for a session that is gone does nothing.
+- **Store:** `<config>/web-sessions.json`, 0600, written with `paths::write_atomic`:
+
+  ```json
+  {"version":1,"epoch":"<hex>","sessions":[{"hash":"<hex>","seen":<unix seconds>}]}
+  ```
+
+  - `hash` is the SHA-256 of the cookie value's 64 ASCII characters. A presented value that is
+    not 64 lowercase hex is refused without hashing. The file never holds a cookie value, so a
+    copy of it (a backup) signs no one in.
+  - A presented cookie is hashed and compared with every stored hash in constant time, as the
+    values are today.
+  - `seen` is wall-clock Unix seconds (`paths::unix_now()`; an `Instant` does not survive a
+    restart), in memory and in the file. Idle time is `now.saturating_sub(seen)`; a session is
+    live while that is under 30 days. A `seen` later than `now` is set to `now` at load and on
+    use, so a clock that once ran ahead cannot keep an entry alive. A clock set forward by more
+    than 30 days signs everyone out; accepted. Each entry also remembers the `seen` last written
+    to the file, for the 1-hour rule under "Writes".
+- **Epoch:** `epoch` is the lowercase hex SHA-256 of
+  `"claudio-web-sessions-v1" ‖ 0x00 ‖ mode ‖ 0x00 ‖ token ‖ 0x00 ‖ password`:
+  - `mode` is `local` or `remote` (see "Mode" below);
+  - `token` is the 64 hex characters this server serves with;
+  - `password` is the bytes of `<config>/web-password` as read at this start, in every mode. It
+    is empty when the file is missing, over 512 bytes (`password.rs` `FILE_MAX`), or not a
+    private regular file of this uid. With `--remote` the same bytes feed
+    `password::Stored::parse` (one read), so the epoch and the password in use cannot differ.
+
+  The epoch is computed once, before the store is loaded, and kept for the life of the process.
+  Every write stamps that value; a write never reads the token or the password file. (A server
+  stopped after a rotation writes its sessions once more: with a re-read they would carry the
+  new epoch and survive it.)
+
+  At load, a file whose `epoch` differs is dropped whole, silently. So a new token or password
+  signs every browser out at the next server start, whoever changed the file and however (a
+  hand edit included). `claudio web --rotate-token`, `--print-url --rotate-token` and
+  `--set-password` restart a running service (`apply { force: true }`, §2), so there they act
+  at once. A `--foreground` server is not restarted by them: it keeps its token, password and
+  sessions until it is restarted, as today.
+- **Mode:** the mode is part of the epoch, so a start in the other mode (loopback ↔ `--remote`)
+  signs every browser out. A session made with the token in loopback mode (from any machine,
+  through an `--allow-host` proxy) must not stay valid under `--remote`, where every non-local
+  request needs the password (C5).
+- **Load** happens once per start, in `run` (`lib.rs`). It runs after the token is loaded and,
+  with `--remote`, after `remote::prepare`, and before the runtime is built: blocking I/O off
+  the executor, like the token's, and before `serve` binds, so no request meets a store that is
+  still loading. `Auth::new` takes the loaded store and the epoch.
+  - A missing file is the normal first start: an empty store, nothing printed.
+  - A different `epoch` gives an empty store, nothing printed.
+  - Otherwise the file is opened with `O_NOFOLLOW | O_CLOEXEC` and checked on the open
+    descriptor, as `claude/hooks.rs` `read_context` does. It must be a regular file of this uid
+    with no group or other permission bits (`mode & 0o077 == 0`, the token's rule), at most
+    64 KiB, and parse as this format with `version` 1, every `hash` 64 lowercase hex and no hash
+    twice.
+  - Anything else gives an empty store and one stderr line, `claudio web: ignoring <path>:
+    <why>; browsers sign in again` (`eprintln!`: the tracing subscriber is installed later),
+    never a failed start. The file stays as it is until the next write replaces it; a file of a
+    newer `version` is therefore lost at the first login after a downgrade.
+  - Entries past the idle limit are dropped; of more than 64, the 64 most recently seen stay.
+- **Writes** go through one writer task that always writes the newest state (a
+  `tokio::sync::watch` of the store, so nothing queues: A10):
+  - on a login and on a sign-out. The reply waits until that write has finished or failed (at
+    most 2 s): a cookie is never handed out, and a sign-out never confirmed, before the file
+    says so. A failed write changes no status code: the login or sign-out holds in memory.
+  - on use, when a session's `seen` in the file is over 1 hour older than its `seen` in memory
+    (memory is updated on every use; the idle limit is 30 days, so 1 hour of precision in the
+    file is enough and requests do not each write the disk);
+  - once more in `serve`'s `stop` sequence, after `hub.shutdown()`, awaited (at most 2 s; the
+    service's 3 s watchdog of §2 stays the outer bound).
+
+  A failed write is logged (file name and error, never content) and retried at the next change
+  and after 60 s, doubling to 1 h (`write_atomic` leaves a temp file behind when it fails, so
+  the retry is slow).
+- **Two servers** on one host and one config dir (a `--foreground` one beside the service)
+  share the file, unlocked: the last writer wins.
+  - One may forget a browser the other signed in.
+  - One may bring back a session the other signed out: it still holds it in memory and writes
+    it again within the hour or when it stops. With two servers a sign-out is sure only when
+    made on each, or with `--rotate-token` and a restart of both.
+  - Two servers with different tokens or modes drop each other's sessions at every start.
+
+  Accepted and documented in `docs/web.md`, not locked.
+- **Sign-out in the page:** the palette (`k`) gets "Sign out": `POST /api/logout`, then a
+  reload, which shows the login. `docs/web.md` lists it, and one e2e spec covers it: a
+  signed-out page shows the login, and `/api/me` answers 401 with the old cookie. This is the
+  only page change in this work; it uses no new message or DTO, and follows `DESIGN.md`.
+
+### 4. Password minimum (`addons/web/src/password.rs`)
+
+`MIN_BYTES` becomes 8 (`password.rs:22`); `MAX_BYTES` (1024), argon2id's parameters and the
+login limits are unchanged. A stored password is never re-checked against the minimum
+(`Stored::verify` checks only the maximum); `--set-password` asks for at least 8 bytes. The
+minimum counts bytes, as today, and `docs/web.md` says "bytes" where it gives the range.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Serve inside the daemon process | One crash or exploit in the network-facing server takes every terminal session down. The web is a client of the daemon, and would connect to itself. |
+| systemd user unit / launchd agent | Platform-specific, and outside the daemon the owner asked for. Also the boot-time goal the owner ruled out. |
+| `claudio web` daemonises itself (double-fork) | Nothing restarts it after a crash or an upgrade, and it has no status. (It would survive a logout exactly as the daemon does: both are `setsid` processes.) |
+| Child always started; it exits 0 when `[web]` is off | A process spawn at every daemon start on every host, and "off" is indistinguishable from "just exited". |
+| Web addon spawns the child itself from an op handler | No hook at daemon start (so no autostart), and process supervision would live outside the core's process-group and shutdown handling. |
+| Supervisor rotates the log on a timer (copy + truncate) | Loses lines, bounds size only per interval, and the error tail must be read back from a file; piping stderr through the daemon bounds it exactly. |
+| Stateless signed cookies (HMAC with a kept key) | The key would live in the config dir, so a copy of that dir (a backup) could forge a remote session, where today it yields a local-only token and an argon2id hash. Signing out one browser would also need a revocation list. Hashed server-side sessions keep today's model and only add a file. |
+| Store cookie values as they are | A copy of the file (a backup, another user's misconfigured share) would sign its reader in; hashes cost nothing at 32 random bytes of entropy. |
+| A sliding cookie `Max-Age` of 30 days | Needs a `Set-Cookie` on use to slide; the server already enforces idle, so a long cookie life is simpler and no weaker. |
+
+## Compatibility and rollout
+
+- **Behaviour change:** a bare `claudio web` no longer stays in the foreground. A script or unit
+  that ran `claudio web` as a long-running process must add `--foreground`. Sign-ins now last
+  until 30 days unused and survive restarts and closed browsers. `claudio web --rotate-token`
+  signs every browser out (a `--foreground` server must then be restarted for it to take
+  effect), and the palette's "Sign out" ends one. Release notes and `docs/web.md` say so.
+- **Sessions file:** new; a previous release ignores it (its sessions stay in memory), and a
+  downgrade followed by an upgrade finds the file again, still valid if the token and password
+  did not change. No migration. A sign-out made while the previous release runs is not in the
+  file: after the upgrade that session is valid again until it idles out.
+- **Mixed versions:** the new `addon:web` feature appears in `Welcome.features`.
+  - New CLI, daemon without `addon:web`: handled as above.
+  - Old CLI, new daemon: never sends web ops; an old `claudio web` still serves in the foreground.
+  - Old daemon, `[web]` written by a new CLI: an old daemon ignores the section (it reads only
+    `[claude]`), and the old web build's `config::load` ignores unknown sections.
+  - A daemon playing the previous release (`Config::old_peer`) runs no service and ignores
+    `[web]`, like the release it plays. `docs/daemon-protocol.md`, "Mixed versions", says so in
+    a commit before the code (B2).
+- **The service contract is a B1 interface.** The daemon runs the binary at `Config::claudio`,
+  which an upgrade replaces under a running daemon, so a daemon and its service child can be
+  one release apart in either direction.
+  - For one release, these may only change compatibly: `web --service` with
+    `--listen=`/`--remote=`/`--allow-host=`; the first stdout line `ready` (the daemon accepts
+    any first line that starts with `ready`); stdin EOF means stop; any unrequested exit is a
+    failure.
+  - A child that does not know `--service` (a downgraded binary) exits 2: an ordinary `Failed`,
+    retried at the backoff cap, with the usage text as its tail.
+  - A daemon left running across an upgrade keeps its old web child until that child is
+    restarted; a restart then runs the new binary under the old daemon (new client, old
+    daemon: B1).
+- **Two daemons** on one host share `config.toml` (two `PROTO` versions side by side, or two
+  runtime dirs: `XDG_RUNTIME_DIR` set in one login and not in another). The first service to
+  bind keeps the port; the other is `Failed` ("address in use"), retried at the 60 s cap, and
+  `claudio web status` in that environment says so. In this release there is one `PROTO`; the
+  release that bumps it decides which daemon runs services.
+- **Rollback:** `claudio web stop`, install the previous binary, `claudio daemon restart`. A
+  newer daemon is never replaced by an older build (B4), and would keep starting a binary without
+  `--service`. `[web]` may stay: the previous release ignores it.
+- Core-only build (A4): the supervisor compiles and runs with no service; nothing changes.
+
+## Failure modes and security
+
+- **Token never in a log.** In `--service` mode the token URL is printed nowhere: not on stdout
+  (a pipe the daemon reads), not on stderr (`<addon>.log`). The CLI prints it, from the 0600
+  token file, as `--print-url` does today. A test greps both logs for the token.
+- **Listener rules unchanged:** `[web]` passes the same validation as the flags (non-loopback
+  only with `remote`, TLS and a password). A hand-edited `listen = "0.0.0.0:…"` is `Failed`
+  with the flag's message and never binds.
+- **Password missing at service start** (deleted after enabling): the child fails as the
+  foreground one does today (`remote::prepare`, before binding). The state is `Failed` with
+  that message, retried with backoff.
+- **Port taken** (a `--foreground` web on the same port): `Failed` with the bind error, retried
+  with backoff; `claudio web` reports it.
+- **Orphans:** stdin EOF ends the child within 3 s when the daemon dies, however it dies (the
+  child's own watchdog thread, which does not depend on the runtime). Stop kills the child's
+  whole process group. Programs the child started in their own group (the extension host's) are
+  stopped by its graceful shutdown; after a SIGKILL they end on their own stdin EOF.
+- **Log growth** is bounded at 2 MiB per addon while the child runs, not only across restarts.
+  Crash loops are bounded by the 60 s backoff cap.
+- **Env:** the child gets the daemon's env minus `SESSION_MARKERS`, with `PATH = Config::path`.
+  That is the env of whatever started the daemon, not of the terminal that ran `claudio web`.
+  So the web's SSH hosts use the daemon's `SSH_AUTH_SOCK`, which may be stale or absent when the
+  daemon was started over ssh or by `systemd-run`. `CLAUDIO_*` variables set in the terminal do
+  not reach it either. `docs/web.md` says so and names the fix (`claudio daemon restart` from a
+  shell with the wanted env, or `--foreground`). Secrets never go in its argv: the token,
+  password and certificate stay in their 0600 files.
+- **Persisted sign-ins** widen what a stolen cookie is worth: it stays valid up to 30 days of
+  disuse instead of 24 h or the next restart. The owner accepted this (2026-11-09).
+  - Mitigations, unchanged: `HttpOnly`, `SameSite=Strict`, the strict CSP, `Secure` with TLS.
+  - New: the epoch binding, so rotating the token or the password (or switching between
+    loopback and `--remote`) signs everyone out; and the palette's "Sign out", so one browser
+    can end its own sign-in.
+  - The sessions file holds hashes only. Anyone who can read it as this uid can already read
+    `web-token`.
+- **Password of 8 bytes:** guessing over the network stays bounded by argon2id and the login
+  limits (5 per peer, 30 per minute in total, `limit.rs`): about 43,000 guesses a day at most.
+- **Concurrency:** two `claudio web` runs at once serialise on the `config.toml` lock and on the
+  per-addon reload; the last write wins, and each prints the URL of the argv its reply says runs.
+
+## Acceptance criteria
+
+- [ ] AC1: `[web]` ↔ argv mapping and the merge (any of `--listen`/`--remote`/`--allow-host`
+  replaces the stored unit, hosts included; none keeps it) are unit-tested, including an invalid
+  section → error naming the key (web addon unit tests).
+- [ ] AC2: the supervisor, with a `TestAddon` service (a script child), is unit/daemon-tested
+  for each of the following:
+  - started at daemon start; `ready` → `Running`;
+  - a crash and an unrequested exit 0 both restart with backoff; a reload to `None` → `Off`,
+    no restart;
+  - a reload with the same argv is a no-op; a changed argv or `force` restarts; a reload while
+    `Failed` with the same argv starts the child at once;
+  - daemon shutdown stops the group; the child exits when the daemon is SIGKILLed (stdin EOF);
+    no ready line in 20 s → `Failed`;
+  - a child that writes 3 MiB to stderr while it stays up leaves at most 2 MiB in `<addon>.log`
+    + `<addon>.log.1`;
+  - the child's argv[0] is the daemon's `Config::claudio`.
+- [ ] AC3: in `addons/web/tests/web.rs` with the isolated env:
+  - `claudio web --listen 127.0.0.1:<port> --no-open` exits 0, prints the token URL, and that
+    URL logs in; `claudio web status` exits 0;
+  - after `claudio daemon restart` the web is back;
+  - `claudio daemon restart` also succeeds when the service child ignores SIGTERM (it is
+    SIGKILLed after 3 s and the new daemon still starts);
+  - after `claudio web stop` the port is closed, `enabled = false`, and `status` exits 3.
+- [ ] AC4: `claudio web --remote 127.0.0.1:<port> --no-open` with the fixture password serves
+  TLS through the daemon and prints the fingerprint banner; without a password it exits
+  non-zero and leaves `config.toml` untouched.
+- [ ] AC5: after AC3 and AC4, neither `<runtime>/web.log` nor `daemon.log` contains the token.
+- [ ] AC6: every existing web suite (Rust and Playwright) passes with `--foreground`, its only
+  change. `--foreground` output is byte-identical to today's start-up.
+- [ ] AC7: against a daemon playing the previous release (`old_peer`), `claudio web` prints the
+  no-web-service message, exits 1, leaves `[web]` saved, sends no `AddonOp`, and nothing listens
+  on the port. The same daemon restarted without `old_peer` serves it.
+- [ ] AC8: `make check` and `make matrix` pass (A2 and the core-only build are checked there; A3
+  is reviewed, see AC10).
+- [ ] AC9: with the web running through the daemon, after a SIGKILL of the service pid
+  `claudio web status` exits 0 with a different pid within 5 s.
+- [ ] AC10: `grep -rn '"web"' crates/core/src/daemon crates/core/src/addon` matches only tests
+  and doc examples; the supervisor module contains no addon name.
+- [ ] AC11: each test of AC3, AC4, AC7 and AC9 ends with no process of its own left: it waits
+  for the service pid to be gone before its dirs are removed.
+- [ ] AC12: the session store is unit-tested (its own module's tests; the clock, the file path
+  and the epoch inputs are parameters) for:
+  - a save/load round trip; the file is 0600 and contains neither a cookie value nor the token;
+  - idle: live at 30 days − 1 s, gone at 30 days, on wall-clock `seen`; a `seen` later than now
+    counts as now;
+  - the cap: a 65th login drops the least recently seen; a file with 70 entries loads the 64
+    most recently seen;
+  - the epoch: a different token, different password bytes and the other mode each give a
+    different epoch and an empty store, with no message; a write made after the token file
+    changed on disk still carries the epoch of the start;
+  - a missing file → empty, no message; a bad mode, a symlink, an oversize or corrupt file, a
+    malformed or repeated hash, an unknown version → empty plus the loader's reason (one line),
+    start not failed;
+  - a login's entry is in the file, and a signed-out entry is out of it, before the reply;
+  - a login with a live cookie replaces that session;
+  - `seen` is written at most once an hour per session under steady use;
+  - an open socket marks its session used once an hour (injected clock), so a session whose
+    only activity is an open tab is live after 30 days;
+  - a failed write (unwritable directory) keeps the session in memory and is retried.
+- [ ] AC13: integration (`addons/web/tests/web.rs`):
+  - the login reply's `Set-Cookie` carries `Max-Age=34560000` with the flags it has today; the
+    sign-out reply's carries `Max-Age=0`;
+  - a cookie from a login stays valid after a `--foreground` server is killed (the harness's
+    SIGKILL) and started again, and a signed-out cookie stays refused after the same;
+  - after a restart with `--foreground --rotate-token` the old cookie is refused;
+  - a cookie from a loopback-mode login is refused by a `--remote` start on the same config dir;
+  - service mode (in the commit of step 3 or step 4, whichever lands last): the cookie stays
+    valid after `claudio daemon restart`; it is refused after `claudio web --rotate-token` and
+    after `claudio web --set-password` (typed through the PTY harness; `--set-password` refuses
+    a pipe).
+- [ ] AC14: `password.rs` tests: 8 bytes is accepted, 7 is refused with "at least 8 bytes",
+  1024 and 1025 as today (the old `password_length_is_12_to_1024_bytes` test is replaced).
+  `web.rs`: `claudio web --set-password` typed through the PTY harness with an 8-byte password
+  exits 0, and that password logs in to a `--remote` server.
+- [ ] AC15: an e2e spec: the palette's "Sign out" shows the login, and `/api/me` answers 401
+  with the old cookie, after a reload too.
+
+## Constraints
+
+- ACCEPTANCE.md throughout. A2/A3: the supervisor is generic and the core never names the web
+  addon. A4: the core-only build stays working. Secrets: never in argv, logs or `AddonOp` bodies.
+- C3 is amended in its own commit, before the supervisor: "…and stdin `/dev/null` unless
+  interactive; a supervised service's stdin is a pipe its owner holds and never writes, so the
+  child sees its owner's death."
+- Commit order:
+  1. `docs/daemon-protocol.md` (features, `old_peer`, the service contract) and
+     `docs/addons.md` ("Daemon ops": `service`, `service_reload`, `service_state`; the web ops'
+     bodies);
+  2. the core supervisor with its `TestAddon` tests, no web code (A3);
+  3. the web addon's service;
+  4. persistent sign-ins: `docs/web-protocol.md`'s Cookie bullet first, in its own commit,
+     then the code, then the page's "Sign out";
+  5. the password minimum.
+
+  `make check` passes at each. Steps 4 and 5 touch only `addons/web` and may come before 2–3.
+- `app.rs` stays pure; no TUI change.
+- `docs/web-protocol.md` changes only in its Cookie bullet (lines 53-55): `Max-Age=34560000` in
+  the cookie, and "30 days idle, kept across restarts, at most 64" for the sessions. These are
+  updated in the same branch:
+  - `docs/web.md`:
+    - usage, including line 27's `--rotate-token` note;
+    - the `--remote` steps, and "keeps the old password until it restarts, and a restart signs
+      every browser out" (lines 68-70);
+    - "24 h idle" (line 37);
+    - the Cookie bullet (lines 146-148): the cookie's `Max-Age`, `web-sessions.json`, what it
+      holds, the epoch, two servers;
+    - the password range (lines 68 and 118);
+    - the palette's "Sign out", the env and sign-out notes, and that the web survives a logout
+      only where the daemon does;
+  - the module docs that state the old rules: `auth.rs:1-12`, `password.rs:21`;
+  - `docs/addons.md`, `docs/daemon-protocol.md`;
+  - `README.md`: the `claudio web` lines and the `--remote` paragraph;
+  - the `Makefile`'s `dev` notes;
+  - `CLAUDE.md`'s web and daemon lines.
+- Tests use fake claude and the isolated env of the existing web suites; manager suites stay
+  single-threaded.
+- Conventional commits `type(scope): lowercase summary`, no AI attribution or co-author trailers.
+
+## Open questions
+
+None.

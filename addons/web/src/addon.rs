@@ -2,16 +2,19 @@
 //! its `Launch` asks every claude session, from any front-end, for the
 //! `<latex>` and ```` ```mermaid ```` lenses the page renders (G5), while
 //! `[extensions] latex`/`diagram` are on; its `Ui` lists those two rows on
-//! the extensions screens. The toggles are the core's (D10).
+//! the extensions screens (the toggles are the core's, D10). Its
+//! `DaemonOps` make the web a daemon service while `[web] enabled`: the ops
+//! `apply` and `status` (docs/addons.md, "The web addon").
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use claudio_core::addon::{
-    Addon, AddonCtx, Addons, BoxFuture, Commands, ExtensionRow, Launch, LaunchError, LaunchPart,
-    LaunchRequest, LaunchSelect, Notice, Routing, RowAction, Ui,
+    Addon, AddonCtx, Addons, BoxFuture, Commands, DaemonCtx, DaemonOps, ExtensionRow, Launch,
+    LaunchError, LaunchPart, LaunchRequest, LaunchSelect, Notice, Routing, RowAction, Ui,
 };
 use claudio_core::proto::{LensKind, LensSpec};
+use serde_json::Value;
 
 /// The diagram lens's instruction (spec §7).
 pub const DIAGRAM_CONTEXT: &str = "This terminal draws Mermaid diagrams. When a diagram \
@@ -33,6 +36,10 @@ impl Addon for WebAddon {
         "web"
     }
 
+    fn config_sections(&self) -> &'static [&'static str] {
+        &["web"]
+    }
+
     fn commands(&self) -> Option<&dyn Commands> {
         Some(self)
     }
@@ -43,6 +50,36 @@ impl Addon for WebAddon {
 
     fn ui(&self) -> Option<&dyn Ui> {
         Some(self)
+    }
+
+    fn daemon(&self) -> Option<&dyn DaemonOps> {
+        Some(self)
+    }
+}
+
+impl DaemonOps for WebAddon {
+    /// `apply` (`{"force": bool}`) re-reads `[web]` and converges;
+    /// `status` (`{}`) reads the state. Both answer `service::reply`.
+    fn handle<'a>(
+        &'a self,
+        op: &'a str,
+        body: Value,
+        ctx: Arc<dyn DaemonCtx>,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            match op {
+                "apply" => {
+                    let force = body.get("force").and_then(Value::as_bool) == Some(true);
+                    Ok(super::service::reply(&ctx.service_reload(force).await))
+                }
+                "status" => Ok(super::service::reply(&ctx.service_state())),
+                other => Err(format!("unknown op {other}")),
+            }
+        })
+    }
+
+    fn service(&self, config: &dyn Fn(&str) -> toml::Table) -> Result<Option<Vec<String>>, String> {
+        super::service::argv(&config("web"))
     }
 }
 

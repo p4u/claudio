@@ -8,6 +8,7 @@ mod addons;
 pub(crate) mod assets;
 mod atomic;
 pub(crate) mod auth;
+mod cli;
 mod dto;
 mod events;
 mod ext;
@@ -21,7 +22,9 @@ mod login;
 mod password;
 mod peer;
 mod remote;
+mod service;
 mod session_events;
+mod sessions;
 mod spawn;
 mod state;
 mod tls;
@@ -54,8 +57,9 @@ pub(crate) fn version() -> String {
 }
 
 const USAGE: &str =
-    "usage: claudio web [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
+    "usage: claudio web [--foreground] [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
 [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]
+       claudio web stop | status
        claudio web --set-password
        claudio web --print-cert";
 
@@ -77,6 +81,11 @@ pub(crate) struct WebArgs {
     pub rotate_token: bool,
     /// `--set-password`: store the `--remote` password, then exit.
     pub set_password: bool,
+    /// `--foreground`: serve from this terminal, as `claudio web` always did.
+    pub foreground: bool,
+    /// `--service`: the child the daemon runs (docs/daemon-protocol.md,
+    /// "Addon services"): `ready` on stdout, never the token, stops at stdin EOF.
+    pub service: bool,
 }
 
 /// Shared by every handler.
@@ -115,6 +124,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
         print_url: false,
         rotate_token: false,
         set_password: false,
+        foreground: false,
+        service: false,
     };
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -148,6 +159,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
             "--print-url" => out.print_url = true,
             "--rotate-token" => out.rotate_token = true,
             "--set-password" => out.set_password = true,
+            "--foreground" => out.foreground = true,
+            "--service" => out.service = true,
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -157,13 +170,19 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
 
 /// The flags that do not go together.
 fn combination_ok(a: &WebArgs, n_args: usize) -> Result<(), String> {
+    let one_shot = a.no_open || a.print_url || a.rotate_token || a.rotate_cert;
+    if a.service && (one_shot || a.set_password || a.print_cert || a.foreground) {
+        return Err("--service takes only --listen=, --remote= and --allow-host=".to_owned());
+    }
     if (a.set_password || a.print_cert) && n_args != 1 {
         return Err("--set-password and --print-cert take no other argument".to_owned());
     }
     if a.remote.is_some() && a.listen_given {
         return Err("--remote is the one listener: drop --listen".to_owned());
     }
-    if a.rotate_cert && a.remote.is_none() {
+    // Without --foreground the stored [web] may be a --remote one: `cli`
+    // checks the settings it merges.
+    if a.rotate_cert && a.remote.is_none() && a.foreground {
         return Err("--rotate-cert needs --remote".to_owned());
     }
     if let Some(remote) = a.remote {
@@ -193,7 +212,7 @@ fn value(
 
 /// `[A-Za-z0-9.-]{1,253}`, not starting with `-`, optionally `:<port>`
 /// (1..=65535).
-fn host_name_ok(name: &str) -> bool {
+pub(crate) fn host_name_ok(name: &str) -> bool {
     let (host, port) = match name.rsplit_once(':') {
         Some((h, p)) => (h, Some(p)),
         None => (name, None),
@@ -244,6 +263,11 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    match args {
+        [word] if word == "stop" => return cli::stop(),
+        [word] if word == "status" => return cli::status(),
+        _ => {}
+    }
     let args = match parse_args(args) {
         Ok(args) => args,
         Err(e) => {
@@ -254,25 +278,37 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
     if let Some(code) = one_shot(&args) {
         return code;
     }
+    match args.foreground || args.service {
+        true => serve_here(args, addons),
+        // The daemon serves it (docs/web.md, "The web service").
+        false => cli::start(args),
+    }
+}
+
+/// Serve from this process: `claudio web --foreground`, or `--service`, the
+/// daemon's child.
+fn serve_here(args: WebArgs, addons: Arc<claudio_core::addon::Addons>) -> ExitCode {
+    // First thing: a daemon that stops us (or dies) during the start is obeyed.
+    let eof = args.service.then(watch_stdin);
     // Blocking I/O, before the runtime exists.
-    let token = match auth::load_or_create_token(&auth::token_path(), args.rotate_token) {
+    let token = match token_for(&args) {
         Ok(token) => token,
         Err(e) => {
-            eprintln!("claudio web: cannot read or write the token file: {e}");
+            eprintln!("claudio web: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let url = match args.remote {
-        // `SocketAddr`'s `Display` brackets an IPv6 address.
-        None => format!("http://{}/#t={token}", args.listen),
-        Some(addr) => remote::token_url(addr, &token)
-            .unwrap_or_else(|| remote::public_url(addr, &claudio_core::sys::hostname())),
-    };
+    // `--service` never prints the token, so it never makes this URL.
+    let url = (!args.service).then(|| start_url(&args, &token));
     if args.print_url {
-        println!("{url}");
+        println!("{}", url.unwrap_or_default());
         return ExitCode::SUCCESS;
     }
-    let remote = match args.remote.map(|addr| remote::prepare(&args, addr, &token)) {
+    let password = password::read(&password::path());
+    let remote = match args
+        .remote
+        .map(|addr| remote::prepare(&args, addr, &token, &password))
+    {
         None => None,
         Some(Ok(r)) => Some(r),
         Some(Err(e)) => {
@@ -280,19 +316,8 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
-
-    // A fixed filter, not RUST_LOG: a dependency's trace output could carry
-    // request headers (the cookie).
-    let debug = std::env::var("CLAUDIO_DEBUG").is_ok_and(|v| v == "1");
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_ansi(io::stderr().is_terminal())
-        .with_env_filter(EnvFilter::new(if debug {
-            "claudio=debug"
-        } else {
-            "claudio=info"
-        }))
-        .init();
+    let sessions = load_sessions(&args, &token, &password);
+    init_tracing();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -303,7 +328,10 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(serve(args, token, url, remote, addons)) {
+    if args.service {
+        hub_io::connect_local_plainly();
+    }
+    match runtime.block_on(serve(args, token, url, remote, sessions, eof, addons)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("claudio web: {e}");
@@ -312,12 +340,115 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
     }
 }
 
+/// The token this server serves with. `--service` only loads it (`claudio
+/// web` made it before it had the service started); a foreground start
+/// makes one when there is none, or a new one with `--rotate-token`.
+fn token_for(args: &WebArgs) -> Result<String, String> {
+    let path = auth::token_path();
+    if !args.service {
+        return auth::load_or_create_token(&path, args.rotate_token)
+            .map_err(|e| format!("cannot read or write the token file: {e}"));
+    }
+    match auth::load_token(&path) {
+        Ok(Some(token)) => Ok(token),
+        Ok(None) => Err(format!("no token in {}: run claudio web", path.display())),
+        Err(e) => Err(format!("cannot read the token file: {e}")),
+    }
+}
+
+/// The URL a start prints and opens: the token link, or with `--remote`
+/// the one for this machine (else the public one).
+pub(crate) fn start_url(args: &WebArgs, token: &str) -> String {
+    match args.remote {
+        // `SocketAddr`'s `Display` brackets an IPv6 address.
+        None => format!("http://{}/#t={token}", args.listen),
+        Some(addr) => remote::token_url(addr, token)
+            .unwrap_or_else(|| remote::public_url(addr, &claudio_core::sys::hostname())),
+    }
+}
+
+/// Logs on stderr. A fixed filter, not RUST_LOG: a dependency's trace
+/// output could carry request headers (the cookie).
+fn init_tracing() {
+    let debug = std::env::var("CLAUDIO_DEBUG").is_ok_and(|v| v == "1");
+    tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_ansi(io::stderr().is_terminal())
+        .with_env_filter(EnvFilter::new(if debug {
+            "claudio=debug"
+        } else {
+            "claudio=info"
+        }))
+        .init();
+}
+
+/// How long `--service` may take to stop after stdin's EOF before it exits.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `--service`: a thread (not a task: a blocked runtime must not stop it)
+/// reads stdin, a pipe the daemon holds and never writes. EOF means the
+/// daemon is gone or asks us to stop: the graceful shutdown starts, and 3 s
+/// later the process exits if it still runs, so nothing stays on the port.
+fn watch_stdin() -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        if test_hang() {
+            return;
+        }
+        let _ = tx.send(());
+        std::thread::sleep(STOP_DEADLINE);
+        std::process::exit(0);
+    });
+    rx
+}
+
+/// `CLAUDIO_TEST_SERVICE_HANG=1`, debug builds only: a `--service` that
+/// ignores its stop (stdin's EOF and SIGTERM), so the suites can check the
+/// daemon's SIGKILL. A release build has no such body: the variable is not
+/// read, and `make static`'s final check greps for its name.
+#[cfg(debug_assertions)]
+fn test_hang() -> bool {
+    std::env::var("CLAUDIO_TEST_SERVICE_HANG").is_ok_and(|v| v == "1")
+}
+
+#[cfg(not(debug_assertions))]
+fn test_hang() -> bool {
+    false
+}
+
+/// The sign-ins of earlier runs, bound to this start's mode, token and
+/// password bytes (a file of another epoch: none, silently). Blocking I/O,
+/// before the runtime exists and before `serve` binds.
+fn load_sessions(
+    args: &WebArgs,
+    token: &str,
+    password: &Result<Vec<u8>, String>,
+) -> sessions::Sessions {
+    let mode = match args.remote {
+        Some(_) => sessions::Mode::Remote,
+        None => sessions::Mode::Local,
+    };
+    let epoch = sessions::epoch(mode, token, password.as_deref().unwrap_or_default());
+    let path = sessions::path();
+    let (store, why) = sessions::load(&path, &epoch, claudio_core::paths::unix_now());
+    if let Some(why) = why {
+        // The tracing subscriber is not installed yet.
+        eprintln!(
+            "claudio web: ignoring {}: {why}; browsers sign in again",
+            path.display()
+        );
+    }
+    sessions::Sessions::new(store, epoch, path)
+}
+
 /// `--set-password` or `--print-cert`: one thing, then exit.
 fn one_shot(args: &WebArgs) -> Option<ExitCode> {
     if args.set_password {
         return Some(match password::set_password() {
             Ok(done) => {
                 eprintln!("claudio web: {done}");
+                cli::restart_if_enabled("the new password");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -343,13 +474,21 @@ fn print_cert() -> ExitCode {
     }
 }
 
+/// Serve until Ctrl+C, SIGTERM or (`--service`) stdin's EOF. `url`: what a
+/// foreground start prints and opens; `None` for `--service`.
 async fn serve(
     args: WebArgs,
     token: String,
-    url: String,
+    url: Option<String>,
     remote: Option<remote::Remote>,
+    sessions: sessions::Sessions,
+    eof: Option<tokio::sync::oneshot::Receiver<()>>,
     addons: Arc<claudio_core::addon::Addons>,
 ) -> Result<(), String> {
+    use tokio::signal::unix::{signal, SignalKind};
+    // Before `ready`: from then on a SIGTERM is the graceful stop, never
+    // the default action (axum polls `stop` only later).
+    let term = signal(SignalKind::terminate()).ok();
     let listen = remote.as_ref().map_or(args.listen, |r| r.addr);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -359,36 +498,30 @@ async fn serve(
         Some(r) => r.allowed.clone(),
         None => auth::Allowed::new(args.listen, &args.allow_hosts),
     };
-    let mut auth = auth::Auth::new(token, allowed, auth::csp(assets.importmap_sha256()))
+    let csp = auth::csp(assets.importmap_sha256());
+    let mut auth = auth::Auth::new(token, allowed, csp, sessions)
         .map_err(|e| format!("cannot open /dev/urandom: {e}"))?;
     if let Some(r) = &remote {
         auth = auth.with_password(r.password.clone());
     }
     let state = build_state(auth, assets, addons).await?;
-    let (hub, ext, addon_rt) = (
+    let (hub, ext, addon_rt, sessions) = (
         state.hub.clone(),
         Arc::clone(&state.ctx.ext),
         state.addons.clone(),
+        Arc::clone(&state.auth.sessions),
     );
-    if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
-        eprintln!("claudio web: local build {}", version());
-    }
-    announce(&url, remote.as_ref());
-    let wanted = claudio_core::app::browser::browser_wanted(
-        std::env::consts::OS,
-        |k| std::env::var(k).ok(),
-        io::stdout().is_terminal(),
-    );
-    if !args.no_open && wanted {
-        claudio_core::app::browser::open_browser(&url);
-    }
+    let writer = sessions.start_writer();
+    started(&args, url.as_deref(), remote.as_ref());
     tracing::info!(listen = %listen, tls = remote.is_some(), "web: serving");
 
-    // Tabs are closed (1001) and web-state.json written before the server
-    // stops waiting for its connections.
+    // Tabs are closed (1001), web-state.json and the sessions written
+    // before the server stops waiting for its connections.
     let stop = async move {
-        shutdown().await;
+        shutdown(eof, term).await;
         hub.shutdown().await;
+        sessions.flush().await;
+        writer.inspect(|w| w.abort());
         ext.shutdown().await;
         addon_rt.shutdown();
     };
@@ -410,9 +543,34 @@ async fn serve(
     served.map_err(|e| format!("server error: {e}"))
 }
 
+/// Once the listener is bound and the hub runs: `--service` (no `url`)
+/// writes `ready` on stdout, the line the daemon waits for, and nothing
+/// else (never the token); a foreground start prints its URL (and banner)
+/// and opens a browser.
+fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
+    if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
+        eprintln!("claudio web: local build {}", version());
+    }
+    let Some(url) = url else {
+        let mut out = io::stdout();
+        let _ = writeln!(out, "ready");
+        let _ = out.flush();
+        return;
+    };
+    announce(url, remote);
+    let wanted = claudio_core::app::browser::browser_wanted(
+        std::env::consts::OS,
+        |k| std::env::var(k).ok(),
+        io::stdout().is_terminal(),
+    );
+    if !args.no_open && wanted {
+        claudio_core::app::browser::open_browser(url);
+    }
+}
+
 /// The start lines: with `--remote` the banner's stderr lines first, then
 /// the one stdout line the tests read.
-fn announce(url: &str, remote: Option<&remote::Remote>) {
+pub(crate) fn announce(url: &str, remote: Option<&remote::Remote>) {
     let line = match remote {
         Some(r) => {
             for l in &r.banner.stderr {
@@ -479,20 +637,37 @@ async fn build_state(
     })
 }
 
-/// Ctrl+C or SIGTERM.
-async fn shutdown() {
-    use tokio::signal::unix::{signal, SignalKind};
+/// Ctrl+C, SIGTERM (`term`, registered before the start's output), or
+/// `eof` (`--service`: stdin closed).
+async fn shutdown(
+    eof: Option<tokio::sync::oneshot::Receiver<()>>,
+    term: Option<tokio::signal::unix::Signal>,
+) {
+    if eof.is_some() && test_hang() {
+        // SIGTERM is caught (`term` stays registered) and never acted on;
+        // only SIGKILL ends us.
+        std::future::pending::<()>().await;
+    }
+    let eof = async {
+        match eof {
+            Some(rx) => {
+                let _ = rx.await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
     let term = async {
-        match signal(SignalKind::terminate()) {
-            Ok(mut s) => {
+        match term {
+            Some(mut s) => {
                 s.recv().await;
             }
-            Err(_) => std::future::pending::<()>().await,
+            None => std::future::pending::<()>().await,
         }
     };
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term => {}
+        _ = eof => {}
     }
     tracing::info!("web: shutting down");
 }
@@ -605,9 +780,12 @@ mod tests {
         );
         let a = parse_args(&args(&["--remote", ":7999", "--rotate-cert"])).unwrap();
         assert!(a.rotate_cert);
+        // Without --foreground, --rotate-cert is checked on the merged
+        // settings (`service::run_args`), which may be a stored --remote.
+        assert!(parse_args(&args(&["--rotate-cert"])).is_ok());
         for bad in [
             &["--remote", "--listen", "127.0.0.1:1"][..],
-            &["--rotate-cert"][..],
+            &["--rotate-cert", "--foreground"][..],
             &["--remote", ":7999", "--allow-host", "a.example:8443"][..],
             &["--print-cert", "--no-open"][..],
             &["--remote", "fe80::1"][..],
@@ -622,5 +800,29 @@ mod tests {
         ]))
         .is_ok());
         assert!(parse_args(&args(&["--print-cert"])).unwrap().print_cert);
+        assert!(!a.foreground);
+        let a = parse_args(&args(&["--foreground", "--listen", "127.0.0.1:9000"])).unwrap();
+        assert!(a.foreground && a.listen_given);
+        let err = parse_args(&args(&["--set-password", "--foreground"])).unwrap_err();
+        assert!(err.contains("no other argument"), "{err}");
+        let a = parse_args(&args(&[
+            "--service",
+            "--remote=0.0.0.0:7999",
+            "--allow-host=a.example",
+        ]))
+        .unwrap();
+        assert!(a.service && a.remote.is_some() && a.allow_hosts == ["a.example"]);
+        for one_shot in [
+            "--no-open",
+            "--print-url",
+            "--rotate-token",
+            "--rotate-cert",
+            "--set-password",
+            "--print-cert",
+            "--foreground",
+        ] {
+            let err = parse_args(&args(&["--service", "--remote", one_shot])).unwrap_err();
+            assert!(err.contains("--service takes only"), "{one_shot}: {err}");
+        }
     }
 }

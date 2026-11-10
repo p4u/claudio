@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -24,6 +25,43 @@ pub trait DaemonOps: Send + Sync {
     fn on_claude_installed(&self, ctx: &Arc<dyn DaemonCtx>) {
         let _ = ctx;
     }
+    /// What the daemon should keep running for this addon: argv after the claudio binary,
+    /// from the addon's declared config sections. `Ok(None)`: nothing. `Err(msg)`: the
+    /// sections are invalid; `msg` names the key. Pure, no I/O.
+    fn service(&self, config: &dyn Fn(&str) -> toml::Table) -> Result<Option<Vec<String>>, String> {
+        let _ = config;
+        Ok(None)
+    }
+}
+
+/// An addon service in this daemon (docs/addons.md, "Daemon ops").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceState {
+    /// Nothing runs: `service()` answered `Ok(None)`, or nothing asked yet.
+    Off,
+    /// Started; its `ready` line has not come yet.
+    Starting,
+    /// It said `ready`.
+    Running {
+        /// The child's pid, also its process group.
+        pid: u32,
+        /// When it said `ready`, in Unix seconds.
+        since: u64,
+        /// What it was started with, after the claudio binary.
+        argv: Vec<String>,
+    },
+    /// Its start failed, it exited unasked, or `service()` refused the sections.
+    Failed {
+        /// Its exit code, when it exited with one.
+        exit: Option<i32>,
+        /// The signal that ended it, when one did.
+        signal: Option<i32>,
+        /// The last ≤ 4 KiB it wrote to stderr since this start (sanitised),
+        /// or why it did not start.
+        tail: String,
+        /// When it is started again (`None`: at the next reload or daemon start).
+        retry_in: Option<Duration>,
+    },
 }
 
 /// What the daemon offers an addon's op.
@@ -38,6 +76,14 @@ pub trait DaemonCtx: Send + Sync {
     fn cache_dir(&self) -> PathBuf;
     /// Held while claude update or a `claude plugin …` runs: one writer of `~/.claude`.
     fn updating(&self) -> Arc<tokio::sync::Mutex<()>>;
+    /// Re-ask `service()` and converge: stop, start, or restart when the argv changed (or
+    /// `force`). A service that is `Failed` is started now and its backoff reset, even with
+    /// the same argv. Resolves once the child is ready, has failed its first attempt, or is
+    /// off (≤ 25 s: a 3 s stop and a 20 s start). A second reload for the same addon waits for
+    /// the first; reloads that queue behind it run as one.
+    fn service_reload(&self, force: bool) -> BoxFuture<'static, ServiceState>;
+    /// This addon's service as of now.
+    fn service_state(&self) -> ServiceState;
 }
 
 /// Lets claude offer bypass-permissions mode; any mention in `--help` counts.

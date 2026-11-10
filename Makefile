@@ -52,9 +52,9 @@ static:
 	@echo "→ $(DIST)/$(BIN)"
 	@file $(DIST)/$(BIN) || true
 	@echo "static check:"; ldd $(DIST)/$(BIN) 2>&1 || true
-	@# R8: the debug-only test peer hook never ships.
-	@if grep -q CLAUDIO_TEST_REMOTE_PEER $(DIST)/$(BIN); then \
-	  echo "error: the debug-only test hook is in the release binary"; exit 1; fi
+	@# R8: the debug-only test hooks never ship.
+	@if grep -q -e CLAUDIO_TEST_REMOTE_PEER -e CLAUDIO_TEST_SERVICE_HANG $(DIST)/$(BIN); then \
+	  echo "error: a debug-only test hook is in the release binary"; exit 1; fi
 
 ## Reproducible static build with zero host toolchain — uses a musl container.
 ## Works on any machine with Docker.
@@ -155,8 +155,8 @@ install: static
 ## The page's footer then reads e.g. `claudio 0.8.0+dev.20f0b49` (`.dirty` with
 ## uncommitted changes). The previous binary is kept as $(BIN).prev (undo:
 ## `make dev-undo`). Running daemons are NOT restarted: each is replaced by this
-## build once it is idle, when a claudio client (TUI or `claudio web`) connects.
-## Restart a running `claudio web` yourself (Ctrl+C, run it again, reload the page).
+## build once it is idle, when a claudio client (TUI or `claudio web`) connects; the web service
+## restarts with its daemon. Restart a `claudio web --foreground` yourself (Ctrl+C, run it again).
 ## Remote hosts get this build too when the TUI or `claudio web` connects to them.
 dev:
 	CLAUDIO_BUILD_LABEL="+dev.$$(git rev-parse --short HEAD)$$(git diff --quiet HEAD -- 2>/dev/null || echo .dirty)" \
@@ -166,7 +166,7 @@ dev:
 	@install -m755 $(DIST)/$(BIN) $(PREFIX)/bin/.$(BIN).new
 	@mv -f $(PREFIX)/bin/.$(BIN).new $(PREFIX)/bin/$(BIN)
 	@echo "installed $(PREFIX)/bin/$(BIN) (local build; previous one in $(BIN).prev)"
-	@echo "next: restart \`claudio web\` (Ctrl+C, run it again) and reload the page"
+	@echo "next: run claudio or claudio web: an idle daemon, and its web service, move onto this build; reload the page"
 
 ## Put back the binary `make dev` replaced.
 dev-undo:

@@ -99,7 +99,8 @@ sanitised and capped by the core.
 
 **C3. Child processes are owned.** A finite helper command has a deadline and capped output; a
 long-lived child has an owner that cancels it and kills its process group. Both run with a
-scrubbed env and stdin `/dev/null` unless interactive.
+scrubbed env and stdin `/dev/null` unless interactive; a supervised service's stdin is a pipe its
+owner holds and never writes, so the child sees its owner's death.
 
 **C4. Files claudio writes** are private data at 0600 in 0700 directories, replaced atomically
 (`paths::write_atomic`); executables keep their executable mode; claudio never chmods a

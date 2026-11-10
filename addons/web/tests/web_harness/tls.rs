@@ -36,6 +36,12 @@ pub fn fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+/// The fingerprint of the certificate `h`'s config dir keeps.
+pub fn kept_fingerprint(h: &ManagerHarness) -> String {
+    let pem = h.config_home.join("claudio/web-tls/cert.pem");
+    fingerprint(&CertificateDer::from_pem_file(&pem).unwrap())
+}
+
 /// Write the fixture password file (0600) into `h`'s config dir.
 pub fn write_test_password(h: &ManagerHarness) {
     let dir = h.config_home.join("claudio");
@@ -67,9 +73,18 @@ impl RemoteWeb {
     /// fingerprint is `cert.pem`'s.
     pub fn start(h: ManagerHarness, args: &[&str], setup: impl FnOnce(&mut Command)) -> RemoteWeb {
         write_test_password(&h);
+        RemoteWeb::start_keeping_password(h, args, setup)
+    }
+
+    /// [`RemoteWeb::start`] with the password file `h` already has.
+    pub fn start_keeping_password(
+        h: ManagerHarness,
+        args: &[&str],
+        setup: impl FnOnce(&mut Command),
+    ) -> RemoteWeb {
         let port = free_port();
         let mut cmd = Command::new(BINARY);
-        cmd.arg("web")
+        cmd.args(["web", "--foreground"])
             .arg("--remote")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--no-open")

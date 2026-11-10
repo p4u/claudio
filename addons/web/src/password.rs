@@ -18,8 +18,9 @@ use claudio_core::paths;
 pub(crate) const M_COST_KIB: u32 = 19 * 1024;
 pub(crate) const T_COST: u32 = 2;
 pub(crate) const P_COST: u32 = 1;
-/// A password is 12 to 1024 bytes of UTF-8.
-pub(crate) const MIN_BYTES: usize = 12;
+/// A password is 8 to 1024 bytes of UTF-8 (a stored one is checked
+/// against the maximum only).
+pub(crate) const MIN_BYTES: usize = 8;
 pub(crate) const MAX_BYTES: usize = 1024;
 /// A PHC string with these parameters is about 100 bytes; anything past
 /// this is not one.
@@ -97,6 +98,14 @@ impl Stored {
 /// Read the stored hash: a regular file of ours, not readable by others,
 /// at most 512 bytes, one valid PHC string. Every failure says how to fix it.
 pub(crate) fn load(path: &Path) -> Result<Stored, String> {
+    parse_file(path, &read(path)?)
+}
+
+/// The password file's bytes: a regular file of ours, not readable by
+/// others, at most 512 bytes. Every failure says how to fix it. One read
+/// feeds both the password a `--remote` server checks and its sessions'
+/// epoch (`sessions::epoch`). Blocking I/O.
+pub(crate) fn read(path: &Path) -> Result<Vec<u8>, String> {
     let fix = "set one with `claudio web --set-password`";
     let meta = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => format!("--remote needs a password: {fix}"),
@@ -110,9 +119,15 @@ pub(crate) fn load(path: &Path) -> Result<Stored, String> {
             path.display()
         ));
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}; {fix}", path.display()))?;
-    Stored::parse(&text).map_err(|e| format!("{}: {e}; {fix}", path.display()))
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}; {fix}", path.display()))
+}
+
+/// The stored hash in `bytes`, as [`read`] read them from `path`.
+pub(crate) fn parse_file(path: &Path, bytes: &[u8]) -> Result<Stored, String> {
+    let fix = "set one with `claudio web --set-password`";
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| format!("{}: not text; {fix}", path.display()))?;
+    Stored::parse(text).map_err(|e| format!("{}: {e}; {fix}", path.display()))
 }
 
 /// `claudio web --set-password`: the password twice from the terminal
@@ -139,7 +154,7 @@ pub(crate) fn set_password() -> Result<String, String> {
         ));
     }
     Ok(format!(
-        "password saved to {}. Restart claudio web to use it (that also signs every browser out).",
+        "password saved to {}. A claudio web --foreground server uses it once restarted (that also signs every browser out).",
         path.display()
     ))
 }
@@ -201,14 +216,15 @@ mod tests {
     }
 
     #[test]
-    fn password_length_is_12_to_1024_bytes() {
-        let short = acceptable(&"x".repeat(11)).unwrap_err();
-        assert!(short.contains("12"), "{short}");
-        assert!(acceptable(&"x".repeat(12)).is_ok());
-        assert!(acceptable(&"é".repeat(6)).is_ok());
+    fn password_length_is_8_to_1024_bytes() {
+        let short = acceptable(&"x".repeat(7)).unwrap_err();
+        assert_eq!(short, "the password needs at least 8 bytes");
+        assert!(acceptable(&"x".repeat(8)).is_ok());
+        assert!(acceptable(&"é".repeat(4)).is_ok(), "bytes, not characters");
         assert!(acceptable(&"x".repeat(1024)).is_ok());
-        assert!(acceptable(&"x".repeat(1025)).is_err());
-        assert!(hash(&"x".repeat(11)).is_err());
+        let long = acceptable(&"x".repeat(1025)).unwrap_err();
+        assert_eq!(long, "the password takes at most 1024 bytes");
+        assert!(hash(&"x".repeat(7)).is_err());
         let s = Stored::parse(FIXTURE).unwrap();
         assert!(
             !s.verify(&"x".repeat(1025)),

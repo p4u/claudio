@@ -2,6 +2,7 @@
 //! sessions), and the one writer of web-state.json.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -12,6 +13,17 @@ use claudio_core::freshness::DaemonCheck;
 use claudio_core::paths;
 use claudio_core::proto::{Msg, SessionInfo};
 
+/// Set once by `claudio web --service`, before the runtime starts: the
+/// daemon that runs us is the authority, so `local` is connected as it is,
+/// never started or replaced (`client::ensure_local_daemon`).
+static PLAIN_LOCAL: AtomicBool = AtomicBool::new(false);
+
+/// `--service`: from now on `local` is reached with plain `client::connect`
+/// (and the hub's reconnects).
+pub(crate) fn connect_local_plainly() {
+    PLAIN_LOCAL.store(true, Ordering::Relaxed);
+}
+
 /// Connect `host` and list its sessions. The error says whether the
 /// bootstrap failed (the next attempt runs it again).
 pub(super) async fn connect_once(
@@ -19,9 +31,12 @@ pub(super) async fn connect_once(
     bootstrap: bool,
 ) -> Result<(Client, Vec<SessionInfo>), (String, bool)> {
     let client = if host == "local" {
-        let check = client::ensure_local_daemon()
-            .await
-            .map_err(|e| (e.to_string(), false))?;
+        let check = match PLAIN_LOCAL.load(Ordering::Relaxed) {
+            true => DaemonCheck::UpToDate,
+            false => client::ensure_local_daemon()
+                .await
+                .map_err(|e| (e.to_string(), false))?,
+        };
         let client = client::connect(&paths::daemon_socket())
             .await
             .map_err(|e| (e.to_string(), false))?;

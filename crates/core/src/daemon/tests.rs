@@ -570,6 +570,8 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
         old_peer: false,
+        config_file: None,
+        service_timing: Default::default(),
     };
     // Pre-populate a journal entry with a claude_session_id so the spawn
     // request carries --resume.
@@ -692,6 +694,8 @@ async fn immediate_exit_leaves_session_dormant() {
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
         old_peer: false,
+        config_file: None,
+        service_timing: Default::default(),
     };
 
     let listening = server::start(config, Arc::new(Addons::empty()))
@@ -1043,6 +1047,7 @@ mod addon_ops;
 mod freshness;
 mod git;
 mod login_path;
+mod service;
 mod spawn_env;
 
 // ── Respawn (reset a session in place) ───────────────────────────────────────

@@ -454,6 +454,7 @@ dependencies = [
  "claudio-core",
  "flate2",
  "futures",
+ "libc",
  "rcgen",
  "reqwest",
  "rustls",
