@@ -154,7 +154,7 @@ pub(crate) fn set_password() -> Result<String, String> {
         ));
     }
     Ok(format!(
-        "password saved to {}. Restart claudio web to use it (that also signs every browser out).",
+        "password saved to {}. A claudio web --foreground server uses it once restarted (that also signs every browser out).",
         path.display()
     ))
 }
