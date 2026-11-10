@@ -102,6 +102,10 @@ A host is added by name or `user@host`, from the hosts panel or Alt+n's "Another
 TUI's Alt+n takes a typed host too). It needs no `~/.ssh/config` entry, but key-based ssh:
 claudio runs ssh with `BatchMode`, so a password is never asked. The first connection records
 the host's key (`StrictHostKeyChecking=accept-new`); a changed key is refused with ssh's message.
+claudio gives ssh that option on its command line, so for claudio's connections it replaces a
+`StrictHostKeyChecking` of your ssh config: with `yes` there, a host missing from `known_hosts`
+is still accepted at its first connection, and with `no`, a host whose key changed is refused
+(`ssh-keygen -R <host>` forgets the old key).
 A host that cannot be reached shows ssh's own error (`ssh failed (exit N): …`, such as "Could
 not resolve hostname").
 
