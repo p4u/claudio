@@ -361,6 +361,49 @@ fn web_service_says_ready_never_prints_the_token_and_stops_at_eof() {
     );
 }
 
+#[test]
+fn web_service_takes_sigterm_from_the_moment_it_says_ready() {
+    use std::os::unix::process::ExitStatusExt;
+    let h = ManagerHarness::new();
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--foreground", "--print-url"]);
+    apply_env(&h, &mut cmd);
+    assert!(cmd.output().unwrap().status.success(), "the token is made");
+    // A SIGTERM right after `ready` is the graceful stop (exit 0), or with
+    // the hang hook ignored until SIGKILL: never the default action.
+    for hang in ["0", "1"] {
+        let listen = format!("--listen=127.0.0.1:{}", free_port());
+        let mut cmd = Command::new(BINARY);
+        cmd.args(["web", "--service", &listen]);
+        apply_env(&h, &mut cmd);
+        cmd.env("CLAUDIO_TEST_SERVICE_HANG", hang);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut child = cmd.stderr(Stdio::null()).spawn().expect("start it");
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        // SAFETY: kill(2) has no preconditions.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        if hang == "1" {
+            thread::sleep(std::time::Duration::from_millis(500));
+            assert!(child.try_wait().unwrap().is_none(), "SIGTERM is ignored");
+            child.kill().unwrap();
+            assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+            continue;
+        }
+        let deadline = std::time::Instant::now() + WAIT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(std::time::Instant::now() < deadline, "still running");
+            thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(status.code(), Some(0), "a graceful stop: {status:?}");
+    }
+}
+
 // ── Persistent sign-ins ───────────────────────────────────────────────────────
 
 fn cookie_header(cookie: &str) -> String {

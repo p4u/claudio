@@ -470,6 +470,10 @@ async fn serve(
     eof: Option<tokio::sync::oneshot::Receiver<()>>,
     addons: Arc<claudio_core::addon::Addons>,
 ) -> Result<(), String> {
+    use tokio::signal::unix::{signal, SignalKind};
+    // Before `ready`: from then on a SIGTERM is the graceful stop, never
+    // the default action (axum polls `stop` only later).
+    let term = signal(SignalKind::terminate()).ok();
     let listen = remote.as_ref().map_or(args.listen, |r| r.addr);
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -499,7 +503,7 @@ async fn serve(
     // Tabs are closed (1001), web-state.json and the sessions written
     // before the server stops waiting for its connections.
     let stop = async move {
-        shutdown(eof).await;
+        shutdown(eof, term).await;
         hub.shutdown().await;
         sessions.flush().await;
         writer.inspect(|w| w.abort());
@@ -618,12 +622,15 @@ async fn build_state(
     })
 }
 
-/// Ctrl+C, SIGTERM, or `eof` (`--service`: stdin closed).
-async fn shutdown(eof: Option<tokio::sync::oneshot::Receiver<()>>) {
-    use tokio::signal::unix::{signal, SignalKind};
+/// Ctrl+C, SIGTERM (`term`, registered before the start's output), or
+/// `eof` (`--service`: stdin closed).
+async fn shutdown(
+    eof: Option<tokio::sync::oneshot::Receiver<()>>,
+    term: Option<tokio::signal::unix::Signal>,
+) {
     if eof.is_some() && test_hang() {
-        // SIGTERM is caught and never acted on; only SIGKILL ends us.
-        let _term = signal(SignalKind::terminate());
+        // SIGTERM is caught (`term` stays registered) and never acted on;
+        // only SIGKILL ends us.
         std::future::pending::<()>().await;
     }
     let eof = async {
@@ -635,11 +642,11 @@ async fn shutdown(eof: Option<tokio::sync::oneshot::Receiver<()>>) {
         }
     };
     let term = async {
-        match signal(SignalKind::terminate()) {
-            Ok(mut s) => {
+        match term {
+            Some(mut s) => {
                 s.recv().await;
             }
-            Err(_) => std::future::pending::<()>().await,
+            None => std::future::pending::<()>().await,
         }
     };
     tokio::select! {
