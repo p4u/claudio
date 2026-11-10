@@ -3,6 +3,7 @@
 //! (binary frames), each checked against the protocol's limits, and the
 //! request ops of §5.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,8 +79,9 @@ impl Drop for TabEnd {
 
 /// `GET /ws` (the guard checked Host, Origin and the cookie). While the
 /// tab is open, its session counts as used (`sessions::OpenTab`); when the
-/// session is gone (`Sessions::gone`), the tab is dropped, and its socket
-/// and `TabSlot` with it.
+/// session is gone (`Sessions::gone`), the tab ends, and its socket and
+/// `TabSlot` with it. The tab watches for that itself and is never dropped
+/// half open: a tab dropped while the hub registers it would stay there.
 pub(crate) async fn upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -93,14 +95,11 @@ pub(crate) async fn upgrade(
         .max_frame_size(2 << 20)
         .on_upgrade(move |socket| async move {
             let Some(hash) = session else {
-                return tab(state, socket, slot).await;
+                return tab(state, socket, slot, std::future::pending()).await;
             };
             let kept = Arc::clone(&state.auth.sessions);
             let _open = sessions::OpenTab::start(Arc::clone(&kept), hash, paths::unix_now);
-            tokio::select! {
-                () = tab(state, socket, slot) => {}
-                () = kept.gone(&hash) => {}
-            }
+            tab(state, socket, slot, kept.gone(&hash)).await;
         })
 }
 
@@ -150,8 +149,9 @@ fn binary_frame(bytes: &[u8]) -> Frame {
 }
 
 /// One browser tab: `hello`, then the hub's snapshot and replay, then a
-/// writer draining the tab's queue while this task reads its frames.
-async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
+/// writer draining the tab's queue while this task reads its frames, until
+/// the socket ends or `gone` does (the tab's sign-in ended).
+async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot, gone: impl Future<Output = ()>) {
     let (tx, mut rx) = TabTx::new();
     let hello = json!({
         "t": "hello",
@@ -201,10 +201,12 @@ async fn tab(state: AppState, socket: WebSocket, _slot: TabSlot) {
     };
     let slots = Arc::new(Semaphore::new(IN_FLIGHT));
     let mut closing = false;
+    tokio::pin!(gone);
     loop {
         let msg = tokio::select! {
             msg = stream.next() => msg,
             _ = &mut writer => break,
+            () = &mut gone => break,
         };
         let Some(Ok(msg)) = msg else { break };
         let frame = match &msg {
