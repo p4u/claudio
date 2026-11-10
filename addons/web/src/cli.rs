@@ -278,7 +278,15 @@ pub(crate) fn status() -> ExitCode {
         Ok(false) => println!("web: disabled"),
         Err(e) => println!("web: {e}"),
     }
-    let kept = web.ok().and_then(|w| service::unit(&w).ok().flatten());
+    // The stored unit; an invalid one is said, and no URL is made up for it.
+    let kept = match web.map(|w| service::unit(&w)) {
+        Ok(Ok(unit)) => Some(unit.unwrap_or_default()),
+        Ok(Err(e)) => {
+            println!("web: {e}");
+            None
+        }
+        Err(_) => None,
+    };
     let (state, code) = match block_on(ask("status", json!({}), false)) {
         Ok(Answer::NotRunning) => {
             println!("daemon: not running");
@@ -308,7 +316,7 @@ pub(crate) fn status() -> ExitCode {
         Some(Reported::Running { argv, .. }) => argv.get(2..).and_then(|a| parse_args(a).ok()),
         _ => None,
     };
-    let shown = running.or_else(|| parse_args(&kept.unwrap_or_default().flags()).ok());
+    let shown = running.or_else(|| kept.and_then(|unit| parse_args(&unit.flags()).ok()));
     if let Some(shown) = shown {
         listener(&shown);
     }

@@ -463,6 +463,22 @@ fn web_stop_and_status_never_start_a_daemon() {
     );
 }
 
+/// `status` names an invalid stored `[web]` and makes up no URL for it.
+#[test]
+fn web_status_says_why_a_stored_section_is_invalid() {
+    let h = ManagerHarness::new();
+    let config = h.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("\n[web]\nenabled = true\nlisten = \"0.0.0.0:7337\"\n");
+    fs::write(&config, text).unwrap();
+    let status = claudio(&h, &["web", "status"], |_| {});
+    assert_eq!(status.status.code(), Some(3), "{status:?}");
+    let out = String::from_utf8_lossy(&status.stdout);
+    let why = "web: [web] listen: refusing to listen on 0.0.0.0:7337";
+    assert!(out.contains(why), "{out}");
+    assert!(!out.contains("url: "), "no URL for it: {out}");
+}
+
 /// AC9.
 #[test]
 fn web_service_comes_back_after_a_sigkill() {
