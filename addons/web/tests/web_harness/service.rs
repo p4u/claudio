@@ -197,6 +197,8 @@ impl ServiceWeb {
         for log in ["web.log", "daemon.log"] {
             let text = fs::read_to_string(h.runtime_dir.join("claudio").join(log));
             let text = text.unwrap_or_default();
+            // A service ran: there is a log to check, not a missing file.
+            assert!(self.pids.is_empty() || !text.is_empty(), "no {log}");
             for token in &self.tokens {
                 assert!(!text.contains(token.as_str()), "the token is in {log}");
             }
