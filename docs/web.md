@@ -40,9 +40,8 @@ the background (next section). Open that URL once: the page posts the token to `
 gets a cookie and removes the token from the address bar. Later visits need no token while the
 sign-in lives: until it goes unused for 30 days (an open tab counts as use), across server and
 daemon restarts and closed browsers. The palette's (`k`) **Sign out** ends this browser's
-sign-in; `--rotate-token` (or a new password) ends every browser's. Sign out reloads the tab it
-is used in; another tab that is already open keeps its connection until it is reloaded or
-reconnects. `claudio web --rotate-token` restarts the web service, which closes every tab.
+sign-in; `--rotate-token` (or a new password) ends every browser's. Sign out closes every tab
+opened with that sign-in, and a page whose sign-in has ended shows the login. `claudio web --rotate-token` restarts the web service, which closes every tab.
 
 Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
 `127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
@@ -95,6 +94,15 @@ without one it listens on `0.0.0.0:7337`, IPv4 only. It is the one listener: `--
 `--listen` is refused, and an `--allow-host` port must be the `--remote` port. `--rotate-cert`
 (with `--remote`) makes a new certificate. `--set-password` and `--print-cert` take no other
 argument and exit.
+
+### SSH hosts
+
+A host is added by name or `user@host`, from the hosts panel or Alt+n's "Another host…" (the
+TUI's Alt+n takes a typed host too). It needs no `~/.ssh/config` entry, but key-based ssh:
+claudio runs ssh with `BatchMode`, so a password is never asked. The first connection records
+the host's key (`StrictHostKeyChecking=accept-new`); a changed key is refused with ssh's message.
+A host that cannot be reached shows ssh's own error (`ssh failed (exit N): …`, such as "Could
+not resolve hostname").
 
 ### From another machine
 
@@ -204,8 +212,7 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   never a cookie: a copy of the file signs no one in. The file is bound to an epoch, the SHA-256
   of the mode, the token and the password file as read at the server's start, so a new token or
   password, or the other mode, empties it at the next start. A stolen cookie is worth more than
-  before (up to 30 days of disuse); sign out of a browser you no longer trust (a tab it already
-  has open keeps its connection until it reloads), or rotate the token: with the web service,
+  before (up to 30 days of disuse); sign out of a browser you no longer trust (its open tabs close), or rotate the token: with the web service,
   `claudio web --rotate-token` restarts it and closes every tab. Two servers on one config dir
   (a `--foreground` one beside the service) share the file unlocked: one may forget a sign-in
   the other made, or bring back one the other signed out (it still holds it in memory); with
