@@ -2,8 +2,8 @@
 //!
 //! A secret token (32 random bytes, hex) lives in `<config>/web-token`
 //! (0600). The page gets it in the URL fragment and trades it at
-//! `POST /api/login` for a cookie naming a server-side session (in memory,
-//! 24 h idle expiry, at most 64). [`guard`] checks every request: its
+//! `POST /api/login` for a cookie naming a server-side session
+//! (`sessions.rs`: 30 days idle on wall-clock time, at most 64). [`guard`] checks every request: its
 //! `Host` must be one this server answers to (DNS rebinding); anything but
 //! `GET`/`HEAD`, and every WebSocket upgrade, must come from an accepted
 //! `Origin` (CSRF, cross-site WebSocket hijacking); `/api/*` (but login)
@@ -15,8 +15,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -30,11 +29,10 @@ use tokio::sync::Semaphore;
 use crate::limit::Limiter;
 use crate::password;
 use crate::peer::{Peer, PeerKey};
+use crate::sessions::{self, Sessions};
 
 pub(crate) const COOKIE: &str = "claudio_web";
 pub(crate) const TOKEN_BYTES: usize = 32;
-pub(crate) const SESSION_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
-pub(crate) const MAX_SESSIONS: usize = 64;
 pub(crate) const LOGIN_BODY_MAX: usize = 4096;
 /// Concurrent argon2 verifications (each 19 MiB).
 pub(crate) const HASH_PERMITS: usize = 4;
@@ -285,12 +283,6 @@ pub(crate) fn csp(importmap_sha256: Option<&str>) -> String {
     )
 }
 
-#[derive(Default)]
-struct Inner {
-    /// Cookie values and their last use.
-    sessions: Vec<(String, Instant)>,
-}
-
 /// A request's sender as the login rules see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Caller {
@@ -320,7 +312,8 @@ pub(crate) struct Auth {
     /// Login attempts, reserved before any check (`limit.rs`).
     pub(crate) limiter: Limiter,
     csp: HeaderValue,
-    inner: Mutex<Inner>,
+    /// The sessions cookies name (`sessions.rs`).
+    pub(crate) sessions: Arc<Sessions>,
     /// `/dev/urandom`, opened once at start: a login opens no file on the
     /// executor. Read under its own lock, never held across an `.await`.
     urandom: Mutex<File>,
@@ -347,13 +340,18 @@ fn test_remote_peer() -> Option<IpAddr> {
 
 impl Auth {
     /// Fails only when `/dev/urandom` cannot be opened.
-    pub(crate) fn new(token: String, allowed: Allowed, csp: String) -> io::Result<Auth> {
+    pub(crate) fn new(
+        token: String,
+        allowed: Allowed,
+        csp: String,
+        sessions: Sessions,
+    ) -> io::Result<Auth> {
         Ok(Auth {
             token,
             allowed,
             limiter: Limiter::default(),
             csp: HeaderValue::from_str(&csp).expect("an ASCII CSP"),
-            inner: Mutex::new(Inner::default()),
+            sessions: Arc::new(sessions),
             urandom: Mutex::new(File::open("/dev/urandom")?),
             test_remote_peer: test_remote_peer(),
             password: None,
@@ -367,10 +365,6 @@ impl Auth {
             hashing: Arc::new(Semaphore::new(HASH_PERMITS)),
         });
         self
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// `n` random bytes from the open `/dev/urandom`, as lowercase hex.
@@ -420,55 +414,23 @@ impl Auth {
         ct_eq(token.as_bytes(), self.token.as_bytes())
     }
 
-    /// A new session's cookie value. Idle ones are dropped first; past
-    /// [`MAX_SESSIONS`], the least recently used goes.
-    pub(crate) fn create_session(&self, now: Instant) -> io::Result<String> {
+    /// A new session's cookie value; the session of `old` (the cookie the
+    /// login came with) goes in the same step. `now`: Unix seconds.
+    pub(crate) fn create_session(&self, old: Option<&str>, now: u64) -> io::Result<String> {
         let value = self.random_hex(TOKEN_BYTES)?;
-        let mut inner = self.lock();
-        inner
-            .sessions
-            .retain(|(_, seen)| now.duration_since(*seen) < SESSION_IDLE);
-        if inner.sessions.len() >= MAX_SESSIONS {
-            let oldest = inner
-                .sessions
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (_, seen))| *seen)
-                .map(|(i, _)| i);
-            if let Some(i) = oldest {
-                inner.sessions.remove(i);
-            }
-        }
-        inner.sessions.push((value.clone(), now));
+        let hash = sessions::hash_of(&value).ok_or_else(|| io::Error::other("not a token"))?;
+        self.sessions.login(hash, old, now);
         Ok(value)
     }
 
-    /// Whether `value` names a live session (every one is compared in
-    /// constant time); refreshes its last use.
-    pub(crate) fn session_ok(&self, value: &str, now: Instant) -> bool {
-        let mut inner = self.lock();
-        inner
-            .sessions
-            .retain(|(_, seen)| now.duration_since(*seen) < SESSION_IDLE);
-        let mut found = None;
-        for (i, (v, _)) in inner.sessions.iter().enumerate() {
-            if ct_eq(v.as_bytes(), value.as_bytes()) {
-                found = Some(i);
-            }
-        }
-        match found {
-            Some(i) => {
-                inner.sessions[i].1 = now;
-                true
-            }
-            None => false,
-        }
+    /// Whether `value` names a live session (a use).
+    pub(crate) fn session_ok(&self, value: &str, now: u64) -> bool {
+        self.sessions.check(value, now)
     }
 
+    /// Sign `value`'s session out.
     pub(crate) fn end_session(&self, value: &str) {
-        self.lock()
-            .sessions
-            .retain(|(v, _)| !ct_eq(v.as_bytes(), value.as_bytes()));
+        self.sessions.sign_out(value);
     }
 }
 
@@ -528,7 +490,8 @@ fn check(auth: &Auth, req: &Request) -> Result<(), StatusCode> {
     }
     let path = req.uri().path();
     if path == "/ws" || (is_api(path) && path != "/api/login") {
-        let live = cookie_value(headers).is_some_and(|v| auth.session_ok(&v, Instant::now()));
+        let now = paths::unix_now();
+        let live = cookie_value(headers).is_some_and(|v| auth.session_ok(&v, now));
         if !live {
             return Err(StatusCode::UNAUTHORIZED);
         }
@@ -586,7 +549,8 @@ mod tests {
     use super::*;
 
     fn auth() -> Auth {
-        Auth::new("ab".repeat(32), Allowed::new(lo(7337), &[]), csp(None)).unwrap()
+        let allowed = Allowed::new(lo(7337), &[]);
+        Auth::new("ab".repeat(32), allowed, csp(None), Sessions::memory()).unwrap()
     }
 
     fn lo(port: u16) -> SocketAddr {
@@ -725,6 +689,7 @@ mod tests {
             "ab".repeat(32),
             Allowed::new(lo(7337), &names(&["proxy.example"])),
             csp(None),
+            Sessions::memory(),
         )
         .unwrap();
         for (p, host) in [
@@ -817,7 +782,7 @@ mod tests {
         assert!(a.host_ok("192.168.1.20:7337"));
         assert!(!a.is_local_host("192.168.1.20:7337"));
         assert!(a.is_local_host("127.0.0.1:7337") && a.is_local_host("[::1]:7337"));
-        let auth = Auth::new("ab".repeat(32), a, csp(None)).unwrap();
+        let auth = Auth::new("ab".repeat(32), a, csp(None), Sessions::memory()).unwrap();
         let c = auth.caller(peer("127.0.0.1:1"), "192.168.1.20:7337");
         assert!(!c.local && !auth.token_allowed(&c));
         let a = Allowed::new(listen, &[]);
@@ -833,7 +798,13 @@ mod tests {
 
     #[test]
     fn with_remote_the_token_is_for_local_requests_only() {
-        let a = Auth::new("ab".repeat(32), remote_allowed(), csp(None)).unwrap();
+        let a = Auth::new(
+            "ab".repeat(32),
+            remote_allowed(),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap();
         for (p, host) in [
             ("127.0.0.1:1", "127.0.0.1:7337"),
             ("[::ffff:127.0.0.1]:1", "localhost:7337"),
@@ -867,9 +838,14 @@ mod tests {
     #[test]
     fn with_a_password_every_caller_may_use_it() {
         const FIXTURE: &str = include_str!("../web/e2e/fixtures/web-password");
-        let a = Auth::new("ab".repeat(32), remote_allowed(), csp(None))
-            .unwrap()
-            .with_password(password::Stored::parse(FIXTURE).unwrap());
+        let a = Auth::new(
+            "ab".repeat(32),
+            remote_allowed(),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap()
+        .with_password(password::Stored::parse(FIXTURE).unwrap());
         let local = a.caller(peer("127.0.0.1:1"), "127.0.0.1:7337");
         assert_eq!(a.login_methods(&local), ["token", "password"]);
         let remote = a.caller(peer("192.168.1.5:1"), "box:7337");
@@ -878,7 +854,13 @@ mod tests {
 
     #[test]
     fn the_test_peer_hook_only_takes_the_token_away() {
-        let mut a = Auth::new("ab".repeat(32), remote_allowed(), csp(None)).unwrap();
+        let mut a = Auth::new(
+            "ab".repeat(32),
+            remote_allowed(),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap();
         a.test_remote_peer = Some("127.0.0.2".parse().unwrap());
         let c = a.caller(peer("127.0.0.2:1"), "127.0.0.1:7337");
         assert!(!c.local);
@@ -887,29 +869,18 @@ mod tests {
     }
 
     #[test]
-    fn sessions_expire_when_idle_and_are_capped() {
+    fn a_session_is_made_used_replaced_and_ended_on_unix_seconds() {
         let a = auth();
-        let t0 = Instant::now();
-        let s = a.create_session(t0).unwrap();
+        let t0 = 1_800_000_000;
+        let s = a.create_session(None, t0).unwrap();
         assert!(token_ok(&s));
-        let t1 = t0 + SESSION_IDLE - Duration::from_secs(1);
-        assert!(a.session_ok(&s, t1), "a use within the idle time keeps it");
-        assert!(
-            a.session_ok(&s, t1 + SESSION_IDLE - Duration::from_secs(1)),
-            "and refreshes it"
-        );
-        assert!(!a.session_ok(&s, t1 + 2 * SESSION_IDLE), "idle too long");
-        let a = auth();
-        let oldest = a.create_session(t0).unwrap();
-        for i in 1..=MAX_SESSIONS as u64 {
-            a.create_session(t0 + Duration::from_secs(i)).unwrap();
-        }
-        assert!(
-            !a.session_ok(&oldest, t0 + Duration::from_secs(100)),
-            "the least recently used went"
-        );
+        assert!(a.session_ok(&s, t0 + sessions::IDLE - 1));
+        let replaced = a.create_session(Some(&s), t0 + 10).unwrap();
+        assert!(!a.session_ok(&s, t0 + 11), "the login replaced it");
+        assert!(a.session_ok(&replaced, t0 + 11));
+        a.end_session(&replaced);
+        assert!(!a.session_ok(&replaced, t0 + 12));
         a.end_session("nothing");
-        assert!(!a.session_ok("", t0 + Duration::from_secs(100)));
     }
 
     #[test]

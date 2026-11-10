@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::auth::{self, Auth, Caller};
+use claudio_core::paths;
 
 /// How long a password login waits for a hashing slot before `503`.
 pub(crate) const HASH_WAIT: Duration = Duration::from_secs(2);
@@ -27,6 +28,8 @@ struct LoginBody {
 
 pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Response {
     let caller = auth.caller(auth::peer_of(&req), auth::host_of(&req));
+    // A login with a cookie replaces that cookie's session.
+    let old = auth::cookie_value(req.headers());
     let body = match axum::body::to_bytes(req.into_body(), auth::LOGIN_BODY_MAX).await {
         Ok(body) => body,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
@@ -50,7 +53,7 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
         );
         return status.into_response();
     }
-    match auth.create_session(Instant::now()) {
+    match auth.create_session(old.as_deref(), paths::unix_now()) {
         Ok(value) => {
             let mut res = StatusCode::NO_CONTENT.into_response();
             let cookie = auth::set_cookie(&value, auth.allowed.secure_cookie());
@@ -127,15 +130,21 @@ mod tests {
     use crate::limit::GLOBAL;
     use crate::password;
     use crate::peer::PeerKey;
+    use crate::sessions::Sessions;
 
     const FIXTURE: &str = include_str!("../web/e2e/fixtures/web-password");
     const TEST_PASSWORD: &str = "claudio-e2e-password";
 
     fn remote() -> Auth {
         let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
-        Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None))
-            .unwrap()
-            .with_password(password::Stored::parse(FIXTURE).unwrap())
+        Auth::new(
+            "ab".repeat(32),
+            Allowed::remote(any, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap()
+        .with_password(password::Stored::parse(FIXTURE).unwrap())
     }
 
     const REMOTE: Caller = Caller {
@@ -145,7 +154,13 @@ mod tests {
 
     fn plain() -> Auth {
         let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 7337));
-        Auth::new("ab".repeat(32), Allowed::new(lo, &[]), csp(None)).unwrap()
+        Auth::new(
+            "ab".repeat(32),
+            Allowed::new(lo, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap()
     }
 
     const LOCAL: Caller = Caller {
@@ -180,7 +195,13 @@ mod tests {
     #[test]
     fn with_remote_a_non_local_token_is_refused_and_counts() {
         let any = std::net::SocketAddr::from(([0, 0, 0, 0], 7337));
-        let a = Auth::new("ab".repeat(32), Allowed::remote(any, &[]), csp(None)).unwrap();
+        let a = Auth::new(
+            "ab".repeat(32),
+            Allowed::remote(any, &[]),
+            csp(None),
+            Sessions::memory(),
+        )
+        .unwrap();
         let right = "ab".repeat(32);
         let remote = Caller {
             local: false,
