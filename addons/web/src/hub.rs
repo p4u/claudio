@@ -855,10 +855,10 @@ pub(crate) fn daemon_error(e: impl std::fmt::Display) -> String {
     }
 }
 
-/// The last `TAIL_MAX` bytes of `text`, sanitized, on a char boundary.
-fn tail(text: &str) -> String {
+/// The last `max` bytes of `text`, sanitized, on a char boundary.
+fn tail(text: &str, max: usize) -> String {
     let text = claudio_core::text::sanitize(text);
-    let mut at = text.len().saturating_sub(TAIL_MAX);
+    let mut at = text.len().saturating_sub(max);
     while !text.is_char_boundary(at) {
         at += 1;
     }
@@ -1692,7 +1692,7 @@ impl Hub {
     }
 
     fn connect_failed(&mut self, host: &str, error: String, bootstrap: bool) {
-        let error = clean(&error, 600);
+        let error = tail(&error, 600);
         tracing::info!(host, "web: connect failed");
         for waiter in self.connect_waiters.remove(host).unwrap_or_default() {
             let _ = waiter.send(Err(error.clone()));
@@ -1947,10 +1947,10 @@ impl Hub {
                 done
             }
             Ok(Msg::ClaudeUpdated { tail: t, .. }) => {
-                claude_event(host, "failed", None, None, None, Some(&tail(&t)))
+                claude_event(host, "failed", None, None, None, Some(&tail(&t, TAIL_MAX)))
             }
             Ok(_) => claude_event(host, "failed", None, None, None, Some("unexpected reply")),
-            Err(e) => claude_event(host, "failed", None, None, None, Some(&tail(&e))),
+            Err(e) => claude_event(host, "failed", None, None, None, Some(&tail(&e, TAIL_MAX))),
         };
         self.send_tabs(&v);
     }
@@ -2326,6 +2326,15 @@ mod tests {
         }
         tx.sent(1 << 20);
         assert!(tx.send(mib()));
+    }
+
+    #[test]
+    fn a_long_error_keeps_its_end_cut_on_a_char_boundary() {
+        // ssh's last line says what failed; a long banner comes before it.
+        let error = format!("{}Host key verification failed.", "é".repeat(400));
+        let kept = tail(&error, 600);
+        assert!(kept.ends_with("éHost key verification failed."), "{kept}");
+        assert_eq!(kept.len(), 599, "the cut moves past half an é");
     }
 
     #[test]

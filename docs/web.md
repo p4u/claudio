@@ -41,7 +41,8 @@ gets a cookie and removes the token from the address bar. Later visits need no t
 sign-in lives: until it goes unused for 30 days (an open tab counts as use), across server and
 daemon restarts and closed browsers. The palette's (`k`) **Sign out** ends this browser's
 sign-in; `--rotate-token` (or a new password) ends every browser's. Sign out closes every tab
-opened with that sign-in, and a page whose sign-in has ended shows the login. `claudio web --rotate-token` restarts the web service, which closes every tab.
+opened with that sign-in, and a page whose sign-in has ended shows the login.
+`claudio web --rotate-token` restarts the web service, which closes every tab.
 
 Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
 `127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
@@ -212,11 +213,12 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   never a cookie: a copy of the file signs no one in. The file is bound to an epoch, the SHA-256
   of the mode, the token and the password file as read at the server's start, so a new token or
   password, or the other mode, empties it at the next start. A stolen cookie is worth more than
-  before (up to 30 days of disuse); sign out of a browser you no longer trust (its open tabs close), or rotate the token: with the web service,
-  `claudio web --rotate-token` restarts it and closes every tab. Two servers on one config dir
-  (a `--foreground` one beside the service) share the file unlocked: one may forget a sign-in
-  the other made, or bring back one the other signed out (it still holds it in memory); with
-  two, a sign-out is sure only when made on each, or with `--rotate-token` and a restart of both.
+  before (up to 30 days of disuse); sign out of a browser you no longer trust (its open tabs close),
+  or rotate the token: with the web service, `claudio web --rotate-token` restarts it and closes
+  every tab. Two servers on one config dir (a `--foreground` one beside the service) share the file
+  unlocked: one may forget a sign-in the other made, or bring back one the other signed out (it
+  still holds it in memory); with two, a sign-out is sure only when made on each, or with
+  `--rotate-token` and a restart of both.
 - **Host and Origin.** Every request needs an accepted `Host` (the listen address and the
   loopback names with the port, plus `--allow-host` names), else `421`. With `--remote` the
   accepted `Host`s are also any IP literal at the port, this machine's host name and

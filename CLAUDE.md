@@ -229,9 +229,9 @@ flowchart LR
   once it is idle. `freshness::EXIT_WAIT` is also the starter's wait for the lock.
 - **Remote** (`crates/core/src/remote/`): `bootstrap.rs` probes the host (`__probe` + `uname -sm`
   in one round trip; a failed probe reports ssh's stderr, and `ssh_cmd` uses
-  `StrictHostKeyChecking=accept-new`) and uploads the binary if missing or stale (SHA-256); cross-platform it
-  uploads the release asset. `bridge.rs` is `--slave`, the stdio↔socket bridge, starting or
-  replacing the remote daemon.
+  `StrictHostKeyChecking=accept-new`) and uploads the binary if missing or stale (SHA-256);
+  cross-platform it uploads the release asset. `bridge.rs` is `--slave`, the stdio↔socket bridge,
+  starting or replacing the remote daemon.
 - **The shared layer** (`crates/core/src/app/`, no ratatui, crossterm or axum; the web imports
   nothing from claudio-tui): `addons/` (`AddonRuntime`, the one `AddonCtx` implementation),
   `launch/` (the launch composer), `config_edit.rs` (every `config.toml` writer: a minimal,
