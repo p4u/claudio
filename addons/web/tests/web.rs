@@ -753,6 +753,77 @@ async fn web_a_loopback_sign_in_is_refused_by_a_remote_start() {
     assert_eq!(me.status, 401);
 }
 
+/// Whether `tab`'s socket ends (closed, failed or a close frame) before
+/// `deadline`; frames before that are skipped.
+async fn ends_by(tab: &mut Tab, deadline: tokio::time::Instant) -> bool {
+    use futures::StreamExt;
+    loop {
+        match tokio::time::timeout_at(deadline, tab.ws.next()).await {
+            Err(_) => return false,
+            Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return true,
+            Ok(Some(Ok(_))) => continue,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_a_removed_sign_in_closes_the_tabs_opened_with_it() {
+    let web = Web::start();
+    let (ended, kept, replaced) = (web.login(), web.login(), web.login());
+    let mut first = Tab::open(&web, &ended).await;
+    let mut second = Tab::open(&web, &ended).await;
+    let mut other = Tab::open(&web, &kept).await;
+    let mut old = Tab::open(&web, &replaced).await;
+    // A sign-out closes both of its tabs within 2 s.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let out = web.post(
+        "/api/logout",
+        Some(&web.origin()),
+        "",
+        &[("Cookie", &cookie_header(&ended))],
+    );
+    assert_eq!(out.status, 204);
+    assert!(ends_by(&mut first, deadline).await, "first tab still open");
+    assert!(
+        ends_by(&mut second, deadline).await,
+        "second tab still open"
+    );
+    // A login with a cookie replaces its session: that session's tab closes.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let body = json!({"token": web.token}).to_string();
+    let again = web.post(
+        "/api/login",
+        Some(&web.origin()),
+        &body,
+        &[("Cookie", &cookie_header(&replaced))],
+    );
+    assert_eq!(again.status, 204);
+    assert!(
+        ends_by(&mut old, deadline).await,
+        "a replaced session's tab"
+    );
+    // Another session's tab stays open and answers.
+    assert!(other.req("hosts.list", json!({})).await.is_ok());
+    // A closed tab gives its slot back and the hub forgets it: more
+    // sign-outs with an open tab than there are tabs leave room for one.
+    for _ in 0..17 {
+        let cookie = web.login();
+        let mut tab = Tab::open(&web, &cookie).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let out = web.post(
+            "/api/logout",
+            Some(&web.origin()),
+            "",
+            &[("Cookie", &cookie_header(&cookie))],
+        );
+        assert_eq!(out.status, 204);
+        assert!(ends_by(&mut tab, deadline).await);
+    }
+    let mut last = Tab::open(&web, &kept).await;
+    assert!(last.req("hosts.list", json!({})).await.is_ok());
+    assert!(other.req("hosts.list", json!({})).await.is_ok());
+}
+
 // ── --set-password (AC3) ──────────────────────────────────────────────────────
 
 #[test]

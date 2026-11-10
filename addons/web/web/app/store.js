@@ -71,6 +71,8 @@ export function connect() {
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   connection = new Connection({
     url,
+    me: () => fetch('/api/me', { credentials: 'same-origin' }).then((r) => r.status),
+    reload: () => location.reload(),
     onHello,
     onSnapshot: (snap) => {
       model.value = applySnapshot(model.value, snap);

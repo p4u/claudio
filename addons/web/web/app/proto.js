@@ -1,5 +1,5 @@
 // Browser protocol v2 client (docs/web-protocol.md). Pure apart from the injected
-// WebSocket and timers; imports nothing.
+// WebSocket, timers, me() and reload(); imports nothing.
 export const PROTO_VERSION = 2;
 export const KIND_OUTPUT = 0x01;
 export const KIND_INPUT = 0x02;
@@ -57,13 +57,17 @@ export function versionAction(v, reloadedBefore) {
 
 export class Connection {
   constructor({ url, WebSocketImpl = globalThis.WebSocket, setTimeout: st = globalThis.setTimeout,
-    clearTimeout: ct = globalThis.clearTimeout, rand = Math.random,
+    clearTimeout: ct = globalThis.clearTimeout, rand = Math.random, me = null, reload = null,
     onHello, onSnapshot, onEvent, onOutput, onStatus } = {}) {
     this.url = url;
     this.WS = WebSocketImpl;
     this.st = (fn, ms) => st(fn, ms);
     this.ct = (id) => ct(id);
     this.rand = rand;
+    // me(): the status of GET /api/me; reload(): the page's. Both come from the caller.
+    this.me = me;
+    this.reload = reload;
+    this.gen = 0; // bumped by every open and stop: a late me() answer is then ignored
     this.cb = { onHello, onSnapshot, onEvent, onOutput, onStatus };
     this._status = 'closed';
     this.ws = null;
@@ -89,6 +93,7 @@ export class Connection {
 
   stop() {
     this.stopped = true;
+    this.gen++;
     if (this.timer != null) { this.ct(this.timer); this.timer = null; }
     const ws = this.ws;
     this.ws = null;
@@ -99,6 +104,7 @@ export class Connection {
 
   _open() {
     this.timer = null;
+    this.gen++;
     this._setStatus('connecting');
     const ws = new this.WS(this.url);
     ws.binaryType = 'arraybuffer';
@@ -110,11 +116,25 @@ export class Connection {
       this.ws = null;
       this._rejectAll('disconnected');
       this._setStatus('closed');
-      if (!this.stopped) {
-        const d = backoffDelay(this.attempt++, this.rand);
-        this.timer = this.st(() => this._open(), d);
-      }
+      if (!this.stopped) this._retry();
     };
+  }
+
+  // A close may be a sign-in that ended: ask me() first, and on an explicit 401 reload (the
+  // page then shows its login). Any other status, or a failure, reconnects after the backoff.
+  _retry() {
+    const gen = this.gen;
+    const later = () => {
+      if (this.stopped || gen !== this.gen) return;
+      const d = backoffDelay(this.attempt++, this.rand);
+      this.timer = this.st(() => this._open(), d);
+    };
+    if (!this.me || !this.reload) { later(); return; }
+    Promise.resolve().then(() => this.me()).then((status) => {
+      if (status !== 401 || this.stopped || gen !== this.gen) { later(); return; }
+      this.stopped = true;
+      this.reload();
+    }, later);
   }
 
   _rejectAll(msg) {

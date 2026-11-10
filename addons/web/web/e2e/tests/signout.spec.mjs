@@ -25,3 +25,19 @@ test('the palette signs this browser out, and its cookie stays refused', async (
   expect((await me()).status()).toBe(401);
   expect(await page.evaluate(() => window.__claudioCsp ?? [])).toEqual([]);
 });
+
+test('a sign-out in one tab shows the login in another tab of that sign-in', async ({ context }) => {
+  const first = await context.newPage();
+  await first.goto(srv.url);
+  await expect(first.getByTestId('rail')).toBeVisible();
+  // The cookie, not the token: a token login would replace the first tab's sign-in.
+  const second = await context.newPage();
+  await second.goto(`${srv.origin}/`);
+  await expect(second.getByTestId('rail')).toBeVisible();
+  await first.keyboard.press('Control+k');
+  await first.getByTestId('palette-input').fill('Sign out');
+  await first.getByTestId('palette-item').first().click();
+  await expect(first.getByText('Open the URL')).toBeVisible();
+  await expect(second.getByText('Open the URL')).toBeVisible();
+  for (const page of [first, second]) expect(await page.evaluate(() => window.__claudioCsp ?? [])).toEqual([]);
+});

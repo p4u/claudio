@@ -172,3 +172,63 @@ test('hello then snapshot reach their callbacks in order', () => {
   assert.ok(ws.sent.at(-1) instanceof Uint8Array);
   c.stop();
 });
+
+// Every pending microtask (an injected me() and its handlers) has run.
+const settle = () => new Promise((r) => setImmediate(r));
+
+test('a close asks me() first: a 401 reloads the page and never reconnects', async () => {
+  const asked = [];
+  const reloads = [];
+  const { c, t } = make({ me: async () => { asked.push('me'); return 401; }, reload: () => reloads.push('reload') });
+  c.start();
+  FakeWS.instances[0].open();
+  FakeWS.instances[0].drop();
+  await settle();
+  assert.deepEqual(asked, ['me']);
+  assert.deepEqual(reloads, ['reload']);
+  assert.equal(t.q.length, 0, 'no reconnect scheduled');
+  assert.equal(FakeWS.instances.length, 1);
+  assert.equal(c.status, 'closed');
+});
+
+test('a close reconnects as before when me() answers 204, another status, or fails', async () => {
+  const answers = [async () => 204, async () => 500, async () => 0,
+    async () => { throw new Error('offline'); }, () => { throw new Error('sync'); }];
+  for (const me of answers) {
+    const reloads = [];
+    const { c, t } = make({ me, reload: () => reloads.push('reload') });
+    c.start();
+    FakeWS.instances[0].open();
+    FakeWS.instances[0].drop();
+    await settle();
+    const retry = t.q.find((x) => x.ms === 1000);
+    assert.ok(retry, `reconnect scheduled at 1 s (${me})`);
+    retry.fn();
+    assert.equal(FakeWS.instances.length, 2);
+    assert.deepEqual(reloads, []);
+    c.stop();
+  }
+});
+
+test('the reconnect waits for me(), and a stop meanwhile ends it', async () => {
+  let answer;
+  const reloads = [];
+  const { c, t } = make({ me: () => new Promise((r) => { answer = r; }), reload: () => reloads.push('reload') });
+  c.start();
+  FakeWS.instances[0].open();
+  FakeWS.instances[0].drop();
+  await settle();
+  assert.equal(t.q.length, 0, 'nothing scheduled before the answer');
+  answer(204);
+  await settle();
+  assert.ok(t.q.find((x) => x.ms === 1000), 'scheduled after it');
+  t.q.find((x) => x.ms === 1000).fn();
+  FakeWS.instances[1].drop();
+  await settle();
+  c.stop();
+  answer(401);
+  await settle();
+  assert.equal(t.q.length, 0);
+  assert.deepEqual(reloads, [], 'a stopped client neither reloads nor reconnects');
+  assert.equal(FakeWS.instances.length, 2);
+});
