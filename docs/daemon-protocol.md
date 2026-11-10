@@ -10,6 +10,7 @@ daemon's handling in `crates/core/src/daemon/server.rs`.
 - [Handshake and features](#handshake-and-features)
 - [Requests and replies](#requests-and-replies)
 - [Addon ops](#addon-ops)
+- [Addon services](#addon-services)
 - [Spawn env: `env_remove`](#spawn-env-env_remove)
 - [Optional args: `optional`](#optional-args-optional)
 - [Mixed versions](#mixed-versions)
@@ -44,7 +45,7 @@ the daemon can do beyond the base protocol; a daemon that omits it has none of t
 | `last_prompt` | answers `LastPrompt` |
 | `attention` | sends `SessionEvent::Attention` and fills `SessionInfo.attention` |
 | `worktree` | answers `GitWorktree` and `GitWorktreeDiff` |
-| `addon:<name>` | runs addon `<name>`'s daemon ops (one entry per daemon-side addon) |
+| `addon:<name>` | runs addon `<name>`'s daemon ops (one entry per daemon-side addon), and its service if it asks for one |
 
 A core-only daemon lists no `addon:` feature. A client sends a request that depends on a
 feature only to a daemon that lists it.
@@ -100,6 +101,44 @@ reach a session only through its `Spawn`/`Respawn` env. The daemon logs an `Addo
 the flags this claude knows, `<cache>/<addon>`, and the lock held while `claude update` or a
 `claude plugin …` runs. After the daemon installs claude it calls each daemon-side addon's
 `on_claude_installed`.
+
+## Addon services
+
+A daemon-side addon may ask the daemon to keep one long-running child running: its
+`DaemonOps::service` (docs/addons.md, "Daemon ops") turns the addon's own `config.toml` sections
+into an argv. The daemon's supervisor (`crates/core/src/daemon/service.rs`) names no addon.
+
+- **When it asks.** At daemon start, once the socket listens, the daemon reads `config.toml`
+  (off its runtime) and asks each daemon-side addon; again at every `DaemonCtx::service_reload`
+  (an addon's op asks for one). A `config.toml` that cannot be read or is not TOML fails every
+  addon's service with `config.toml does not parse`; an addon's `Err` fails its own, naming the
+  key. Neither is retried before the next reload or daemon start.
+- **The child.** `Config::claudio` (the binary at the daemon's own path, which an upgrade may
+  have replaced since) with the argv, in a process group of its own, with the daemon's env minus
+  the session markers and with `PATH` set to the login shell's (`Config::path`). Its stdin is a
+  pipe the daemon holds and never writes. Its stdout carries the ready line. Its stderr goes to
+  `<runtime>/<addon>.log` (0600), renamed to `<addon>.log.1` before a write would take it past
+  1 MiB, so an addon's logs never pass 2 MiB; the last 4 KiB since this start are kept in memory
+  as the failure's `tail`.
+- **Ready.** The child's first stdout line starts with `ready` once it serves. The daemon reads
+  at most 4 KiB for it, within 20 s; otherwise the start failed and the child is stopped. Then
+  the daemon reads and discards stdout until EOF and never closes its end while the child runs.
+- **Exit.** Any exit nobody asked for, 0 included, is a failure: the service starts again after
+  a backoff of 1 s that doubles up to 60 s and is reset after 5 min of running. A reload starts a
+  failed service at once.
+- **Stop** (a reload to nothing, a restart, the daemon's shutdown): stdin closed, SIGTERM to the
+  group, SIGKILL to the group after 3 s, reaped. At shutdown every service stops, in parallel,
+  after the socket stopped listening and before the daemon lets go of its startup lock, so a
+  successor's service never runs beside it; a starter waits up to 10 s for that lock. A daemon
+  killed by a signal stops nothing: its children see stdin's EOF and stop themselves within 3 s.
+- **Mixed versions (B1).** A daemon may run a child one release newer or older than itself (an
+  upgrade replaces the binary under a running daemon). For one release these change only
+  compatibly: the argv an addon defines, the first stdout line `ready` (any line that starts
+  with it), stdin's EOF meaning stop, and any unrequested exit being a failure. A child that does
+  not know its argv (a downgraded binary) exits non-zero: an ordinary failure, retried at the
+  backoff cap, with its usage text as the tail.
+- The state is the daemon's own, never journaled, and not in `Welcome`: the addon's ops report
+  it (docs/addons.md, "The web addon").
 
 ## Spawn env: `env_remove`
 
@@ -158,10 +197,13 @@ A client and a daemon one release apart work together in both directions.
 | new client → old daemon (busy, deferred, failed check) | no `addon:vocdoni` in features → no `AddonOp`; the launch gets the proxy env without the plugins' share and one notice ("daemon too old, plugins after `claudio daemon restart`"). The old daemon applies its own `env_diff` (a superset of what the addon sends in `env_remove`). |
 | old client → new daemon | `Spawn`/`Respawn` without `env_remove` (`None`) → the daemon's **compatibility scrub** applies today's `env_diff` rule. Its `Manifest` op is refused (`unsupported op`) → the old client's existing "daemon too old" path, session without plugins. |
 | new client → old daemon, `optional` | ignored; the old daemon drops its own fixed three (`--plugin-dir`, `--agents`, `--mcp-config`) when its claude lacks them, which covers every flag a client marks optional within the window. |
+| new `claudio web` → a daemon without `addon:web` (older, or built without the web addon) | no `AddonOp` (the CLI decides on `Welcome.features` only, never on an error's text); `[web]` stays saved and the next daemon start with the web addon serves it. |
+| old `claudio web` → new daemon | it never sends a web op and serves in the foreground, as before; the daemon serves `[web]` only when a new `claudio web` wrote it. |
 
 Debug builds take `CLAUDIO_TEST_OLD_DAEMON=1` (tests only; a release build ignores it): the
 daemon then plays the previous release. It lists no `addon:` feature, answers `AddonOp` with
-`unsupported op: addon_op`, treats every `env_remove` as absent and ignores `optional`.
+`unsupported op: addon_op`, treats every `env_remove` as absent, ignores `optional`, and runs no
+addon service (it ignores `[web]`, as the previous release reads only `[claude]`).
 
 **Removal date.** The compatibility paths for older peers (the compatibility scrub for a spawn
 without `env_remove`, the legacy optional-flag list, the refused-`Manifest` test, and the legacy
