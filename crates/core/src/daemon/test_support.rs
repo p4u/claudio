@@ -160,6 +160,8 @@ impl TestDaemon {
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         }
     }
 
@@ -188,7 +190,7 @@ impl TestDaemon {
             .unwrap()
             .expect("lock is free");
         let daemon = listening.daemon();
-        tokio::spawn(listening.serve());
+        tokio::spawn(super::serve_until_shutdown(listening));
         TestDaemon {
             dir,
             config,

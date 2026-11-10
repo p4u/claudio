@@ -38,7 +38,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::Instant as TokioInstant;
 
-use crate::freshness::DaemonCheck;
+use crate::freshness::{DaemonCheck, EXIT_WAIT};
 use crate::paths;
 use crate::proto::{
     read_frame, write_frame, Envelope, Frame, Hello, Msg, SessionEvent, SessionId, Welcome, PROTO,
@@ -715,7 +715,7 @@ pub fn ensure_daemon() -> io::Result<()> {
     // Validate the runtime directory first.
     paths::ensure_private_dir(&dir)?;
 
-    if crate::freshness::wait_for_lock(&socket, &paths::daemon_lock(), Duration::from_secs(5)) {
+    if crate::freshness::wait_for_lock(&socket, &paths::daemon_lock(), EXIT_WAIT) {
         return Ok(());
     }
     let log_path = dir.join("daemon.log");

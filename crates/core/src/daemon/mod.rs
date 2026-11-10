@@ -13,6 +13,7 @@
 //! - [`login_path`] — the user's login-shell `PATH`, for claude and sessions.
 //! - [`manifest`] — proxy plugin manifests: what a plugin's sessions get
 //!   here, and the plugin installs it needs.
+//! - [`service`] — the addons' long-running services, supervised.
 //!
 //! This module holds the shared [`Daemon`] state: the registry of journaled
 //! and live sessions, and the all-clients event broadcast.
@@ -28,6 +29,7 @@ mod journal;
 mod lifecycle;
 mod login_path;
 mod server;
+mod service;
 mod session;
 mod stats;
 #[cfg(any(test, feature = "test-support"))]
@@ -53,6 +55,7 @@ use crate::proto::{
 };
 use crate::remote::probe::Probe;
 use journal::{Entry, Journal};
+pub use service::ServiceTiming;
 use session::{Cmd, Handle};
 
 /// Capacity of the all-clients event broadcast. A client that falls this far
@@ -98,6 +101,11 @@ pub struct Config {
     /// "Mixed versions"): no `addon:` features, `AddonOp` refused as unknown,
     /// every `env_remove` taken as absent and `optional` ignored.
     pub old_peer: bool,
+    /// The `config.toml` the addons' services are read from, at start and at
+    /// every reload ([`service`]); `None`: no addon has a service.
+    pub config_file: Option<PathBuf>,
+    /// How the addons' services are started, stopped and restarted.
+    pub service_timing: ServiceTiming,
 }
 
 impl Config {
@@ -126,6 +134,8 @@ impl Config {
             path,
             addon_timeout: addon_ops::TIMEOUT,
             old_peer: admit::old_peer(std::env::var_os("CLAUDIO_TEST_OLD_DAEMON").as_deref()),
+            config_file: Some(paths::config_file()),
+            service_timing: ServiceTiming::default(),
         })
     }
 
@@ -200,7 +210,7 @@ pub fn run(addons: Arc<crate::addon::Addons>) -> std::process::ExitCode {
         match server::start(config, addons) {
             Ok(Some(listening)) => (
                 std::process::ExitCode::SUCCESS,
-                Some(listening.serve().await),
+                Some(serve_until_shutdown(listening).await),
             ),
             Ok(None) => {
                 tracing::info!("another daemon is already running");
@@ -223,6 +233,18 @@ pub fn run(addons: Arc<crate::addon::Addons>) -> std::process::ExitCode {
 
 /// How long a shutting-down daemon waits for its blocking tasks.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+/// Start the addons' services, serve until asked to shut down, then stop
+/// every service (in parallel) before handing back the startup lock: a
+/// successor's services never run beside ours.
+async fn serve_until_shutdown(listening: server::Listening) -> std::fs::File {
+    let daemon = listening.daemon();
+    service::Services::start_all(&daemon);
+    let lock = listening.serve().await;
+    let grace = daemon.config.service_timing.stop;
+    daemon.services.stop_all(grace).await;
+    lock
+}
 
 /// State shared by every connection and session actor.
 pub struct Daemon {
@@ -252,6 +274,8 @@ pub struct Daemon {
     /// The addons this binary runs, and each daemon-side one's op slots.
     addons: Arc<crate::addon::Addons>,
     addon_slots: HashMap<&'static str, Arc<tokio::sync::Semaphore>>,
+    /// The addons' services ([`service`]).
+    pub(crate) services: service::Services,
 }
 
 /// Journaled sessions, and the live subset with a running process.
@@ -280,6 +304,7 @@ impl Daemon {
         let (events, _) = broadcast::channel(EVENTS_CAPACITY);
         let (stats_tx, stats_rx) = tokio::sync::watch::channel(stats::HostSnapshot::default());
         tokio::spawn(stats::sample_loop(stats_tx));
+        let services = service::Services::new(&addons, config.service_timing);
         Daemon {
             config,
             registry: Mutex::new(Registry {
@@ -298,6 +323,7 @@ impl Daemon {
             stats_rx,
             search: server::SearchSlot::new(),
             addon_slots: addon_ops::slots(&addons),
+            services,
             addons,
         }
     }
@@ -845,6 +871,8 @@ mod claude_path_tests {
             path,
             addon_timeout: std::time::Duration::from_secs(150),
             old_peer: false,
+            config_file: None,
+            service_timing: Default::default(),
         }
     }
 

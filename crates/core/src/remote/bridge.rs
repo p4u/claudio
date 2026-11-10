@@ -145,7 +145,7 @@ async fn ensure_daemon_detached(socket: &Path) -> io::Result<()> {
     // Already running? Or on its way out (or in), holding the lock: a new
     // one would find it taken and quit.
     let (sock, lock) = (socket.to_owned(), paths::daemon_lock());
-    let wait = move || freshness::wait_for_lock(&sock, &lock, Duration::from_secs(5));
+    let wait = move || freshness::wait_for_lock(&sock, &lock, freshness::EXIT_WAIT);
     if tokio::task::spawn_blocking(wait)
         .await
         .map_err(io::Error::other)?
