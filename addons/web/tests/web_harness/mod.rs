@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, Stdio};
 use std::{fs, thread};
 
-use crate::common::{ManagerHarness, BINARY, DAEMON_WAIT, WAIT};
+use crate::common::{ManagerHarness, Region, TuiProcess, BINARY, DAEMON_WAIT, WAIT};
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, Message};
@@ -44,6 +44,20 @@ pub fn apply_env(h: &ManagerHarness, cmd: &mut Command) {
         .env_remove("COLORTERM")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("ANTHROPIC_BASE_URL");
+}
+
+/// `claudio web --set-password` in a PTY (it refuses a pipe), `password`
+/// typed twice; its exit code.
+pub fn set_password_typed(h: &ManagerHarness, password: &str) -> u32 {
+    let mut cmd = portable_pty::CommandBuilder::new(BINARY);
+    cmd.args(["web", "--set-password"]);
+    h.apply(&mut cmd);
+    let mut tty = TuiProcess::spawn(cmd);
+    tty.wait_for("New password:", Region::Screen, WAIT);
+    tty.send_keys(format!("{password}\r").as_bytes());
+    tty.wait_for("Again:", Region::Screen, WAIT);
+    tty.send_keys(format!("{password}\r").as_bytes());
+    tty.wait_exit_code(DAEMON_WAIT)
 }
 
 pub fn free_port() -> u16 {

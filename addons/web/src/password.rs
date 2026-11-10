@@ -18,8 +18,9 @@ use claudio_core::paths;
 pub(crate) const M_COST_KIB: u32 = 19 * 1024;
 pub(crate) const T_COST: u32 = 2;
 pub(crate) const P_COST: u32 = 1;
-/// A password is 12 to 1024 bytes of UTF-8.
-pub(crate) const MIN_BYTES: usize = 12;
+/// A password is 8 to 1024 bytes of UTF-8 (a stored one is checked
+/// against the maximum only).
+pub(crate) const MIN_BYTES: usize = 8;
 pub(crate) const MAX_BYTES: usize = 1024;
 /// A PHC string with these parameters is about 100 bytes; anything past
 /// this is not one.
@@ -215,14 +216,15 @@ mod tests {
     }
 
     #[test]
-    fn password_length_is_12_to_1024_bytes() {
-        let short = acceptable(&"x".repeat(11)).unwrap_err();
-        assert!(short.contains("12"), "{short}");
-        assert!(acceptable(&"x".repeat(12)).is_ok());
-        assert!(acceptable(&"é".repeat(6)).is_ok());
+    fn password_length_is_8_to_1024_bytes() {
+        let short = acceptable(&"x".repeat(7)).unwrap_err();
+        assert_eq!(short, "the password needs at least 8 bytes");
+        assert!(acceptable(&"x".repeat(8)).is_ok());
+        assert!(acceptable(&"é".repeat(4)).is_ok(), "bytes, not characters");
         assert!(acceptable(&"x".repeat(1024)).is_ok());
-        assert!(acceptable(&"x".repeat(1025)).is_err());
-        assert!(hash(&"x".repeat(11)).is_err());
+        let long = acceptable(&"x".repeat(1025)).unwrap_err();
+        assert_eq!(long, "the password takes at most 1024 bytes");
+        assert!(hash(&"x".repeat(7)).is_err());
         let s = Stored::parse(FIXTURE).unwrap();
         assert!(
             !s.verify(&"x".repeat(1025)),

@@ -391,6 +391,15 @@ fn web_set_password_refuses_a_pipe() {
     assert!(!h.config_home.join("claudio/web-password").exists());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_set_password_takes_8_bytes_typed_at_a_terminal() {
+    let h = ManagerHarness::new();
+    assert_eq!(set_password_typed(&h, "8-bytes!"), 0);
+    let r = RemoteWeb::start_keeping_password(h, &[], |_| {});
+    assert_eq!(r.login(&json!({"password": "8-bytes!"})).await.status, 204);
+    assert_eq!(r.login(&json!({"password": "8-bytes?"})).await.status, 401);
+}
+
 // ── --remote: TLS (AC2, AC4, AC6) ────────────────────────────────────────────
 
 #[test]

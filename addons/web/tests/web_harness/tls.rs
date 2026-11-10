@@ -67,6 +67,15 @@ impl RemoteWeb {
     /// fingerprint is `cert.pem`'s.
     pub fn start(h: ManagerHarness, args: &[&str], setup: impl FnOnce(&mut Command)) -> RemoteWeb {
         write_test_password(&h);
+        RemoteWeb::start_keeping_password(h, args, setup)
+    }
+
+    /// [`RemoteWeb::start`] with the password file `h` already has.
+    pub fn start_keeping_password(
+        h: ManagerHarness,
+        args: &[&str],
+        setup: impl FnOnce(&mut Command),
+    ) -> RemoteWeb {
         let port = free_port();
         let mut cmd = Command::new(BINARY);
         cmd.arg("web")
