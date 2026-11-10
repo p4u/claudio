@@ -165,7 +165,8 @@ words, core config sections, shared flags and shared panel keys.
 - **api** (`addons/api/src/`): `Commands` only — the print relays, `-p`/`--print`, `--api`;
   see "Print-mode pipeline" and "API server" below.
 - **web** (`addons/web/src/` the server, `addons/web/web/` the page): `claudio web`, see "Web UI"
-  below; its `Launch` gives every session the `latex` and `mermaid` lenses while
+  below (a bare `claudio web` saves `[web]` and the local daemon runs `claudio web --service` from
+  it, supervised; `--foreground` serves from the terminal; `claudio web stop|status`); its `Launch` gives every session the `latex` and `mermaid` lenses while
   `[extensions] latex`/`diagram` are on (`[claude] latex = false` is the alias the runtime maps).
 - **vocdoni** (`addons/vocdoni/src/`): the claude-proxy client (`vocdoni login|status|use|logout`,
   alias `proxy …`; `[proxy]` profiles; the "Proxy stats" panel on Alt+s) and the team plugins
@@ -179,7 +180,7 @@ services and its own modules, and reads and writes only the `config.toml` tables
 declares. The services addons use today: `paths` (all); `term::{probe, strip_escapes}`
 (api); `proto`, `text`, `client`, `remote::bootstrap`, `term::secret` and
 `app::{addons, launch, browser}` (web and vocdoni); `claude::SESSION_MARKERS` and
-`app::config_edit` (vocdoni); `config`, `freshness`, `claude::{hooks, update}`,
+`app::config_edit` (vocdoni, web; and `daemon::test_support` in the web's tests); `config`, `freshness`, `claude::{hooks, update}`,
 `remote::{hosts, validate_host}`, `sys::hostname` and `app::label` (web). The web addon (the former in-tree web UI, a second front-end) also uses
 `app::{state, connections, extensions, snippets}`: the layer both front-ends share (A5).
 
@@ -207,6 +208,12 @@ flowchart LR
   The journal (`journal.rs`, `daemon-sessions-v1.json`, atomic writes, no secrets, `--plain`
   sessions not written) re-spawns sessions with `claude --resume` on a fresh start. Slow
   requests (git, `UpdateClaude`, attach, `Answers`) reply from spawned tasks, never inline.
+  `service.rs` runs the addons' services (`DaemonOps::service` and `DaemonCtx::service_reload`/
+  `service_state` in `addon/daemon.rs`, `ServiceState`): one child per daemon-side addon from its
+  config sections (`Config::claudio`, own process group, stdin a pipe the daemon never writes,
+  a `ready` line; `Config::config_file`, `service_timing`), stderr in `<runtime>/<addon>.log`
+  (≤ 2 MiB), restarted with a 1–60 s backoff; started after the socket listens, stopped before
+  the lock goes (stdin closed, SIGTERM, SIGKILL after 3 s; `serve_until_shutdown`).
   `command.rs` builds the command line and scrubs the env (`SESSION_MARKERS` plus the spec's
   `env_remove`), dropping `optional` flags this claude's `--help` lacks.
 - **Finding claude:** `Config::claude_bin()` resolves it on every use: `$CLAUDIO_CLAUDE_PATH`,
@@ -214,11 +221,12 @@ flowchart LR
   login-shell `PATH` (`login_path.rs`, read once at daemon start, 3 s deadline) merged before
   the inherited one, because a daemon started over ssh only has the system `PATH` and can find
   a stale `/usr/local/bin/claude`. It is the `PATH` of every session, probe and `claude update`.
+  A service child gets the daemon's whole environment, not the terminal's that ran `claudio web`.
 - **Freshness** (`freshness.rs`): each host's daemon is kept at least as new as the claudio
   binary on it. An older daemon is restarted from the current binary unless `busy` (a claude
   turn, a permission prompt, a `--plain` session); then the client is flagged
   `daemon_outdated` (over SSH the bridge prints `DEFERRED`) and the TUI reconnects that host
-  once it is idle.
+  once it is idle. `freshness::EXIT_WAIT` is also the starter's wait for the lock.
 - **Remote** (`crates/core/src/remote/`): `bootstrap.rs` probes the host (`__probe` + `uname -sm`
   in one round trip) and uploads the binary if missing or stale (SHA-256); cross-platform it
   uploads the release asset. `bridge.rs` is `--slave`, the stdio↔socket bridge, starting or
@@ -245,13 +253,19 @@ flowchart LR
 ### Web UI (`claudio web`, `addons/web/src/`, `addons/web/web/`)
 
 `claudio web` (the web addon's `Commands`; flags in `docs/web.md`) serves the manager to a
-browser: one more client of the daemons, like the TUI, over the same socket and ssh bridge.
+browser. Without `--foreground` it checks its flags, saves `[web]` in `config.toml` and has the
+local daemon run `claudio web --service` (supervised: restarted with backoff, stopped with the
+daemon), then prints the URL and exits (`cli.rs`, with `stop`, `status`, `restart_if_enabled`;
+`service.rs` maps `[web]` to argv); `--foreground` serves from the terminal and never touches
+`[web]`. The server is one more client of the daemons, like the TUI, over the same socket and ssh bridge.
 `docs/web-protocol.md` is the contract between server and page (version 2: `addons.*` ops,
 the Session's `launch` and `segments`); change it first, in its own commit. User docs, the
 security model and the TUI parity table: `docs/web.md`.
 
-- **Server** (axum, loopback only unless `--remote`): `auth.rs` (token, cookie sessions,
-  `Host`/`Origin` checks, the CSP), `login.rs` + `limit.rs` + `password.rs` (token or argon2id
+- **Server** (axum, loopback only unless `--remote`): `auth.rs` (token, the cookie with
+  `Max-Age=34560000`, `Host`/`Origin` checks, the CSP), `sessions.rs` (sign-ins as hashes in
+  `web-sessions.json`, bound to an epoch; 30 days idle, 64 at most), `hub_io.rs` (the plain
+  connect for `--service`), `login.rs` + `limit.rs` + `password.rs` (token or argon2id
   password login, rate-limited), `tls/` (`--remote`'s kept self-signed certificate), `ws.rs`
   (the WebSocket), `hub.rs` (one actor owning hosts, daemon connections, sessions, tabs and
   `web-state.json`), `dto.rs` (DTOs built field by field, never a serialized `Profile`,
@@ -368,13 +382,17 @@ security model and the TUI parity table: `docs/web.md`.
   `securitypolicyviolation` events.
 - **Vendored files under `addons/web/web/vendor/` are byte-identical to upstream.** Delete whole files
   (mermaid reduction rule) but never edit one; every file is in `MANIFEST.txt`.
-- **The web never writes `state.json`.** It reads it; its own state is `web-state.json` and
-  `web-token`, both written with `paths::write_atomic` (0600).
+- **The web never writes `state.json`.** It reads it; its own state is `web-state.json`,
+  `web-sessions.json` and `web-token`, all written with `paths::write_atomic` (0600).
 - **`--remote` is the only non-loopback listener, and it is TLS.** `listen_addr` still refuses
   non-loopback `--listen`; with `--remote` the token works for local requests only (loopback
   peer **and** loopback `Host`), so a reverse proxy on the same host never turns internet users
   into token holders. No HSTS: it would stop browsers from accepting the self-signed
   certificate later.
+- **`claudio web --service` never prints or logs the token; it only loads it.** The suites start
+  servers with `--foreground`; `CLAUDIO_TEST_SERVICE_HANG` is debug-only (like
+  `CLAUDIO_TEST_REMOTE_PEER`). `CLAUDIO_WEB_DIR` works with `--foreground` (a service has the
+  daemon's environment).
 - **The suites' remote peer is a debug-only hook** (`CLAUDIO_TEST_REMOTE_PEER`); it only ever
   takes the token away.
 - **DTO fields are fixed by `docs/web-protocol.md`.** A new field or message changes the doc
