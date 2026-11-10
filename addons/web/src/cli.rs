@@ -151,11 +151,11 @@ pub(crate) fn start(args: WebArgs) -> ExitCode {
     if let Some(addr) = run.remote {
         let password = password::read(&password::path());
         if let Err(e) = remote::prepare(&run, addr, &token, &password) {
-            return fail(&e);
+            return fail_after_token(&run, &e);
         }
     }
     if let Err(e) = save(&config, true, Some(&Unit::of(&run))) {
-        return fail(&e);
+        return fail_after_token(&run, &e);
     }
     let force = run.rotate_token || run.rotate_cert;
     match block_on(ask("apply", json!({ "force": force }), true)) {
@@ -176,6 +176,17 @@ pub(crate) fn start(args: WebArgs) -> ExitCode {
 fn fail(why: &str) -> ExitCode {
     eprintln!("claudio web: {why}");
     ExitCode::FAILURE
+}
+
+/// [`fail`] once the token is loaded. `--rotate-token` has then already
+/// written a new one, so the service that runs (the stored `[web]`) is
+/// restarted first: the old token stops working at once, and the token
+/// file is again the one the service serves with.
+fn fail_after_token(run: &WebArgs, why: &str) -> ExitCode {
+    if run.rotate_token {
+        restart_if_enabled("a new token");
+    }
+    fail(why)
 }
 
 /// What a foreground start prints, for what runs (the reply's argv: two

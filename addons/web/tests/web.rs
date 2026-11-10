@@ -627,6 +627,42 @@ fn web_service_sign_ins_outlive_a_daemon_restart_but_not_a_new_secret() {
     svc.finish();
 }
 
+/// A `--rotate-token` whose start is then refused (here `--remote` without
+/// a password) still ends the old token: the running service restarts with
+/// the new one, and the token file is the one it serves with.
+#[test]
+fn web_a_rotated_token_holds_when_the_start_is_refused() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let cookie = svc.login();
+    let old = svc.token();
+    let pid = svc.running_other_than(None, WAIT);
+    let remote = format!("127.0.0.1:{}", svc.port);
+    let out = svc.claudio(&["web", "--remote", &remote, "--rotate-token", "--no-open"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--set-password"));
+    assert_ne!(svc.token(), old, "the token was rotated");
+    svc.running_other_than(Some(pid), WAIT);
+    assert_eq!(svc.me(&cookie), 401, "the old sign-ins are gone");
+    let body = json!({ "token": old }).to_string();
+    let origin = format!("http://{}", svc.host());
+    let reply = http(
+        svc.port,
+        "POST",
+        "/api/login",
+        &svc.host(),
+        &[("Origin", &origin)],
+        &body,
+    );
+    assert_eq!(reply.status, 401, "the old token is refused");
+    let cookie = svc.login();
+    assert_eq!(
+        svc.me(&cookie),
+        204,
+        "the token file is the one it serves with"
+    );
+    svc.finish();
+}
+
 // ── Persistent sign-ins ───────────────────────────────────────────────────────
 
 fn cookie_header(cookie: &str) -> String {
