@@ -398,6 +398,10 @@ async fn a_reload_during_an_exit_report_is_not_overwritten() {
     write_config(&d.dir, Some(&["serve"]));
     let new = pid_of(&reload(&d, false).await).expect("running");
     let before = starts(&d);
+    // Where the orphan holds the report back, the reload's start is the second.
+    if cfg!(target_os = "linux") {
+        assert_eq!(before, 2);
+    }
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(pid_of(&state(&d)), Some(new), "{:?}", state(&d));
     assert_eq!(starts(&d), before, "nothing replaced the reload's child");
