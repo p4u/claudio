@@ -14,6 +14,7 @@ import { ago } from './glyph.js';
 import { openSession } from './session-actions.js';
 import { addonDecls, loadAddonDecls } from './panel.js';
 import { openChecklist, checklist as checklistShown } from './checklist.js';
+import { AGENT_HELP } from './hosts.js';
 
 export const wizardArgs = signal({});
 
@@ -44,9 +45,12 @@ function HostField({ w, set }) {
   const other = !!w.other;
   const setOther = (v) => set({ other: v });
   const [typed, setTyped] = useState('');
-  async function connectTo(name) {
+  const [agent, setAgent] = useState(false);
+  // `forward` (a typed host only): sent before the connect, whatever the box says.
+  async function connectTo(name, forward = null) {
     setBusy(name);
     try {
+      if (forward !== null) await reqQuiet('hosts.forward_agent', { host: name, on: forward });
       await reqQuiet('hosts.connect', { host: name });
       set({ host: name, hosts: [...new Set([...w.hosts, name])], resume: null, other: false });
       setTyped('');
@@ -63,7 +67,7 @@ function HostField({ w, set }) {
     await connectTo(v.slice(4));
   }
   const typedHost = typed.trim();
-  const connectTyped = () => { if (typedHost && busy === null) { setErr(null); connectTo(typedHost); } };
+  const connectTyped = () => { if (typedHost && busy === null) { setErr(null); connectTo(typedHost, agent); } };
   return html`<div class="wz-field">
     <label for="wz-host">Host</label>
     <select id="wz-host" class="select" data-testid="wizard-host" value=${other ? 'other:' : w.host} disabled=${busy !== null} onChange=${(e) => pick(e.target.value)}>
@@ -76,7 +80,9 @@ function HostField({ w, set }) {
       <input class="input" data-testid="wizard-host-input" data-autofocus placeholder="alias or user@host" autocomplete="off" spellcheck=${false} value=${typed} disabled=${busy !== null}
         onInput=${(e) => setTyped(e.target.value)} onKeyDown=${(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); connectTyped(); } }} />
       <button type="button" class="btn btn-primary" data-testid="wizard-host-connect" disabled=${busy !== null || !typedHost} onClick=${connectTyped}>Connect</button>
-    </div>` : null}
+    </div>
+    <label class="wz-check"><input type="checkbox" data-testid="wizard-host-agent" checked=${agent} disabled=${busy !== null} onChange=${(e) => setAgent(e.target.checked)} /> Forward my SSH agent</label>
+    ${agent ? html`<p class="wz-note">${AGENT_HELP}</p>` : null}` : null}
     ${busy ? html`<p class="wz-note">Connecting to ${busy}… (first time it uploads claudio)</p>` : null}
     ${err ? html`<pre class="wz-error" role="alert" data-testid="wizard-host-error">${err}</pre>` : null}
   </div>`;
