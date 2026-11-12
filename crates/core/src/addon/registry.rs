@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::{feature, name_ok, Addon, FlagDecl, PanelDecl};
 
 /// The `config.toml` tables the core owns; no addon may claim them.
-pub const CORE_SECTIONS: &[&str] = &["ui", "keys", "update", "claude", "extensions"];
+pub const CORE_SECTIONS: &[&str] = &["ui", "keys", "update", "claude", "extensions", "ssh"];
 
 /// The core's command words; never an addon's name.
 pub const RESERVED_WORDS: &[&str] = &[

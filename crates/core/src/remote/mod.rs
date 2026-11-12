@@ -32,13 +32,15 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 /// Build the standard `ssh` invocation shared by bootstrap and the client
 /// bridge: `-T -o BatchMode=yes -o ConnectTimeout=15
 /// -o ServerAliveInterval=15 -o ServerAliveCountMax=3
-/// -o StrictHostKeyChecking=accept-new -- HOST`.
+/// -o StrictHostKeyChecking=accept-new [-o ForwardAgent=yes] -- HOST`.
 ///
 /// `accept-new` trusts a host's key on first contact (BatchMode cannot ask)
-/// and still refuses a changed key.
+/// and still refuses a changed key. `forward_agent` asks for agent
+/// forwarding (the bridge of a host in `[ssh] forward_agent`); without it
+/// nothing is said about forwarding, so `~/.ssh/config` decides.
 ///
 /// Callers append the remote command as one more `.arg(…)` call.
-pub fn ssh_cmd(host: &str) -> Command {
+pub fn ssh_cmd(host: &str, forward_agent: bool) -> Command {
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-T",
@@ -52,9 +54,11 @@ pub fn ssh_cmd(host: &str) -> Command {
         "ServerAliveCountMax=3",
         "-o",
         "StrictHostKeyChecking=accept-new",
-        "--",
-        host,
     ]);
+    if forward_agent {
+        cmd.args(["-o", "ForwardAgent=yes"]);
+    }
+    cmd.args(["--", host]);
     cmd
 }
 
@@ -87,9 +91,50 @@ mod tests {
         assert!(validate_host("192.168.1.1").is_ok());
     }
 
+    fn args(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn ssh_cmd_without_forwarding_is_unchanged() {
+        let want = [
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "--",
+            "devbox",
+        ];
+        assert_eq!(args(&ssh_cmd("devbox", false)), want);
+    }
+
+    #[test]
+    fn ssh_cmd_forwards_the_agent_before_the_host() {
+        let args = args(&ssh_cmd("me@10.0.0.2", true));
+        let opt = args
+            .iter()
+            .position(|a| a == "ForwardAgent=yes")
+            .expect("ForwardAgent option");
+        assert_eq!(args[opt - 1], "-o");
+        let dd = args.iter().position(|a| a == "--").unwrap();
+        assert!(opt < dd);
+        assert_eq!(args.last().unwrap(), "me@10.0.0.2");
+        assert_eq!(args.len(), dd + 2, "the host is the only operand");
+    }
+
     #[test]
     fn ssh_cmd_accepts_new_host_keys_before_the_host() {
-        let cmd = ssh_cmd("devbox");
+        let cmd = ssh_cmd("devbox", false);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()

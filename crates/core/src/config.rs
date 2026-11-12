@@ -257,6 +257,8 @@ pub enum SaveError {
     UnsupportedSection(String),
     /// The name is not an extension's (`^[a-z][a-z0-9-]{0,31}$`).
     BadName,
+    /// Not a host `remote::validate_host` takes (why).
+    BadHost(String),
     Io(io::Error),
 }
 
@@ -273,6 +275,7 @@ impl std::fmt::Display for SaveError {
                 "config.toml layout not understood; edit [{section}] by hand"
             ),
             SaveError::BadName => write!(f, "not an extension name"),
+            SaveError::BadHost(why) => write!(f, "{why}"),
             SaveError::Io(e) => write!(f, "{e}"),
         }
     }
