@@ -120,7 +120,7 @@ You need a Claude Code account. If `claude` is missing, claudio installs it with
 3. Start a new conversation or resume one from that folder.
 4. Close the browser tab or quit with `Alt+q`. The sessions keep running; open either UI again and they are where you left them.
 
-**SSH hosts.** Hosts come from `~/.ssh/config`, the ones you used before, or a name or `user@host` you type (Alt+n, the web's hosts panel). Key-based `ssh <host>` must work without a password. A host's key is recorded at its first connection and a changed key is refused (`StrictHostKeyChecking=accept-new` on ssh's command line, whatever your ssh config sets). claudio copies itself to `~/.local/bin/claudio` on the host, keeps it in sync by checksum, and starts a daemon there (under `systemd-run --user` when it can). No remote dotfiles are touched. The daemon finds claude through your login shell's `PATH`; `CLAUDIO_CLAUDE_PATH` pins one, and `claudio daemon status` shows which one a host uses.
+**SSH hosts.** Hosts come from `~/.ssh/config`, the ones you used before, or a name or `user@host` you type (Alt+n, the web's hosts panel). Key-based `ssh <host>` must work without a password. A host's key is recorded at its first connection and a changed key is refused (`StrictHostKeyChecking=accept-new` on ssh's command line, whatever your ssh config sets). claudio copies itself to `~/.local/bin/claudio` on the host, keeps it in sync by checksum, and starts a daemon there (under `systemd-run --user` when it can). No remote dotfiles are touched. The daemon finds claude through your login shell's `PATH`; `CLAUDIO_CLAUDE_PATH` pins one, and `claudio daemon status` shows which one a host uses. To use your SSH keys from sessions on a host (`git push`, `ssh` onward), turn on agent forwarding for it: `Alt+f` on the host in Alt+n, or the host panel in the web ([docs/web.md](docs/web.md#ssh-hosts) says what that lets the host do).
 
 **Keeping claude current.** Once a day claudio compares `claude --version` with the latest release and asks before running `claude update`; an SSH host with an older claude than yours gets the same offer. Running sessions keep their binary. claudio starts claude with `--allow-dangerously-skip-permissions` when claude supports it, so bypass mode is one `Shift+Tab` away; claude never starts in it (`allow_skip_permissions = false` turns this off).
 
@@ -202,6 +202,9 @@ allow_skip_permissions = true   # start claude with --allow-dangerously-skip-per
 update_check = "ask"            # this machine's claude vs its release channel: "ask" | "auto" | "off"
 remote_check = "ask"            # SSH hosts' claude vs this machine's: "ask" | "auto" | "off"
 install = "auto"                # install claude where a host has none: "auto" | "ask" | "off"
+
+[ssh]
+forward_agent = ["devbox"]      # hosts whose connection forwards your ssh agent (Alt+f in Alt+n)
 
 [extensions]                    # every extension is on unless turned off here
 diagram = false                 # e.g. no Mermaid instruction or drawing (Alt+i writes this table)
