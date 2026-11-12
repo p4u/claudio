@@ -67,10 +67,22 @@ async fn async_run() -> io::Result<()> {
     paths::ensure_private_dir(&dir)?;
 
     // Ensure the remote daemon is running, and runs this binary (the one the
-    // bootstrap installed) or a newer one.
-    let socket = paths::daemon_socket();
-    ensure_daemon_detached(&socket).await?;
-    ensure_current(&socket).await;
+    // bootstrap installed) or a newer one. Meanwhile, link this connection's
+    // forwarded agent for the daemon's relay; the link goes when we return.
+    let (socket, links) = (paths::daemon_socket(), paths::agent_links());
+    let link = super::agent::register(
+        std::env::var_os("SSH_AUTH_SOCK"),
+        &links,
+        std::process::id(),
+        super::agent::PROBE_TIMEOUT,
+    );
+    let daemon = async {
+        ensure_daemon_detached(&socket).await?;
+        ensure_current(&socket).await;
+        io::Result::Ok(())
+    };
+    let (_link, daemon) = tokio::join!(link, daemon);
+    daemon?;
 
     // Connect to the daemon socket.
     let daemon = UnixStream::connect(&socket).await.map_err(|e| {

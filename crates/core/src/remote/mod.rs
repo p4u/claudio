@@ -2,11 +2,13 @@
 //!
 //! - [`probe`] — `claudio __probe`: prints a JSON fingerprint of this binary.
 //! - [`bridge`] — `claudio --slave`: the remote-side stdio↔socket bridge.
+//! - [`agent`] — the bridge's forwarded SSH agent, linked for the daemon's relay.
 //! - [`hosts`] — SSH host alias discovery and MRU persistence.
 //! - [`bootstrap`] — install or update the claudio binary on a remote host.
 //! - [`diag`] — diagnostic / test-harness subcommands (`__bootstrap`, etc.),
 //!   enabled only with `--features diag`.
 
+pub mod agent;
 pub mod bootstrap;
 pub mod bridge;
 #[cfg(feature = "diag")]

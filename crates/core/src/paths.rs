@@ -60,6 +60,24 @@ pub fn daemon_socket() -> PathBuf {
     runtime_dir().join(format!("daemon-v{PROTO}.sock"))
 }
 
+/// The SSH agent relay's socket beside the daemon socket `daemon_socket`:
+/// `agent-v{PROTO}.sock`, versioned like it. The daemon derives it from its
+/// own socket, so a test daemon's relay stays in its temp dir.
+pub fn agent_relay_beside(daemon_socket: &Path) -> PathBuf {
+    daemon_socket.with_file_name(format!("agent-v{PROTO}.sock"))
+}
+
+/// Where the bridges beside the daemon socket `daemon_socket` link their
+/// forwarded agents for the relay: `agents/`.
+pub fn agent_links_beside(daemon_socket: &Path) -> PathBuf {
+    daemon_socket.with_file_name("agents")
+}
+
+/// This host's [`agent_links_beside`] the daemon socket: `<runtime>/agents`.
+pub fn agent_links() -> PathBuf {
+    agent_links_beside(&daemon_socket())
+}
+
 /// Lock file serializing daemon startup.
 pub fn daemon_lock() -> PathBuf {
     runtime_dir().join(format!("daemon-v{PROTO}.lock"))
@@ -186,6 +204,16 @@ mod tests {
 
     fn scratch() -> PathBuf {
         std::env::temp_dir().join(format!("claudio-paths-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn agent_paths_sit_beside_the_daemon_socket() {
+        let dir = Path::new("/run/user/1000/claudio");
+        let sock = dir.join(format!("daemon-v{PROTO}.sock"));
+        let relay = agent_relay_beside(&sock);
+        assert_eq!(relay, dir.join(format!("agent-v{PROTO}.sock")));
+        assert_eq!(agent_links_beside(&sock), dir.join("agents"));
+        assert_eq!(agent_links(), runtime_dir().join("agents"));
     }
 
     #[test]
