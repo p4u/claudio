@@ -449,6 +449,16 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 `<cache>/plugins/` is downloaded again once. Installs run after the reply, under the
 `updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
 
+**Usage limits.** Its `on_usage_limit` answers `NotMine` when the host's `config.toml` has
+`[proxy] auto_switch = false` (a bool, default `true`, read through `DaemonCtx::config`), and
+when the session's env lacks `ANTHROPIC_BASE_URL` or `ANTHROPIC_AUTH_TOKEN` (a direct session).
+Otherwise it asks that proxy to move the conversation, `POST /v1/claudio/session/switch`
+within 15 s: 202 is `Switched` with the proxy's names (`current subscription` and `next
+available` when it sends none), 409 is `Failed` with the proxy's reason (no other eligible
+subscription, or a session bound to its account), 404 is `Failed("the proxy does not know this
+session")`, and anything else `Failed` with the client's error. The token goes only to the
+session's own proxy URL, never to a log or an outcome.
+
 **Launch.** Flags `--proxy NAME`, `--no-proxy` and `--first-party` (the wizard checkbox
 "First-party session"); one option per proxy profile (group "Proxy", the configured default
 marked). The default profile, or a chosen one, is `Routing::Required`: a profile that does not
