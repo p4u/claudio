@@ -18,7 +18,7 @@ mod git_view;
 mod hosts;
 use hosts::{
     client_claude, connect_local, on_connected, on_local_reconnected, retry_outdated_hosts,
-    spawn_connect, spawn_connect_after, spawn_reader, spawn_reconnect_local,
+    spawn_connect, spawn_connect_after, spawn_reader, spawn_reconnect_local, ssh_hosts,
 };
 mod interaction;
 mod keymap;
@@ -394,8 +394,11 @@ enum HostEvent {
     /// A local reconnect failed; retry after delay.
     LocalReconnectFailed { generation: u64 },
     /// Drop `host`'s connection and connect again: its outdated daemon has
-    /// become idle (see [`retry_outdated`]).
+    /// become idle ([`retry_outdated`]), or its `[ssh] forward_agent` changed.
     Reconnect { host: String, generation: u64 },
+    /// An [`Effect::ForwardAgent`] ended: the SSH hosts and `[ssh]
+    /// forward_agent` read after it (`None`: they could not be read).
+    ForwardSaved(Option<(Vec<String>, Vec<String>)>),
     /// Background upgrade check completed. `Some(tag)` means a newer version is
     /// available; `None` means we are up to date (or the check failed silently).
     UpgradeAvailable(Option<String>),
@@ -644,20 +647,9 @@ async fn event_loop(
                     spawn_reconnect_local(delay, gen, ev_tx.clone());
                 }
                 Some(HostEvent::Reconnect { host, generation }) => {
-                    if generation < conns.current_generation(&host) || !conns.is_connected(&host) {
-                        continue;
-                    }
-                    // Dropping the client closes the connection; the newer
-                    // generation silences its reader.
-                    conns.disconnect(&host);
-                    addon_runner::on_incoming(&mut app, &runtime, &host, Incoming::Disconnected);
-                    let gen = conns.next_generation(&host);
-                    if host == "local" {
-                        spawn_reconnect_local(Duration::ZERO, gen, ev_tx.clone());
-                    } else {
-                        spawn_connect(host, gen, ev_tx.clone(), true);
-                    }
+                    hosts::reconnect(&mut app, conns, &runtime, &ev_tx, (host, generation));
                 }
+                Some(HostEvent::ForwardSaved(read)) => app.on_forward_saved(read),
                 Some(HostEvent::UpgradeAvailable(tag)) => app.on_upgrade_available(tag),
                 Some(HostEvent::ClaudeLatest(latest)) => app.check_local_claude(&latest),
                 Some(HostEvent::AnswersRendered { gen, id, answers }) => match answers {
@@ -746,7 +738,7 @@ fn run_effect(
             let gen = conns.next_generation(&host);
             spawn_connect(host, gen, ev_tx.clone(), false);
         }
-        Effect::LoadSshHosts => app.on_ssh_hosts(claudio_core::remote::hosts::candidates()),
+        e @ (Effect::LoadSshHosts | Effect::ForwardAgent { .. }) => ssh_hosts(e, app, conns, ev_tx),
         Effect::CopyToClipboard(text) => copy_to_clipboard(&text),
         Effect::LoadSnippets { gen } => {
             let tx = ev_tx.clone();

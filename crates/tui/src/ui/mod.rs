@@ -19,6 +19,7 @@ mod leader;
 mod panel;
 mod reader;
 mod status;
+mod wizard_host;
 
 use confirm::draw_confirm;
 use git::draw_git;
@@ -90,13 +91,7 @@ fn draw_plain(frame: &mut Frame, app: &App) {
 fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
     match &app.modal {
         Some(Modal::Rename { input, .. }) => draw_rename(frame, input),
-        Some(Modal::Wizard(w)) => {
-            let toggle_key = app
-                .keymap
-                .key_for(super::keymap::Action::ToggleHidden)
-                .unwrap_or_default();
-            draw_wizard(frame, w, app.now, &toggle_key)
-        }
+        Some(Modal::Wizard(w)) => draw_wizard(frame, w, app),
         Some(Modal::Panel(view)) => panel::draw_panel(frame, view, app.now),
         Some(Modal::Overview { selected, filter }) => draw_overview(frame, app, *selected, filter),
         Some(Modal::Help) => draw_help(frame, app),
@@ -413,7 +408,8 @@ fn draw_list(frame: &mut Frame, area: Rect, rows: &[String], selected: Option<us
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
+fn draw_wizard(frame: &mut Frame, w: &Wizard, app: &App) {
+    let now = app.now;
     let area = frame.area();
     let rect = centered(
         area,
@@ -423,102 +419,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
 
     // Step 0: first screen (LOCAL / REMOTE sections).
     if let Some(hs) = &w.host_step {
-        use super::wizard::HostSection;
-        let inner = popup(
-            frame,
-            rect,
-            "New session (↑/↓ move · Tab switch section · Enter pick · Esc cancel)",
-        );
-        if let Some(host) = &hs.connecting {
-            frame.render_widget(
-                Paragraph::new(format!("Connecting to {host}…"))
-                    .style(Style::default().fg(Color::Cyan)),
-                inner,
-            );
-            return;
-        }
-        let height = inner.height as usize;
-        // Layout: filter (2) + LOCAL label (1) + local items + REMOTE label (1) + remote items.
-        let local_count = hs.local_len().min((height.saturating_sub(4)) / 2);
-        let [filter_area, rest] =
-            ratatui::layout::Layout::vertical([Constraint::Length(2), Constraint::Min(0)])
-                .areas(inner);
-        draw_input(frame, filter_area, "filter> ", &hs.input);
-        // Render LOCAL section header.
-        let sections = ratatui::layout::Layout::vertical([
-            Constraint::Length(1),                  // LOCAL header
-            Constraint::Length(local_count as u16), // local items
-            Constraint::Length(1),                  // REMOTE header
-            Constraint::Min(0),                     // remote items
-        ])
-        .split(rest);
-        let local_focused = hs.focus == HostSection::Local;
-        let remote_focused = hs.focus == HostSection::Remote;
-        let local_hdr_style = if local_focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
-        let remote_hdr_style = if remote_focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
-        frame.render_widget(
-            Paragraph::new("── LOCAL ──────────────────────────────────────────────────")
-                .style(local_hdr_style),
-            sections[0],
-        );
-        // LOCAL items: "Explore local dirs…" + recent dirs, badged like the
-        // directory list.
-        let local_area = sections[1];
-        let visible = local_area.height as usize;
-        let selected = local_focused.then_some(hs.local_selected);
-        let width = local_area.width as usize;
-        let explore = truncate("  Explore local dirs…", width);
-        let explore = if selected == Some(0) {
-            Line::styled(explore, Style::default().add_modifier(Modifier::REVERSED))
-        } else {
-            Line::raw(explore)
-        };
-        let offset = selected.map_or(0, |i| i.saturating_sub(visible.saturating_sub(1)));
-        let lines: Vec<Line> = std::iter::once(explore)
-            .chain(hs.local_items.iter().enumerate().map(|(i, dir)| {
-                let mut row = dir_row(
-                    w,
-                    dir,
-                    selected == Some(i + 1),
-                    width.saturating_sub(2),
-                    now,
-                );
-                row.spans.insert(0, Span::raw("  "));
-                row
-            }))
-            .skip(offset)
-            .take(visible)
-            .collect();
-        frame.render_widget(Paragraph::new(lines), local_area);
-        frame.render_widget(
-            Paragraph::new("── REMOTE ─────────────────────────────────────────────────")
-                .style(remote_hdr_style),
-            sections[2],
-        );
-        // REMOTE items (plus optional synthetic "connect to <query>" row).
-        let mut remote_rows: Vec<String> = hs.items.iter().map(|h| format!("  {h}")).collect();
-        if hs.connect_raw {
-            remote_rows.push(format!("  connect to {}", hs.input.trim()));
-        }
-        draw_list(
-            frame,
-            sections[3],
-            &remote_rows,
-            remote_focused.then_some(hs.selected),
-        );
-        return;
+        return wizard_host::draw_host_step(frame, rect, w, hs, app);
     }
 
     // Step 2: resume picker.
@@ -590,7 +491,7 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
             ""
         };
         frame.render_widget(
-            Paragraph::new(format!("{hint}{toggle_key} hidden: {state}"))
+            Paragraph::new(format!("{hint}{} hidden: {state}", toggle_key(app)))
                 .style(Style::default().add_modifier(Modifier::DIM)),
             Rect {
                 y: head.y + 1,
@@ -600,6 +501,12 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, now: u64, toggle_key: &str) {
         );
     }
     draw_dir_list(frame, list, w, now);
+}
+
+/// The key that shows or hides the wizard's hidden dirs.
+fn toggle_key(app: &App) -> String {
+    let action = super::keymap::Action::ToggleHidden;
+    app.keymap.key_for(action).unwrap_or_default()
 }
 
 /// Render the directory candidate list with right-aligned metadata badges.

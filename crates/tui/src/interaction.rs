@@ -303,10 +303,10 @@ impl App {
         let Some(modal) = &mut self.modal else { return };
         match modal {
             Modal::Wizard(w) => {
-                let outcome = if self.keymap.lookup_wizard(&key) == Some(Action::ToggleHidden) {
-                    w.toggle_hidden()
-                } else {
-                    w.on_key(&key)
+                let outcome = match self.keymap.lookup_wizard(&key) {
+                    Some(Action::ToggleHidden) => w.toggle_hidden(),
+                    Some(Action::ForwardAgent) => return self.toggle_forward_agent(),
+                    _ => w.on_key(&key),
                 };
                 self.wizard_outcome(outcome);
             }

@@ -48,6 +48,9 @@ pub enum Action {
     ExtensionsMenu,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
+    /// Switch ssh agent forwarding for the wizard's highlighted remote host
+    /// (wizard scope; `[ssh] forward_agent`).
+    ForwardAgent,
     /// Jump to tab `n` (`Alt+Shift+1`…`9` → 1…9, `Alt+Shift+0` → 10).
     /// Fixed: not in [`DEFAULT_BINDINGS`], so `[keys]` can't override it.
     GotoSession(u8),
@@ -74,6 +77,7 @@ impl Action {
             Action::Extensions => "extensions",
             Action::ExtensionsMenu => "extensions_menu",
             Action::ToggleHidden => "toggle_hidden",
+            Action::ForwardAgent => "forward_agent",
             Action::GotoSession(_) => "goto_session",
         }
     }
@@ -197,6 +201,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "wizard: show/hide hidden dirs",
         action: Action::ToggleHidden,
+        scope: Scope::Wizard,
+    },
+    // Alt+f: ssh agent forwarding for the wizard's highlighted remote host.
+    // Wizard scoped like Alt+.: typing there is the filter, and claude
+    // (whose readline-style Alt+f moves a word) never sees it.
+    Binding {
+        code: KeyCode::Char('f'),
+        mods: KeyModifiers::ALT,
+        label: "wizard: forward ssh agent to the host",
+        action: Action::ForwardAgent,
         scope: Scope::Wizard,
     },
     // Alt+u: the reader view. Verified free in Claude Code 2.1.312 (no
@@ -1004,6 +1018,15 @@ mod tests {
                 b.label
             );
         }
+    }
+
+    #[test]
+    fn forward_agent_is_wizard_scoped_on_alt_f() {
+        let km = Keymap::default();
+        let alt_f = key(KeyCode::Char('f'), KeyModifiers::ALT);
+        assert_eq!(km.lookup_wizard(&alt_f), Some(Action::ForwardAgent));
+        assert_eq!(km.lookup(&alt_f), None, "claude still gets Alt+f");
+        assert_eq!(km.key_for(Action::ForwardAgent).as_deref(), Some("Alt+f"));
     }
 
     #[test]

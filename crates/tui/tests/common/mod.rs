@@ -63,6 +63,7 @@ pub const ALT_H: &[u8] = b"\x1bh";
 pub const ALT_C: &[u8] = b"\x1bc";
 pub const ALT_L: &[u8] = b"\x1bl";
 pub const ALT_E: &[u8] = b"\x1be";
+pub const ALT_F: &[u8] = b"\x1bf";
 pub const ALT_U: &[u8] = b"\x1bu";
 pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
@@ -1113,7 +1114,8 @@ exit $status
     fn lock(&self) -> PathBuf {
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
-        self.root.join(format!("t/claudio-{uid}/daemon-v1.lock"))
+        let v = claudio_core::version::PROTO;
+        self.root.join(format!("t/claudio-{uid}/daemon-v{v}.lock"))
     }
 }
 
