@@ -1493,6 +1493,11 @@ fn test_reset_restarts_claude_in_the_same_tab() {
     let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
     let n1 = harness.dirs[1].file_name().unwrap().to_str().unwrap();
     tui.wait_for(n1, Region::TabBar, WAIT);
+    // The tab's label can be drawn before its claude printed the banner.
+    tui.wait_until(
+        |s| extract_nonce(&s.region_text(Region::Pane)).is_some(),
+        WAIT,
+    );
     let before = current_nonce(&tui);
 
     // Esc leaves everything alone.

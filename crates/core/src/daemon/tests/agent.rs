@@ -180,18 +180,27 @@ async fn claude_agent(
     .await
 }
 
-/// Whether a new terminal's `SSH_AUTH_SOCK` is the relay.
-async fn shell_has_relay(d: &TestDaemon, c: &mut Client, relay: &Path) -> bool {
+/// A new terminal's `SSH_AUTH_SOCK`, after its login profile ran: `relay`,
+/// `own` (this process's value, which the daemon passes on) or `other`.
+async fn shell_agent(d: &TestDaemon, c: &mut Client, relay: &Path) -> &'static str {
     let id = Uuid::new_v4();
     c.spawn_shell(d.shell_spec(id)).await;
     c.attach(id, 24, 80).await;
+    let quote = crate::remote::shell_quote;
+    let own = std::env::var("SSH_AUTH_SOCK").unwrap_or_default();
     // The answer is computed, so the echoed command line never matches it.
     let test = format!(
-        "[ \"$SSH_AUTH_SOCK\" = '{}' ] && echo relay-$((40+2)) || echo other-$((40+2))",
-        relay.display()
+        "case \"$SSH_AUTH_SOCK\" in {}) echo relay-$((40+2));; {}) echo own-$((40+2));; \
+         *) echo other-$((40+2));; esac",
+        quote(&relay.to_string_lossy()),
+        quote(&own)
     );
     c.type_line(id, &test).await;
-    c.output_until(id, "-42").await.contains("relay-42")
+    let out = c.output_until(id, "-42").await;
+    ["relay", "own"]
+        .into_iter()
+        .find(|seen| out.contains(&format!("{seen}-42")))
+        .unwrap_or("other")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -206,14 +215,22 @@ async fn sessions_get_the_relay_once_a_bridge_linked_an_agent() {
         _ => "unset",
     };
     assert_eq!(claude_agent(&d, &mut c, &relay, |_| {}).await, own);
-    assert!(!shell_has_relay(&d, &mut c, &relay).await);
+    let shell_before = shell_agent(&d, &mut c, &relay).await;
+    assert_ne!(shell_before, "relay");
 
     // A bridge linked a live agent: claude sessions and terminals get the relay.
     paths::ensure_private_dir(&links).unwrap();
     let _a = FakeAgent::start(&d.dir.join("a.sock"), b"A");
     symlink(d.dir.join("a.sock"), links.join("100")).unwrap();
     assert_eq!(claude_agent(&d, &mut c, &relay, |_| {}).await, "relay");
-    assert!(shell_has_relay(&d, &mut c, &relay).await);
+    // A terminal is a login shell: a login profile that sets `SSH_AUTH_SOCK`
+    // itself (as on some CI hosts) hides what the daemon gave it, so the
+    // terminal is checked only where the profile left the daemon's value.
+    if shell_before == "own" {
+        assert_eq!(shell_agent(&d, &mut c, &relay).await, "relay");
+    } else {
+        eprintln!("terminal check skipped: this host's login profile sets SSH_AUTH_SOCK");
+    }
 
     // A spawn that scrubs the agent gets none; an explicit value wins.
     let scrub = |s: &mut SpawnSpec| s.env_remove = Some(vec!["SSH_AUTH_SOCK".into()]);
