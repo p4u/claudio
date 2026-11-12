@@ -68,6 +68,7 @@ pub(super) fn command(
         cmd.arg(name);
     }
     cmd.cwd(cwd);
+    cfg.agent.apply(&mut cmd);
     let env_remove = spec.env_remove.as_deref();
     apply_env(&mut cmd, cfg.path.as_deref(), &spec.env, env_remove);
     cmd
@@ -181,12 +182,14 @@ pub(super) fn optional_ok(list: &[String]) -> Result<(), String> {
 
 /// `<shell> -l` in `cwd`: a plain terminal. No hooks, no proxy env, and
 /// only the claude session markers are scrubbed, so a `claude` typed into it
-/// is a top-level session, not a child of whatever started the daemon.
-pub(super) fn shell_command(shell: &Path, cwd: &Path, path: Option<&OsStr>) -> CommandBuilder {
+/// is a top-level session, not a child of whatever started the daemon. It
+/// gets the login `PATH` and the agent relay as a claude session does.
+pub(super) fn shell_command(shell: &Path, cwd: &Path, cfg: &super::Config) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(shell);
     cmd.arg("-l");
     cmd.cwd(cwd);
-    apply_env(&mut cmd, path, &[], Some(&[]));
+    cfg.agent.apply(&mut cmd);
+    apply_env(&mut cmd, cfg.path.as_deref(), &[], Some(&[]));
     cmd
 }
 
@@ -213,6 +216,14 @@ mod tests {
         assert_eq!(clean_title("✳ Fix the parser"), "Fix the parser");
         assert_eq!(clean_title("plain"), "plain");
         assert_eq!(clean_title("◑ "), "");
+    }
+
+    /// A daemon config whose login `PATH` is `path`, its relay not listening.
+    fn daemon_config(path: Option<&OsStr>) -> super::super::Config {
+        super::super::Config {
+            path: path.map(OsStr::to_os_string),
+            ..super::super::test_support::TestDaemon::config(Path::new("/run"))
+        }
     }
 
     /// Flags as a claude whose `--help` lists those marked true.
@@ -257,7 +268,11 @@ mod tests {
 
     #[test]
     fn shell_command_is_a_plain_login_shell() {
-        let cmd = shell_command(Path::new("/bin/zsh"), Path::new("/tmp"), None);
+        let cmd = shell_command(
+            Path::new("/bin/zsh"),
+            Path::new("/tmp"),
+            &daemon_config(None),
+        );
         let argv: Vec<_> = cmd
             .get_argv()
             .iter()
@@ -299,7 +314,11 @@ mod tests {
         apply_env(&mut cmd, None, &[], None);
         assert_eq!(cmd.get_env("PATH"), Some(OsStr::new("/usr/bin")));
         // Terminals get it too.
-        let cmd = shell_command(Path::new("/bin/sh"), Path::new("/tmp"), Some(login));
+        let cmd = shell_command(
+            Path::new("/bin/sh"),
+            Path::new("/tmp"),
+            &daemon_config(Some(login)),
+        );
         assert_eq!(cmd.get_env("PATH"), Some(login));
     }
 
@@ -315,6 +334,7 @@ mod tests {
     fn command_line_shape() {
         let cfg = super::super::Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
@@ -398,6 +418,7 @@ mod tests {
     fn skip_permissions_not_duplicated() {
         let cfg = super::super::Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
@@ -444,6 +465,7 @@ mod tests {
     fn plugin_dirs_are_dropped_for_a_claude_without_the_flag() {
         let cfg = super::super::Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
@@ -502,6 +524,7 @@ mod tests {
     fn plugin_flags_keep_their_order_and_are_dropped_when_unknown() {
         let cfg = super::super::Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
@@ -575,6 +598,7 @@ mod tests {
     fn optional_flags_are_dropped_only_when_unknown() {
         let cfg = super::super::Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude: "/bin/claude".into(),
@@ -766,7 +790,7 @@ mod tests {
 
     #[test]
     fn a_shell_loses_only_the_markers() {
-        let cmd = shell_command(Path::new("/bin/sh"), Path::new("/"), None);
+        let cmd = shell_command(Path::new("/bin/sh"), Path::new("/"), &daemon_config(None));
         // Every inherited variable but the markers is still there.
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy();

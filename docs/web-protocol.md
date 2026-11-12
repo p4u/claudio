@@ -202,6 +202,7 @@ only for the approval kinds and the two kinds above. Show `message` first.
 | `claude` | `{"path": string, "version": string}` \| null | null: claude is not installed there |
 | `features` | [string] | the daemon's features: `lens`, `search`, `last_prompt`, `attention`, `worktree`, and `addon:<name>` for each addon it runs ops for |
 | `version` | string \| null | the daemon's claudio version |
+| `forward_agent` | bool | the host is in `config.toml`'s `[ssh] forward_agent`: its bridge ssh asks for agent forwarding (`-o ForwardAgent=yes`). Whether a forwarded agent is live there is not known to the server. Always `false` for `"local"` |
 
 ### Layout **(decided here)**
 
@@ -274,6 +275,7 @@ known host answers `"no such host"`; a known but disconnected one `"not connecte
 | `hosts.candidates` | — | `{"hosts":[string]}` | MRU then `~/.ssh/config` aliases, without connected ones |
 | `hosts.connect` | `host` | `{"host":Host}` once connected | ssh `BatchMode=yes`; failure: the last 3 sanitized ssh stderr lines (or the bootstrap error). `"local"` answers `"local is always connected"` |
 | `hosts.disconnect` | `host` | `{}` | drops the host: `session_removed` for its sessions, then `host_removed`. `"local"` answers `"cannot disconnect local"` |
+| `hosts.forward_agent` | `host`, `on` (bool) | `{}` | adds `host` to `[ssh] forward_agent` (`on`) or removes it. When that changed the file: a connected host is reconnected (its sessions keep running; the UIs re-attach as after a dropped connection), any other known host gets a `host` event; a host mid-connect keeps its attempt, and the next one uses the new value. Any host string `hosts.connect` takes, known or not. `"local"` answers `"local has no ssh connection"`; a config the edit cannot make answers `"could not save: <why>"` |
 
 ### Sessions
 

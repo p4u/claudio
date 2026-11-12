@@ -37,6 +37,20 @@ function Fact({ k, v, mono }) {
   return html`<div class="kv"><dt>${k}</dt><dd class=${mono ? 'mono' : ''}>${v}</dd></div>`;
 }
 
+/** What forwarding allows, wherever it can be switched on. */
+export const AGENT_HELP = 'With forwarding on, every session on this host, and anything claude runs in one, can sign with your SSH keys while a connection that forwards your agent is up. Prefer ssh-add -c (confirm each use) or a dedicated key.';
+
+// `[ssh] forward_agent` for a remote host. The server cannot see whether a forwarded agent is
+// live there, so the row says what the next connection asks for, never "forwarded".
+function AgentRow({ h }) {
+  const on = !!h.forward_agent;
+  return html`<div class="kv"><dt>SSH agent</dt><dd>
+    <span data-testid="host-agent">${on ? 'forward on connect' : 'not forwarded (your ssh config decides)'}</span>${' '}
+    <button type="button" class="btn btn-sm" data-testid="host-agent-btn" onClick=${() => req('hosts.forward_agent', { host: h.name, on: !on }).catch(() => {})}>${on ? 'Stop forwarding' : 'Forward'}</button>
+    <p class="wz-note">${AGENT_HELP}</p>
+  </dd></div>`;
+}
+
 function HostFacts({ h }) {
   const claude = model.value.claude[h.name];
   const working = claude && (claude.phase === 'installing' || claude.phase === 'updating');
@@ -58,6 +72,7 @@ function HostFacts({ h }) {
       ${offered ? html`<${Fact} k="Update" v=${`claude ${offered.have ?? '?'} → ${offered.want ?? '?'} is available`} />` : null}
       <${Fact} k="Daemon" v=${h.version ? `claudio ${h.version}${h.outdated ? ' (older than this server; it is replaced once idle)' : ''}` : null} />
       <${Fact} k="Sessions" v=${sessions} />
+      ${remote ? html`<${AgentRow} h=${h} />` : null}
       <div class="kv"><dt>Features</dt><dd>${(h.features ?? []).length ? (h.features ?? []).map((f) => html`<span class="chip" key=${f}>${f}</span>`) : html`<span class="muted">none</span>`}</dd></div>
     </dl>
     ${h.error ? html`<pre class="host-error" data-testid="host-error">${h.error}</pre>` : null}
@@ -75,12 +90,15 @@ function AddHost() {
   const [cands, setCands] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [agent, setAgent] = useState(false);
   useEffect(() => { reqQuiet('hosts.candidates').then((r) => setCands(r.hosts ?? [])).catch(() => {}); }, []);
   async function connect(name) {
     const host = name.trim();
     if (!host) return;
     setBusy(true); setErr(null);
     try {
+      // Always sent, so a host added again with the box clear loses an old entry.
+      await reqQuiet('hosts.forward_agent', { host, on: agent });
       await reqQuiet('hosts.connect', { host });
       toast({ text: `Connected to ${host}.`, level: 'info' });
       setAlias('');
@@ -98,6 +116,8 @@ function AddHost() {
       <datalist id="host-candidates">${cands.map((c) => html`<option value=${c}></option>`)}</datalist>
       <button type="button" class="btn btn-primary" data-testid="host-add-btn" disabled=${busy || !alias.trim()} onClick=${() => connect(alias)}>${busy ? 'Connecting…' : 'Connect'}</button>
     </div>
+    <label class="wz-check"><input type="checkbox" data-testid="host-add-agent" checked=${agent} onChange=${(e) => setAgent(e.target.checked)} /> Forward my SSH agent</label>
+    ${agent ? html`<p class="wz-note">${AGENT_HELP}</p>` : null}
     ${cands.length ? html`<div class="host-cands">${cands.slice(0, 12).map((c) => html`<button type="button" class="chip chip-btn" key=${c} data-testid="host-candidate" onClick=${() => setAlias(c)}>${c}</button>`)}</div>` : null}
     ${err ? html`<pre class="host-error" data-testid="host-connect-error" role="alert">${err}</pre>` : null}
   </section>`;

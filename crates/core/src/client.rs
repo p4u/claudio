@@ -224,7 +224,7 @@ fn ssh_tail_line(line: &str) -> Option<String> {
 async fn connect_ssh_with(host: &str, tail: Option<Arc<Mutex<SshTail>>>) -> io::Result<Client> {
     crate::remote::validate_host(host).map_err(io::Error::other)?;
 
-    let mut child = crate::remote::ssh_cmd(host)
+    let mut child = crate::remote::ssh_cmd(host, crate::remote::hosts::forward_agent(host))
         .arg(r#""$HOME"/.local/bin/claudio --slave"#)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

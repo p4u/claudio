@@ -560,6 +560,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
     let dir = TestDaemon::new_dir();
     let config = Config {
         socket: dir.join("rt/d.sock"),
+        agent: Default::default(),
         lock: dir.join("rt/d.lock"),
         journal: dir.join("state/journal.json"),
         claude: fake_claude_resume_fails().to_path_buf(),
@@ -685,6 +686,7 @@ async fn immediate_exit_leaves_session_dormant() {
     let dir = TestDaemon::new_dir();
     let config = Config {
         socket: dir.join("rt/d.sock"),
+        agent: Default::default(),
         lock: dir.join("rt/d.lock"),
         journal: dir.join("state/journal.json"),
         claude: fake_claude_exits_immediately().to_path_buf(),
@@ -1046,6 +1048,7 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
     );
 }
 mod addon_ops;
+mod agent;
 mod freshness;
 mod git;
 mod limit;

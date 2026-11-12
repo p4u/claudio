@@ -7,6 +7,10 @@
 //!
 //! [`touch`] updates the MRU list in `~/.config/claudio/hosts.json` whenever
 //! a remote host is successfully connected.
+//!
+//! [`forward_agent`] and [`set_forward_agent`] read and write `config.toml`'s
+//! core section `[ssh] forward_agent`: the hosts whose bridge ssh asks for
+//! agent forwarding.
 
 use std::collections::HashSet;
 use std::fs;
@@ -14,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::SaveError;
 use crate::paths;
 
 /// The hosts MRU file.
@@ -54,6 +59,73 @@ pub fn touch(host: &str) {
     // Keep the list from growing without bound.
     mru.hosts.truncate(50);
     let _ = save_mru(&mru);
+}
+
+// ── [ssh] forward_agent ───────────────────────────────────────────────────────
+
+/// The core section of per-host ssh options, and its forwarding key.
+const SSH_SECTION: &str = "ssh";
+const FORWARD_AGENT: &str = "forward_agent";
+
+/// Whether `host`, exactly as connected, is in `config.toml`'s
+/// `[ssh] forward_agent`, read now.
+pub fn forward_agent(host: &str) -> bool {
+    forward_agent_hosts().iter().any(|h| h == host)
+}
+
+/// `config.toml`'s `[ssh] forward_agent`, read now ([`forward_agent_in`]).
+pub fn forward_agent_hosts() -> Vec<String> {
+    forward_agent_in(&paths::config_file())
+}
+
+/// `[ssh] forward_agent` of the config file at `path`: its entries that
+/// [`super::validate_host`] takes, in order. A missing or unreadable file,
+/// section or key, or a value that is not an array, reads as empty; the rest
+/// of the file is not looked at.
+pub fn forward_agent_in(path: &Path) -> Vec<String> {
+    let table = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let items = table
+        .as_ref()
+        .and_then(|t| t.get(SSH_SECTION)?.get(FORWARD_AGENT)?.as_array());
+    items
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .filter(|h| super::validate_host(h).is_ok())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// [`set_forward_agent_in`] on `config.toml`: the one writer of
+/// `[ssh] forward_agent`; front-ends call it.
+pub fn set_forward_agent(host: &str, on: bool) -> Result<bool, SaveError> {
+    set_forward_agent_in(&paths::config_file(), host, on)
+}
+
+/// Put `host` in (`on`) or take it out of `[ssh] forward_agent` of the
+/// config file at `path` with [`crate::app::config_edit::edit_section`]
+/// (atomic, minimal, serialised). On: the first copy stays where it is, a
+/// later one goes, and a new host goes at the end. Off: every copy goes.
+/// Other entries keep their order; a value that is not an array is
+/// replaced. Whether the file changed.
+pub fn set_forward_agent_in(path: &Path, host: &str, on: bool) -> Result<bool, SaveError> {
+    super::validate_host(host).map_err(SaveError::BadHost)?;
+    crate::app::config_edit::edit_section(path, SSH_SECTION, |table| {
+        let mut items = match table.remove(FORWARD_AGENT) {
+            Some(toml::Value::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let is_host = |v: &toml::Value| v.as_str() == Some(host);
+        let had = items.iter().any(is_host);
+        let mut first = true;
+        items.retain(|v| !is_host(v) || (on && std::mem::replace(&mut first, false)));
+        if on && !had {
+            items.push(toml::Value::String(host.to_owned()));
+        }
+        table.insert(FORWARD_AGENT.to_owned(), toml::Value::Array(items));
+    })
 }
 
 // ── SSH config parsing ────────────────────────────────────────────────────────
@@ -383,6 +455,100 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(!glob_match(&pattern, &name));
         assert!(start.elapsed().as_millis() < 10, "glob_match took too long");
+    }
+
+    /// A config file in a new private temp dir, holding `text`.
+    fn config_with(text: &str) -> PathBuf {
+        let path = scratch().join("config.toml");
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn forward_agent_is_added_removed_and_deduplicated_in_order() {
+        let text =
+            "# mine\n[claude]\ninstall = \"off\"\n\n[ssh]\nforward_agent = [\"a\", \"b\", \"a\"]\n";
+        let path = config_with(text);
+        assert_eq!(forward_agent_in(&path), ["a", "b", "a"]);
+        // On: the first copy stays, a later one goes.
+        assert!(set_forward_agent_in(&path, "a", true).unwrap());
+        assert_eq!(forward_agent_in(&path), ["a", "b"]);
+        assert!(
+            !set_forward_agent_in(&path, "a", true).unwrap(),
+            "already on"
+        );
+        assert!(set_forward_agent_in(&path, "me@10.0.0.2", true).unwrap());
+        assert_eq!(forward_agent_in(&path), ["a", "b", "me@10.0.0.2"]);
+        // Off: every copy goes; the others keep their order.
+        assert!(set_forward_agent_in(&path, "a", false).unwrap());
+        assert_eq!(forward_agent_in(&path), ["b", "me@10.0.0.2"]);
+        assert!(
+            !set_forward_agent_in(&path, "a", false).unwrap(),
+            "already off"
+        );
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with("# mine\n[claude]\ninstall = \"off\"\n"),
+            "{after}"
+        );
+        let table: toml::Table = after.parse().unwrap();
+        assert_eq!(table.len(), 2, "{after}");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn forward_agent_section_is_made_when_missing() {
+        let path = config_with("[ui]\nnotify = true\n");
+        assert!(forward_agent_in(&path).is_empty());
+        assert!(set_forward_agent_in(&path, "devbox", true).unwrap());
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with("[ui]\nnotify = true\n"), "{after}");
+        assert!(
+            after.contains("[ssh]\nforward_agent = [\"devbox\"]"),
+            "{after}"
+        );
+        assert_eq!(forward_agent_in(&path), ["devbox"]);
+        // No file at all reads as empty, and is created on a write.
+        let missing = path.with_file_name("none.toml");
+        assert!(forward_agent_in(&missing).is_empty());
+        assert!(set_forward_agent_in(&missing, "devbox", true).unwrap());
+        assert_eq!(forward_agent_in(&missing), ["devbox"]);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn forward_agent_refuses_and_ignores_bad_hosts() {
+        let path = config_with("[ssh]\nforward_agent = [\"-oProxyCommand=x\", \"\", \"ok\", 3]\n");
+        assert_eq!(forward_agent_in(&path), ["ok"], "bad entries are ignored");
+        for bad in ["-oProxyCommand=x", ""] {
+            let err = set_forward_agent_in(&path, bad, true).unwrap_err();
+            assert!(matches!(err, SaveError::BadHost(_)), "{bad}: {err}");
+        }
+        assert!(crate::addon::CORE_SECTIONS.contains(&SSH_SECTION));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn forward_agent_that_is_not_an_array_reads_as_empty() {
+        let path = config_with("[claude]\ninstall = \"off\"\n[ssh]\nforward_agent = \"devbox\"\n");
+        assert!(forward_agent_in(&path).is_empty());
+        let config = crate::config::load_from(&path);
+        assert_eq!(
+            config.claude.install,
+            crate::config::UpdatePolicy::Off,
+            "the rest still loads"
+        );
+        assert!(set_forward_agent_in(&path, "devbox", true).unwrap());
+        assert_eq!(forward_agent_in(&path), ["devbox"]);
+        let path2 = config_with("ssh = 1\n");
+        assert!(forward_agent_in(&path2).is_empty());
+        assert!(matches!(
+            set_forward_agent_in(&path2, "devbox", true),
+            Err(SaveError::UnsupportedSection(_))
+        ));
+        for p in [&path, &path2] {
+            fs::remove_dir_all(p.parent().unwrap()).unwrap();
+        }
     }
 
     #[test]

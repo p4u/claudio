@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::app::App;
+use super::app::{App, Effect};
 use super::HostEvent;
 use claudio_core::app::connections::Connections;
 use claudio_core::client::{self, Client, Incoming};
@@ -14,6 +14,7 @@ use claudio_core::freshness::{self, DaemonCheck};
 use claudio_core::paths;
 use claudio_core::proto::{Msg, SessionInfo};
 use claudio_core::remote::bootstrap::ensure_remote;
+use claudio_core::remote::hosts as remote_hosts;
 
 /// A host's daemon connected (bootstrap + connect): start its reader and
 /// recover its sessions. Whether it was taken (a stale attempt is not).
@@ -41,7 +42,10 @@ pub(super) fn on_connected(
     conns.connected(host, client);
     // Record this host in the MRU so it appears first next time.
     claudio_core::remote::hosts::touch(host);
-    app.on_ssh_hosts(claudio_core::remote::hosts::candidates());
+    app.on_ssh_hosts(
+        remote_hosts::candidates(),
+        remote_hosts::forward_agent_hosts(),
+    );
     app.on_host_connected(host, &home);
     // Recover this host's sessions only.
     app.recover_host(host, &sessions);
@@ -77,6 +81,81 @@ pub(super) fn on_local_reconnected(
     app.check_local_install();
     app.on_reconnected_local(&sessions, home);
     true
+}
+
+/// [`Effect::LoadSshHosts`]: read the wizard's SSH hosts and `[ssh]
+/// forward_agent` now. [`Effect::ForwardAgent`]: write the option off the
+/// event loop, then read both again ([`HostEvent::ForwardSaved`]). A host
+/// that was connected and whose option changed is reconnected
+/// ([`HostEvent::Reconnect`]); a failed write is a notice.
+pub(super) fn ssh_hosts(
+    effect: Effect,
+    app: &mut App,
+    conns: &Connections,
+    ev_tx: &mpsc::Sender<HostEvent>,
+) {
+    let Effect::ForwardAgent { host, on } = effect else {
+        app.on_ssh_hosts(
+            remote_hosts::candidates(),
+            remote_hosts::forward_agent_hosts(),
+        );
+        return;
+    };
+    let generation = conns
+        .is_connected(&host)
+        .then(|| conns.current_generation(&host));
+    let tx = ev_tx.clone();
+    tokio::spawn(async move {
+        let write = move || (remote_hosts::set_forward_agent(&host, on), host);
+        match tokio::task::spawn_blocking(write).await {
+            Ok((Ok(true), host)) => {
+                if let Some(generation) = generation {
+                    let _ = tx.send(HostEvent::Reconnect { host, generation }).await;
+                }
+            }
+            Ok((Ok(false), _)) => {}
+            Ok((Err(e), host)) => {
+                let text = format!("ssh agent forwarding for {host} not saved: {e}");
+                let _ = tx.send(HostEvent::Notice(text)).await;
+            }
+            Err(_) => {
+                let text = "ssh agent forwarding not saved: the save stopped".to_owned();
+                let _ = tx.send(HostEvent::Notice(text)).await;
+            }
+        }
+        let read = || {
+            (
+                remote_hosts::candidates(),
+                remote_hosts::forward_agent_hosts(),
+            )
+        };
+        let read = tokio::task::spawn_blocking(read).await.ok();
+        let _ = tx.send(HostEvent::ForwardSaved(read)).await;
+    });
+}
+
+/// [`HostEvent::Reconnect`]: drop `host`'s connection and connect again, its
+/// sessions kept, unless a newer attempt runs or it is not connected.
+pub(super) fn reconnect(
+    app: &mut App,
+    conns: &mut Connections,
+    runtime: &super::addon_runner::Edge,
+    ev_tx: &mpsc::Sender<HostEvent>,
+    (host, generation): (String, u64),
+) {
+    if generation < conns.current_generation(&host) || !conns.is_connected(&host) {
+        return;
+    }
+    // Dropping the client closes the connection; the newer generation
+    // silences its reader.
+    conns.disconnect(&host);
+    super::addon_runner::on_incoming(app, runtime, &host, Incoming::Disconnected);
+    let gen = conns.next_generation(&host);
+    if host == "local" {
+        spawn_reconnect_local(Duration::ZERO, gen, ev_tx.clone());
+    } else {
+        spawn_connect(host, gen, ev_tx.clone(), true);
+    }
 }
 
 /// Ask every host whose daemon is outdated whether it is idle now, so it

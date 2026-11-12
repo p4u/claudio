@@ -164,7 +164,7 @@ async fn probe_and_platform(host: &str) -> Result<(Option<Probe>, String, String
     let cmd = format!(
         r#"{home_quoted}/.local/bin/claudio __probe 2>/dev/null; echo '---UNAME---'; uname -sm"#
     );
-    let output = tokio::time::timeout(SSH_TIMEOUT, ssh_cmd(host).arg(&cmd).output())
+    let output = tokio::time::timeout(SSH_TIMEOUT, ssh_cmd(host, false).arg(&cmd).output())
         .await
         .map_err(|_| format!("ssh probe/uname timed out on {host}"))?
         .map_err(|e| format!("ssh failed: {e}"))?;
@@ -237,7 +237,7 @@ fn parse_probe(
 /// Returns `None` when the binary is missing or the output is unparseable.
 async fn probe_remote(host: &str) -> Option<Probe> {
     let output = tokio::time::timeout(SSH_TIMEOUT, async {
-        ssh_cmd(host)
+        ssh_cmd(host, false)
             .arg(r#""$HOME"/.local/bin/claudio __probe 2>/dev/null"#)
             .output()
             .await
@@ -380,7 +380,7 @@ async fn upload_bytes(
     // Upload: pipe into ssh's stdin, which writes to the temp file.
     let upload_cmd = format!("cat > {tmp_quoted}");
     let status = tokio::time::timeout(SSH_TIMEOUT, async {
-        let mut child = ssh_cmd(host)
+        let mut child = ssh_cmd(host, false)
             .arg(&upload_cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -465,10 +465,12 @@ fi"#
 
 /// Run a shell command on `host` and return its trimmed stdout.
 async fn ssh_run(host: &str, cmd: &str) -> Result<String, String> {
-    let output = tokio::time::timeout(SSH_TIMEOUT, async { ssh_cmd(host).arg(cmd).output().await })
-        .await
-        .map_err(|_| format!("ssh command timed out on {host}"))?
-        .map_err(|e| format!("ssh command failed: {e}"))?;
+    let output = tokio::time::timeout(SSH_TIMEOUT, async {
+        ssh_cmd(host, false).arg(cmd).output().await
+    })
+    .await
+    .map_err(|_| format!("ssh command timed out on {host}"))?
+    .map_err(|e| format!("ssh command failed: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

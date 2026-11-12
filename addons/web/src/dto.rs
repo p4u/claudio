@@ -50,6 +50,7 @@ pub(crate) const HOST_FIELDS: &[&str] = &[
     "claude",
     "features",
     "version",
+    "forward_agent",
 ];
 
 fn kind_name(kind: SessionKind) -> &'static str {
@@ -159,6 +160,7 @@ pub(crate) fn host(state: &HostState) -> Value {
         "claude": claude,
         "features": state.features,
         "version": welcome.map(|w| w.claudio_version.as_str()),
+        "forward_agent": super::hosts::forwards_agent(&state.name),
     })
 }
 

@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::{fs, thread};
 
-use common::{ManagerHarness, BINARY, WAIT};
+use common::{FakeSsh, ManagerHarness, BINARY, DAEMON_WAIT, WAIT};
 use futures::SinkExt;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
@@ -1683,6 +1683,191 @@ async fn web_hosts_report_daemon_features() {
     }
     // The Welcome carries claude's raw `--version` line.
     assert_eq!(local["claude"]["version"], "claude 0.0.0-fake");
+}
+
+/// A web server whose ssh is `fake`'s, logged in, `local` connected.
+async fn web_with_fake_ssh(fake: &FakeSsh) -> (Web, Tab) {
+    let h = ManagerHarness::new();
+    write_web_fake_claude(&h, false);
+    let path = fake.path();
+    let web = Web::start_with(h, &[], move |cmd| {
+        cmd.env("PATH", &path);
+    });
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    (web, tab)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_forward_agent_writes_the_option_and_connects_nothing() {
+    let fake = FakeSsh::new();
+    let (web, mut tab) = web_with_fake_ssh(&fake).await;
+    let set = |host: &str, on: bool| json!({"host": host, "on": on});
+    assert_eq!(
+        tab.req("hosts.forward_agent", set("local", true)).await,
+        Err("local has no ssh connection".to_owned())
+    );
+    let bad = tab
+        .req("hosts.forward_agent", set("-oProxyCommand=x", true))
+        .await;
+    assert!(bad.unwrap_err().contains("must not start with '-'"));
+    let missing = tab
+        .req("hosts.forward_agent", json!({"host": "nowhere"}))
+        .await;
+    assert!(missing.unwrap_err().starts_with("bad request:"));
+
+    // A host this server does not know: written, and nothing connects.
+    let reply = tab.req("hosts.forward_agent", set("nowhere", true)).await;
+    assert_eq!(reply, Ok(json!({})));
+    let config = web.h().config_home.join("claudio/config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(
+        text.contains("[ssh]\nforward_agent = [\"nowhere\"]"),
+        "{text}"
+    );
+    assert!(text.starts_with("[claude]\n"), "the rest stays: {text}");
+    let hosts = tab.req("hosts.list", json!({})).await.unwrap();
+    let names: Vec<&Value> = hosts["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| &h["name"])
+        .collect();
+    assert_eq!(names, [&json!("local")]);
+    assert_eq!(hosts["hosts"][0]["forward_agent"], false, "never for local");
+    tab.req("hosts.forward_agent", set("nowhere", false))
+        .await
+        .unwrap();
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.contains("forward_agent = []"), "{text}");
+    assert!(fake.calls().is_empty(), "no ssh ran: {:?}", fake.calls());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_forward_agent_reconnects_a_connected_host_and_keeps_its_sessions() {
+    let fake = FakeSsh::new();
+    let (web, mut tab) = web_with_fake_ssh(&fake).await;
+    let dir = web.h().dirs[0].clone();
+    let connect = tokio::time::timeout(
+        DAEMON_WAIT,
+        tab.req("hosts.connect", json!({"host": "fakehost"})),
+    );
+    let host = connect
+        .await
+        .expect("connected in time")
+        .expect("hosts.connect");
+    assert_eq!(host["host"]["forward_agent"], false);
+    let shell = json!({"host": "fakehost", "cwd": dir, "rows": 24, "cols": 80});
+    let sid = tab.req("session.shell", shell).await.expect("shell")["sid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = tab
+        .event("session", |v| {
+            v["session"]["id"] == sid.as_str() && v["session"]["pid"].is_u64()
+        })
+        .await;
+    let bridges = fake.bridges();
+    assert_eq!(bridges.len(), 1, "{bridges:?}");
+    assert!(!bridges[0].contains("ForwardAgent"), "{bridges:?}");
+
+    // From here on, only what the toggle causes.
+    tab.pending.clear();
+    let on = json!({"host": "fakehost", "on": true});
+    assert_eq!(
+        tab.req("hosts.forward_agent", on.clone()).await,
+        Ok(json!({}))
+    );
+    let fwd = |v: &Value| v["host"]["name"] == "fakehost" && v["host"]["forward_agent"] == true;
+    tab.event("host", |v| fwd(v) && v["host"]["connected"] == false)
+        .await;
+    tab.event("host", |v| fwd(v) && v["host"]["connected"] == true)
+        .await;
+    let bridges = fake.wait_bridges(2, WAIT);
+    assert!(bridges[1].contains("-o ForwardAgent=yes --"), "{bridges:?}");
+    // The terminal kept running: back from `unknown` with the same process.
+    let state =
+        |v: &Value, want: &str| v["session"]["id"] == sid.as_str() && v["session"]["state"] == want;
+    tab.event("session", |v| state(v, "unknown")).await;
+    let after = tab.event("session", |v| state(v, "idle")).await;
+    assert_eq!(after["session"]["pid"], before["session"]["pid"]);
+    // Unchanged: no reconnect.
+    assert_eq!(tab.req("hosts.forward_agent", on).await, Ok(json!({})));
+    let listed = tab.req("hosts.list", json!({})).await.unwrap();
+    let fakehost = listed["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "fakehost")
+        .cloned();
+    assert_eq!(fakehost.unwrap()["forward_agent"], true);
+    assert_eq!(fake.bridges().len(), 2);
+}
+
+/// What `ssh-add -l` says in terminal `sid`, its output after this run's
+/// command line only (`step` makes the line and its marker unique).
+async fn ssh_add_in(tab: &mut Tab, sid: &str, step: u32) -> String {
+    let line = format!("ssh-add -l; echo step{step}-$((40+2))\r");
+    tab.input(sid, line.as_bytes()).await;
+    let out = tab.output_until(sid, &format!("step{step}-42")).await;
+    let typed = format!("step{step}-$((40+2))");
+    out[out.rfind(&typed).unwrap_or(0)..].to_owned()
+}
+
+/// A forwarded agent reaches a remote terminal through the bridge's link and
+/// the daemon's relay; a terminal started while one was forwarded loses it
+/// while no connection forwards one and gets it back on the next that does,
+/// without a restart (hermetic: a fake ssh and a fake agent with no keys).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_forwarded_agent_reaches_terminals_through_the_relay() {
+    // Never the owner's agent: only whether ssh-add runs at all.
+    let mut probe = Command::new("ssh-add");
+    probe.arg("-l").env_remove("SSH_AUTH_SOCK");
+    if probe.output().is_err() {
+        println!("SKIP web_forwarded_agent_reaches_terminals_through_the_relay: no ssh-add");
+        return;
+    }
+    let fake = FakeSsh::with_agent();
+    let (web, mut tab) = web_with_fake_ssh(&fake).await;
+    let dir = web.h().dirs[0].clone();
+    let set = |on: bool| json!({"host": "fakehost", "on": on});
+    tab.req("hosts.forward_agent", set(true)).await.unwrap();
+    let connect = tab.req("hosts.connect", json!({"host": "fakehost"}));
+    let connect = tokio::time::timeout(DAEMON_WAIT, connect).await;
+    connect.expect("connected in time").expect("hosts.connect");
+    assert!(fake.bridges()[0].contains("ForwardAgent=yes"));
+    let shell = json!({"host": "fakehost", "cwd": dir, "rows": 24, "cols": 200});
+    let sid = tab.req("session.shell", shell).await.expect("shell")["sid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let attach = json!({"sid": sid, "rows": 24, "cols": 200});
+    tab.req("session.attach", attach).await.expect("attach");
+    let none = "The agent has no identities";
+    assert!(ssh_add_in(&mut tab, &sid, 1).await.contains(none));
+
+    // No connection forwards an agent now: the terminal cannot reach one.
+    reconnect_with(&mut tab, &fake, &sid, false, 2).await;
+    assert!(!ssh_add_in(&mut tab, &sid, 2).await.contains(none));
+
+    // A forwarding connection again: the same terminal reaches the agent.
+    reconnect_with(&mut tab, &fake, &sid, true, 3).await;
+    assert!(ssh_add_in(&mut tab, &sid, 3).await.contains(none));
+}
+
+/// Switch fakehost's forwarding to `on` and wait for its `n`th bridge and for
+/// terminal `sid` to be attached again.
+async fn reconnect_with(tab: &mut Tab, fake: &FakeSsh, sid: &str, on: bool, n: usize) {
+    tab.pending.clear();
+    let set = json!({"host": "fakehost", "on": on});
+    tab.req("hosts.forward_agent", set).await.unwrap();
+    fake.wait_bridges(n, WAIT);
+    tab.event("host", |v| {
+        v["host"]["name"] == "fakehost" && v["host"]["connected"] == true
+    })
+    .await;
+    tab.event("attached", |v| v["sid"] == sid).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,6 +13,7 @@ mod dto;
 mod events;
 mod ext;
 mod git_ops;
+mod hosts;
 mod hub;
 mod hub_io;
 mod input;
@@ -603,14 +604,17 @@ async fn build_state(
     let state_path = state::path();
     let hub_cfg = {
         let (state_path, runtime) = (state_path.clone(), runtime.clone());
-        tokio::task::spawn_blocking(move || hub::HubConfig {
-            config: claudio_core::config::load(),
-            tui_state: claudio_core::app::state::ClientState::load(
-                &claudio_core::paths::client_state(),
-            ),
-            web: state::load(&state_path),
-            state_path,
-            runtime,
+        tokio::task::spawn_blocking(move || {
+            hosts::reload_forward(&claudio_core::paths::config_file());
+            hub::HubConfig {
+                config: claudio_core::config::load(),
+                tui_state: claudio_core::app::state::ClientState::load(
+                    &claudio_core::paths::client_state(),
+                ),
+                web: state::load(&state_path),
+                state_path,
+                runtime,
+            }
         })
         .await
         .map_err(|e| format!("cannot read the configuration: {e}"))?

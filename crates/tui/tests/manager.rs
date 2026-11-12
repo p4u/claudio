@@ -27,10 +27,10 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, encode_cwd, extract_nonce, run_git, scopeguard, wizard_pick_dir,
-    ClaudeProjectGuard, ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_G, ALT_H, ALT_L,
-    ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X, ALT_Z,
-    BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT, RIGHT_ARROW,
-    UP_ARROW, WAIT,
+    ClaudeProjectGuard, FakeSsh, ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_F, ALT_G,
+    ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X,
+    ALT_Z, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT,
+    RIGHT_ARROW, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -494,6 +494,68 @@ fn test_wizard_hidden_dirs_toggle() {
     tui.wait_until(|s| !s.contains(".secret-dir", Region::Screen), WAIT);
     tui.wait_for("Alt+. hidden: off", Region::Screen, WAIT);
 
+    tui.quit(WAIT);
+}
+
+/// The Where step's Alt+f switches `[ssh] forward_agent` for the highlighted
+/// remote host (its marker, its hint, `config.toml`), and the connected host
+/// is reconnected with `-o ForwardAgent=yes`, its session kept running.
+#[test]
+fn test_wizard_alt_f_forwards_the_agent_and_reconnects_the_host() {
+    let fake = FakeSsh::new();
+    let harness = ManagerHarness::new();
+    let path = fake.path();
+    let mut tui = harness.start_tui_with(|cmd| cmd.env("PATH", &path));
+
+    // A typed host ("connect to"), then a session in one of its dirs.
+    tui.send_paste("fakehost");
+    tui.wait_for("connect to fakehost", Region::Screen, WAIT);
+    tui.wait_for("Alt+f ssh agent for fakehost: off", Region::Screen, WAIT);
+    tui.send_keys(ENTER);
+    tui.wait_for("New session on fakehost", Region::Screen, DAEMON_WAIT);
+    tui.send_paste(harness.dirs[0].to_str().unwrap());
+    thread::sleep(Duration::from_millis(50));
+    tui.send_keys(ENTER);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, DAEMON_WAIT);
+    let nonce = current_nonce(&tui);
+    let bridges = fake.bridges();
+    assert_eq!(bridges.len(), 1, "{bridges:?}");
+    assert!(!bridges[0].contains("ForwardAgent"), "{bridges:?}");
+
+    // The host is a candidate now; Alt+f on its highlighted row.
+    tui.send_keys(ALT_N);
+    tui.wait_for("── REMOTE", Region::Screen, WAIT);
+    tui.send_keys(b"fakeh");
+    tui.wait_for("Alt+f ssh agent for fakehost: off", Region::Screen, WAIT);
+    tui.send_keys(ALT_F);
+    tui.wait_for("fakehost [agent]", Region::Screen, WAIT);
+    tui.wait_for(
+        "Alt+f ssh agent for fakehost: forward on connect",
+        Region::Screen,
+        WAIT,
+    );
+    let config = harness.config_home.join("claudio/config.toml");
+    let deadline = Instant::now() + WAIT;
+    while !fs::read_to_string(&config)
+        .unwrap_or_default()
+        .contains("[ssh]\nforward_agent = [\"fakehost\"]")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "[ssh] forward_agent never written"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Reconnected with forwarding; the same session answers through it.
+    let bridges = fake.wait_bridges(2, DAEMON_WAIT);
+    assert!(bridges[1].contains("-o ForwardAgent=yes --"), "{bridges:?}");
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("── REMOTE", Region::Screen), WAIT);
+    tui.wait_until(|s| !s.contains("⇄", Region::TabBar), DAEMON_WAIT);
+    tui.send_keys(b"after-reconnect\r");
+    tui.wait_for("after-reconnect", Region::Pane, WAIT);
+    assert_eq!(current_nonce(&tui), nonce, "not respawned");
     tui.quit(WAIT);
 }
 

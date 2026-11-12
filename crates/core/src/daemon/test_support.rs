@@ -150,6 +150,7 @@ impl TestDaemon {
     pub fn config(dir: &Path) -> Config {
         Config {
             socket: dir.join("rt/d.sock"),
+            agent: Default::default(),
             lock: dir.join("rt/d.lock"),
             journal: dir.join("state/journal.json"),
             claude: fake_claude().to_path_buf(),

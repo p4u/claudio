@@ -8,7 +8,8 @@
 //! ```
 //!
 //! Tests `t1`, `t7`, and `t8` are pure unit-style tests (no SSH) and always
-//! run.  Tests `t2`–`t6` and `t9` require a real SSH host.
+//! run.  Tests `t2`–`t6`, `t9` and `t10` require a real SSH host (`t10`
+//! also a local ssh agent holding a key: it checks agent forwarding).
 //!
 //! **Note on `__` diag commands:** `t2`–`t4` use `claudio __bootstrap`,
 //! `__connect-check`, and `__remote-session`.  These may later be gated
@@ -513,5 +514,76 @@ fn t9_remote_plugin_manifest() {
     let _ = ssh_run(
         &host,
         "rm -f \"${XDG_CACHE_HOME:-$HOME/.cache}/claudio/plugins/claudio-t9.\"*",
+    );
+}
+
+// ── t10: ssh agent forwarding ────────────────────────────────────────────────
+
+/// The `SHA256:` fingerprints in `text` (`ssh-add -l`'s, or `__agent-check`'s).
+fn fingerprints(text: &str) -> std::collections::BTreeSet<String> {
+    text.split_whitespace()
+        .filter_map(|w| w.strip_prefix("fingerprint=").or(Some(w)))
+        .filter(|w| w.starts_with("SHA256:"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `claudio __agent-check HOST [ID]` with `cfg` as `XDG_CONFIG_HOME`.
+fn agent_check(cfg: &std::path::Path, host: &str, id: Option<&str>) -> String {
+    let out = Command::new(BINARY)
+        .args(["__agent-check", host])
+        .args(id)
+        .env("XDG_CONFIG_HOME", cfg)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run claudio: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "__agent-check failed: {stderr}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// With `[ssh] forward_agent` naming the host, a terminal there lists the
+/// keys of the agent this test runs with (the same fingerprints as
+/// `ssh-add -l` here), and the same terminal still does after a second
+/// bridge replaced the first. Only fingerprints are compared or printed.
+#[test]
+fn t10_agent_forwarding_reaches_sessions_across_bridges() {
+    let host = match test_host() {
+        Some(h) => h,
+        None => {
+            println!("SKIP t10: set CLAUDIO_SSH_TEST_HOST to run SSH tests");
+            return;
+        }
+    };
+    let local = Command::new("ssh-add").arg("-l").output();
+    let local = fingerprints(
+        &local
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default(),
+    );
+    if local.is_empty() {
+        println!("SKIP t10: the local ssh agent holds no key (ssh-add one first)");
+        return;
+    }
+    let (_, stderr, ok) = run_claudio(&["__bootstrap", &host]);
+    assert!(ok, "__bootstrap failed: {stderr}");
+    let cfg = env::temp_dir().join(format!("cl-agent-{}", std::process::id()));
+    std::fs::create_dir_all(cfg.join("claudio")).unwrap();
+    let toml = format!("[ssh]\nforward_agent = [{:?}]\n", host);
+    std::fs::write(cfg.join("claudio/config.toml"), toml).unwrap();
+
+    let first = agent_check(&cfg, &host, None);
+    let id = first
+        .lines()
+        .find_map(|l| l.strip_prefix("session="))
+        .expect("a session id")
+        .to_owned();
+    let second = agent_check(&cfg, &host, Some(&id));
+    let _ = std::fs::remove_dir_all(&cfg);
+    println!("[t10] local agent: {} key(s)", local.len());
+    assert_eq!(fingerprints(&first), local, "the first bridge's terminal");
+    assert_eq!(
+        fingerprints(&second),
+        local,
+        "the same terminal after a second bridge"
     );
 }

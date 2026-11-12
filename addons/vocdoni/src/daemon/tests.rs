@@ -464,15 +464,17 @@ async fn install_never_runs_over_a_present_claude() {
     }
     assert!(h.log().is_empty(), "{:?}", h.log());
 }
-/// The fake's `--help` lists the flags: nothing is dropped.
+/// The fake's `--help` lists the flags: nothing is dropped. The help text is
+/// there before the daemon starts, which probes `--help` at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn applied_names_the_flags_this_claude_lacks() {
-    let h = PluginHost::start().await;
-    std::fs::write(
-        h.ctl.join("help"),
-        "  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n",
-    )
-    .unwrap();
+    let h = PluginHost::start_with(|ctl| {
+        let help = "  --agents <json>  Agents\n  --mcp-config <configs...>  MCP\n";
+        std::fs::write(ctl.join("help"), help).unwrap();
+        let path = format!("{}:/usr/bin:/bin", ctl.display());
+        (fake_plugin_claude().to_path_buf(), path)
+    })
+    .await;
     let mut c = h.d.client().await;
     let a = applied(
         c.call(team(&[], &["plugin:a@market", "plugin:b@market"]))

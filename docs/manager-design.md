@@ -317,6 +317,32 @@ Recovery runs on start or reconnect:
 
 With the proxy enabled, the remote needs **no claude login**.
 
+### 2.4.1 Agent forwarding
+
+A host listed in `config.toml`'s core section `[ssh] forward_agent` (host strings exactly as
+connected) gets `-o ForwardAgent=yes` on the ssh that carries its bridge (`remote::ssh_cmd`; never
+on bootstrap's). Without it claudio says nothing about forwarding and `~/.ssh/config` decides.
+`remote::hosts::set_forward_agent` is the one writer; the TUI (`Alt+f` in the wizard's Where
+step) and the web (`hosts.forward_agent`) call it, and switching a connected host reconnects it.
+
+sshd's forwarded socket lives as long as one connection, while the daemon and its sessions
+outlive every connection. So:
+
+- **The bridge** (`remote/agent.rs`) asks its `SSH_AUTH_SOCK` for identities (2 s, the answer's
+  type only). One that answers is linked as `<runtime>/agents/<pid>` (made private, renamed into
+  place) and unlinked when the bridge exits. A failure is one stderr line.
+- **The daemon's relay** (`daemon/agent.rs`) listens on `<runtime>/agent-v{PROTO}.sock` (0600,
+  peer uid checked, at most 32 connections). Each connection goes to the newest live link
+  (`lstat` mtime, then name), then to the daemon's own inherited `SSH_AUTH_SOCK`. A link whose
+  target refuses, is gone or is forbidden is removed. Bytes are copied, never read.
+- **Sessions** (claude and terminals) get `SSH_AUTH_SOCK=<relay>` once `agents/` exists: once a
+  bridge linked a working agent there. A host no bridge reaches (the local one) keeps its own
+  agent. A spawn's `env_remove` of `SSH_AUTH_SOCK` drops it, and a value in its env wins.
+
+A session keeps reaching an agent through any later forwarding connection, whichever started
+it; the newest one wins when several forward different agents. A busy daemon older than this
+feature ignores the links until it is replaced (`claudio daemon restart` on that host).
+
 ### 2.5 claude-proxy integration
 
 #### Configuration

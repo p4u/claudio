@@ -112,8 +112,8 @@ pub fn start(config: Config, addons: Arc<crate::addon::Addons>) -> io::Result<Op
 }
 
 /// Bind `path`, replacing a stale socket left by a dead daemon (we hold the
-/// lock, so no live daemon owns it).
-fn bind(path: &Path) -> io::Result<UnixListener> {
+/// lock, so no live daemon owns it). The agent relay binds the same way.
+pub(super) fn bind(path: &Path) -> io::Result<UnixListener> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}

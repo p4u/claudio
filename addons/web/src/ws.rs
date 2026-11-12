@@ -23,7 +23,7 @@ use super::input::Decision;
 use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
-use super::{addons, auth, ext, git_ops, sessions};
+use super::{addons, auth, ext, git_ops, hosts, sessions};
 use claudio_core::paths;
 use claudio_core::proto::{Msg, SearchHit, SessionId};
 
@@ -277,12 +277,12 @@ pub(super) fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NoArgs {}
+pub(super) struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HostArgs {
-    host: String,
+pub(super) struct HostArgs {
+    pub(super) host: String,
 }
 
 #[derive(Deserialize)]
@@ -439,33 +439,7 @@ pub(crate) async fn dispatch(
 ) -> Result<Value, String> {
     let hub = &state.hub;
     match op {
-        "hosts.list" => {
-            parse::<NoArgs>(args)?;
-            Ok(json!({ "hosts": hub.hosts().await }))
-        }
-        "hosts.candidates" => {
-            parse::<NoArgs>(args)?;
-            let connected: Vec<String> = hub
-                .hosts()
-                .await
-                .into_iter()
-                .filter(|h| h["connected"] == true)
-                .filter_map(|h| h["name"].as_str().map(str::to_owned))
-                .collect();
-            let all = tokio::task::spawn_blocking(claudio_core::remote::hosts::candidates)
-                .await
-                .unwrap_or_default();
-            let hosts: Vec<String> = all.into_iter().filter(|h| !connected.contains(h)).collect();
-            Ok(json!({ "hosts": hosts }))
-        }
-        "hosts.connect" => {
-            let a: HostArgs = parse(args)?;
-            hub.connect(a.host).await
-        }
-        "hosts.disconnect" => {
-            let a: HostArgs = parse(args)?;
-            hub.disconnect(a.host).await.map(|()| json!({}))
-        }
+        op if op.starts_with("hosts.") => hosts::dispatch(hub, op, args).await,
         "session.attach" => {
             let a: SizeArgs = parse(args)?;
             check_size(a.rows, a.cols)?;

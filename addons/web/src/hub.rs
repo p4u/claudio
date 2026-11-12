@@ -509,10 +509,10 @@ enum Cmd {
         host: String,
         generation: u64,
     },
-    /// An outdated daemon is idle now: reconnect (which replaces it).
+    /// Reconnect a connected host: outdated and idle now, or `hosts.forward_agent` (`None`).
     Reconnect {
         host: String,
-        generation: u64,
+        generation: Option<u64>,
     },
     ClaudeDone {
         host: String,
@@ -562,7 +562,7 @@ pub(crate) fn start(cfg: HubConfig) -> HubHandle {
     let remembered = hub.web.hosts.iter().cloned();
     let tui_hosts = hub.tui_state.sessions.iter().map(|s| s.host.clone());
     for host in remembered.chain(tui_hosts) {
-        if host_ok(&host).is_ok() && host != "local" && !hosts.contains(&host) {
+        if super::hosts::host_ok(&host).is_ok() && host != "local" && !hosts.contains(&host) {
             hosts.push(host);
         }
     }
@@ -576,16 +576,6 @@ pub(crate) fn start(cfg: HubConfig) -> HubHandle {
     }
     tokio::spawn(run(hub, rx));
     HubHandle { tx, events }
-}
-
-/// A host name the web may connect to: what `remote::validate_host` takes,
-/// at most 255 bytes, no whitespace or control characters.
-fn host_ok(host: &str) -> Result<(), String> {
-    claudio_core::remote::validate_host(host)?;
-    if host.len() > 255 || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("invalid host {:?}", clean(host, 80)));
-    }
-    Ok(())
 }
 
 impl HubHandle {
@@ -698,8 +688,14 @@ impl HubHandle {
         if host == "local" {
             return Err("local is always connected".into());
         }
-        host_ok(&host)?;
+        super::hosts::host_ok(&host)?;
         self.ask(|reply| Cmd::Connect { host, reply }).await?
+    }
+
+    /// `hosts.forward_agent` changed `host`'s option: reconnect it if connected.
+    pub(crate) async fn forward_agent_changed(&self, host: String) {
+        let generation = None;
+        let _ = self.tx.send(Cmd::Reconnect { host, generation }).await;
     }
 
     pub(crate) async fn disconnect(&self, host: String) -> Result<(), String> {
@@ -837,7 +833,7 @@ fn now_secs() -> u64 {
 }
 
 /// `text` sanitized and cut at `max` characters.
-fn clean(text: &str, max: usize) -> String {
+pub(crate) fn clean(text: &str, max: usize) -> String {
     claudio_core::text::sanitize(text)
         .chars()
         .take(max)
@@ -1033,19 +1029,26 @@ impl Hub {
                     self.start_attempt(&host, generation, bootstrap);
                 }
             }
-            Cmd::Reconnect { host, generation } => {
-                let connected = self.hosts.get(&host).is_some_and(|h| h.client.is_some());
-                if connected && self.current(&host, generation) {
-                    self.lost(&host);
-                    let generation = self.conns.next_generation(&host);
-                    self.start_attempt(&host, generation, false);
-                }
-            }
+            Cmd::Reconnect { host, generation } => self.reconnect(&host, generation),
             Cmd::ClaudeDone {
                 host,
                 install,
                 result,
             } => self.claude_done(&host, install, result),
+        }
+    }
+
+    /// Drop a connected `host`'s connection and connect again (its sessions
+    /// stay, `unknown` until it is back); a `generation` must still be its
+    /// connection's. Without one, a host left alone gets its `host` event.
+    fn reconnect(&mut self, host: &str, generation: Option<u64>) {
+        let connected = self.hosts.get(host).is_some_and(|h| h.client.is_some());
+        if connected && generation.is_none_or(|g| self.current(host, g)) {
+            self.lost(host);
+            let generation = self.conns.next_generation(host);
+            self.start_attempt(host, generation, false);
+        } else if generation.is_none() {
+            self.send_host(host);
         }
     }
 
@@ -1810,7 +1813,7 @@ impl Hub {
             };
             let (host, generation, tx) = (
                 h.name.clone(),
-                self.conns.current_generation(&h.name),
+                Some(self.conns.current_generation(&h.name)),
                 self.tx.clone(),
             );
             tokio::spawn(async move {

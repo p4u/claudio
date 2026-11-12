@@ -233,7 +233,10 @@ flowchart LR
   in one round trip; a failed probe reports ssh's stderr, and `ssh_cmd` uses
   `StrictHostKeyChecking=accept-new`) and uploads the binary if missing or stale (SHA-256);
   cross-platform it uploads the release asset. `bridge.rs` is `--slave`, the stdio↔socket bridge,
-  starting or replacing the remote daemon.
+  starting or replacing the remote daemon. Agent forwarding (`[ssh] forward_agent` per host,
+  `ssh_cmd`'s `-o ForwardAgent=yes`): `agent.rs` links the bridge's live `SSH_AUTH_SOCK` under
+  `<runtime>/agents/`, and the daemon's relay (`daemon/agent.rs`, `agent-v{PROTO}.sock`) is every
+  session's `SSH_AUTH_SOCK` once one exists (docs/manager-design.md §2.4.1).
 - **The shared layer** (`crates/core/src/app/`, no ratatui, crossterm or axum; the web imports
   nothing from claudio-tui): `addons/` (`AddonRuntime`, the one `AddonCtx` implementation),
   `launch/` (the launch composer), `config_edit.rs` (every `config.toml` writer: a minimal,

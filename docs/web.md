@@ -80,7 +80,8 @@ allow_hosts = ["claudio.example.org"]
   running service at once: every browser signs in again.
 - The server runs with the daemon's environment, not the terminal's that ran `claudio web`: its
   SSH hosts use the daemon's `SSH_AUTH_SOCK` (stale or absent when the daemon was started over ssh
-  or by `systemd-run`), and `CLAUDIO_*` set in the terminal do not reach it. Run
+  or by `systemd-run`), so its connections usually forward no agent (below), and `CLAUDIO_*` set
+  in the terminal do not reach it. Run
   `claudio daemon restart` from a shell with the environment you want, or use `--foreground`.
 - A daemon older than this claudio (or a build without the web addon) has no web service:
   `claudio web` says so, keeps `[web]` saved, and exits 1. `claudio daemon restart` when its
@@ -108,6 +109,31 @@ is still accepted at its first connection, and with `no`, a host whose key chang
 (`ssh-keygen -R <host>` forgets the old key).
 A host that cannot be reached shows ssh's own error (`ssh failed (exit N): …`, such as "Could
 not resolve hostname").
+
+**SSH agent forwarding.** A remote host's panel has an "SSH agent" row with a button, and the add
+form and Alt+n's "Another host…" a "Forward my SSH agent" box (sent before the connect, checked
+or not). They set the host in `config.toml`'s `[ssh] forward_agent` (the TUI: `Alt+f` on the
+host in Alt+n's Where step). claudio then connects that host with `-o ForwardAgent=yes`; without
+it, claudio passes nothing and your ssh config decides. Switching a connected host reconnects it;
+its sessions keep running. On the host, every claude session and terminal reaches the agent of
+the newest connection that forwards one, for as long as one does, whichever connection started
+the session, and a reconnect restores it without a restart. Sessions started before the first
+forwarding connection to that host need a restart. Things to know:
+
+- **Trust.** While a forwarding connection is up, every session on that host, anything claude
+  runs in one, and root there can sign with your keys. That is the feature; prefer `ssh-add -c`
+  (confirm each use) or a dedicated key.
+- **Where the agent comes from.** Forwarding needs an agent where the ssh runs. The web service
+  runs with the daemon's environment, which often has no `SSH_AUTH_SOCK`, so its connections
+  register nothing: forwarding reaches the host while a client whose own environment has a live
+  agent is connected, normally the desktop TUI or a `--foreground` web started from a desktop
+  terminal. The panel says "forward on connect", never "forwarded": the server cannot see the
+  remote side.
+- **Several clients.** When two machines forward different agents, sessions use the newest.
+- **ControlMaster.** A multiplexed connection forwards only if its master was opened with
+  forwarding (OpenSSH decides by the master's `ForwardAgent`).
+- **Old daemons.** A daemon older than this claudio, left running because it was busy, ignores
+  forwarded agents until it is replaced (`claudio daemon restart` on that host).
 
 ### From another machine
 
@@ -320,6 +346,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Capability | TUI key | Web action | WS op(s) | Test |
 |---|---|---|---|---|
 | Sessions on many hosts | wizard host list | the top bar's Hosts menu (one row per host), host panel, Add host… | `hosts.list`, `hosts.candidates`, `hosts.connect`, `hosts.disconnect` | `web_hosts_report_daemon_features`; ssh hosts: manual check on a real host |
+| SSH agent forwarding | `Alt+f` in the wizard's Where step | host panel "SSH agent" row; "Forward my SSH agent" in Add host and the wizard's "Another host…" | `hosts.forward_agent`, Host `forward_agent` | `the host panel switches ssh agent forwarding for a remote host`; `the wizard sends the agent choice before it connects a typed host`; `web_forward_agent_reconnects_a_connected_host_and_keeps_its_sessions`; `web_forwarded_agent_reaches_terminals_through_the_relay` |
 | Terminal panes (1, 2, 4) | `Alt+←/→` | pane grid buttons, `1`-`4`, drag a card | `session.attach`, `session.detach`, `session.resize`, `layout.save` | `a pane shows the terminal and typed keys echo`; `web_attach_snapshot_input_and_resize`; `web_two_tabs_share_one_attach` |
 | Terminal tabs | `Alt+c` | `t`, "Terminal beside" in a pane | `session.shell` | `a terminal tab runs echo ok`; `web_session_lifecycle_shell_rename_kill` |
 | New-session wizard: dirs | `Alt+n` | `n`: folder field, recent folders, browser | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir` |

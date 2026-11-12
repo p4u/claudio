@@ -20,6 +20,7 @@
 
 mod addon_ops;
 mod admit;
+mod agent;
 mod command;
 pub mod ctl;
 mod git;
@@ -72,6 +73,8 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Config {
     /// The control socket (also handed to hooks).
     pub socket: PathBuf,
+    /// The SSH agent relay beside it ([`agent`]): its inherited fallback.
+    pub agent: agent::AgentRelay,
     /// The startup lock file; held for the daemon's lifetime.
     pub lock: PathBuf,
     /// The session journal.
@@ -123,6 +126,7 @@ impl Config {
         let claude = crate::config::load().claude;
         Ok(Config {
             socket: paths::daemon_socket(),
+            agent: agent::AgentRelay::inherited(std::env::var_os("SSH_AUTH_SOCK")),
             lock: paths::daemon_lock(),
             journal: paths::daemon_journal(),
             claude: claude_setting(std::env::var_os("CLAUDIO_CLAUDE_PATH")),
@@ -243,7 +247,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 async fn serve_until_shutdown(listening: server::Listening) -> std::fs::File {
     let daemon = listening.daemon();
     service::Services::start_all(&daemon);
+    let relay = agent::start(&daemon);
     let lock = listening.serve().await;
+    drop(relay);
     let grace = daemon.config.service_timing.stop;
     daemon.services.stop_all(grace).await;
     lock
@@ -864,6 +870,7 @@ mod claude_path_tests {
     fn config(claude: PathBuf, path: Option<OsString>) -> Config {
         Config {
             socket: "/run/d.sock".into(),
+            agent: Default::default(),
             lock: "/run/d.lock".into(),
             journal: "/j.json".into(),
             claude,

@@ -97,8 +97,12 @@ pub enum Effect {
     Connect(String),
     /// Write state.json.
     Save,
-    /// Read the SSH host candidates again; they go to [`App::on_ssh_hosts`].
+    /// Read the SSH host candidates and `[ssh] forward_agent` again; they go
+    /// to [`App::on_ssh_hosts`].
     LoadSshHosts,
+    /// Put `host` in `[ssh] forward_agent` (`on`) or take it out, off the
+    /// event loop; then [`App::on_forward_saved`].
+    ForwardAgent { host: String, on: bool },
     /// Launch a claude session through the launch composer
     /// ([`claudio_core::app::launch`]); the outcome goes to [`App::on_launched`].
     Launch(LaunchCall),
@@ -300,6 +304,10 @@ pub struct App {
     /// The SSH hosts the wizard offers: recently used ones, then
     /// `~/.ssh/config` aliases.
     pub(super) ssh_hosts: Vec<String>,
+    /// `[ssh] forward_agent`, read with them: the wizard's markers.
+    pub(super) forward_agent: Vec<String>,
+    /// An [`Effect::ForwardAgent`] runs; the next waits for it.
+    pub(super) forward_pending: bool,
     /// The generation of the open wizard or history view, raised each time
     /// one opens. Their requests carry it, so a reply meant for one that
     /// was closed (or replaced) since is recognised and dropped.
@@ -399,6 +407,8 @@ impl App {
             claude_installing: HashSet::new(),
             confirms: VecDeque::new(),
             ssh_hosts: cfg.ssh_hosts,
+            forward_agent: Vec::new(),
+            forward_pending: false,
             modal_gen: 0,
             copy_on_select: cfg.copy_on_select,
             selection: None,
@@ -415,13 +425,60 @@ impl App {
         }
     }
 
-    /// The SSH host candidates were (re)read: offer them from now on, and in
-    /// the wizard's first screen if it is open and untouched.
-    pub fn on_ssh_hosts(&mut self, hosts: Vec<String>) {
+    /// The SSH host candidates and `[ssh] forward_agent` were (re)read: offer
+    /// them from now on, and in the wizard's first screen if it is open and
+    /// untouched.
+    pub fn on_ssh_hosts(&mut self, hosts: Vec<String>, forward_agent: Vec<String>) {
         if let Some(w) = self.wizard_mut() {
             w.set_ssh_hosts(&hosts);
         }
         self.ssh_hosts = hosts;
+        self.forward_agent = forward_agent;
+        self.redraw = true;
+    }
+
+    /// An [`Effect::ForwardAgent`] ended: the hosts and flags read after it
+    /// (`None`: they could not be read; the next wizard reads them again).
+    pub fn on_forward_saved(&mut self, read: Option<(Vec<String>, Vec<String>)>) {
+        self.forward_pending = false;
+        if let Some((hosts, forward_agent)) = read {
+            self.on_ssh_hosts(hosts, forward_agent);
+        }
+    }
+
+    /// The remote host the wizard's first screen has highlighted: a
+    /// candidate row, or the "connect to <query>" row.
+    pub fn wizard_remote_host(&self) -> Option<String> {
+        let Some(Modal::Wizard(w)) = &self.modal else {
+            return None;
+        };
+        let hs = w.host_step.as_ref().filter(|hs| hs.connecting.is_none())?;
+        if hs.focus != super::wizard::HostSection::Remote {
+            return None;
+        }
+        match hs.items.get(hs.selected) {
+            Some(host) => Some(host.clone()),
+            None => hs.connect_raw.then(|| hs.input.trim().to_owned()),
+        }
+    }
+
+    /// The wizard's forwarding key: switch `[ssh] forward_agent` for the
+    /// highlighted remote host. The marker flips now; the write runs off the
+    /// event loop, one at a time, and its end sends the flags again.
+    pub(super) fn toggle_forward_agent(&mut self) {
+        if self.forward_pending {
+            return;
+        }
+        let Some(host) = self.wizard_remote_host() else {
+            return;
+        };
+        let on = !self.forward_agent.contains(&host);
+        self.forward_agent.retain(|h| *h != host);
+        if on {
+            self.forward_agent.push(host.clone());
+        }
+        self.forward_pending = true;
+        self.emit(Effect::ForwardAgent { host, on });
         self.redraw = true;
     }
 
@@ -749,13 +806,74 @@ mod tests {
         };
         assert_eq!(hosts(&app), ["devbox"]);
         // The fresh list replaces the untouched first screen...
-        app.on_ssh_hosts(vec!["devbox".into(), "nas".into()]);
+        app.on_ssh_hosts(vec!["devbox".into(), "nas".into()], vec![]);
         assert_eq!(hosts(&app), ["devbox", "nas"]);
         // ...but not one the user is typing in.
         app.on_terminal(press(KeyCode::Char('n')));
-        app.on_ssh_hosts(vec!["other".into()]);
+        app.on_ssh_hosts(vec!["other".into()], vec!["other".into()]);
         assert_eq!(hosts(&app), ["nas"]);
         assert_eq!(app.ssh_hosts, ["other"], "the next wizard has it");
+        assert_eq!(app.forward_agent, ["other"]);
+    }
+
+    #[test]
+    fn alt_f_switches_forwarding_for_the_highlighted_remote_host() {
+        let mut app = App::new(AppConfig {
+            ssh_hosts: vec!["devbox".into(), "nas".into()],
+            ..test_support::config()
+        });
+        app.recover(&ClientState::default(), &[]);
+        app.take_effects();
+        // The LOCAL section has focus: nothing to switch.
+        app.on_terminal(alt('f'));
+        assert!(app.take_effects().is_empty());
+        for c in "nas".chars() {
+            app.on_terminal(press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.wizard_remote_host().as_deref(), Some("nas"));
+        app.on_terminal(alt('f'));
+        let effects = app.take_effects();
+        assert!(
+            matches!(&effects[..], [Effect::ForwardAgent { host, on: true }] if host == "nas"),
+            "{effects:?}"
+        );
+        assert_eq!(app.forward_agent, ["nas"], "the marker flips at once");
+        // One at a time: a second press waits for the first write.
+        app.on_terminal(alt('f'));
+        assert!(app.take_effects().is_empty());
+        app.on_forward_saved(Some((
+            vec!["devbox".into(), "nas".into()],
+            vec!["nas".into()],
+        )));
+        assert!(!app.forward_pending);
+        app.on_terminal(alt('f'));
+        let effects = app.take_effects();
+        assert!(matches!(
+            &effects[..],
+            [Effect::ForwardAgent { on: false, .. }]
+        ));
+        assert!(app.forward_agent.is_empty());
+        // The typed "connect to <query>" row is switched too.
+        app.on_forward_saved(None);
+        assert!(app.forward_agent.is_empty(), "nothing read: kept");
+        for _ in 0..3 {
+            app.on_terminal(press(KeyCode::Backspace));
+        }
+        for c in "me@10.0.0.9".chars() {
+            app.on_terminal(press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.wizard_remote_host().as_deref(), Some("me@10.0.0.9"));
+        app.on_terminal(alt('f'));
+        let effects = app.take_effects();
+        assert!(
+            matches!(&effects[..], [Effect::ForwardAgent { host, on: true }] if host == "me@10.0.0.9"),
+            "{effects:?}"
+        );
+        // The typed text is the filter: plain `f` still types.
+        assert_eq!(
+            app.wizard_mut().unwrap().host_step.as_ref().unwrap().input,
+            "me@10.0.0.9"
+        );
     }
 
     #[test]

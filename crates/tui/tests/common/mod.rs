@@ -63,6 +63,7 @@ pub const ALT_H: &[u8] = b"\x1bh";
 pub const ALT_C: &[u8] = b"\x1bc";
 pub const ALT_L: &[u8] = b"\x1bl";
 pub const ALT_E: &[u8] = b"\x1be";
+pub const ALT_F: &[u8] = b"\x1bf";
 pub const ALT_U: &[u8] = b"\x1bu";
 pub const ENTER: &[u8] = b"\r";
 pub const CTRL_U: &[u8] = b"\x15";
@@ -983,6 +984,178 @@ impl Drop for ManagerHarness {
         self.kill_daemon();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+// ── FakeSsh ───────────────────────────────────────────────────────────────────
+
+/// A fake `ssh` for hermetic remote-host tests (put [`FakeSsh::path`] on the
+/// client's `PATH`). It logs its argv, then runs the remote command with
+/// `sh -c` on this machine as a "remote" of its own: its own `HOME` (whose
+/// `~/.local/bin/claudio` execs this build, so bootstrap uploads nothing),
+/// config (the test config) and runtime dir (`TMPDIR`; without
+/// `XDG_RUNTIME_DIR` the bridge starts the remote daemon with setsid, never
+/// `systemd-run`). The owner's `SSH_AUTH_SOCK` never reaches it: like ssh,
+/// it forwards an agent only when given `-o ForwardAgent=yes`, and then only
+/// the fake one of [`FakeSsh::with_agent`]. Every host name reaches the same
+/// remote. Dropping it stops the remote daemon and removes its dirs.
+pub struct FakeSsh {
+    pub root: PathBuf,
+    bin: PathBuf,
+    log: PathBuf,
+}
+
+impl FakeSsh {
+    /// A fake ssh that forwards no agent.
+    pub fn new() -> FakeSsh {
+        FakeSsh::make(false)
+    }
+
+    /// A fake ssh that forwards a fake agent (`<root>/agent.sock`, which
+    /// holds no key) when asked to.
+    pub fn with_agent() -> FakeSsh {
+        FakeSsh::make(true)
+    }
+
+    fn make(agent: bool) -> FakeSsh {
+        let root = short_tmp_root();
+        private_dir(&root);
+        let agent = match agent {
+            true => {
+                let sock = root.join("agent.sock");
+                fake_ssh_agent(&sock);
+                sock.display().to_string()
+            }
+            false => String::new(),
+        };
+        let (bin, home, cfg, tmp) = (
+            root.join("bin"),
+            root.join("home"),
+            root.join("cfg"),
+            root.join("t"),
+        );
+        for d in [&bin, &home.join(".local/bin"), &tmp] {
+            fs::create_dir_all(d).expect("create fake remote dir");
+        }
+        write_test_config(&cfg);
+        let claudio = home.join(".local/bin/claudio");
+        fs::write(&claudio, format!("#!/bin/sh\nexec '{BINARY}' \"$@\"\n")).expect("write claudio");
+        let log = root.join("ssh.log");
+        let ssh = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+agent=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -o) [ "$2" = ForwardAgent=yes ] && [ -n '{agent}' ] && agent='{root}/fwd-'$$; shift 2 ;;
+    *) shift ;;
+  esac
+done
+shift
+# Like sshd: this connection's own agent path, gone when the connection ends.
+[ -n "$agent" ] && ln -s '{agent}' "$agent"
+env -u SSH_AUTH_SOCK -u XDG_RUNTIME_DIR ${{agent:+SSH_AUTH_SOCK=$agent}} HOME='{home}' XDG_CONFIG_HOME='{cfg}' TMPDIR='{tmp}' /bin/sh -c "$*"
+status=$?
+[ -n "$agent" ] && rm -f "$agent"
+exit $status
+"#,
+            log = log.display(),
+            root = root.display(),
+            home = home.display(),
+            cfg = cfg.display(),
+            tmp = tmp.display(),
+        );
+        fs::write(bin.join("ssh"), ssh).expect("write fake ssh");
+        for f in [bin.join("ssh"), claudio] {
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        FakeSsh { root, bin, log }
+    }
+
+    /// `PATH` with the fake ssh first.
+    pub fn path(&self) -> String {
+        let rest = std::env::var("PATH").unwrap_or_default();
+        format!("{}:{rest}", self.bin.display())
+    }
+
+    /// The logged command lines (ssh's argv) that ran a bridge, oldest first.
+    pub fn bridges(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.ends_with("--slave"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Every logged ssh command line, oldest first.
+    pub fn calls(&self) -> Vec<String> {
+        let log = fs::read_to_string(&self.log).unwrap_or_default();
+        log.lines().map(str::to_owned).collect()
+    }
+
+    /// Wait until `n` bridges ran; their command lines.
+    pub fn wait_bridges(&self, n: usize, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let bridges = self.bridges();
+            if bridges.len() >= n {
+                return bridges;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{n} bridges never ran: {bridges:?}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The remote daemon's lock file (it holds its pid).
+    fn lock(&self) -> PathBuf {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let v = claudio_core::version::PROTO;
+        self.root.join(format!("t/claudio-{uid}/daemon-v{v}.lock"))
+    }
+}
+
+impl Drop for FakeSsh {
+    fn drop(&mut self) {
+        let pid = fs::read_to_string(self.lock()).ok();
+        if let Some(pid) = pid.and_then(|s| s.trim().parse::<libc::pid_t>().ok()) {
+            // SAFETY: kill(2) has no preconditions.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// A fake ssh agent at `path`, for the rest of the test run: it answers an
+/// identities request with an empty list and anything else with a failure.
+fn fake_ssh_agent(path: &Path) {
+    let listener = std::os::unix::net::UnixListener::bind(path).expect("bind fake agent");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            thread::spawn(move || {
+                let mut len = [0u8; 4];
+                while s.read_exact(&mut len).is_ok() {
+                    let mut body = vec![0u8; (u32::from_be_bytes(len) as usize).min(1 << 16)];
+                    if s.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    // SSH_AGENT_IDENTITIES_ANSWER (no keys), else SSH_AGENT_FAILURE.
+                    let answer: &[u8] = match body.first() {
+                        Some(11) => &[0, 0, 0, 5, 12, 0, 0, 0, 0],
+                        _ => &[0, 0, 0, 1, 5],
+                    };
+                    if s.write_all(answer).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// One `J` frame: `[u32 BE length][b'J'][JSON]`, the length counting the tag.
