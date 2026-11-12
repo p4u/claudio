@@ -450,8 +450,9 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 `updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
 
 **Usage limits.** Its `on_usage_limit` answers `NotMine` when the host's `config.toml` has
-`[proxy] auto_switch = false` (a bool, default `true`, read through `DaemonCtx::config`), and
-when the session's env lacks `ANTHROPIC_BASE_URL` or `ANTHROPIC_AUTH_TOKEN` (a direct session).
+`[proxy] auto_switch = false` (default `true`, and any value but `true` counts as off; read
+through `DaemonCtx::config`), and when the session's env lacks `ANTHROPIC_BASE_URL` or
+`ANTHROPIC_AUTH_TOKEN` (a direct session).
 Otherwise it asks that proxy to move the conversation, `POST /v1/claudio/session/switch`
 within 15 s: 202 is `Switched` with the proxy's names (`current subscription` and `next
 available` when it sends none), 409 is `Failed` with the proxy's reason (no other eligible

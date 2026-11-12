@@ -13,12 +13,16 @@ use super::api::{self, SwitchError};
 /// The most one switch may take, the capability probe after a 404 included.
 const SWITCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Unless `[proxy] auto_switch = false` on this host: `POST /v1/claudio/session/switch`
+/// Unless `[proxy] auto_switch` is set to anything but `true` on this host: `POST /v1/claudio/session/switch`
 /// for the conversation with the session's own `ANTHROPIC_BASE_URL` and
 /// `ANTHROPIC_AUTH_TOKEN`. A session without both is not a proxy session: `NotMine`.
 pub async fn on_usage_limit(hit: UsageLimit<'_>, ctx: Arc<dyn DaemonCtx>) -> LimitOutcome {
     let proxy = ctx.config("proxy");
-    if proxy.get("auto_switch").and_then(toml::Value::as_bool) == Some(false) {
+    // Absent is on; any present value but `true` is off, so a typo never leaves it on.
+    if proxy
+        .get("auto_switch")
+        .is_some_and(|v| v.as_bool() != Some(true))
+    {
         return LimitOutcome::NotMine;
     }
     let var = |name| (hit.env)(name).filter(|v| !v.is_empty());
@@ -173,8 +177,11 @@ mod tests {
         let body = json!({"session_id": "0a1b", "from": {"id": "c1"}, "state": "pending"});
         let (router, hits) = counted(switch_router(202, body));
         let base = serve(router).await;
-        let off = "[proxy]\nauto_switch = false\n";
-        assert_eq!(ask(&proxied(&base), off).await, LimitOutcome::NotMine);
+        // Off is any present value but `true`: a typo must not leave it on.
+        for off in ["false", "\"false\"", "0"] {
+            let off = format!("[proxy]\nauto_switch = {off}\n");
+            assert_eq!(ask(&proxied(&base), &off).await, LimitOutcome::NotMine);
+        }
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         let on = "[proxy]\nauto_switch = true\n";
         assert!(matches!(
