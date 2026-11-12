@@ -252,9 +252,11 @@ impl Extensions {
     pub(crate) async fn reread(&self, hub: &HubHandle, rows: &[(&'static str, ExtensionRow)]) {
         let toggles = self.toggles.load(Ordering::Acquire);
         let path = self.config_path.clone();
-        let Ok(config) =
-            tokio::task::spawn_blocking(move || claudio_core::config::load_from(&path)).await
-        else {
+        let read = move || {
+            super::hosts::reload_forward(&path);
+            claudio_core::config::load_from(&path)
+        };
+        let Ok(config) = tokio::task::spawn_blocking(read).await else {
             return;
         };
         tracing::debug!("web: config.toml re-read");
