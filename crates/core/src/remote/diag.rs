@@ -12,7 +12,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 /// The core's diag words (`__bootstrap`, `__connect-check`,
-/// `__remote-session`, `__ssh-hosts`); `None` for any other word.
+/// `__remote-session`, `__ssh-hosts`, `__agent-check`); `None` for any
+/// other word.
 pub fn dispatch(argv: &[String]) -> Option<ExitCode> {
     let arg = |i: usize| argv.get(i).map(String::as_str);
     let code = match (arg(1)?, arg(2), arg(3)) {
@@ -20,6 +21,8 @@ pub fn dispatch(argv: &[String]) -> Option<ExitCode> {
         ("__connect-check", Some(host), _) => connect_check_cmd(host),
         ("__remote-session", Some(host), Some(cwd)) => remote_session_cmd(host, cwd),
         ("__ssh-hosts", _, _) => ssh_hosts_cmd(),
+        ("__agent-check", Some(host), id) => agent_check_cmd(host, id),
+        ("__agent-check", ..) => usage("__agent-check <host> [<session id>]"),
         ("__bootstrap", ..) => usage("__bootstrap <host>"),
         ("__connect-check", ..) => usage("__connect-check <host>"),
         ("__remote-session", ..) => usage("__remote-session <host> <cwd>"),
@@ -231,4 +234,119 @@ fn ssh_hosts_cmd() -> ExitCode {
         println!("{h}");
     }
     ExitCode::SUCCESS
+}
+
+/// `claudio __agent-check HOST [ID]`
+///
+/// In a terminal on `HOST` (a new one, printed as `session=<id>` and left
+/// running, or session `ID`, killed afterwards), runs `ssh-add -l` and
+/// prints the fingerprints it lists, `fingerprint=SHA256:…`, never a key's
+/// comment. For `tests/remote.rs`' agent forwarding test.
+fn agent_check_cmd(host: &str, id: Option<&str>) -> ExitCode {
+    let given = match id.map(uuid::Uuid::parse_str) {
+        None => None,
+        Some(Ok(id)) => Some(id),
+        Some(Err(_)) => return usage("__agent-check <host> [<session id>]"),
+    };
+    let rt = match make_runtime() {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let host = host.to_owned();
+    rt.block_on(async move {
+        let client = match crate::client::connect_ssh(&host).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("connect_ssh({host}) failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let id = match given {
+            Some(id) => id,
+            None => match spawn_shell(&client).await {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("SpawnShell failed: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+        };
+        let output = ssh_add_in(&client, id).await;
+        if given.is_some() {
+            let _ = client.request(crate::proto::Msg::Kill { id }).await;
+        }
+        let Some(output) = output else {
+            eprintln!("no answer from the terminal");
+            return ExitCode::FAILURE;
+        };
+        for word in output.split_whitespace() {
+            if word.starts_with("SHA256:") {
+                println!("fingerprint={word}");
+            }
+        }
+        ExitCode::SUCCESS
+    })
+}
+
+/// A new terminal in `/tmp`, announced as `session=<id>`.
+async fn spawn_shell(client: &crate::client::Client) -> Result<uuid::Uuid, String> {
+    let id = uuid::Uuid::new_v4();
+    let spec = crate::proto::ShellSpec {
+        id,
+        cwd: "/tmp".to_owned(),
+        name: None,
+        rows: 24,
+        cols: 160,
+    };
+    match client.request(crate::proto::Msg::SpawnShell(spec)).await {
+        Ok(crate::proto::Msg::Spawned { .. }) => {
+            println!("session={id}");
+            Ok(id)
+        }
+        Ok(other) => Err(format!("unexpected reply {other:?}")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Attach to terminal `id`, let its snapshot pass, run `ssh-add -l` there
+/// and collect what it prints until a marker computed by the shell (so the
+/// echoed command line never matches it); `None` after 15 s.
+async fn ssh_add_in(client: &crate::client::Client, id: uuid::Uuid) -> Option<String> {
+    use crate::client::Incoming;
+    let mut rx = client.take_incoming()?;
+    let attach = crate::proto::Msg::Attach {
+        id,
+        rows: 24,
+        cols: 160,
+    };
+    client.request(attach).await.ok()?;
+    let settle = tokio::time::sleep(Duration::from_millis(500));
+    tokio::pin!(settle);
+    loop {
+        tokio::select! {
+            _ = &mut settle => break,
+            item = rx.recv() => item?,
+        };
+    }
+    let n = std::process::id() % 1000 + 1000;
+    let line = format!("ssh-add -l; echo agent-check-$(({n}+1))\r");
+    let marker = format!("agent-check-{}", n + 1);
+    client.send_input(id, line.as_bytes());
+    let mut text = String::new();
+    let collect = async {
+        while !text.contains(&marker) {
+            match rx.recv().await? {
+                Incoming::Data { id: from, bytes } if from == id => {
+                    text.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                Incoming::Disconnected => return None,
+                _ => {}
+            }
+        }
+        Some(())
+    };
+    tokio::time::timeout(Duration::from_secs(15), collect)
+        .await
+        .ok()??;
+    Some(text)
 }
