@@ -60,6 +60,17 @@ async fn greeting(relay: &Path) -> String {
     String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
+/// Wait until the fake agent at `sock` refuses connections: dropping it only
+/// aborts its task, and its listener closes when that task next runs.
+async fn gone(sock: &Path) {
+    within(async {
+        while UnixStream::connect(sock).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relay_reaches_the_newest_live_agent_and_prunes_dead_links() {
     let d = TestDaemon::start().await;
@@ -74,12 +85,14 @@ async fn relay_reaches_the_newest_live_agent_and_prunes_dead_links() {
 
     assert_eq!(greeting(&relay).await, "B", "the newer link wins");
     drop(b);
+    gone(&d.dir.join("b.sock")).await;
     assert_eq!(greeting(&relay).await, "A");
     assert!(
         std::fs::symlink_metadata(links.join("200")).is_err(),
         "B's link is gone"
     );
     drop(a);
+    gone(&d.dir.join("a.sock")).await;
     assert_eq!(greeting(&relay).await, "", "no live agent: closed");
     assert!(std::fs::symlink_metadata(links.join("100")).is_err());
 }
