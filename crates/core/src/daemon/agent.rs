@@ -187,6 +187,7 @@ fn dead(e: &io::Error) -> bool {
 
 /// The symlinks in `dir`, newest `lstat` mtime first, ties by file name
 /// descending; at most [`MAX_LINKS`] of the first [`MAX_ENTRIES`] entries.
+/// Dot-names are a bridge's half-made link (`.<pid>.tmp`): left out.
 fn newest_first(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -194,6 +195,7 @@ fn newest_first(dir: &Path) -> Vec<PathBuf> {
     let mut links: Vec<(SystemTime, OsString, PathBuf)> = entries
         .take(MAX_ENTRIES)
         .filter_map(Result::ok)
+        .filter(|e| !e.file_name().as_encoded_bytes().starts_with(b"."))
         .filter_map(|e| {
             let meta = e.metadata().ok().filter(|m| m.file_type().is_symlink())?;
             Some((meta.modified().ok()?, e.file_name(), e.path()))
@@ -219,12 +221,15 @@ mod tests {
             std::os::unix::fs::symlink("/nowhere", dir.join(name)).unwrap();
         }
         std::fs::write(dir.join("999"), b"not a link").unwrap();
+        // A bridge killed between its symlink and its rename leaves this behind.
+        std::os::unix::fs::symlink("/nowhere", dir.join(".400.tmp")).unwrap();
         let names: Vec<String> = newest_first(&dir)
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         // Made within one tick or not, "300" was made after "100": newest first
-        // or, on a tie, the larger name first, never the plain file.
+        // or, on a tie, the larger name first, never the plain file nor a
+        // half-made link.
         assert_eq!(names.len(), 3, "{names:?}");
         assert!(!names.contains(&"999".to_owned()));
         let pos = |n: &str| names.iter().position(|x| x == n).unwrap();

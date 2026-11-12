@@ -96,10 +96,11 @@ fn forward() -> MutexGuard<'static, Vec<String>> {
 }
 
 /// Read `[ssh] forward_agent` of the config file at `path` again (blocking:
-/// from `spawn_blocking`).
+/// from `spawn_blocking`). The read happens under the cache's lock, so two
+/// overlapping reloads never store an older read over a newer one.
 pub(crate) fn reload_forward(path: &Path) {
-    let list = ssh_hosts::forward_agent_in(path);
-    *forward() = list;
+    let mut cached = forward();
+    *cached = ssh_hosts::forward_agent_in(path);
 }
 
 /// The Host DTO's `forward_agent`: never for `local`.
