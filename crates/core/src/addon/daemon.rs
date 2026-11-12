@@ -32,6 +32,45 @@ pub trait DaemonOps: Send + Sync {
         let _ = config;
         Ok(None)
     }
+    /// A session of this daemon ended a turn on a usage limit (docs/addons.md, "Usage
+    /// limits"). Asked in registry order until one answers other than `NotMine`, off the
+    /// session's actor, within `daemon::Config::limit_attempt_timeout` (20 s) for the round.
+    fn on_usage_limit<'a>(
+        &'a self,
+        hit: UsageLimit<'a>,
+        ctx: Arc<dyn DaemonCtx>,
+    ) -> BoxFuture<'a, LimitOutcome> {
+        let _ = (hit, ctx);
+        Box::pin(async { LimitOutcome::NotMine })
+    }
+}
+
+/// A usage-limit hit, as `DaemonOps::on_usage_limit` gets it. No `Debug`: `env` reads the
+/// session's spawn env, secrets included (C1).
+pub struct UsageLimit<'a> {
+    /// claude's session id (the conversation).
+    pub conversation: &'a str,
+    /// claude's message, sanitised, one line, at most 256 bytes.
+    pub message: &'a str,
+    /// The session's spawn env, by name. Never log a value.
+    pub env: &'a (dyn Fn(&str) -> Option<String> + Sync),
+}
+
+/// What an addon did about a usage-limit hit. The core cleans every string (one safe line,
+/// at most 120 bytes) before a notice shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LimitOutcome {
+    /// Not this addon's session, or the addon is switched off here.
+    NotMine,
+    /// The conversation's next message goes to another subscription.
+    Switched {
+        /// The subscription it leaves.
+        from: String,
+        /// The subscription it moves to.
+        to: String,
+    },
+    /// The addon tried; why it did not work.
+    Failed(String),
 }
 
 /// An addon service in this daemon (docs/addons.md, "Daemon ops").
@@ -84,6 +123,13 @@ pub trait DaemonCtx: Send + Sync {
     fn service_reload(&self, force: bool) -> BoxFuture<'static, ServiceState>;
     /// This addon's service as of now.
     fn service_state(&self) -> ServiceState;
+    /// A declared section of this host's `config.toml` as it was when this context was
+    /// made (each op and each `on_usage_limit` reads the file afresh, off the runtime);
+    /// empty for an undeclared section, or a file that is missing, over 1 MiB or not TOML.
+    fn config(&self, section: &str) -> toml::Table {
+        let _ = section;
+        toml::Table::new()
+    }
 }
 
 /// Lets claude offer bypass-permissions mode; any mention in `--help` counts.

@@ -332,7 +332,7 @@ async fn wanted(daemon: &Daemon, addon: &str) -> Result<Option<Vec<String>>, Str
 /// config.toml as a table: empty when missing, `None` when it cannot be
 /// read, is not a regular file (a FIFO would block the open), is over
 /// 1 MiB or is not TOML.
-fn read_config(path: &Path) -> Option<toml::Table> {
+pub(super) fn read_config(path: &Path) -> Option<toml::Table> {
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() => {}
         Ok(_) => return None,
