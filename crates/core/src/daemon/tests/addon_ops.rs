@@ -192,3 +192,45 @@ async fn unknown_op_from_a_newer_client_is_refused() {
         .await;
     assert_eq!(reply, error("unsupported op: unknown"));
 }
+
+/// `DaemonCtx::config` hands an addon only the sections it declares, read
+/// afresh for each op, and nothing from a file over 1 MiB.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_ctx_config_is_the_declared_sections_read_per_op() {
+    let dir = TestDaemon::new_dir();
+    let file = dir.join("config.toml");
+    std::fs::write(&file, "top = 1\n[echo]\na = 1\n[other]\nb = 2\n").unwrap();
+    let echo = Arc::new(TestAddon::new("echo").sections(&["echo"]).with_daemon());
+    let other = Arc::new(TestAddon::new("other").sections(&["other"]));
+    let addons = Addons::new(vec![echo as Arc<dyn Addon>, other]).unwrap();
+    let config = Config {
+        config_file: Some(file.clone()),
+        ..TestDaemon::config(&dir)
+    };
+    let d = TestDaemon::start_with_addons(dir, config, addons);
+    let mut c = d.client().await;
+    assert_eq!(section(&mut c, "echo").await, json!({"a": 1}));
+    let theirs = section(&mut c, "other").await;
+    assert_eq!(theirs, json!({}), "another addon's section");
+    assert_eq!(section(&mut c, "top").await, json!({}), "not a table");
+    std::fs::write(&file, "[echo]\na = 2\n").unwrap();
+    assert_eq!(
+        section(&mut c, "echo").await,
+        json!({"a": 2}),
+        "read afresh"
+    );
+    let big = format!("[echo]\na = 3\npad = \"{}\"\n", "x".repeat(1 << 20));
+    std::fs::write(&file, big).unwrap();
+    assert_eq!(section(&mut c, "echo").await, json!({}), "over 1 MiB");
+}
+
+/// `echo`'s `DaemonCtx::config(name)`, through its `config` op.
+async fn section(c: &mut Client, name: &str) -> Value {
+    match c
+        .call(op("echo", "config", json!({ "section": name })))
+        .await
+    {
+        Msg::AddonReply { body } => body,
+        other => panic!("expected a reply, got {other:?}"),
+    }
+}

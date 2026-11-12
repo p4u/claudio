@@ -529,7 +529,7 @@ async fn has_capability(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::routing::get;
     use axum::{Json, Router};
@@ -537,7 +537,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// Spin up a local axum server serving the given router. Returns the base URL.
-    async fn serve(router: Router) -> String {
+    pub(crate) async fn serve(router: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -787,7 +787,7 @@ mod tests {
         }
     }
 
-    fn switch_router(code: u16, body: serde_json::Value) -> Router {
+    pub(crate) fn switch_router(code: u16, body: serde_json::Value) -> Router {
         use axum::routing::post;
         Router::new().route(
             "/v1/claudio/session/switch",
@@ -833,7 +833,11 @@ mod tests {
     }
 
     /// `switch_router` plus the `/v1/claudio` discovery, listing `capabilities`.
-    fn switch_router_with(code: u16, body: serde_json::Value, capabilities: &[&str]) -> Router {
+    pub(crate) fn switch_router_with(
+        code: u16,
+        body: serde_json::Value,
+        capabilities: &[&str],
+    ) -> Router {
         let discovery = serde_json::json!({"version": "1", "capabilities": capabilities});
         switch_router(code, body).route("/v1/claudio", get(move || async move { Json(discovery) }))
     }

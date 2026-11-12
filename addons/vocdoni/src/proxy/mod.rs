@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod env;
+pub mod limit;
 pub mod login;
 pub mod plugins;
 pub mod profile;

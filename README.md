@@ -155,6 +155,8 @@ New sessions use the default profile. `--proxy NAME`, `--no-proxy` and `--first-
 
 *The Vocdoni addon's panel: usage, the pool, your limit and the top models, with an action to move the session to the next subscription.*
 
+When a proxy session's turn ends on a subscription limit ("You've hit your 5-hour limit"), the daemon on its host asks the proxy to move the conversation to another subscription and types `continue`, at most 3 times in a row; a notice says what happened, and a direct session is left alone. `auto_switch = false` under `[proxy]` in that host's `config.toml` turns it off.
+
 The proxy can also serve **plugins**: a pinned, hash-checked manifest of Claude Code plugins, MCP servers (their secrets come as env), subagents and instructions for every session. The first time claudio sees one it asks what to install; each host's daemon then installs the plugins with `claude plugin install` (never with `-y`), and every session on that proxy profile gets the servers, agents and instructions. What you already have is left alone. The extensions screen shows each plugin's state per host.
 
 Two ways to run through the proxy:

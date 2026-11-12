@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "claudio"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "alacritty_terminal",
  "claudio-api",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "claudio-api"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "axum",
  "claudio-core",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "claudio-core"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "alacritty_terminal",
  "axum",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "claudio-tui"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "alacritty_terminal",
  "claudio-core",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "claudio-vocdoni"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "axum",
  "claudio-core",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "claudio-web"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "argon2",
  "axum",

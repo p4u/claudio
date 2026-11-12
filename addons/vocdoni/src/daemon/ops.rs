@@ -9,7 +9,7 @@ use tokio::process::Child;
 
 use super::{handle, remove_stale_zips, ApplyRequest, Manifests, OP_APPLY};
 use crate::plugins::manifest::name_ok;
-use claudio_core::addon::{BoxFuture, ClaudeFlags, DaemonCtx, DaemonOps};
+use claudio_core::addon::{BoxFuture, ClaudeFlags, DaemonCtx, DaemonOps, LimitOutcome, UsageLimit};
 
 /// The plugin flags a plugin's sessions use.
 const AGENTS: &str = "--agents";
@@ -105,6 +105,16 @@ impl DaemonOps for VocdoniDaemon {
     /// tried at the next request. Manual installs stay.
     fn on_claude_installed(&self, _ctx: &Arc<dyn DaemonCtx>) {
         self.manifests.forget_failures();
+    }
+
+    /// A proxy session hit a usage limit: move its conversation to the
+    /// proxy's next subscription ([`crate::proxy::limit`]).
+    fn on_usage_limit<'a>(
+        &'a self,
+        hit: UsageLimit<'a>,
+        ctx: Arc<dyn DaemonCtx>,
+    ) -> BoxFuture<'a, LimitOutcome> {
+        Box::pin(crate::proxy::limit::on_usage_limit(hit, ctx))
     }
 }
 

@@ -25,6 +25,17 @@ pub enum Script {
     Review(LaunchPart),
 }
 
+/// What `on_usage_limit` answers.
+#[derive(Debug, Clone)]
+pub enum LimitScript {
+    /// This outcome.
+    Answer(LimitOutcome),
+    /// The inner answer after a delay.
+    Delay(Duration, Box<LimitScript>),
+    /// A panic inside the future.
+    Panic,
+}
+
 /// The fake addon. Build with `TestAddon::new(name)` and the builder methods.
 pub struct TestAddon {
     name: &'static str,
@@ -47,6 +58,8 @@ pub struct TestAddon {
     saved: AtomicBool,
     installs: AtomicUsize,
     calls: Mutex<Vec<String>>,
+    /// What `on_usage_limit` answers.
+    limit: Mutex<LimitScript>,
     /// How long its start's task reads its state, if it has one.
     start_load: Option<Duration>,
     /// That task has read it.
@@ -77,6 +90,7 @@ impl TestAddon {
             saved: AtomicBool::new(false),
             installs: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
+            limit: Mutex::new(LimitScript::Answer(LimitOutcome::NotMine)),
             start_load: None,
             loaded: Arc::default(),
         }
@@ -159,7 +173,8 @@ impl TestAddon {
         self
     }
 
-    /// Has `DaemonOps`: `echo`, `sleep` (`{"secs": n}`), `big` (600 KiB), `fail`.
+    /// Has `DaemonOps`: `echo`, `sleep` (`{"secs": n}`), `big` (600 KiB), `fail`, and
+    /// `config` (`{"section": name}`: `DaemonCtx::config` as JSON).
     pub fn with_daemon(mut self) -> Self {
         self.has_daemon = true;
         self
@@ -172,6 +187,18 @@ impl TestAddon {
         self.has_daemon = true;
         self.has_service = true;
         self
+    }
+
+    /// Has `DaemonOps`; `on_usage_limit` follows `script`.
+    pub fn on_limit(mut self, script: LimitScript) -> Self {
+        self.limit = Mutex::new(script);
+        self.has_daemon = true;
+        self
+    }
+
+    /// What `on_usage_limit` answers from now on.
+    pub fn set_limit(&self, script: LimitScript) {
+        *lock(&self.limit) = script;
     }
 
     /// `claudio <word>` exits with `code`.
@@ -477,7 +504,41 @@ impl DaemonOps for TestAddon {
                     Ok(Value::String(format!("{state:?}")))
                 }
                 "state" => Ok(Value::String(format!("{:?}", ctx.service_state()))),
+                "config" => {
+                    let section = body.get("section").and_then(Value::as_str).unwrap_or("");
+                    serde_json::to_value(ctx.config(section)).map_err(|e| e.to_string())
+                }
                 other => Err(format!("unknown op {other}")),
+            }
+        })
+    }
+    /// Records `usage_limit <conversation> <message> <env>`, `<env>` saying whether the
+    /// session's `SECRET_ENV` (the daemon harness's spec) reached it, never its value.
+    fn on_usage_limit<'a>(
+        &'a self,
+        hit: UsageLimit<'a>,
+        ctx: Arc<dyn DaemonCtx>,
+    ) -> BoxFuture<'a, LimitOutcome> {
+        let _ = ctx;
+        let env = match (hit.env)("SECRET_ENV") {
+            Some(_) => "SECRET_ENV=<set>",
+            None => "SECRET_ENV=<unset>",
+        };
+        self.record(format!(
+            "usage_limit {} {} {env}",
+            hit.conversation, hit.message
+        ));
+        let mut script = lock(&self.limit).clone();
+        Box::pin(async move {
+            loop {
+                match script {
+                    LimitScript::Answer(outcome) => return outcome,
+                    LimitScript::Delay(wait, inner) => {
+                        tokio::time::sleep(wait).await;
+                        script = *inner;
+                    }
+                    LimitScript::Panic => panic!("the test addon panics on a usage limit"),
+                }
             }
         })
     }

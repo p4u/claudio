@@ -2,8 +2,8 @@
 //! The runtime applies them, never the addon.
 
 use super::{
-    name_ok, Block, Checklist, ChecklistItem, ExtensionRow, LaunchOption, Notice, Page, Panel,
-    PanelAction, Segment, Tone,
+    name_ok, Block, Checklist, ChecklistItem, ExtensionRow, LaunchOption, LimitOutcome, Notice,
+    Page, Panel, PanelAction, Segment, Tone,
 };
 
 /// A segment's text, in characters.
@@ -14,6 +14,8 @@ pub const PANEL_BYTES: usize = 64 * 1024;
 pub const CHECKLIST_ITEMS: usize = 256;
 /// Any one string of a panel, checklist, row, option or notice, in bytes.
 pub const TEXT_BYTES: usize = 4096;
+/// Any one string of a [`LimitOutcome`], in bytes: it goes into a one-line notice.
+pub const LIMIT_TEXT_BYTES: usize = 120;
 
 /// `s` as one safe line: `text::sanitize`, newlines and tabs as spaces,
 /// cut at `max_bytes` on a char boundary.
@@ -176,6 +178,19 @@ pub fn notice(n: Notice) -> Notice {
     }
 }
 
+/// A usage-limit outcome with every string one safe line of at most [`LIMIT_TEXT_BYTES`].
+pub fn limit_outcome(o: LimitOutcome) -> LimitOutcome {
+    let cut = |s: String| line(&s, LIMIT_TEXT_BYTES);
+    match o {
+        LimitOutcome::NotMine => LimitOutcome::NotMine,
+        LimitOutcome::Switched { from, to } => LimitOutcome::Switched {
+            from: cut(from),
+            to: cut(to),
+        },
+        LimitOutcome::Failed(why) => LimitOutcome::Failed(cut(why)),
+    }
+}
+
 /// A one-page panel that says why the real one is not shown.
 pub fn error_panel(title: &str, why: &str) -> Panel {
     Panel {
@@ -334,5 +349,25 @@ mod tests {
             detail: Some("x\u{9b}".into()),
         });
         assert_eq!((o.label.as_str(), o.detail.as_deref()), ("L", Some("x")));
+    }
+
+    #[test]
+    fn limit_outcomes_are_one_safe_line_of_at_most_120_bytes() {
+        let long = format!("sub\x1b[31m-a\n{}", "é".repeat(100));
+        let LimitOutcome::Switched { from, to } = limit_outcome(LimitOutcome::Switched {
+            from: long.clone(),
+            to: "b\x07".into(),
+        }) else {
+            panic!("not switched");
+        };
+        assert!(from.len() <= LIMIT_TEXT_BYTES, "{}", from.len());
+        assert!(from.starts_with("sub[31m-a "), "{from}");
+        assert!(!from.contains('\x1b') && !from.contains('\n'));
+        assert_eq!(to, "b");
+        assert_eq!(
+            limit_outcome(LimitOutcome::Failed("no\talternative".into())),
+            LimitOutcome::Failed("no alternative".into())
+        );
+        assert_eq!(limit_outcome(LimitOutcome::NotMine), LimitOutcome::NotMine);
     }
 }

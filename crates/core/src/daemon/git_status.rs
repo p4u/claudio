@@ -22,6 +22,16 @@ const OUTPUT_CAP: usize = 256 * 1024;
 /// Short commit id for a detached HEAD.
 const SHORT_OID: usize = 7;
 
+/// Read the current git branch from `cwd/.git/HEAD` (the fallback when git
+/// is not installed). `None` when the directory is not a git repo or HEAD is
+/// detached.
+pub(super) fn head_branch(cwd: &Path) -> Option<String> {
+    let head_path = cwd.join(".git/HEAD");
+    let content = std::fs::read_to_string(head_path).ok()?;
+    let line = content.trim();
+    line.strip_prefix("ref: refs/heads/").map(str::to_owned)
+}
+
 /// The status of the repository containing `cwd`; `None` when it is not a
 /// repository, git is missing, or the run exceeded the deadline.
 pub async fn read(cwd: &Path) -> Option<GitStatus> {
