@@ -172,7 +172,6 @@ pub fn spawn(
         )));
     }
     let token = hooks::new_token();
-    let path = daemon.config.path.as_deref();
     let (cmd, program) = match kind {
         SessionKind::Claude => {
             let context = write_context(&daemon.config.socket, spec);
@@ -190,7 +189,7 @@ pub fn spawn(
         }
         SessionKind::Shell => {
             let shell = super::login_path::login_shell();
-            (shell_command(&shell, &cwd, path), shell)
+            (shell_command(&shell, &cwd, &daemon.config), shell)
         }
     };
     let (rows, cols) = size_or_default(spec.rows, spec.cols);
