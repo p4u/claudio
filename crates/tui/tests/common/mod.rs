@@ -745,10 +745,14 @@ exec cat
         present: &[&str],
     ) {
         let record = record_env_sh(&env_file.display().to_string(), values, present);
+        // `--help` too: the daemon's flag probe must not record its own env.
         let script = format!(
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
     echo "claude 0.0.0-fake"
+    exit 0
+fi
+if [ "$1" = "--help" ]; then
     exit 0
 fi
 {record}NONCE="${{$}}__${{RANDOM}}${{RANDOM}}"
