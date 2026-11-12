@@ -17,7 +17,7 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, extract_nonce, record_env_sh, scopeguard, wizard_pick_dir, ClaudeProjectGuard,
-    ManagerHarness, Region, TuiProcess, ALT_E, ALT_H, ALT_I, ALT_N, ALT_Q, ALT_X, BINARY,
+    FakeSsh, ManagerHarness, Region, TuiProcess, ALT_E, ALT_H, ALT_I, ALT_N, ALT_Q, ALT_X, BINARY,
     DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, RECONNECT_WAIT, WAIT,
 };
 use portable_pty::CommandBuilder;
@@ -832,6 +832,165 @@ fn test_default_profile_with_unreachable_config_starts_through_the_proxy() {
         "the API key reached a proxied session: {env}"
     );
     tui.wait_for("proxy:work", Region::StatusBar, WAIT);
+    tui.quit(WAIT);
+}
+
+/// A proxy session whose daemon stopped (an upgrade replaces it) comes back,
+/// when the TUI recovers it, through its proxy: never direct, which would
+/// use whatever login the host has ("Not logged in").
+#[test]
+fn test_a_recovered_proxy_session_keeps_its_proxy() {
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("recovered.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_BASE_URL"],
+        &["ANTHROPIC_AUTH_TOKEN"],
+    );
+    let config = harness.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\n\
+         url = \"http://127.0.0.1:1\"\ntoken = \"work-test-token\"\n",
+    );
+    fs::write(&config, text).unwrap();
+    let proxied = |env: &str| {
+        env.lines()
+            .any(|l| l == "ANTHROPIC_BASE_URL=http://127.0.0.1:1")
+            && env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=<set>")
+    };
+    let started = || {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let env = fs::read_to_string(&env_file).unwrap_or_default();
+            if env.lines().any(|l| l.starts_with("ANTHROPIC_BASE_URL=")) {
+                return env;
+            }
+            assert!(Instant::now() < deadline, "no session started: {env}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    let mut tui = harness.start_tui();
+    tui.wait_for("New session", Region::Screen, WAIT);
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let first = started();
+    assert!(proxied(&first), "the first start: {first}");
+
+    // The daemon is replaced under the running TUI, which reconnects.
+    fs::remove_file(&env_file).unwrap();
+    let restart = std::process::Command::new(BINARY)
+        .args(["daemon", "restart"])
+        .env("XDG_RUNTIME_DIR", &harness.runtime_dir)
+        .env("XDG_CONFIG_HOME", &harness.config_home)
+        .env("HOME", &harness.home)
+        .env("CLAUDIO_CLAUDE_PATH", &harness.fake_claude)
+        .output()
+        .expect("claudio daemon restart");
+    assert!(
+        restart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restart.stdout)
+    );
+    let reconnected = started();
+    assert!(
+        proxied(&reconnected),
+        "reconnected without its proxy: {reconnected}"
+    );
+    tui.quit(WAIT);
+
+    // The daemon goes (as an upgrade replaces it): the session is dormant.
+    let stop = std::process::Command::new(BINARY)
+        .args(["daemon", "stop"])
+        .env("XDG_RUNTIME_DIR", &harness.runtime_dir)
+        .env("XDG_CONFIG_HOME", &harness.config_home)
+        .env("HOME", &harness.home)
+        .env("CLAUDIO_CLAUDE_PATH", &harness.fake_claude)
+        .output()
+        .expect("claudio daemon stop");
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stdout)
+    );
+    fs::remove_file(&env_file).unwrap();
+
+    // A new TUI starts a daemon and recovers the session.
+    let mut tui = harness.start_tui();
+    let n0 = harness.dirs[0].file_name().unwrap().to_str().unwrap();
+    tui.wait_for(n0, Region::TabBar, WAIT);
+    let recovered = started();
+    assert!(
+        proxied(&recovered),
+        "recovered without its proxy: {recovered}"
+    );
+    tui.quit(WAIT);
+}
+
+/// A proxy session on a remote host whose daemon is replaced (an upgrade
+/// uploads a new binary and restarts it) comes back through its proxy when
+/// the TUI reconnects: never direct.
+#[test]
+fn test_a_recovered_remote_proxy_session_keeps_its_proxy() {
+    let fake = FakeSsh::new();
+    let harness = ManagerHarness::new();
+    let env_file = harness.root.join("remote.env");
+    harness.write_env_recording_fake_claude(
+        &env_file,
+        &["ANTHROPIC_BASE_URL"],
+        &["ANTHROPIC_AUTH_TOKEN"],
+    );
+    let config = harness.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\n\
+         url = \"http://127.0.0.1:1\"\ntoken = \"work-test-token\"\n",
+    );
+    fs::write(&config, text).unwrap();
+    let started = || {
+        let deadline = Instant::now() + DAEMON_WAIT;
+        loop {
+            let env = fs::read_to_string(&env_file).unwrap_or_default();
+            if env.starts_with("# env") {
+                return env;
+            }
+            assert!(Instant::now() < deadline, "no session started");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let proxied = |env: &str| {
+        env.lines()
+            .any(|l| l == "ANTHROPIC_BASE_URL=http://127.0.0.1:1")
+            && env.lines().any(|l| l == "ANTHROPIC_AUTH_TOKEN=<set>")
+    };
+
+    let path = fake.path();
+    let mut tui = harness.start_tui_with(|cmd| cmd.env("PATH", &path));
+    tui.send_paste("fakehost");
+    tui.wait_for("connect to fakehost", Region::Screen, WAIT);
+    tui.send_keys(ENTER);
+    tui.wait_for("New session on fakehost", Region::Screen, DAEMON_WAIT);
+    tui.send_paste(harness.dirs[0].to_str().unwrap());
+    thread::sleep(Duration::from_millis(50));
+    tui.send_keys(ENTER);
+    tui.wait_for("FAKE_CLAUDE_BANNER", Region::Pane, DAEMON_WAIT);
+    let first = started();
+    assert!(proxied(&first), "the first start: {first}");
+
+    // The remote daemon is replaced; the TUI reconnects and recovers.
+    fs::remove_file(&env_file).unwrap();
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let v = claudio_core::version::PROTO;
+    let lock = fake.root.join(format!("t/claudio-{uid}/daemon-v{v}.lock"));
+    let pid: i32 = fs::read_to_string(&lock).unwrap().trim().parse().unwrap();
+    // SAFETY: kill(2) has no memory-safety preconditions.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let recovered = started();
+    assert!(
+        proxied(&recovered),
+        "recovered without its proxy: {recovered}"
+    );
     tui.quit(WAIT);
 }
 
