@@ -1431,3 +1431,124 @@ fn test_new_client_old_daemon_gets_proxy_env_without_plugins() {
     );
     tui.quit(WAIT);
 }
+
+// ── Usage limits ─────────────────────────────────────────────────────────────
+
+/// The conversation the usage-limit fake claude reports.
+const LIMIT_SID: &str = "5e55-limit-test";
+
+/// A fake claude-proxy on loopback that accepts every `POST
+/// /v1/claudio/session/switch` (202, from `sub-a` to `sub-b`) and sends each
+/// one's `authorization` header and body down the channel; every other path
+/// is a 404. Returns its `host:port`.
+fn fake_switch_proxy() -> (String, std::sync::mpsc::Receiver<(String, String)>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake proxy");
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).into_owned();
+            let header = |name: &str| {
+                head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+                })
+            };
+            let len = header("content-length").and_then(|v| v.parse().ok());
+            let mut body = vec![0u8; len.unwrap_or(0).min(4096)];
+            let _ = stream.read_exact(&mut body);
+            let (status, reply) = if head.starts_with("POST /v1/claudio/session/switch ") {
+                let body = String::from_utf8_lossy(&body).into_owned();
+                let _ = tx.send((header("authorization").unwrap_or_default(), body));
+                let reply = serde_json::json!({"session_id": LIMIT_SID, "state": "pending",
+                    "from": {"id": "c1", "label": "sub-a"}, "to": {"id": "c2", "label": "sub-b"}});
+                ("202 Accepted", reply.to_string())
+            } else {
+                ("404 Not Found", "{}".to_owned())
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    (addr, rx)
+}
+
+/// A fake claude whose turn ends on a usage limit: a second after its banner
+/// it reports conversation [`LIMIT_SID`] (`SessionStart`) and then the limit
+/// (`StopFailure`), through the hook commands of its merged `--settings`, as
+/// claude does; then it echoes each line it reads as `GOT <line>`.
+fn write_limit_claude(h: &ManagerHarness) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        r#"#!/bin/sh
+[ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
+[ "$1" = "--help" ] && exit 0
+echo "FAKE_CLAUDE_BANNER pid=$$"
+START=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook SessionStart [^"]*\)".*/\1/p')
+FAIL=$(printf '%s' "$2" | sed -n 's/.*"command":"\([^"]*__hook StopFailure [^"]*\)".*/\1/p')
+sleep 1
+printf '{{"session_id":"{LIMIT_SID}","source":"startup"}}' | eval "$START"
+eval "$FAIL" <<'JSON'
+{{"error":"rate_limit","last_assistant_message":"You've hit your 5-hour limit · resets 4pm (UTC)"}}
+JSON
+while IFS= read -r line; do printf 'GOT %s\n' "$line"; done
+"#
+    );
+    fs::write(&h.fake_claude, script).unwrap();
+    fs::set_permissions(&h.fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// AC4: a proxy session whose turn ends on a usage limit is moved by its
+/// host's daemon, with no one asking: the fake proxy gets the switch for the
+/// session's conversation with the profile's token, the session gets
+/// `continue` and Enter, and the TUI shows the notice. The token is in no
+/// notice and no daemon log line.
+#[test]
+fn test_a_usage_limit_switches_the_subscription_and_continues() {
+    let h = ManagerHarness::new();
+    write_limit_claude(&h);
+    let (proxy, switches) = fake_switch_proxy();
+    let config = h.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[proxy]\ndefault = \"work\"\n[proxy.profiles.work]\n\
+         url = \"http://{proxy}\"\ntoken = \"work-test-token\"\n"
+    ));
+    fs::write(&config, text).unwrap();
+    let mut tui = h.start_tui();
+    tui.wait_for("New session", Region::Screen, WAIT);
+    wizard_pick_dir(&mut tui, &h.dirs[0]);
+
+    let (auth, body) = switches
+        .recv_timeout(DAEMON_WAIT)
+        .expect("no switch request reached the proxy");
+    assert_eq!(auth, "Bearer work-test-token");
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body, serde_json::json!({ "id": LIMIT_SID }));
+    // The notice first: it leaves the status bar after a few seconds.
+    tui.wait_for(
+        "usage limit: switched sub-a → sub-b, continuing (1/3)",
+        Region::StatusBar,
+        WAIT,
+    );
+    tui.wait_for("GOT continue", Region::Pane, WAIT);
+    assert!(switches.try_recv().is_err(), "one switch per limit hit");
+    assert!(!tui.screen_text(Region::Screen).contains("work-test-token"));
+    let log = fs::read_to_string(h.runtime_dir.join("claudio/daemon.log")).unwrap_or_default();
+    assert!(
+        !log.contains("work-test-token"),
+        "the token in the daemon log"
+    );
+    tui.quit(WAIT);
+}
