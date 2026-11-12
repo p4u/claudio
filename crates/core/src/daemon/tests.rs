@@ -569,6 +569,7 @@ async fn resume_retry_spawns_fresh_on_quick_exit() {
         build: None,
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
+        limit_attempt_timeout: std::time::Duration::from_secs(20),
         old_peer: false,
         config_file: None,
         service_timing: Default::default(),
@@ -693,6 +694,7 @@ async fn immediate_exit_leaves_session_dormant() {
         build: None,
         path: None,
         addon_timeout: std::time::Duration::from_secs(150),
+        limit_attempt_timeout: std::time::Duration::from_secs(20),
         old_peer: false,
         config_file: None,
         service_timing: Default::default(),
@@ -1046,6 +1048,7 @@ async fn spawn_for_a_journaled_shell_starts_a_shell() {
 mod addon_ops;
 mod freshness;
 mod git;
+mod limit;
 mod login_path;
 mod service;
 mod spawn_env;

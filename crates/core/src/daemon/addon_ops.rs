@@ -12,7 +12,9 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use super::{service, Daemon};
-use crate::addon::{Addons, BoxFuture, ClaudeFlags, DaemonCtx, ServiceState};
+use crate::addon::{
+    Addons, BoxFuture, ClaudeFlags, DaemonCtx, LimitOutcome, ServiceState, UsageLimit,
+};
 use crate::proto::{self, Msg};
 
 /// How long one addon op may run (`Config::addon_timeout`).
@@ -157,4 +159,32 @@ pub(crate) async fn claude_installed(daemon: &Arc<Daemon>) {
             ops.on_claude_installed(&ctx(daemon, addon.name()).await);
         }
     }
+}
+
+/// Ask every daemon-side addon, in registry order, about a usage-limit hit on a session
+/// whose spawn env is `env`; the first answer other than `NotMine` wins, its strings
+/// cleaned ([`crate::addon::limit_outcome`]). The env goes to the addons only, never a log.
+pub(crate) async fn usage_limit(
+    daemon: Arc<Daemon>,
+    conversation: String,
+    message: String,
+    env: Vec<(String, String)>,
+) -> LimitOutcome {
+    let lookup = move |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    for addon in daemon.addons.iter() {
+        let Some(ops) = addon.daemon() else { continue };
+        let hit = UsageLimit {
+            conversation: &conversation,
+            message: &message,
+            env: &lookup,
+        };
+        match ops
+            .on_usage_limit(hit, ctx(&daemon, addon.name()).await)
+            .await
+        {
+            LimitOutcome::NotMine => {}
+            outcome => return crate::addon::limit_outcome(outcome),
+        }
+    }
+    LimitOutcome::NotMine
 }
