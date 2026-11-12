@@ -159,6 +159,7 @@ impl TestDaemon {
             build: None,
             path: None,
             addon_timeout: std::time::Duration::from_secs(150),
+            limit_attempt_timeout: std::time::Duration::from_secs(20),
             old_peer: false,
             config_file: None,
             service_timing: Default::default(),

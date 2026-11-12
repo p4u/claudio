@@ -97,6 +97,8 @@ pub struct Config {
     pub path: Option<OsString>,
     /// How long one addon op may run ([`addon_ops::TIMEOUT`]).
     pub addon_timeout: Duration,
+    /// The budget of one usage-limit attempt, every addon's answer included (20 s).
+    pub limit_attempt_timeout: Duration,
     /// Play the previous release (mixed-version tests only; docs/daemon-protocol.md,
     /// "Mixed versions"): no `addon:` features, `AddonOp` refused as unknown,
     /// every `env_remove` taken as absent and `optional` ignored.
@@ -133,6 +135,7 @@ impl Config {
                 .ok(),
             path,
             addon_timeout: addon_ops::TIMEOUT,
+            limit_attempt_timeout: Duration::from_secs(20),
             old_peer: admit::old_peer(std::env::var_os("CLAUDIO_TEST_OLD_DAEMON").as_deref()),
             config_file: Some(paths::config_file()),
             service_timing: ServiceTiming::default(),
@@ -870,6 +873,7 @@ mod claude_path_tests {
             build: None,
             path,
             addon_timeout: std::time::Duration::from_secs(150),
+            limit_attempt_timeout: std::time::Duration::from_secs(20),
             old_peer: false,
             config_file: None,
             service_timing: Default::default(),

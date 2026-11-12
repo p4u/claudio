@@ -304,9 +304,54 @@ through its spawn env. The daemon logs an op as addon, op and body length, never
 
 `DaemonCtx` gives the op `claude_bin()`, the daemon's login-shell `path()`, `claude_flags()`
 (the flags this claude's `--help` lists, probed once), `cache_dir()` (`<cache>/<addon>`, which
-the addon creates 0700), and `updating()`, the lock held while `claude update` or a `claude
-plugin …` runs, so `~/.claude` has one writer. `on_claude_installed` is called after the daemon
-installs claude.
+the addon creates 0700), `updating()`, the lock held while `claude update` or a `claude
+plugin …` runs, so `~/.claude` has one writer, and `config(section)`: one of the addon's
+declared `config.toml` sections on this host. The daemon reads the file (off the runtime, at
+most 1 MiB) when it makes the context, once per op, per `on_usage_limit` and per
+`on_claude_installed`, so an edit applies at the next call without a daemon restart; an
+undeclared section, or a file that is missing, over 1 MiB or not TOML, reads as empty.
+`on_claude_installed` is called after the daemon installs claude.
+
+**Usage limits.** When a claude session's turn ends on a usage limit (claude's `StopFailure`
+hook with `error` `rate_limit` and a message that starts with one of claude's own usage-limit
+prefixes, `claude::hooks::USAGE_LIMIT_PREFIXES`), the session's daemon calls
+`on_usage_limit(hit, ctx)` of each daemon-side addon in registry order, on a task off the
+session, and takes the first answer that is not `LimitOutcome::NotMine` (the default).
+
+```rust
+fn on_usage_limit<'a>(&'a self, hit: UsageLimit<'a>, ctx: Arc<dyn DaemonCtx>)
+    -> BoxFuture<'a, LimitOutcome>;
+
+pub struct UsageLimit<'a> {
+    pub conversation: &'a str,                              // claude's session id
+    pub message: &'a str,                                   // sanitised, one line, ≤ 256 bytes
+    pub env: &'a (dyn Fn(&str) -> Option<String> + Sync),   // the session's spawn env, by name
+}
+pub enum LimitOutcome {
+    NotMine,                                 // not this addon's session, or switched off here
+    Switched { from: String, to: String },   // the next message goes to another subscription
+    Failed(String),                          // tried; why it did not work
+}
+```
+
+`env` reads the session's spawn env, secrets included: an addon never logs a value, and
+`UsageLimit` has no `Debug`. The whole round has 20 s (`daemon::Config::limit_attempt_timeout`);
+past it the outcome is `Failed("timed out")`, and a future that panics is `Failed("addon
+panicked")`. The core cleans the outcome's strings (one safe line, at most 120 bytes) and shows
+them as session notices:
+- `Failed(why)`: `usage limit: could not switch subscription: <why>`.
+- `Switched { from, to }`: after a 1 s settle the daemon types `continue`, and 150 ms later
+  Enter as a separate write, then shows `usage limit: switched <from> → <to>, continuing (n/3)`.
+  It types only while the session still sits in the error of that hit, no newer hit came, and
+  no client typed since its last submitted prompt (a front-end's focus and mouse reports do
+  not count). Otherwise it types nothing more and shows `usage limit: switch to <to>
+  scheduled; not continuing automatically`.
+- `NotMine` from every addon: nothing.
+
+One attempt runs per session at a time; a hit meanwhile starts none. After 3 automatic
+continues in a row the next hit shows `usage limit: 3 automatic switches in a row; continue by
+hand` and asks no addon; a turn that ends normally (`Stop`) starts the count over. The daemon
+acts with no client attached, once per hit whatever the number of clients.
 
 **Services.** `DaemonOps::service(config)` maps the addon's own config sections (`config` hands it
 only those) to the argv of one long-running child the daemon keeps running: `Ok(Some(argv))`, the
@@ -404,6 +449,17 @@ The manifest is downloaded once per hash into `<cache>/vocdoni/` (the addon's `c
 `<cache>/plugins/` is downloaded again once. Installs run after the reply, under the
 `updating()` lock, as `claude plugin … --json`; `on_claude_installed` forgets their failures.
 
+**Usage limits.** Its `on_usage_limit` answers `NotMine` when the host's `config.toml` has
+`[proxy] auto_switch = false` (default `true`, and any value but `true` counts as off; read
+through `DaemonCtx::config`), and when the session's env lacks `ANTHROPIC_BASE_URL` or
+`ANTHROPIC_AUTH_TOKEN` (a direct session).
+Otherwise it asks that proxy to move the conversation, `POST /v1/claudio/session/switch`
+within 15 s: 202 is `Switched` with the proxy's names (`current subscription` and `next
+available` when it sends none), 409 is `Failed` with the proxy's reason (no other eligible
+subscription, or a session bound to its account), 404 is `Failed("the proxy does not know this
+session")`, and anything else `Failed` with the client's error. The token goes only to the
+session's own proxy URL, never to a log or an outcome.
+
 **Launch.** Flags `--proxy NAME`, `--no-proxy` and `--first-party` (the wizard checkbox
 "First-party session"); one option per proxy profile (group "Proxy", the configured default
 marked). The default profile, or a chosen one, is `Routing::Required`: a profile that does not
@@ -479,6 +535,8 @@ its flags: `--plain`, `--daemon`, `--slave`, `-p`, `--print`, `--api`, `-h`, `--
 | panel | 64 KiB encoded |
 | checklist | 256 items |
 | `AddonOp` body | 512 KiB encoded, each way |
+| `LimitOutcome` string | 120 bytes, one line |
+| `on_usage_limit` round, every addon's answer included | 20 s |
 | composed instructions | 8158 bytes |
 
 Errors an addon sees from `ctx.request` (`AddonError`): `NotConnected(host)`, `Missing(host)` (the

@@ -35,6 +35,29 @@ pub const EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
+/// The prefixes of claude's own usage-limit messages: claude 2.1.322's `usage_limit_reached`
+/// list (subscription windows, credits, org and seat limits). The proxy's own per-user
+/// limit ("API Error: 429 proxy: usage limit reached …") matches none of them.
+pub const USAGE_LIMIT_PREFIXES: &[&str] = &[
+    "You've hit your",
+    "You've reached your",
+    "You're out of usage credits",
+    "Your org is out of usage",
+    "Your seat type doesn't include usage",
+    "You're out of extra usage",
+];
+
+/// Whether a `StopFailure` payload is a usage limit: `error` is `rate_limit` and
+/// `last_assistant_message`, trimmed, starts with one of [`USAGE_LIMIT_PREFIXES`].
+pub fn is_usage_limit(payload: &Value) -> bool {
+    let rate_limit = payload.get("error").and_then(Value::as_str) == Some("rate_limit");
+    let message = payload
+        .get("last_assistant_message")
+        .and_then(Value::as_str)
+        .map(str::trim);
+    rate_limit && message.is_some_and(|m| USAGE_LIMIT_PREFIXES.iter().any(|p| m.starts_with(p)))
+}
+
 /// The tools whose `PostToolUse` is relayed: the ones that wait for the user,
 /// so an ordinary tool call costs no extra hook process.
 pub const ASKING_TOOLS: &str = "AskUserQuestion|ExitPlanMode";
@@ -493,5 +516,52 @@ mod tests {
     fn relay_ignores_missing_socket() {
         // A missing daemon socket is silently ignored.
         relay_from(&b"{}"[..], "Stop", Path::new("/nonexistent/sock"), "tok");
+    }
+
+    // ── is_usage_limit ────────────────────────────────────────────────────────
+
+    fn stop_failure(error: &str, message: Value) -> Value {
+        serde_json::json!({"hook_event_name": "StopFailure", "error": error,
+                           "last_assistant_message": message})
+    }
+
+    #[test]
+    fn usage_limit_messages_of_claude_are_limits() {
+        for message in [
+            // The subscription variants (claude 2.1.322).
+            "You've hit your 5-hour limit · resets 4pm (UTC)",
+            "You've hit your weekly limit · resets Mon 9am (UTC)",
+            "You've hit your Opus limit · resets 4pm (UTC)",
+            "You've hit your monthly spend limit · ask your admin for a higher limit",
+            "You've hit your team budget · ask your admin for a higher limit",
+            // One per other prefix.
+            "You've reached your usage limit",
+            "You're out of usage credits · add funds to continue",
+            "Your org is out of usage · add funds to continue",
+            "Your seat type doesn't include usage credits",
+            "You're out of extra usage · resets 4pm (UTC)",
+            // Trimmed.
+            "  You've hit your 5-hour limit\n",
+        ] {
+            let payload = stop_failure("rate_limit", Value::from(message));
+            assert!(is_usage_limit(&payload), "{message:?}");
+        }
+    }
+
+    #[test]
+    fn other_failures_are_not_usage_limits() {
+        let hit = "You've hit your 5-hour limit · resets 4pm (UTC)";
+        let proxy = "API Error: 429 proxy: usage limit reached - try again later";
+        for payload in [
+            stop_failure("overloaded", Value::from(hit)),
+            stop_failure("rate_limit", Value::from(proxy)),
+            stop_failure("rate_limit", Value::Null),
+            stop_failure("rate_limit", serde_json::json!(429)),
+            serde_json::json!({"error": "rate_limit"}),
+            serde_json::json!({"last_assistant_message": hit}),
+            Value::Null,
+        ] {
+            assert!(!is_usage_limit(&payload), "{payload}");
+        }
     }
 }

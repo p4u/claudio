@@ -1011,6 +1011,158 @@ fn test_e2e_real_claude() {
     tui.quit(WAIT);
 }
 
+/// Watch the daemon at `socket` from a connection of its own until a
+/// session's notice containing `needle` is followed by that session going
+/// `working` (a `UserPromptSubmit`): true if it is, false once `timeout`
+/// passes without it.
+fn notice_then_working(
+    socket: std::path::PathBuf,
+    needle: &'static str,
+    timeout: Duration,
+) -> thread::JoinHandle<bool> {
+    use std::io::{Read, Write};
+    thread::spawn(move || {
+        let Ok(mut s) = std::os::unix::net::UnixStream::connect(&socket) else {
+            return false;
+        };
+        let _ = s.set_read_timeout(Some(timeout));
+        let hello = serde_json::json!({"op": "hello", "claudio_version": "0.0.0-test", "proto": claudio_core::version::PROTO});
+        let body = serde_json::to_vec(&hello).unwrap();
+        let len = u32::try_from(body.len() + 1).unwrap().to_be_bytes();
+        if s.write_all(&len)
+            .and_then(|()| s.write_all(b"J"))
+            .and_then(|()| s.write_all(&body))
+            .is_err()
+        {
+            return false;
+        }
+        let deadline = Instant::now() + timeout;
+        let mut noticed = None;
+        while Instant::now() < deadline {
+            let mut len = [0u8; 4];
+            if s.read_exact(&mut len).is_err() {
+                return false;
+            }
+            let len = u32::from_be_bytes(len) as usize;
+            let mut frame = vec![0u8; len.min(1 << 20)];
+            if len > 1 << 20 || s.read_exact(&mut frame).is_err() {
+                return false;
+            }
+            let Some((b'J', json)) = frame.split_first() else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else {
+                continue;
+            };
+            let event = &v["event"];
+            match event["kind"].as_str() {
+                Some("notice") if event["text"].as_str().is_some_and(|t| t.contains(needle)) => {
+                    noticed = Some(v["id"].clone());
+                }
+                Some("state")
+                    if event["state"] == "working" && noticed.as_ref() == Some(&v["id"]) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    })
+}
+
+/// AC6, gated by `CLAUDIO_E2E=1` (it costs two short turns of a real
+/// claude). The daemon's own type-dwell-Enter path delivers a prompt that
+/// starts a turn: with the debug-only `CLAUDIO_TEST_LIMIT_SWITCH=1`, the
+/// session's first `Stop` counts as a usage limit that "switched", so the
+/// daemon types `continue` and Enter into the real claude; its
+/// `UserPromptSubmit` (the session going `working`) follows the notice.
+#[test]
+fn test_e2e_usage_limit_continue_starts_a_turn() {
+    if std::env::var("CLAUDIO_E2E").as_deref() != Ok("1") {
+        eprintln!("skipped: set CLAUDIO_E2E=1 (needs an authenticated claude; costs tokens)");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("cl-e2e-limit-{}", std::process::id()));
+    let runtime_dir = root.join("run");
+    let config_home = root.join("cfg");
+    let session_dir = root.join("sess");
+    for p in [&runtime_dir, &config_home, &session_dir] {
+        fs::create_dir_all(p).unwrap();
+    }
+    common::write_test_config(&config_home);
+    let (lock, cleanup_root) = (
+        runtime_dir.join(format!(
+            "claudio/daemon-v{}.lock",
+            claudio_core::version::PROTO
+        )),
+        root.clone(),
+    );
+    let _guard = scopeguard(move || {
+        if let Some(pid) = fs::read_to_string(&lock)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            // SAFETY: kill(2) has no memory-safety preconditions.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        let _ = fs::remove_dir_all(&cleanup_root);
+    });
+    let _project_guard = ClaudeProjectGuard::new(&session_dir);
+
+    let mut cmd = CommandBuilder::new(BINARY);
+    // Isolated claudio state; the real HOME, where claude keeps its login.
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CLAUDIO_") {
+            cmd.env_remove(&k);
+        }
+    }
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("ANTHROPIC_MODEL", "claude-haiku-4-5");
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("COLORTERM");
+    cmd.env("CLAUDIO_TEST_LIMIT_SWITCH", "1");
+    let mut tui = TuiProcess::spawn(cmd);
+    tui.wait_for("Alt+h help", Region::StatusBar, Duration::from_secs(30));
+    tui.send_keys(ENTER);
+    thread::sleep(Duration::from_millis(80));
+    tui.send_paste(session_dir.to_str().unwrap());
+    tui.send_keys(ENTER);
+    // claude is ready: its prompt in the pane and the SessionStart's `?`.
+    let ready = Instant::now() + Duration::from_secs(90);
+    let mut trusted = false;
+    loop {
+        let pane = tui.screen_text(Region::Pane);
+        if !trusted && pane.contains("Do you trust") {
+            tui.send_keys(ENTER);
+            trusted = true;
+            continue;
+        }
+        if pane.contains("❯") && tui.screen_text(Region::TabBar).contains('?') {
+            break;
+        }
+        assert!(Instant::now() < ready, "claude never got ready:\n{pane}");
+        thread::sleep(Duration::from_millis(200));
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    let socket = runtime_dir.join(format!(
+        "claudio/daemon-v{}.sock",
+        claudio_core::version::PROTO
+    ));
+    let needle = "usage limit: switched test → test, continuing (1/3)";
+    let watch = notice_then_working(socket, needle, Duration::from_secs(120));
+    tui.send_paste("Reply with only the word ok");
+    tui.send_keys(ENTER);
+    tui.wait_for(needle, Region::StatusBar, Duration::from_secs(90));
+    assert!(
+        watch.join().unwrap(),
+        "no turn started after the daemon typed continue"
+    );
+    tui.quit(WAIT);
+}
+
 // ── Soak test ─────────────────────────────────────────────────────────────────
 
 /// Soak test: stay idle for 75 s (longer than the 45 s liveness deadline) then

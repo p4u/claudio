@@ -11,8 +11,10 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-use super::Daemon;
-use crate::addon::{Addons, BoxFuture, ClaudeFlags, DaemonCtx, ServiceState};
+use super::{service, Daemon};
+use crate::addon::{
+    Addons, BoxFuture, ClaudeFlags, DaemonCtx, LimitOutcome, ServiceState, UsageLimit,
+};
 use crate::proto::{self, Msg};
 
 /// How long one addon op may run (`Config::addon_timeout`).
@@ -45,6 +47,26 @@ pub(crate) fn features(daemon: &Daemon) -> Vec<String> {
 pub(crate) struct Ctx {
     daemon: Arc<Daemon>,
     addon: &'static str,
+    /// The addon's declared sections of `config.toml`, read when the context was made.
+    config: toml::Table,
+}
+
+/// Addon `addon`'s context, with its declared `config.toml` sections read now, off the
+/// runtime, under the service supervisor's 1 MiB cap.
+pub(crate) async fn ctx(daemon: &Arc<Daemon>, addon: &'static str) -> Arc<dyn DaemonCtx> {
+    let sections = daemon
+        .addons
+        .get(addon)
+        .map_or(&[][..], |a| a.config_sections());
+    let path = daemon.config.config_file.clone();
+    let read = tokio::task::spawn_blocking(move || path.and_then(|p| service::read_config(&p)));
+    let mut config = read.await.ok().flatten().unwrap_or_default();
+    config.retain(|name, value| sections.contains(&name) && value.is_table());
+    Arc::new(Ctx {
+        daemon: Arc::clone(daemon),
+        addon,
+        config,
+    })
 }
 
 impl DaemonCtx for Ctx {
@@ -82,6 +104,13 @@ impl DaemonCtx for Ctx {
     fn service_state(&self) -> ServiceState {
         self.daemon.services.state(self.addon)
     }
+
+    fn config(&self, section: &str) -> toml::Table {
+        match self.config.get(section) {
+            Some(toml::Value::Table(t)) => t.clone(),
+            _ => toml::Table::new(),
+        }
+    }
 }
 
 /// Run one AddonOp: body cap, find the addon's DaemonOps, take a slot (none
@@ -114,10 +143,7 @@ async fn handle(daemon: Arc<Daemon>, addon: &str, op: &str, body: Value) -> Resu
     let _permit = Arc::clone(slot)
         .try_acquire_owned()
         .map_err(|_| format!("addon {addon} busy"))?;
-    let ctx: Arc<dyn DaemonCtx> = Arc::new(Ctx {
-        daemon: Arc::clone(&daemon),
-        addon: found.name(),
-    });
+    let ctx = ctx(&daemon, found.name()).await;
     let reply = tokio::time::timeout(daemon.config.addon_timeout, ops.handle(op, body, ctx))
         .await
         .map_err(|_| format!("addon {addon} timed out"))??;
@@ -127,14 +153,38 @@ async fn handle(daemon: Arc<Daemon>, addon: &str, op: &str, body: Value) -> Resu
 
 /// Every daemon-side addon's `on_claude_installed`: claude was just
 /// installed on this host.
-pub(crate) fn claude_installed(daemon: &Arc<Daemon>) {
+pub(crate) async fn claude_installed(daemon: &Arc<Daemon>) {
     for addon in daemon.addons.iter() {
         if let Some(ops) = addon.daemon() {
-            let ctx: Arc<dyn DaemonCtx> = Arc::new(Ctx {
-                daemon: Arc::clone(daemon),
-                addon: addon.name(),
-            });
-            ops.on_claude_installed(&ctx);
+            ops.on_claude_installed(&ctx(daemon, addon.name()).await);
         }
     }
+}
+
+/// Ask every daemon-side addon, in registry order, about a usage-limit hit on a session
+/// whose spawn env is `env`; the first answer other than `NotMine` wins, its strings
+/// cleaned ([`crate::addon::limit_outcome`]). The env goes to the addons only, never a log.
+pub(crate) async fn usage_limit(
+    daemon: Arc<Daemon>,
+    conversation: String,
+    message: String,
+    env: Vec<(String, String)>,
+) -> LimitOutcome {
+    let lookup = move |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    for addon in daemon.addons.iter() {
+        let Some(ops) = addon.daemon() else { continue };
+        let hit = UsageLimit {
+            conversation: &conversation,
+            message: &message,
+            env: &lookup,
+        };
+        match ops
+            .on_usage_limit(hit, ctx(&daemon, addon.name()).await)
+            .await
+        {
+            LimitOutcome::NotMine => {}
+            outcome => return crate::addon::limit_outcome(outcome),
+        }
+    }
+    LimitOutcome::NotMine
 }

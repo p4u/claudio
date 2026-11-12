@@ -172,7 +172,9 @@ words, core config sections, shared flags and shared panel keys.
   alias `proxy …`; `[proxy]` profiles; the "Proxy stats" panel on Alt+s) and the team plugins
   (manifests from `GET /v1/claudio/plugins`, one checklist per manifest, installed on the
   daemon by the `vocdoni/apply` addon op). `state/` is the one plugin state machine, pure;
-  `runner.rs` does its I/O.
+  `runner.rs` does its I/O. Its `on_usage_limit` (`proxy/limit.rs`) moves a proxy session to
+  another subscription when a turn ends on a usage limit, and the daemon
+  (`daemon/session/limit.rs`) then types `continue` (`[proxy] auto_switch = false` turns it off).
 
 **A3 across crates:** the core crates cannot import an addon (A2: no such dependency) and
 never branch on an addon's name; an addon imports `claudio_core::addon`, the core's public

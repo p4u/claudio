@@ -15,6 +15,8 @@
 //! `Attached` + snapshot instead of the bytes it missed. A slow client
 //! therefore never blocks the PTY.
 
+mod limit;
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -112,6 +114,8 @@ pub enum Cmd {
     /// Like `Kill`, first handing over the subscribers so a respawn can
     /// attach them to the new process.
     Stop(oneshot::Sender<Vec<Subscription>>),
+    /// The usage-limit auto-switch's own steps ([`limit`]).
+    Limit(limit::Step),
 }
 
 /// An attached client's id and output queue.
@@ -224,7 +228,6 @@ pub fn spawn(
     // Detect whether this spawn uses --resume (for retry logic, §2.3).
     let spawned_with_resume =
         kind == SessionKind::Claude && spec.args.iter().any(|a| a == "--resume");
-    let spawn_time = std::time::Instant::now();
 
     // A shell has no hooks to report state: it is simply idle, forever.
     let mut tracker = Tracker::new();
@@ -252,7 +255,7 @@ pub fn spawn(
         title: None,
         subs: HashMap::new(),
         spawned_with_resume,
-        spawn_time,
+        spawn_time: std::time::Instant::now(),
         kind,
         meta: MetaRefresher::new(spec.id, Arc::clone(daemon), cwd, kind).with_tags(
             spec.extensions
@@ -260,6 +263,7 @@ pub fn spawn(
                 .map(|e| e.tags())
                 .unwrap_or_default(),
         ),
+        limit: limit::AutoSwitch::new(tx.downgrade()),
     };
     tokio::spawn(actor.run(cmds, io.output, io.exit, committed_rx));
     Ok((Handle { tx, token, pid }, committed_tx))
@@ -501,6 +505,8 @@ struct Actor {
     kind: SessionKind,
     /// Git status and transcript totals for the status bar (owns the cwd).
     meta: MetaRefresher,
+    /// The usage-limit auto-switch.
+    limit: limit::AutoSwitch,
 }
 
 /// Produces [`SessionEvent::Meta`] for one session: the git status of its
@@ -680,7 +686,7 @@ fn meta_event(
 ) -> SessionEvent {
     let branch = match &git {
         Some(status) => status.branch().map(str::to_owned),
-        None => read_git_branch(cwd),
+        None => super::git_status::head_branch(cwd),
     };
     let (model, context_tokens, output_tokens, turns) = match transcript {
         Some(t) => (
@@ -817,7 +823,7 @@ impl Actor {
 
     fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Input(bytes) => self.write(bytes),
+            Cmd::Input(bytes) => self.client_input(bytes),
             Cmd::Attach {
                 client,
                 queue,
@@ -829,7 +835,8 @@ impl Actor {
                 self.subs.remove(&client);
             }
             Cmd::Resize { client, rows, cols } => self.resize(client, rows, cols),
-            Cmd::Hook { event, payload } => self.on_hook(&event, &payload),
+            Cmd::Hook { event, payload } => self.hook(event, payload),
+            Cmd::Limit(step) => self.limit_step(step),
             Cmd::Status(reply) => {
                 let _ = reply.send(Status {
                     state: self.tracker.state,
@@ -1022,16 +1029,6 @@ impl Actor {
             }
         }
     }
-}
-
-/// Read the current git branch from `cwd/.git/HEAD` (the fallback when git
-/// is not installed). `None` when the directory is not a git repo or HEAD is
-/// detached.
-fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
-    let head_path = cwd.join(".git/HEAD");
-    let content = std::fs::read_to_string(head_path).ok()?;
-    let line = content.trim();
-    line.strip_prefix("ref: refs/heads/").map(str::to_owned)
 }
 
 #[cfg(test)]

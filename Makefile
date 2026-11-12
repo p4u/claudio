@@ -53,7 +53,8 @@ static:
 	@file $(DIST)/$(BIN) || true
 	@echo "static check:"; ldd $(DIST)/$(BIN) 2>&1 || true
 	@# R8: the debug-only test hooks never ship.
-	@if grep -q -e CLAUDIO_TEST_REMOTE_PEER -e CLAUDIO_TEST_SERVICE_HANG $(DIST)/$(BIN); then \
+	@if grep -q -e CLAUDIO_TEST_REMOTE_PEER -e CLAUDIO_TEST_SERVICE_HANG \
+	  -e CLAUDIO_TEST_LIMIT_SWITCH $(DIST)/$(BIN); then \
 	  echo "error: a debug-only test hook is in the release binary"; exit 1; fi
 
 ## Reproducible static build with zero host toolchain — uses a musl container.

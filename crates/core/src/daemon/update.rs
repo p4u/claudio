@@ -87,7 +87,7 @@ pub async fn run(daemon: &Arc<Daemon>, install: bool) -> Msg {
     if install && ok && version.is_some() {
         // Every daemon-side addon hears it (plugin installs that failed
         // for want of claude go at once).
-        super::addon_ops::claude_installed(daemon);
+        super::addon_ops::claude_installed(daemon).await;
     }
     Msg::ClaudeUpdated { version, ok, tail }
 }

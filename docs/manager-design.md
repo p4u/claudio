@@ -236,6 +236,41 @@ Extra metrics come from the JSONL tail:
 
 **[later]** The statusLine feed, chained to the user's own statusLine command.
 
+#### Usage limits: switch and continue
+
+A proxy session that hits a subscription limit ("You've hit your 5-hour limit · resets 4pm
+(UTC)") would sit stopped until someone switched it by hand. Its host's daemon does that
+instead (`crates/core/src/daemon/session/limit.rs`), with no client attached and once per hit.
+
+- **Detection.** `StopFailure` with `error: "rate_limit"` and a `last_assistant_message` that
+  starts with one of claude 2.1.322's own usage-limit prefixes (`claude::hooks::is_usage_limit`).
+  The proxy's own per-user limit ("API Error: 429 proxy: usage limit reached …") and other
+  errors do not count.
+- **The guard**, pure, in the session actor: a hit counter `seq`, the automatic continues in a
+  row (a `Stop` resets them), one attempt in flight, and whether a client typed since its last
+  `UserPromptSubmit`. Typing is a client's `Input` other than focus and mouse reports; the
+  daemon's own writes never count.
+- **The attempt** runs on a task of its own. It copies the session's spawn env out of the
+  registry and asks each daemon-side addon's `DaemonOps::on_usage_limit` in registry order
+  (docs/addons.md, "Usage limits"), within `Config::limit_attempt_timeout` (20 s). It reports
+  one `Cmd::Limit(Done)` to the actor that started it, through a weak handle on that actor's
+  channel, so a respawned session never hears it. A panic is `Failed("addon panicked")`.
+- **Typing.** After `Switched`: a 1 s timer, `continue`, a 150 ms timer, then `\r` as a
+  separate write (the api driver's text-dwell-Enter rule). The timers are tasks that send the
+  actor a `Cmd`, never a sleep on it. Each step types only while `seq` is still the hit's, the
+  state is still `Error` and no client typed; otherwise the notice says the switch applies to
+  the next message.
+- **Bounds.** 3 automatic continues in a row, then a notice to continue by hand. A 409 from the
+  proxy (no other subscription) is a `Failed` notice and stops at once. The counters live in
+  the actor, so a respawn starts at zero.
+- **Rollout.** The feature lives in the daemon: a host gets it when its daemon is from this
+  release. `[proxy] auto_switch = false` in that host's `config.toml` turns it off at the next
+  hit. No protocol change: clients show the `Notice` events.
+- **Testing.** In debug builds only, `CLAUDIO_TEST_LIMIT_SWITCH=1` in the daemon's env makes
+  each session's first `Stop` a usage limit that switches without an addon. The opt-in
+  real-claude test `test_e2e_usage_limit_continue_starts_a_turn` uses it to check that the typed
+  `continue` starts a turn.
+
 ### 2.3 Persistence and recovery
 
 There are two journals, each written durably (write-tmp + fsync + rename):
