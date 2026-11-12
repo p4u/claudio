@@ -1,6 +1,6 @@
 # SSH agent forwarding per remote host: design
 
-Status: draft   Class: architectural (security-sensitive: delegates the use of the owner's SSH keys)
+Status: audited (2026-11-12; audit-spec.md F1-F10 folded in)   Class: architectural (security-sensitive: delegates the use of the owner's SSH keys)
 Owner decisions so far (2026-11-12):
 - The option is per host, stored in `config.toml`, and toggled from the web (host panel, Alt+n's
   "Another host…", the add-host form) and from the TUI wizard's Where step.
@@ -17,9 +17,14 @@ Owner decisions so far (2026-11-12):
   the forwarded socket (`/tmp/ssh-XXXX/agent.N`) for one connection and removes it when that
   connection ends. The remote daemon is started once by a bridge (`claudio --slave`,
   crates/core/src/remote/bridge.rs:63) and outlives it. Every session inherits the daemon's env
-  (crates/core/src/daemon/command.rs:76-97), so its `SSH_AUTH_SOCK` names the socket of the
-  connection that started the daemon. That socket is gone once that connection closes. Sessions
-  outlive connections by design, so the agent stops working for them.
+  (crates/core/src/daemon/command.rs:80-97), which depends on how the daemon was started:
+  - A daemon started by fork+setsid keeps the starting connection's `SSH_AUTH_SOCK`, which dies
+    with that connection.
+  - A daemon started by `systemd-run --user` (bridge.rs, the preferred path) runs in the user
+    manager's environment and usually has no `SSH_AUTH_SOCK` at all.
+
+  Either way, sessions outlive connections by design, so the agent stops working, or never
+  works, for them.
 
 ## Goals
 
@@ -153,18 +158,30 @@ from a shell rc) is registered the same way.
   - It starts in `serve_until_shutdown` before `serve()`. A bind failure is logged once and leaves
     the relay off; the daemon still serves.
 - Per connection, at most 32 at once (a `Semaphore`; over the cap the connection is closed):
-  1. List `agents/`. Take the entries that are symlinks, newest `lstat` mtime first.
+  1. List `agents/`. Take the entries that are symlinks, newest `lstat` mtime first. Ties on
+     mtime are broken by file name, descending, so the order is deterministic.
   2. Connect to each in turn, with a 1 s timeout.
-     - `ECONNREFUSED` or `ENOENT`: remove that link and try the next one.
-     - Other errors: skip it.
-  3. On the first success, copy bytes both ways until either side closes.
-  4. No live agent: close the connection.
+     - `ECONNREFUSED`, `ENOENT` or `EACCES`: remove that link and try the next one. The link
+       is ours even when its target no longer is.
+     - A timeout or any other error: skip it and keep the link.
+  3. After the links, try the daemon's own inherited `SSH_AUTH_SOCK`, read once at start, if it
+     is set, absolute and not the relay path. Never prune it.
+  4. On the first success, copy bytes both ways until either side closes.
+  5. No live agent: close the connection.
 - The relay never parses, logs or stores the traffic. It logs only counts and errors, never key
   names or comments.
-- **Spawn env:** when the relay is listening and `agents/` holds at least one link whose target
-  exists (`stat`, no connect), `apply_env` sets `SSH_AUTH_SOCK=<relay path>`. This happens for
-  claude sessions and terminals alike, before the spec's env, so an explicit spec value still wins.
-  Otherwise the session inherits the daemon's env as today (Goal 4).
+- **Spawn env:** when the relay is listening and the `<runtime>/agents` directory exists,
+  `apply_env` sets `SSH_AUTH_SOCK=<relay path>`.
+  - Only a bridge that registered a working agent at least once creates the directory (§2
+    step 2). A local daemon, where no bridge ever runs, never has it, so its sessions inherit
+    the daemon's env as today (Goal 4).
+  - A relay with no live link at spawn time is no worse than today's stale inherited socket. The
+    next forwarding connection revives it without a respawn (Goal 2), and step 3's fallback keeps
+    a daemon's own agent reachable.
+  - The value is set for claude sessions and terminals alike, before the spec's env, so an
+    explicit spec value still wins.
+  - It is not set when the spawn's `env_remove` names `SSH_AUTH_SOCK`: a launch that scrubs the
+    agent gets none.
 
 ### 4. Front-ends
 
@@ -174,24 +191,39 @@ from a shell rc) is registered the same way.
 - New op `hosts.forward_agent`, args `host` (string) and `on` (bool), answering `{}`.
   - It calls `remote::hosts::set_forward_agent`.
   - If the host is connected and the value changed, the hub reconnects it through its
-    `Cmd::Reconnect` path.
+    `Cmd::Reconnect` path. Toggling a host that is mid-connect only writes the option. The
+    in-flight attempt keeps its old setting and is not restarted; the next connect or reconnect
+    picks up the new value. The same holds in the TUI.
   - It then emits `host`.
   - `"local"` answers `"local has no ssh connection"`.
   - It is additive: the protocol stays version 2.
 - Page:
-  - The host panel shows a row, "SSH agent": "forwarded" or "not forwarded (your ssh config
-    decides)", with a button (`host-agent-btn`) that toggles it.
+  - The host panel shows a row, "SSH agent": "forward on connect" or "not forwarded (your ssh
+    config decides)", with a button (`host-agent-btn`) that toggles it. The server does not know
+    whether a live link exists on the remote, so it never claims "forwarded".
   - The add-host form (`host-add-agent`) and the wizard's "Another host…" (`wizard-host-agent`)
-    get a checkbox "Forward my SSH agent". When checked, `hosts.forward_agent {on: true}` is sent
-    before `hosts.connect`.
+    get a checkbox "Forward my SSH agent", initially clear. Whatever its state,
+    `hosts.forward_agent {host, on: <checked>}` is sent before `hosts.connect`, so a host re-added
+    with the box clear loses a stale entry.
   - The help text says what forwarding allows (below).
+- The web service's own ssh runs with the local daemon's environment, which often has no
+  `SSH_AUTH_SOCK` (a `systemd-run` daemon has the user manager's env).
+  - Such a connection still requests forwarding but registers nothing (the probe fails). It is
+    not a forwarding connection in Goal 2's sense.
+  - docs/web.md's "SSH hosts" says forwarding reaches a host only while some client whose own
+    environment has a live agent is connected, normally the desktop TUI or a `--foreground` web
+    started from a desktop terminal.
 
 **TUI.**
-- In the Where step, one key toggles forwarding for the highlighted remote row, or for the
-  "connect to <query>" row.
-  - The plan picks the key from keymap.rs so it collides with no manager binding and no key the
-    step already uses. It is shown in the step's hint line.
-  - The toggle is a pure `Outcome`/`Effect`. The I/O stays in lib.rs.
+- In the Where step, one `Alt+<key>` toggles forwarding for the highlighted remote row, or for
+  the "connect to <query>" row. Typing in this step is the filter, so the toggle needs the
+  modifier.
+  - The plan picks the key from keymap.rs so it collides with no manager binding. It is shown in
+    the step's hint line.
+  - The per-host flags travel with the candidates (`Effect::LoadSshHosts` →
+    `App::on_ssh_hosts`), so `app.rs` reads no file.
+  - The toggle is a pure `Outcome`/`Effect` whose completion sends the flags again. The I/O
+    stays in lib.rs.
 - Rows with forwarding on show a marker.
 - Toggling a connected host emits the existing reconnect.
 
@@ -203,7 +235,8 @@ from a shell rc) is registered the same way.
 | One stable symlink re-pointed by each bridge | The last bridge to connect wins. When it leaves, the link dangles while another forwarding connection is still up (the TUI and the web service both connected is the owner's normal case). Exit hooks do not run when sshd kills a bridge. |
 | Pass the forwarded path in each `Spawn` | It still dies with that connection, and a respawn from another client would need the field (protocol change). |
 | The daemon reads bridges' env from `/proc` | Linux only; macOS hosts are supported. |
-| Always set the relay in the spawn env | Changes the local host's sessions, whose desktop agent works today. |
+| Always set the relay in the spawn env, even where no bridge ever registered | Changes the local host's sessions, whose desktop agent works today. |
+| Set the relay only while a live link exists at spawn | A session spawned during a forwarding gap (the web service respawning while the desktop TUI sleeps) could never be restored by a reconnect (audit F1). |
 
 ## Compatibility and rollout
 
@@ -219,8 +252,14 @@ from a shell rc) is registered the same way.
   binary.
 - **ControlMaster:** a multiplexed session gets forwarding only if the master connection has it
   (OpenSSH decides by the master's `ForwardAgent`). Docs say so.
-- **Rollback:** remove the hosts from `[ssh] forward_agent` (or downgrade). Links left in
-  `agents/` are inert.
+- **Rollback:**
+  - Remove the hosts from `[ssh] forward_agent`; the next reconnect drops
+    `-o ForwardAgent=yes`.
+  - A binary downgrade also needs `claudio daemon restart` on the host, because freshness
+    replaces a daemon only with a newer build.
+  - Sessions spawned with the relay path keep it until they are respawned. The path is dead
+    once no daemon binds it.
+  - Links left in `agents/` are inert.
 
 ## Failure modes and security
 
@@ -228,6 +267,9 @@ from a shell rc) is registered the same way.
   connection is up. This is inherent to `ssh -A`. The relay adds no new reader: its socket is
   0600, inside the private runtime dir, and checks peer uid, the same guard as the daemon socket.
   Docs explain this and recommend `ssh-add -c` (confirm each use) or a dedicated key.
+  - Docs also say that with forwarding on, every session on that host, and anything claude runs
+    inside one, can sign with the owner's agent while a forwarding connection is up. That is the
+    feature, and the reason to prefer `ssh-add -c` or a dedicated key.
 - **Links** are created only by the user, inside the private runtime dir. The relay follows them
   to wherever the bridge's `SSH_AUTH_SOCK` pointed. Dead links are removed when found.
   - The bridge's pid may be reused, but the rename overwrites the old link atomically.
@@ -270,13 +312,18 @@ from a shell rc) is registered the same way.
 - [ ] AC6: web Rust test (addons/web/tests/web.rs):
   - `hosts.forward_agent` writes `[ssh] forward_agent`, emits `host` with `forward_agent: true`,
     and refuses `"local"`;
-  - `hosts.list` reports the field.
+  - `hosts.list` reports the field;
+  - toggling a connected fake host makes the hub drop and re-establish that host's connection
+    (its generation goes up, its sessions survive);
+  - toggling a disconnected host connects nothing.
 - [ ] AC7: Playwright spec:
   - the host panel's `host-agent-btn` toggles the row text, and the wizard's
     `wizard-host-agent` checkbox makes `hosts.forward_agent` precede `hosts.connect`;
   - zero CSP violations.
 - [ ] AC8: TUI manager test (crates/tui/tests/manager.rs): in the Where step, the toggle key marks
-  the highlighted host and writes `[ssh] forward_agent` in the test config.
+  the highlighted host and writes `[ssh] forward_agent` in the test config. Toggling a connected
+  host emits the reconnect: the fake host's bridge is re-established and the session keeps
+  running.
 - [ ] AC9: `CLAUDIO_SSH_TEST_HOST` end-to-end test (tests/remote.rs, gated like t2–t6).
   - With the option on and an agent holding a test key, a remote shell session can run
     `ssh-add -l` and see that key's fingerprint.
@@ -295,7 +342,8 @@ from a shell rc) is registered the same way.
 - ACCEPTANCE.md throughout:
   - A2/A3: the core names no addon, and the web writes `[ssh]` only through
     `remote::hosts::set_forward_agent`.
-  - A8: size baselines; `ws.rs::tab` must not grow; hub.rs is near its baseline.
+  - A8: size baselines. `ws.rs::tab` and `ws.rs::dispatch` must not grow, so the new op's arm
+    delegates to a helper. hub.rs is near its baseline.
   - A10: bounded.
   - B2: web-protocol doc first.
   - C1: no secrets in logs.
