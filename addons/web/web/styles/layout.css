@@ -152,8 +152,13 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
 .pane-dormant { flex: 1; min-height: 0; display: grid; place-content: center; justify-items: center; gap: var(--space-3); text-align: center; padding: var(--space-4); }
 .pane-dormant .coin { font-size: var(--fs-lg); letter-spacing: var(--track-mono-wide); text-transform: uppercase; color: var(--state-stopped); }
 .pane-dormant p { font-family: var(--font-sans); max-width: 46ch; }
-.term-host { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px; background: var(--term-bg); overflow: hidden; }
-.term-host .xterm { width: max-content; }
+/* The grid sits at the box's bottom: when another client's size is taller than this pane, the top is
+   cut and claude's prompt stays in view (typing here takes the size back: term.js claim). */
+.term-host { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px; background: var(--term-bg); overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end; }
+.term-host .xterm { width: max-content; flex: none; }
+/* xterm's scrollbar fades out when idle; keep it on the right, always. */
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible { opacity: 1; pointer-events: auto; }
 .term-host .xterm-viewport { background-color: var(--term-bg) !important; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px var(--space-4); }
 .facts dt { color: var(--text-muted); }

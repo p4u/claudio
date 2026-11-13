@@ -57,6 +57,10 @@ function look() {
       cursor: cssVar('--term-cursor'),
       cursorAccent: cssVar('--term-bg'),
       selectionBackground: cssVar('--term-selection'),
+      // The scrollbar is always shown (layout.css): a thumb in the hairline tokens.
+      scrollbarSliderBackground: cssVar('--border-strong'),
+      scrollbarSliderHoverBackground: cssVar('--text-muted'),
+      scrollbarSliderActiveBackground: cssVar('--text-muted'),
     },
   };
 }
@@ -129,6 +133,26 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     timer = setTimeout(sendResize, resizePolicy().debounceMs);
   }
 
+  // The pane in use takes the PTY's size back from another client (tmux's "latest"): typing in
+  // it, a click in it, its window coming back. Nothing when the PTY already has this pane's fit.
+  function claim() {
+    if (disposed || !opened || !isFocused()) return;
+    const s = proposed();
+    if (!s || (lastSent && lastSent.rows === s.rows && lastSent.cols === s.cols)) return;
+    clearTimeout(timer);
+    sendResize();
+  }
+
+  // A move to a screen of another density keeps the box's CSS size (no ResizeObserver call) but
+  // can change the cell size: refit, and watch the new density.
+  let dpr = null;
+  const onDpr = () => { watchDpr(); refit(); };
+  function watchDpr() {
+    dpr?.removeEventListener('change', onDpr);
+    dpr = globalThis.matchMedia?.(`(resolution: ${globalThis.devicePixelRatio || 1}dppx)`) ?? null;
+    dpr?.addEventListener?.('change', onDpr);
+  }
+
   function attach() {
     if (disposed || !opened || conn.value !== 'open') return;
     const s = proposed() ?? size();
@@ -159,12 +183,12 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     const nl = shiftEnterBytes(ev);
     if (!nl) return true;
     ev.preventDefault();
-    if (ev.type === 'keydown') sendInput(sid, nl);
+    if (ev.type === 'keydown') { claim(); sendInput(sid, nl); }
     return false;
   });
 
-  const d1 = term.onData((d) => sendInput(sid, d));
-  const d2 = term.onBinary((d) => sendInput(sid, Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)));
+  const d1 = term.onData((d) => { claim(); sendInput(sid, d); });
+  const d2 = term.onBinary((d) => { claim(); sendInput(sid, Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)); });
 
   // copy on select: when the pointer is released over a selection
   const copy = () => {
@@ -172,6 +196,8 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (t) navigator.clipboard?.writeText(t).catch(() => {});
   };
   el.addEventListener('pointerup', copy);
+  el.addEventListener('pointerdown', claim);
+  globalThis.addEventListener?.('focus', claim);
 
   const ro = new ResizeObserver(() => {
     if (raf) return;
@@ -195,6 +221,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (wantFocus) { wantFocus = false; term.focus(); }
     ro.observe(el);
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style'] });
+    watchDpr();
     attach();
   });
 
@@ -210,6 +237,9 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect(); mo.disconnect(); latex.dispose();
       el.removeEventListener('pointerup', copy);
+      el.removeEventListener('pointerdown', claim);
+      globalThis.removeEventListener?.('focus', claim);
+      dpr?.removeEventListener('change', onDpr);
       offOut(); offEv(); d1.dispose(); d2.dispose();
       if (handles.get(sid) === handle) handles.delete(sid);
       if (conn.value === 'open') req('session.detach', { sid }).catch(() => {});
