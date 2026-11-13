@@ -264,6 +264,9 @@ local daemon run `claudio web --service` (supervised: restarted with backoff, st
 daemon), then prints the URL and exits (`cli.rs`, with `stop`, `status`, `restart_if_enabled`;
 `service.rs` maps `[web]` to argv); `--foreground` serves from the terminal and never touches
 `[web]`. The server is one more client of the daemons, like the TUI, over the same socket and ssh bridge.
+A browser it opens signs in with a single-use ticket through a 0600 redirect file (`ticket.rs`); `--app`
+opens a Chromium-family app window instead of a tab, `--app=<url>` another machine's web (`app_window.rs`),
+and `--install-launcher` writes a desktop launcher for it (`launcher/`).
 `docs/web-protocol.md` is the contract between server and page (version 2: `addons.*` ops,
 the Session's `launch` and `segments`); change it first, in its own commit. User docs, the
 security model and the TUI parity table: `docs/web.md`.
@@ -271,7 +274,7 @@ security model and the TUI parity table: `docs/web.md`.
 - **Server** (axum, loopback only unless `--remote`): `auth.rs` (token, the cookie with
   `Max-Age=34560000`, `Host`/`Origin` checks, the CSP), `sessions.rs` (sign-ins as hashes in
   `web-sessions.json`, bound to an epoch; 30 days idle, 64 at most), `hub_io.rs` (the plain
-  connect for `--service`), `login.rs` + `limit.rs` + `password.rs` (token or argon2id
+  connect for `--service`), `login.rs` + `limit.rs` + `password.rs` (token, ticket or argon2id
   password login, rate-limited), `tls/` (`--remote`'s kept self-signed certificate), `ws.rs`
   (the WebSocket), `hub.rs` (one actor owning hosts, daemon connections, sessions, tabs and
   `web-state.json`), `dto.rs` (DTOs built field by field, never a serialized `Profile`,
@@ -401,6 +404,11 @@ security model and the TUI parity table: `docs/web.md`.
   daemon's environment).
 - **The suites' remote peer is a debug-only hook** (`CLAUDIO_TEST_REMOTE_PEER`); it only ever
   takes the token away.
+- **No token or ticket in a browser's argv.** A browser claudio opens gets
+  `file://<runtime>/web-open/<hex>.html` (0600), which carries a single-use ticket; only a snap or
+  flatpak browser gets the `#k=` link in argv, with a warning. With `--app` and stdout not a
+  terminal, nothing that holds the token is printed. Tests put fake browsers, openers and
+  notifiers on `PATH` and in `CLAUDIO_BROWSER` (`web_harness/app.rs`), never a real one.
 - **DTO fields are fixed by `docs/web-protocol.md`.** A new field or message changes the doc
   first. Session ids are `sid` in every request and event (an `id` argument would collide with
   the request id); only the Session DTO keeps `id`.
