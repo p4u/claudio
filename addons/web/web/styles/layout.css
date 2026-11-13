@@ -152,8 +152,16 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
 .pane-dormant { flex: 1; min-height: 0; display: grid; place-content: center; justify-items: center; gap: var(--space-3); text-align: center; padding: var(--space-4); }
 .pane-dormant .coin { font-size: var(--fs-lg); letter-spacing: var(--track-mono-wide); text-transform: uppercase; color: var(--state-stopped); }
 .pane-dormant p { font-family: var(--font-sans); max-width: 46ch; }
-.term-host { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px; background: var(--term-bg); overflow: hidden; }
+/* content-box: the fit addon reads this box's computed width and height, which must not count the
+   padding (with border-box it fitted 12 px too wide and 8 px too tall). */
+.term-host { flex: 1; min-height: 0; min-width: 0; padding: 4px 6px; background: var(--term-bg); overflow: hidden;
+  box-sizing: content-box; }
 .term-host .xterm { width: max-content; }
+/* xterm's scrollbar sits in the gutter the fit leaves right of the grid (14 px, xterm's default), not
+   over the last columns, and stays shown while there is scrollback (term.js sets data-scroll): xterm
+   fades it out when idle (`invisible fade`), and keeps `fade` after the scrollback goes. */
+.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { right: -14px !important; }
+.term-host[data-scroll="1"] .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible.fade { opacity: 1; pointer-events: auto; }
 .term-host .xterm-viewport { background-color: var(--term-bg) !important; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px var(--space-4); }
 .facts dt { color: var(--text-muted); }

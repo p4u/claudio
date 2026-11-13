@@ -222,6 +222,32 @@ export function installFocusModel() {
     setTimeout(() => { if (document.hasFocus() && !inTerm(document.activeElement)) setMode('app'); }, 0);
   }, true);
   setMode(inTerm(document.activeElement) ? 'terminal' : 'app');
+
+  // Focus follows the mouse: over a terminal the keyboard goes to it (and its pane is the focused
+  // one), over the rest of the page it leaves the terminal (APP). Only for a mouse with no button
+  // held (a selection or a drag keeps its focus), never while a dialog, the palette, a panel or a
+  // menu is open, and a text field outside the terminals (search, composer) keeps the keyboard. Moving
+  // the focus never takes the terminal's size: a key or a click does (term.js).
+  let hovered;
+  document.addEventListener('pointerover', (ev) => {
+    if (ev.pointerType !== 'mouse' || ev.buttons !== 0) return;
+    const host = ev.target instanceof Element ? ev.target.closest('[data-testid="terminal"]') : null;
+    if (host === hovered) return;
+    hovered = host;
+    if (modal.value || overlay.value !== null || panelOpen.value !== null || checklistOpen()) return;
+    // An open menu (Hosts, a session's ⋯) keeps the keyboard for its arrows, Enter and Escape.
+    if (document.querySelector('[aria-haspopup][aria-expanded="true"]')) return;
+    const active = document.activeElement;
+    if (isTyping(active) && !inTerm(active)) return;
+    if (active instanceof Element && active.closest('[role="menu"], [role="listbox"], [role="dialog"]')) return;
+    if (!host) {
+      if (inTerm(active)) active.blur();
+      return;
+    }
+    const i = Number(host.closest('[data-testid="pane"]')?.dataset.pane);
+    if (Number.isInteger(i)) focusPane(i);
+    host.querySelector('.xterm-helper-textarea')?.focus({ preventScroll: true });
+  }, true);
 }
 
 // ---- notifications: the tab title always, the desktop notification when the person turned it on ----

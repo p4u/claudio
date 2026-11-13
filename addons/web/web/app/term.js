@@ -13,6 +13,7 @@ import { confirm } from './ui/modal.js';
 import { createLatexLayer } from './ui/latex-layer.js';
 
 const handles = new Map(); // sid -> handle
+const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock']);
 
 export function focusTerminal(sid) {
   const h = handles.get(sid);
@@ -57,6 +58,10 @@ function look() {
       cursor: cssVar('--term-cursor'),
       cursorAccent: cssVar('--term-bg'),
       selectionBackground: cssVar('--term-selection'),
+      // The scrollbar is always shown (layout.css): a thumb in the hairline tokens.
+      scrollbarSliderBackground: cssVar('--border-strong'),
+      scrollbarSliderHoverBackground: cssVar('--text-muted'),
+      scrollbarSliderActiveBackground: cssVar('--text-muted'),
     },
   };
 }
@@ -115,18 +120,71 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     lastSent = s;
     mine = s;
     term.resize(s.cols, s.rows);
+    measure();
     onAttached?.({ ...s, foreign: false });
     req('session.resize', { sid, ...s }).catch(() => {});
   }
 
   function refit() {
     if (disposed || !opened) return;
+    measure();
     const s = proposed();
     if (!s) return;
     onFit?.(s);
     if (!shouldSendResize({ focused: isFocused(), cause: 'fit', size: s, lastSent })) return;
     clearTimeout(timer);
     timer = setTimeout(sendResize, resizePolicy().debounceMs);
+  }
+
+  // The pane in use takes the PTY's size back from another client (tmux's "latest"): a key or a
+  // paste in it, a click in it, its window coming back. Never on onData, which also carries the
+  // terminal's own replies (focus reports, device attributes): two panes would trade the size.
+  // Nothing when the PTY already has this pane's fit.
+  function claim() {
+    if (disposed || !opened || !isFocused()) return;
+    const s = proposed();
+    if (!s || (lastSent && lastSent.rows === s.rows && lastSent.cols === s.cols)) return;
+    clearTimeout(timer);
+    sendResize();
+  }
+
+  // A grid taller than its box (another client's size) is shifted up just enough to show the
+  // cursor row, where claude's prompt is; never past the grid's top, so a prompt near the top of
+  // a fresh terminal stays in view too. Measured on every resize, applied on every cursor move.
+  let over = 0; // rows of the grid below the box
+  let cellH = 0;
+  let shiftPx = 0;
+  function measure() {
+    if (disposed || !opened) return;
+    const screen = term.element?.querySelector('.xterm-screen');
+    const cs = getComputedStyle(el);
+    const room = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    cellH = screen && term.rows ? screen.offsetHeight / term.rows : 0;
+    over = cellH > 0 ? Math.max(0, term.rows - Math.floor(room / cellH)) : 0;
+    follow();
+  }
+  function follow() {
+    const rows = over > 0 ? Math.min(over, Math.max(0, term.buffer.active.cursorY + 1 - (term.rows - over))) : 0;
+    const px = rows * cellH;
+    if (px === shiftPx) return;
+    shiftPx = px;
+    if (term.element) term.element.style.marginTop = px ? `${-px}px` : '';
+  }
+
+  // Whether the buffer has scrollback: the scrollbar is kept shown only then (layout.css).
+  function scrollable() {
+    const yes = term.buffer.active.baseY > 0;
+    if (yes !== (el.dataset.scroll === '1')) el.dataset.scroll = yes ? '1' : '';
+  }
+
+  // A move to a screen of another density keeps the box's CSS size (no ResizeObserver call) but
+  // can change the cell size: refit, and watch the new density.
+  let dpr = null;
+  const onDpr = () => { watchDpr(); refit(); requestAnimationFrame(measure); };
+  function watchDpr() {
+    dpr?.removeEventListener('change', onDpr);
+    dpr = globalThis.matchMedia?.(`(resolution: ${globalThis.devicePixelRatio || 1}dppx)`) ?? null;
+    dpr?.addEventListener?.('change', onDpr);
   }
 
   function attach() {
@@ -145,6 +203,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (ev.ev !== 'attached' || ev.sid !== sid || disposed) return;
     term.resize(ev.cols, ev.rows);
     term.reset(); // the next output frame is the snapshot
+    measure();
     lastSent = { rows: ev.rows, cols: ev.cols };
     // Foreign only when the size is not the one this tab asked for: another client sized the PTY.
     // A pane here that merely differs from the focused pane's fit just letterboxes.
@@ -156,6 +215,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   // claude's newline is ESC CR, which xterm does not send for Shift.
   term.attachCustomKeyEventHandler((ev) => {
     if (tuiBinding(ev)) return false;
+    if (ev.type === 'keydown' && !MODIFIERS.has(ev.key)) claim();
     const nl = shiftEnterBytes(ev);
     if (!nl) return true;
     ev.preventDefault();
@@ -163,6 +223,9 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     return false;
   });
 
+  const d3 = term.onCursorMove(follow);
+  const d4 = term.onWriteParsed(scrollable);
+  const d5 = term.buffer.onBufferChange(scrollable);
   const d1 = term.onData((d) => sendInput(sid, d));
   const d2 = term.onBinary((d) => sendInput(sid, Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)));
 
@@ -172,6 +235,9 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (t) navigator.clipboard?.writeText(t).catch(() => {});
   };
   el.addEventListener('pointerup', copy);
+  el.addEventListener('pointerdown', claim);
+  el.addEventListener('paste', claim, true);
+  globalThis.addEventListener?.('focus', claim);
 
   const ro = new ResizeObserver(() => {
     if (raf) return;
@@ -183,6 +249,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     term.options.theme = l.theme;
     if (term.options.fontSize !== l.fontSize) term.options.fontSize = l.fontSize;
     refit();
+    requestAnimationFrame(measure); // the new cell size is laid out by then
     latex.schedule();
   });
 
@@ -195,6 +262,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     if (wantFocus) { wantFocus = false; term.focus(); }
     ro.observe(el);
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style'] });
+    watchDpr();
     attach();
   });
 
@@ -210,7 +278,11 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect(); mo.disconnect(); latex.dispose();
       el.removeEventListener('pointerup', copy);
-      offOut(); offEv(); d1.dispose(); d2.dispose();
+      el.removeEventListener('pointerdown', claim);
+      el.removeEventListener('paste', claim, true);
+      globalThis.removeEventListener?.('focus', claim);
+      dpr?.removeEventListener('change', onDpr);
+      offOut(); offEv(); d1.dispose(); d2.dispose(); d3.dispose(); d4.dispose(); d5.dispose();
       if (handles.get(sid) === handle) handles.delete(sid);
       if (conn.value === 'open') req('session.detach', { sid }).catch(() => {});
       term.dispose();
