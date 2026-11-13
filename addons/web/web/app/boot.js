@@ -1,3 +1,5 @@
+import { ticketOf, afterRefusal, TICKET_EXPIRED } from './signin.js';
+
 // First thing: record CSP violations so the e2e can assert there are none.
 document.addEventListener('securitypolicyviolation', (e) => {
   (window.__claudioCsp ||= []).push(e.violatedDirective);
@@ -101,7 +103,35 @@ async function start() {
   await import('./main.js');
 }
 
+/**
+ * `#k=<ticket>` (docs/web-protocol.md, "Sign-in tickets"): post it (a well-formed one only, and
+ * also with a live cookie, so it is spent), clear the fragment whatever happened, then start, or
+ * ask /api/me what is left: the cookie, the password form or the expiry message.
+ */
+async function ticketBoot(ticket) {
+  let r = null;
+  if (ticket) {
+    try {
+      r = await fetch('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticket }), credentials: 'same-origin',
+      });
+    } catch { /* r stays null */ }
+  }
+  history.replaceState(null, '', location.pathname);
+  if (r?.status === 204) return start();
+  if (r?.status === 429) return show('claudio', LOGIN_FAILED[429]);
+  let me;
+  try { me = await fetch('/api/me', { credentials: 'same-origin' }); } catch { return show('claudio', 'Cannot reach the server.'); }
+  const next = afterRefusal(me.status, await methodsOf(me));
+  if (next === 'start') return start();
+  if (next === 'password') return showLogin('');
+  return show('claudio', TICKET_EXPIRED);
+}
+
 async function boot() {
+  const k = ticketOf(location.hash);
+  if (k) return ticketBoot(k.ticket);
   const m = /^#t=([A-Za-z0-9._~-]{1,128})$/.exec(location.hash);
   if (location.hash.startsWith('#t=')) {
     const token = m ? m[1] : '';
