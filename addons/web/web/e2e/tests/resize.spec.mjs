@@ -24,7 +24,7 @@ async function fit(page) {
   });
 }
 
-async function open(page) {
+async function open(page, lines = 50) {
   await page.setViewportSize({ width: 1200, height: 800 });
   const sid = await srv.spawn(srv.dirs.a);
   await page.goto(srv.url);
@@ -32,8 +32,8 @@ async function open(page) {
   const term = page.locator('[data-testid="pane"][data-pane="0"]').getByTestId('terminal');
   await expect(term).toContainText('FAKE_CLAUDE_BANNER');
   await term.click();
-  for (let i = 1; i <= 50; i++) { await page.keyboard.type(`x${i}`); await page.keyboard.press('Enter'); }
-  await expect(term).toContainText('line:x50');
+  for (let i = 1; i <= lines; i++) { await page.keyboard.type(`x${i}`); await page.keyboard.press('Enter'); }
+  if (lines) await expect(term).toContainText(`line:x${lines}`);
   return { sid, term };
 }
 
@@ -60,7 +60,11 @@ test('another client sizing the terminal never hides the prompt, and typing here
   await srv.api('session.attach', { sid, rows: 70, cols: 140 });
   await srv.api('session.resize', { sid, rows: 70, cols: 140 });
   await expect.poll(async () => (await fit(page)).rows, { timeout: 5_000 }).toBe(70);
-  expect((await fit(page)).cursorInside).toBe(true);
+  await settled(page, (f) => f.cursorInside);
+  // With no key, paste or click here, the size stays the other client's: the pane never trades
+  // it on its own (terminal replies, snapshots).
+  await page.waitForTimeout(1_000);
+  expect((await fit(page)).rows).toBe(70);
   // Typing in this pane takes the size back.
   await term.click();
   await page.keyboard.type('mine');
@@ -69,12 +73,33 @@ test('another client sizing the terminal never hides the prompt, and typing here
   await settled(page, (f) => f.fits && f.cursorInside);
 });
 
-test('the scrollbar stays visible once there is scrollback', async ({ page }) => {
-  await open(page);
-  const bar = page.locator('[data-testid="pane"][data-pane="0"] .xterm-scrollable-element > .scrollbar.vertical');
-  await expect(bar).toHaveCount(1);
-  // Away from the terminal and past xterm's 800 ms fade: still visible.
+test('a prompt near the top stays in view under a taller foreign size', async ({ page }) => {
+  const { sid } = await open(page, 0);
+  await settled(page, (f) => f.fits && f.cursorInside);
+  await srv.api('session.attach', { sid, rows: 80, cols: 140 });
+  await srv.api('session.resize', { sid, rows: 80, cols: 140 });
+  await expect.poll(async () => (await fit(page)).rows, { timeout: 5_000 }).toBe(80);
+  await settled(page, (f) => f.cursorInside);
+});
+
+// The vertical scrollbar against the grid: its opacity, and whether it covers the last column.
+const scrollbar = (page) => page.evaluate(() => {
+  const host = document.querySelector('[data-testid="pane"][data-pane="0"] [data-testid="terminal"]');
+  const bar = host.querySelector('.xterm-scrollable-element > .scrollbar.vertical');
+  const row = host.querySelector('.xterm-rows > div').getBoundingClientRect();
+  const b = bar.getBoundingClientRect(), h = host.getBoundingClientRect();
+  return { opacity: getComputedStyle(bar).opacity, clear: b.left >= row.right - 0.5, inside: b.right <= h.right + 0.5 };
+});
+
+test('the scrollbar: hidden with nothing to scroll, shown with scrollback, never over the text', async ({ page }) => {
+  await open(page, 0);
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(1_200);
+  expect((await scrollbar(page)).opacity).toBe('0');
+  await page.locator('[data-testid="pane"][data-pane="0"]').getByTestId('terminal').click();
+  for (let i = 1; i <= 50; i++) { await page.keyboard.type(`x${i}`); await page.keyboard.press('Enter'); }
+  // Away from the terminal and past xterm's 800 ms fade: still shown, right of the last column.
   await page.mouse.move(0, 0);
   await page.waitForTimeout(1_500);
-  expect(await bar.evaluate((e) => getComputedStyle(e).opacity)).toBe('1');
+  expect(await scrollbar(page)).toEqual({ opacity: '1', clear: true, inside: true });
 });
