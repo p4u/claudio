@@ -7,7 +7,7 @@
 //! only, never on an error's text.
 
 use std::future::Future;
-use std::io::{self, IsTerminal};
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -17,7 +17,7 @@ use claudio_core::proto::Msg;
 use serde_json::{json, Value};
 
 use crate::service::{self, Reported, Unit};
-use crate::{auth, parse_args, password, remote, start_url, tls, WebArgs};
+use crate::{auth, parse_args, password, remote, start_url, ticket, tls, WebArgs};
 
 /// `claudio web` against a daemon without `addon:web`.
 const NO_SERVICE: &str = "the daemon has no web service (older, or built without the web \
@@ -190,7 +190,8 @@ fn fail_after_token(run: &WebArgs, why: &str) -> ExitCode {
 }
 
 /// What a foreground start prints, for what runs (the reply's argv: two
-/// `claudio web` at once each print the one that won), then the browser.
+/// `claudio web` at once each print the one that won), then the browser,
+/// signed in with a ticket (`ticket::open_tab`).
 fn announce(argv: &[String], token: &str, asked: &WebArgs) -> ExitCode {
     let Some(Ok(running)) = argv.get(2..).map(parse_args) else {
         return fail("the daemon runs a web service this claudio cannot read");
@@ -207,14 +208,7 @@ fn announce(argv: &[String], token: &str, asked: &WebArgs) -> ExitCode {
         }
     };
     crate::announce(&url, remote.as_ref());
-    let wanted = claudio_core::app::browser::browser_wanted(
-        std::env::consts::OS,
-        |k| std::env::var(k).ok(),
-        io::stdout().is_terminal(),
-    );
-    if !asked.no_open && wanted {
-        claudio_core::app::browser::open_browser(&url);
-    }
+    ticket::open_tab(&running, asked.no_open);
     ExitCode::SUCCESS
 }
 

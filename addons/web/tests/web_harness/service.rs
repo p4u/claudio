@@ -162,6 +162,14 @@ impl ServiceWeb {
         super::tls::cookie_of(&set)
     }
 
+    /// A sign-in with `ticket` on the loopback listener: its status.
+    pub fn ticket_login(&self, ticket: &str) -> u16 {
+        let (host, origin) = (self.host(), format!("http://{}", self.host()));
+        let body = serde_json::json!({ "ticket": ticket }).to_string();
+        let headers = [("Origin", origin.as_str())];
+        http(self.port, "POST", "/api/login", &host, &headers, &body).status
+    }
+
     /// `/api/me` with `cookie`.
     pub fn me(&self, cookie: &str) -> u16 {
         let with = format!("claudio_web={cookie}");

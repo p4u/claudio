@@ -15,6 +15,7 @@ use common::{FakeSsh, ManagerHarness, BINARY, DAEMON_WAIT, WAIT};
 use futures::SinkExt;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
+use web_harness::app::*;
 use web_harness::service::*;
 use web_harness::tls::*;
 use web_harness::*;
@@ -2222,4 +2223,90 @@ async fn hello_is_v2() {
     assert_eq!(tab.hello["t"], "hello");
     assert_eq!(tab.hello["v"], 2);
     assert_eq!(tab.hello["features"], json!([]));
+}
+
+// ── Sign-in tickets (docs/specs/2026-11-13-desktop-design.md) ────────────────
+
+/// AC4: a ticket signs in once; a body with a ticket and anything else is
+/// a bad one.
+#[test]
+fn web_a_ticket_signs_in_once() {
+    let web = Web::start();
+    let ticket = mint_ticket(web.h());
+    let post = |body: Value| web.post("/api/login", Some(&web.origin()), &body.to_string(), &[]);
+    assert_eq!(
+        post(json!({"ticket": ticket, "token": web.token})).status,
+        400
+    );
+    assert_eq!(post(json!({"ticket": ticket, "password": "x"})).status, 400);
+    assert!(
+        ticket_file(web.h(), &ticket).exists(),
+        "a 400 spends nothing"
+    );
+    let first = post(json!({ "ticket": ticket }));
+    assert_eq!(first.status, 204, "{first:?}");
+    let cookie = cookie_of(first.header("set-cookie").expect("a cookie"));
+    assert_eq!(me_with(&web, &cookie), 204);
+    assert!(!ticket_file(web.h(), &ticket).exists(), "spent");
+    assert_eq!(post(json!({ "ticket": ticket })).status, 401, "a replay");
+}
+
+/// AC4: with `--remote`, a ticket from a peer that is not local is refused
+/// and counts, and its file stays: the same ticket then signs in locally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_remote_tickets_are_for_local_requests_only() {
+    // Linux routes all of 127/8 to lo; macOS only 127.0.0.1 unless aliased.
+    if std::net::TcpListener::bind("127.0.0.2:0").is_err() {
+        return;
+    }
+    let r = RemoteWeb::start(ManagerHarness::new(), &[], |cmd| {
+        cmd.env("CLAUDIO_TEST_REMOTE_PEER", "127.0.0.2");
+    });
+    let ticket = mint_ticket(r.web.h());
+    let body = json!({ "ticket": ticket }).to_string();
+    let (host, origin) = (r.host(), r.origin());
+    let headers = [("Origin", origin.as_str())];
+    let from_2 = || r.req_as("127.0.0.2", &host, "POST", "/api/login", &headers, &body);
+    for i in 0..5 {
+        assert_eq!(from_2().await.status, 401, "attempt {i}");
+    }
+    assert_eq!(from_2().await.status, 429, "the refusals counted");
+    assert!(ticket_file(r.web.h(), &ticket).exists(), "the file stays");
+    let local = r.login(&json!({ "ticket": ticket })).await;
+    assert_eq!(local.status, 204, "{local:?}");
+    assert!(local.header("set-cookie").unwrap().contains("; Secure"));
+}
+
+/// AC6: `claudio web` opens the browser on a `file://` redirect file that
+/// carries a ticket; neither argv nor the file holds the token.
+#[test]
+fn web_opens_the_browser_on_a_redirect_file_never_the_token() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let token = svc.token();
+    let fake = FakeBin::new(&svc.h().root);
+    let mut cmd = portable_pty::CommandBuilder::new(BINARY);
+    cmd.arg("web");
+    svc.h().apply(&mut cmd);
+    desktop_env_pty(&mut cmd, &fake);
+    let mut tty = common::TuiProcess::spawn(cmd);
+    assert_eq!(tty.wait_exit_code(DAEMON_WAIT), 0);
+    let opener = match cfg!(target_os = "macos") {
+        true => "open",
+        false => "xdg-open",
+    };
+    let calls = fake.wait_calls(opener, 1, WAIT);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let [url] = calls[0].as_slice() else {
+        panic!("one argument: {calls:?}");
+    };
+    assert!(!url.contains('#') && !url.contains(&token), "{url}");
+    let html = redirect_of(svc.h(), url);
+    assert!(
+        html.contains(&format!("url=http://127.0.0.1:{}/#k=", svc.port)),
+        "{html}"
+    );
+    assert!(!html.contains("#t=") && !html.contains(&token), "{html}");
+    let ticket = ticket_in(&html);
+    assert_eq!(svc.ticket_login(&ticket), 204, "the ticket signs in");
+    svc.finish();
 }

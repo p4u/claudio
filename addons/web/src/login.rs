@@ -1,12 +1,14 @@
-//! `POST /api/login`: a token (local requests, or any without `--remote`)
-//! or the password (`--remote`). Every attempt reserves its rate-limit slot
-//! before anything is compared or hashed (`limit.rs`); argon2 runs off the
-//! executor under `auth::HASH_PERMITS` slots. The guard already checked
-//! Host and Origin, so only same-origin attempts reach it. Nothing a body
-//! carries is ever logged.
+//! `POST /api/login`: a token or a sign-in ticket (local requests, or any
+//! without `--remote`) or the password (`--remote`). Every attempt reserves
+//! its rate-limit slot before anything is compared, looked up or hashed
+//! (`limit.rs`); argon2 runs off the executor under `auth::HASH_PERMITS`
+//! slots, a ticket's file checks in `spawn_blocking`. The guard already
+//! checked Host and Origin, so only same-origin attempts reach it. Nothing a
+//! body carries is ever logged.
 
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -14,16 +16,18 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::auth::{self, Auth, Caller};
+use crate::ticket;
 use claudio_core::paths;
 
 /// How long a password login waits for a hashing slot before `503`.
 pub(crate) const HASH_WAIT: Duration = Duration::from_secs(2);
 
-/// Exactly one of the two. Unknown fields are ignored, as before.
+/// Exactly one of the three. Unknown fields are ignored, as before.
 #[derive(Deserialize)]
 struct LoginBody {
     token: Option<String>,
     password: Option<String>,
+    ticket: Option<String>,
 }
 
 pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Response {
@@ -38,11 +42,25 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, req: Request) -> Respon
         Ok(LoginBody {
             token: Some(token),
             password: None,
+            ticket: None,
         }) => token_login(&auth, &caller, &token, Instant::now()),
         Ok(LoginBody {
             token: None,
             password: Some(pw),
+            ticket: None,
         }) => password_login(&auth, &caller, pw, Instant::now()).await,
+        Ok(LoginBody {
+            token: None,
+            password: None,
+            ticket: Some(t),
+        }) => {
+            let (auth, runtime) = (Arc::clone(&auth), paths::runtime_dir());
+            tokio::task::spawn_blocking(move || {
+                ticket_login(&auth, &caller, &t, Instant::now(), &runtime)
+            })
+            .await
+            .unwrap_or(Err(StatusCode::INTERNAL_SERVER_ERROR))
+        }
         _ => Err(StatusCode::BAD_REQUEST),
     };
     if let Err(status) = status {
@@ -82,6 +100,38 @@ fn token_login(auth: &Auth, caller: &Caller, token: &str, now: Instant) -> Resul
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// A ticket attempt (docs/web-protocol.md, "Sign-in tickets"): its slot as
+/// a token attempt takes it, the token's rule (with `--remote`, local
+/// requests only: a refused ticket's file is not touched), then
+/// [`ticket::redeem`] under `runtime`. Every refusal keeps its slot.
+/// Blocking: the login runs it in `spawn_blocking`.
+fn ticket_login(
+    auth: &Auth,
+    caller: &Caller,
+    t: &str,
+    now: Instant,
+    runtime: &Path,
+) -> Result<(), StatusCode> {
+    let slot = auth
+        .limiter
+        .reserve(caller.key, !caller.local, now)
+        .map_err(|()| StatusCode::TOO_MANY_REQUESTS)?;
+    if !auth.token_allowed(caller) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    match ticket::redeem(runtime, t, SystemTime::now()) {
+        Ok(()) => {
+            auth.limiter.release(slot);
+            Ok(())
+        }
+        Err(ticket::Refused::Dir(why)) => {
+            tracing::error!(error = %why, "web: the sign-in ticket directory failed its check");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        Err(ticket::Refused::Invalid) => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -361,6 +411,42 @@ mod tests {
         assert!(!std::fs::read_to_string(&file).unwrap().contains(&hash));
         writer.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A ticket redeems once from a local caller; a refused one counts like
+    /// a wrong token; with `--remote` a non-local caller is refused before
+    /// the file is looked at, so the same ticket still redeems locally.
+    #[test]
+    fn tickets_redeem_once_count_when_refused_and_stay_local() {
+        let rt = std::env::temp_dir().join(format!("claudio-login-{}", uuid::Uuid::new_v4()));
+        paths::ensure_private_dir(&rt).unwrap();
+        let a = plain();
+        let t0 = Instant::now();
+        let t = ticket::mint(&rt, SystemTime::now()).unwrap();
+        assert_eq!(ticket_login(&a, &LOCAL, &t, t0, &rt), Ok(()));
+        for _ in 0..5 {
+            assert_eq!(
+                ticket_login(&a, &LOCAL, &t, t0, &rt),
+                Err(StatusCode::UNAUTHORIZED)
+            );
+        }
+        let fresh = ticket::mint(&rt, SystemTime::now()).unwrap();
+        assert_eq!(
+            ticket_login(&a, &LOCAL, &fresh, t0, &rt),
+            Err(StatusCode::TOO_MANY_REQUESTS),
+            "the replays counted"
+        );
+        let file = ticket::tickets_dir(&rt).join(ticket::file_name(&fresh));
+        assert!(file.exists(), "a 429 leaves the ticket untouched");
+        let r = remote();
+        let t60 = t0 + Duration::from_secs(61);
+        assert_eq!(
+            ticket_login(&r, &REMOTE, &fresh, t60, &rt),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert!(file.exists(), "a non-local refusal does not touch the file");
+        assert_eq!(ticket_login(&r, &LOCAL, &fresh, t60, &rt), Ok(()));
+        std::fs::remove_dir_all(&rt).unwrap();
     }
 
     #[test]

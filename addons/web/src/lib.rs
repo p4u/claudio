@@ -28,6 +28,7 @@ mod session_events;
 mod sessions;
 mod spawn;
 mod state;
+mod ticket;
 mod tls;
 mod ws;
 
@@ -318,6 +319,10 @@ fn serve_here(args: WebArgs, addons: Arc<claudio_core::addon::Addons>) -> ExitCo
         }
     };
     let sessions = load_sessions(&args, &token, &password);
+    ticket::sweep(
+        &claudio_core::paths::runtime_dir(),
+        std::time::SystemTime::now(),
+    );
     init_tracing();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -547,7 +552,7 @@ async fn serve(
 /// Once the listener is bound and the hub runs: `--service` (no `url`)
 /// writes `ready` on stdout, the line the daemon waits for, and nothing
 /// else (never the token); a foreground start prints its URL (and banner)
-/// and opens a browser.
+/// and opens a browser, signed in with a ticket (`ticket::open_tab`).
 fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
     if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
         eprintln!("claudio web: local build {}", version());
@@ -559,14 +564,7 @@ fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
         return;
     };
     announce(url, remote);
-    let wanted = claudio_core::app::browser::browser_wanted(
-        std::env::consts::OS,
-        |k| std::env::var(k).ok(),
-        io::stdout().is_terminal(),
-    );
-    if !args.no_open && wanted {
-        claudio_core::app::browser::open_browser(url);
-    }
+    ticket::open_tab(args, args.no_open);
 }
 
 /// The start lines: with `--remote` the banner's stderr lines first, then
