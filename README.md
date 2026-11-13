@@ -12,6 +12,8 @@ Run many [Claude Code](https://claude.ai/claude-code) sessions, on this machine 
 
 ```bash
 claudio web          # serves http://127.0.0.1:7337 through the daemon and opens it in your browser
+claudio web --app    # the same, in an app window of Chrome, Chromium, Brave or Edge
+claudio web --install-launcher   # a "claudio" launcher in the desktop menu that runs claudio web --app
 claudio web status   # is it running? (claudio web stop turns it off)
 ```
 
@@ -177,7 +179,7 @@ An exported `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is kept and turns the fea
 | Command | What it does |
 |---|---|
 | `claudio [--proxy NAME\|--no-proxy] [--first-party]` | The terminal UI |
-| `claudio web [--listen ADDR] [--no-open]` | The web UI, served by the daemon (also `stop`, `status`, `--foreground`, `--remote`, `--set-password`, `--print-cert`, `--print-url`, `--rotate-token`) |
+| `claudio web [--listen ADDR] [--no-open]` | The web UI, served by the daemon (also `stop`, `status`, `--foreground`, `--remote`, `--set-password`, `--print-cert`, `--print-url`, `--rotate-token`, `--app`, `--app=URL`, `--install-launcher`, `--remove-launcher`) |
 | `claudio --plain [claude args…]` | One full-screen claude session |
 | `claudio sessions` | List the local sessions as a table |
 | `claudio daemon status\|stop\|restart` | Inspect or control this host's daemon |

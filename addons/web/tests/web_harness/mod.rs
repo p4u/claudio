@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+/// Fake browsers, openers and notifiers; sign-in tickets as `claudio` mints them.
+pub mod app;
 /// `claudio web` handed to the harness daemon (the web service).
 pub mod service;
 /// `claudio web --remote`: a TLS server and a pinned client.

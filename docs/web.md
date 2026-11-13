@@ -33,11 +33,16 @@ claudio web --remote             # TLS on 0.0.0.0:7337 for other machines; needs
 claudio web --remote [::]:8443   # IPv6 and IPv4, port 8443
 claudio web --print-cert         # the certificate, to install as trusted on a laptop or phone
 claudio web --remote --rotate-cert   # a new certificate (browsers warn once more)
+claudio web --app                # as claudio web, in an app window of Chrome, Chromium, Brave or Edge
+claudio web --app=https://z6:7337/   # another machine's claudio web in an app window; starts nothing here
+claudio web --install-launcher   # a "claudio" launcher that runs claudio web --app (--remove-launcher)
 ```
 
 It prints `claudio web: http://127.0.0.1:7337/#t=<token>` and exits; the server keeps running in
 the background (next section). Open that URL once: the page posts the token to `/api/login`,
-gets a cookie and removes the token from the address bar. Later visits need no token while the
+gets a cookie and removes the token from the address bar. A browser that claudio opens itself
+is not given that URL: it signs in with a single-use ticket instead (Security model, "Sign-in
+tickets"). Later visits need no token while the
 sign-in lives: until it goes unused for 30 days (an open tab counts as use), across server and
 daemon restarts and closed browsers. The palette's (`k`) **Sign out** ends this browser's
 sign-in; `--rotate-token` (or a new password) ends every browser's. Sign out closes every tab
@@ -46,7 +51,9 @@ opened with that sign-in, and a page whose sign-in has ended shows the login.
 
 Flags: `--listen ADDR` (loopback only: `127.0.0.0/8`, `::1`, `localhost`; default
 `127.0.0.1:7337`), `--allow-host NAME[:PORT]` (repeatable), `--no-open`, `--print-url`,
-`--rotate-token`, `--foreground`. `CLAUDIO_NO_BROWSER=1` also stops it from opening a browser.
+`--rotate-token`, `--foreground`, `--app` and `--app=URL`, `--install-launcher` and
+`--remove-launcher` ("App window and launcher", below). `CLAUDIO_NO_BROWSER=1` also stops it
+from opening a browser or a window.
 
 ### The web service
 
@@ -189,9 +196,80 @@ Without `--remote` the server never listens on a non-loopback address. Three way
    phone the warning cannot show the fingerprint: install the certificate instead of clicking
    through.
 
+### App window and launcher
+
+`claudio web --app` opens the manager in a chromeless app window: no tab strip, no address bar,
+a window of its own in the task switcher. It does what a bare `claudio web` does (saves `[web]`,
+has the daemon serve it), then opens the window instead of a tab. It needs a display
+(`DISPLAY` or `WAYLAND_DISPLAY` on Linux; always on macOS) but no terminal, so a desktop launcher
+can run it; without a display it says `claudio web --app: no display here; open <URL> in a
+browser on this machine` and exits 1. `CLAUDIO_NO_BROWSER=1` opens nothing. With `--foreground`
+the window opens once the server listens; if it cannot open, the reason is on stderr only (no
+log entry, no notification) and the server keeps serving. `--app` goes with `--listen`, `--remote`,
+`--allow-host`, `--foreground`, `--rotate-token` and `--rotate-cert`, not with `--no-open` or
+`--print-url`, and is never stored in `[web]`.
+
+- **The browser.** An app window needs a Chromium-family browser. claudio takes, in order:
+  `[web] browser` in `config.toml` (a path or a name, written by hand), `$CLAUDIO_BROWSER`,
+  then on Linux the default browser (`xdg-mime query default text/html`) when it is Chrome,
+  Chromium, Brave or Edge (a reverse-DNS flatpak id falls through to the list), then the first of
+  `google-chrome`, `google-chrome-stable`, `chromium`,
+  `chromium-browser`, `brave-browser`, `microsoft-edge` and `microsoft-edge-stable` found in
+  `PATH`, `/usr/bin`, `/usr/local/bin`, `/snap/bin`, `/var/lib/flatpak/exports/bin` or
+  `~/.local/share/flatpak/exports/bin` (no login shell is run), and on macOS `Google
+  Chrome.app`, `Chromium.app`, `Brave Browser.app` or `Microsoft Edge.app` in `/Applications`
+  or `~/Applications`. It runs `<browser> --app=<url>` (and `--class=claudio` on Linux) with your
+  default profile, so your cookie, notification permission and settings apply. Without such a
+  browser it opens the default one and says `no Chromium-family browser found: opened the
+  default browser (an app window needs Chrome, Chromium, Brave or Edge)`. Firefox and Safari
+  have no app windows (Safari's Add to Dock stays a manual step).
+- **Signing in.** The window signs in with a single-use ticket, never with the token on the
+  browser's command line (Security model, "Sign-in tickets"). A snap or flatpak browser cannot
+  read claudio's private runtime dir, so it gets the ticket link itself on its command line,
+  and claudio says "this browser is sandboxed: the sign-in link is visible to other users of
+  this machine for up to 30 s": another local user who watches the process list in those 30 s
+  can sign in first.
+- **Without a terminal** (a launcher), nothing that holds the token is printed: the line is
+  `claudio web: http://127.0.0.1:7337/`, and the `--remote` banner leaves out its token link. A
+  failure is also appended to `<runtime>/web-app.log` (0600, 64 KiB at most) and shown as a
+  desktop notification (`notify-send` when it is installed, `osascript` on macOS).
+- **With `--remote`** the window opens `https://127.0.0.1:<port>/`. The browser shows its
+  certificate warning first (above); a ticket that expired meanwhile falls through to the
+  password form. A `--remote` on a specific non-loopback address has no local URL: the window
+  opens the public one, and the page asks for the password.
+- **Another machine's web: `--app=<url>`.** `claudio web --app=https://z6:7337/` opens a
+  `claudio web --remote` that runs elsewhere (here on `z6`) in an app window and does nothing
+  else: no daemon, no token, no ticket, no `[web]`. The URL is `http` or `https` with a host, an
+  optional port and path, and no `user:pass@`, query or fragment; anything else exits 2 with
+  `claudio web --app: expected an http(s) URL without credentials or fragment`. Sign in with the
+  password; the cookie then keeps the window signed in (until 30 days unused). The self-signed
+  certificate warns until the laptop trusts it: on the host, `claudio web --print-cert >
+  z6.pem`; on a Linux laptop, `certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n claudio-z6 -i
+  z6.pem` (the NSS store Chrome and Chromium read). Or tunnel it, `ssh -L
+  7337:127.0.0.1:7337 z6`, and open `claudio web --app=https://127.0.0.1:7337/`, a name the
+  certificate already has. Neither is automated.
+- **The launcher.** `claudio web --install-launcher` adds a "claudio" launcher that runs
+  `claudio web --app`; with `--app=<url>` (`claudio web --install-launcher --app=<url>`) it runs
+  `claudio web --app=<url>` instead. One launcher at a time: installing again replaces it. On
+  Linux it writes `$XDG_DATA_HOME/applications/claudio.desktop` (default `~/.local/share`),
+  marked `X-Claudio-Launcher=1`, and its icons under `$XDG_DATA_HOME/icons/hicolor`; on macOS,
+  `~/Applications/claudio.app`, a bundle whose executable is a script that runs claudio (the
+  window still shows under the browser's Dock icon). It names this claudio by its path, quoted.
+  `claudio web --remove-launcher` removes what it wrote and nothing else: a `claudio.desktop` or
+  `claudio.app` that claudio did not write, or a symlink at either path, is reported and left
+  alone. Before a downgrade to a claudio without `--app`, remove the launcher: an older claudio
+  refuses `--app`, so the launcher would do nothing.
+- **Window grouping.** On Linux the window opened while the browser already runs is that
+  browser's, so the desktop may group it under the browser's icon instead of the launcher's
+  (the launcher has no `StartupWMClass` for this reason). For a window with an icon of its own
+  every time, install the page from the browser (next paragraph).
+
 **Installed window.** Chromium and Safari can install the page as an app (Install, or Add to
-Dock). An app window has no tab strip, so `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and friends stay with
-the terminal in it, and the page's own keys are not fighting the browser's.
+Dock); the page has PNG icons at 192 and 512 px and a maskable one for that. An app window,
+installed or opened by `claudio web --app`, has no tab strip, so `Ctrl+W`, `Ctrl+T`, `Ctrl+N`
+and friends stay with the terminal in it, and the page's own keys are not fighting the
+browser's. Checked with the help's key check in a Chrome `--app` window on Linux: `Ctrl+W`,
+`Ctrl+T` and `Ctrl+N` each reached the session.
 
 ## Security model
 
@@ -230,10 +308,27 @@ the terminal in it, and the page's own keys are not fighting the browser's.
   is reused across runs and is compared in constant time. Treat it like an SSH private key:
   whoever has it can type into your sessions. `--rotate-token` replaces it. `claudio web` prints
   it on stdout, from the token file, and so does `--print-url`; nothing else does (never a log,
-  the web service's included, a query string, a WebSocket frame or an HTTP body). With
-  `--remote` it is printed on stderr instead, in the link for this machine (when the listen
-  address is loopback or every interface), and by `--print-url`, and accepted only from local
-  requests.
+  the web service's included, a query string, a WebSocket frame, an HTTP body or a browser's
+  command line: a browser claudio opens gets a ticket, below). With `--remote` it is printed on
+  stderr instead, in the link for this machine (when the listen address is loopback or every
+  interface), and by `--print-url`, and accepted only from local requests. With `--app` and
+  stdout not a terminal it is not printed at all.
+- **Sign-in tickets.** A browser claudio opens (`claudio web`, `--foreground`, `--app`) signs in
+  with a single-use ticket, never the token: 32 random bytes, good for 30 s, kept as an empty
+  0600 file named by its SHA-256 in `<runtime>/web-tickets/` (the private runtime dir, 0700), so
+  a listing of it shows no usable ticket. The browser is opened on
+  `file://<runtime>/web-open/<hex>.html`, a 0600 page that sends it on to
+  `http://127.0.0.1:<port>/#k=<ticket>`: its command line holds only that file's path, which
+  other users cannot read. The page posts the ticket once and removes it from the address bar;
+  the server checks the file (a regular file of ours, at most 30 s old) and deletes it, so a
+  second use fails. A ticket attempt takes a login slot as a token attempt does, and with
+  `--remote` only local requests may use one. At most 16 are live at once. The one exception is
+  a snap or flatpak browser, which cannot read the runtime dir: it gets the `#k=` link on its
+  command line, and claudio says "this browser is sandboxed: the sign-in link is visible to
+  other users of this machine for up to 30 s". For a tab, that is the default browser: on Linux
+  claudio asks `xdg-mime query default text/html` which desktop entry opens a local page, and
+  takes it for sandboxed when that entry is a snap's or a flatpak's (Ubuntu's Firefox is). When
+  it cannot tell, the browser gets the file.
 - **Cookie.** `claudio_web=<64 hex>; Max-Age=34560000; HttpOnly; SameSite=Strict; Path=/`, plus
   `Secure` with `--remote` or when `--allow-host` is set. 400 days is the longest a browser keeps
   a cookie; the server decides when a sign-in ends: 30 days unused (an open tab marks it used
@@ -275,8 +370,9 @@ the terminal in it, and the page's own keys are not fighting the browser's.
 - **State.** The web writes `web-state.json` (layout, order, each session's `launch`, still
   with its `proxy`/`first_party` for one release, remote hosts), `web-sessions.json` and
   `web-token` in the config dir (with `--set-password` and `--remote`, also `web-password` and
-  `web-tls/`), and `claudio web` writes `[web]` in `config.toml`. It reads the TUI's
-  `state.json` and never writes it.
+  `web-tls/`), and `claudio web` writes `[web]` in `config.toml`; in the runtime dir,
+  `web-tickets/`, `web-open/` and `web-app.log`; `--install-launcher` writes the launcher
+  (above). It reads the TUI's `state.json` and never writes it.
 
 ## Keys
 
@@ -375,7 +471,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |
 | Overview of all sessions | `Alt+g` | `Alt+g`, Board | (client side) | `the board lists sessions with their states` |
-| Login and security | n/a | token URL, cookie; password form with `--remote`; palette: Sign out | `/api/login`, `/api/me`, `/api/logout` | `logs in from the token URL and clears the fragment`; `over --remote the page asks for the password and the session works`; `the palette signs this browser out, and its cookie stays refused`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests; `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate`, `web_sign_ins_and_sign_outs_survive_a_killed_server` |
+| Login and security | n/a | token URL, cookie; sign-in ticket (`#k=`); password form with `--remote`; palette: Sign out | `/api/login`, `/api/me`, `/api/logout` | `logs in from the token URL and clears the fragment`; `a ticket link signs in once and clears the fragment`; `web_a_ticket_signs_in_once`; `over --remote the page asks for the password and the session works`; `the palette signs this browser out, and its cookie stays refused`; `web_auth_gates_api_and_ws` and the other `web_*auth*` tests; `web_remote_login_rules`, `web_remote_serves_tls_with_a_kept_certificate`, `web_sign_ins_and_sign_outs_survive_a_killed_server` |
 | Layout and style | n/a | dark only ([DESIGN.md](../DESIGN.md)); Settings → Text size | `layout.save` | `the page follows DESIGN.md`; `web_order_and_layout_persist_in_web_state` |
 | Keys | `Alt+…` (see Keys) | the same Alt keys, `Ctrl+Shift+Space`, `k` | (client side) | `Ctrl+Shift+Space then k opens the palette`; `Alt+u in a terminal opens the reader and sends nothing to claude`; `Alt+a focuses the session that needs attention, Alt+Right switches session` |
 | Newline in the prompt | `Shift+Enter` | `Shift+Enter` in a terminal | `session.input` | `Shift+Enter puts ESC CR into the input, Enter submits` |

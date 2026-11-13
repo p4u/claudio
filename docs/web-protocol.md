@@ -21,7 +21,7 @@ is in git history.
 | Method and path | Cookie | Origin check | Answer |
 |---|---|---|---|
 | `GET`/`HEAD` `/`, `/index.html`, any embedded asset path | no | no | the asset; `404` when unknown |
-| `POST /api/login` body `{"token":"<64 hex>"}` or `{"password":"<8–1024 bytes>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token or password, or a token from a non-local request with `--remote`; `429` locked; `400` bad body (neither or both fields, or a password without `--remote`); `413` too large; `503` no hashing slot within 2 s (does not count) |
+| `POST /api/login` body `{"token":"<64 hex>"}`, `{"password":"<8–1024 bytes>"}` or `{"ticket":"<64 hex>"}` (≤ 4 KiB) | no | yes | `204` + `Set-Cookie`; `401` wrong token or password, a ticket that is unknown, spent or expired, or a token or ticket from a non-local request with `--remote`; `429` locked; `400` bad body (not exactly one of the three fields, or a password without `--remote`); `413` too large; `503` no hashing slot within 2 s (does not count) |
 | `POST /api/logout` | yes | yes | `204` + an expiring `Set-Cookie` |
 | `GET /api/me` **(decided here)** | yes | no | `204`: the cookie is live (the page asks this at load when the URL has no token). `401` without one, body `{"login":[…]}`: the methods this request may use, `"token"` and/or `"password"` (below) |
 | `GET /ws` (WebSocket upgrade) | yes | yes | `101`; `503` past 16 tabs **(decided here)** |
@@ -75,6 +75,51 @@ request with it, `["password"]` for any other request.
 - The token never travels in a query string. The page reads it from the fragment
   (`#t=<token>`), posts it to `/api/login`, then removes the fragment with
   `history.replaceState`.
+
+**Sign-in tickets.** A `claudio` that opens a browser on this machine (`claudio web`,
+`--foreground`, `--app`) signs it in with a single-use ticket, never the token in argv. The
+ticket body is additive: the protocol stays version 2.
+
+- **Minting** (by that `claudio`). The ticket is 32 random bytes as 64 lowercase hex. Minting
+  makes `<runtime>` and `<runtime>/web-tickets` private (0700, ours, not a symlink; `<runtime>`
+  is the runtime dir the daemon socket is in, which the CLI and the service the daemon runs
+  share), removes the files there older than 30 s and the oldest beyond 15 (so at most 16 are
+  live), then creates the empty file `<runtime>/web-tickets/<SHA-256 hex of the ticket>` with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600. A server start removes the expired ones too.
+- **The redirect file.** The browser is opened on `file://<runtime>/web-open/<32 hex>.html`
+  (0600, written atomically in a directory checked as above), whose whole text is
+  `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=URL"><title>claudio</title><a href="URL">Open claudio</a>`
+  and a newline, where URL is `<base URL>#k=<ticket>`. The base URL is `http://<listen>/`, or with
+  `--remote` `https://127.0.0.1:<port>/` (`https://[::1]:<port>/` for `[::]`, the address itself
+  when it is loopback). URL holds only a scheme, an IP literal, a port, `/`, `#k=` and hex:
+  nothing in it needs escaping. Redirect files older than 60 s go at each one written and at a
+  server start; at most 16 are kept. Only a browser that cannot read the runtime dir is given
+  `<base URL>#k=<ticket>` in argv instead, and `claudio` says "this browser is sandboxed: the
+  sign-in link is visible to other users of this machine for up to 30 s". That is an app
+  window's browser whose path, or where it resolves, is under `/snap/`, is the snap launcher, or
+  is in a flatpak `exports/bin`; and, on Linux, a default browser whose desktop entry (the one
+  `xdg-mime query default text/html` names, asked without a shell within 3 s) is a snap's or a
+  flatpak's: the first `applications/<id>` in the XDG data directories is under
+  `/var/lib/snapd/desktop` or a flatpak `exports/share`. A default browser that cannot be found
+  out gets the redirect file. A specific non-loopback `--remote` address has no base URL: no
+  ticket is minted, and the page asks for the password.
+- **Redeeming** `{"ticket": T}`, in this order: (1) the rate-limit slot, taken as a token
+  attempt takes it (`429` when full: nothing below runs and the ticket is untouched); (2) with
+  `--remote`, a request that is not local gets `401` and the ticket file is not touched; (3) `T`
+  not 64 lowercase hex: `401`; (4) `<runtime>` and `<runtime>/web-tickets` checked as at
+  minting, on every redeem (an error: `401`, and an ERROR log naming the path); (5) the file
+  must be a regular file owned by the server's uid with an mtime from 30 s ago to 2 s ahead,
+  else `401`, and a file that fails is removed; (6) removing the file must succeed: the other
+  of two racing attempts gets `401`; (7) the slot is given back and the session made as a token
+  login makes it (a cookie the request came with loses its session). Every `401` keeps its
+  slot. A ticket is found by its hash, never compared as a string.
+- **The page**, on a fragment that starts with `#k=`: anything but exactly
+  `#k=<64 lowercase hex>` is a refused ticket, and no request is made. Otherwise it posts
+  `{"ticket": …}` (also with a live cookie, so the ticket is spent), then clears the fragment
+  with `history.replaceState`, also when the request throws. `204` starts the app; `429`
+  shows "Too many attempts: wait a minute."; any other answer, a thrown request or a refused
+  fragment asks `/api/me`: `204` starts the app, a 401 that offers the password shows the
+  password form, anything else shows "This sign-in link has expired. Run `claudio web` again."
 
 ## 2. WebSocket framing
 

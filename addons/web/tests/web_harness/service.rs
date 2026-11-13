@@ -2,6 +2,7 @@
 //! CLI, read `claudio web status`, and end every test with no process of
 //! its own left and no token in a log (AC5, AC11).
 
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -12,7 +13,17 @@ use crate::common::{ManagerHarness, BINARY};
 /// `claudio <args>` in `h`'s isolated env, run to its end: at most 60 s,
 /// so a command that keeps running fails the test instead of hanging it.
 pub fn claudio(h: &ManagerHarness, args: &[&str], setup: impl FnOnce(&mut Command)) -> Output {
-    let mut cmd = Command::new(BINARY);
+    claudio_at(Path::new(BINARY), h, args, setup)
+}
+
+/// [`claudio`] with the binary at `bin` (a copy of it, say).
+pub fn claudio_at(
+    bin: &Path,
+    h: &ManagerHarness,
+    args: &[&str],
+    setup: impl FnOnce(&mut Command),
+) -> Output {
+    let mut cmd = Command::new(bin);
     cmd.args(args);
     apply_env(h, &mut cmd);
     setup(&mut cmd);
@@ -160,6 +171,14 @@ impl ServiceWeb {
         assert_eq!(reply.status, 204, "{reply:?}");
         let set = reply.header("set-cookie").expect("a cookie").to_owned();
         super::tls::cookie_of(&set)
+    }
+
+    /// A sign-in with `ticket` on the loopback listener: its status.
+    pub fn ticket_login(&self, ticket: &str) -> u16 {
+        let (host, origin) = (self.host(), format!("http://{}", self.host()));
+        let body = serde_json::json!({ "ticket": ticket }).to_string();
+        let headers = [("Origin", origin.as_str())];
+        http(self.port, "POST", "/api/login", &host, &headers, &body).status
     }
 
     /// `/api/me` with `cookie`.

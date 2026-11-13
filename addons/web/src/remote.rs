@@ -100,17 +100,22 @@ fn url_host(ip: IpAddr) -> String {
     }
 }
 
-/// The URL a local browser uses with the token, when a loopback request
-/// can reach the listener: the address itself when loopback, `127.0.0.1`
-/// for `0.0.0.0`, `[::1]` for `[::]`.
-pub(crate) fn token_url(listen: SocketAddr, token: &str) -> Option<String> {
+/// The URL a local browser uses, without a fragment, when a loopback
+/// request can reach the listener: the address itself when loopback,
+/// `127.0.0.1` for `0.0.0.0`, `[::1]` for `[::]`.
+pub(crate) fn base_url(listen: SocketAddr) -> Option<String> {
     let host = match listen.ip() {
         ip if ip.is_loopback() => url_host(ip),
         IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
         IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
         _ => return None,
     };
-    Some(format!("https://{host}:{}/#t={token}", listen.port()))
+    Some(format!("https://{host}:{}/", listen.port()))
+}
+
+/// [`base_url`] with the token.
+pub(crate) fn token_url(listen: SocketAddr, token: &str) -> Option<String> {
+    base_url(listen).map(|base| format!("{base}#t={token}"))
 }
 
 /// The one stdout URL: the specific address, else the host name.
@@ -293,6 +298,8 @@ mod tests {
             Some("https://127.0.0.1:5/#t=t")
         );
         assert_eq!(token_url("192.168.1.20:5".parse().unwrap(), "t"), None);
+        assert_eq!(base_url(any).as_deref(), Some("https://127.0.0.1:7337/"));
+        assert_eq!(base_url("192.168.1.20:5".parse().unwrap()), None);
         assert_eq!(public_url(any, "box"), "https://box:7337/");
         assert_eq!(
             public_url("127.0.0.1:5".parse().unwrap(), "box"),

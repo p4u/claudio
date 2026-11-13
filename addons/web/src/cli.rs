@@ -4,10 +4,11 @@
 //! exits. Also `claudio web stop` and `status`, and the service restart
 //! `--set-password` and `--print-url --rotate-token` ask for. Whether the
 //! daemon has the service is decided on `Welcome.features` (`addon:web`)
-//! only, never on an error's text.
+//! only, never on an error's text. With `--app` the start opens a window
+//! (`app_window.rs`) and every failure also reaches the desktop.
 
 use std::future::Future;
-use std::io::{self, IsTerminal};
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -17,7 +18,7 @@ use claudio_core::proto::Msg;
 use serde_json::{json, Value};
 
 use crate::service::{self, Reported, Unit};
-use crate::{auth, parse_args, password, remote, start_url, tls, WebArgs};
+use crate::{app_window, auth, parse_args, password, remote, start_url, ticket, tls, WebArgs};
 
 /// `claudio web` against a daemon without `addon:web`.
 const NO_SERVICE: &str = "the daemon has no web service (older, or built without the web \
@@ -122,22 +123,20 @@ fn log_path() -> std::path::PathBuf {
 /// `claudio web [flags]`: check, save `[web]`, have the daemon serve it,
 /// print what a foreground start prints.
 pub(crate) fn start(args: WebArgs) -> ExitCode {
+    let app = args.app.is_some();
     let config = paths::config_file();
     let run = match stored(&config) {
-        Err(e) => return fail(&e),
+        Err(e) => return failed(app, 1, &e),
         Ok(web) => service::merge(&web, &args).and_then(|unit| service::run_args(&unit, &args)),
     };
     let run = match run {
         Ok(run) => run,
-        Err(e) => {
-            eprintln!("claudio web: {e}");
-            return ExitCode::from(2);
-        }
+        Err(e) => return failed(app, 2, &e),
     };
     // The token first: the service only ever loads it.
     let token = match auth::load_or_create_token(&auth::token_path(), run.rotate_token) {
         Ok(token) => token,
-        Err(e) => return fail(&format!("cannot read or write the token file: {e}")),
+        Err(e) => return failed(app, 1, &format!("cannot read or write the token file: {e}")),
     };
     if run.print_url {
         println!("{}", start_url(&run, &token));
@@ -159,23 +158,73 @@ pub(crate) fn start(args: WebArgs) -> ExitCode {
     }
     let force = run.rotate_token || run.rotate_cert;
     match block_on(ask("apply", json!({ "force": force }), true)) {
-        Ok(Answer::Replied(Reported::Running { argv, .. })) => announce(&argv, &token, &run),
-        Ok(Answer::Replied(Reported::Failed { tail, .. })) => {
-            eprintln!("claudio web: the web service did not start: {tail}");
-            fail(&format!(
-                "see {}; it is tried again (claudio web status)",
-                log_path().display()
-            ))
+        Ok(Answer::Replied(Reported::Running { argv, since, .. })) => {
+            match current(argv, since, &run) {
+                Ok(argv) => announce(&argv, &token, &run),
+                Err(code) => code,
+            }
         }
-        Ok(Answer::Replied(other)) => fail(&format!("the web service is {}", what(&other))),
-        Ok(Answer::NoService | Answer::NotRunning) => fail(NO_SERVICE),
-        Err(e) => fail(&e),
+        Ok(Answer::Replied(Reported::Failed { tail, .. })) => failed(
+            app,
+            1,
+            &format!(
+                "the web service did not start: {tail}\nsee {}; it is tried again (claudio web status)",
+                log_path().display()
+            ),
+        ),
+        Ok(Answer::Replied(other)) => failed(app, 1, &format!("the web service is {}", what(&other))),
+        Ok(Answer::NoService | Answer::NotRunning) => failed(app, 1, NO_SERVICE),
+        Err(e) => failed(app, 1, &e),
     }
 }
 
+/// The argv of the service this start's browser reaches. One that started
+/// before this binary's file changed runs older code (a busy daemon kept
+/// it), whose page ignores `#k=`: when this start opens a browser on a
+/// ticket, it is restarted (`apply { force: true }`; the daemon starts the
+/// binary at `Config::claudio`, a path, so the one on disk, this one).
+fn current(argv: Vec<String>, since: u64, run: &WebArgs) -> Result<Vec<String>, ExitCode> {
+    if !older_than_me(since) || !app_window::opens(run) {
+        return Ok(argv);
+    }
+    match block_on(ask("apply", json!({ "force": true }), false)) {
+        Ok(Answer::Replied(Reported::Running { argv, .. })) => Ok(argv),
+        _ => {
+            let old = argv.get(2..).and_then(|a| parse_args(a).ok());
+            if let Some(base) = old.as_ref().and_then(ticket::base_url) {
+                println!("claudio web: {base}");
+            }
+            let why = "the web service is older than this claudio: run `claudio daemon restart`";
+            Err(failed(run.app.is_some(), 1, why))
+        }
+    }
+}
+
+/// Whether a service that started at `since` (Unix seconds) is older than
+/// this binary's file.
+fn older_than_me(since: u64) -> bool {
+    std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|mtime| since < mtime.as_secs())
+}
+
 fn fail(why: &str) -> ExitCode {
-    eprintln!("claudio web: {why}");
-    ExitCode::FAILURE
+    failed(false, 1, why)
+}
+
+/// `why` on stderr as its line (`app_window::line`), with `--app` (`app`)
+/// also where a desktop user sees it (`app_window::tell_desktop`); then
+/// exit `code`.
+fn failed(app: bool, code: u8, why: &str) -> ExitCode {
+    let line = app_window::line(why);
+    eprintln!("{line}");
+    if app {
+        app_window::tell_desktop(&line);
+    }
+    ExitCode::from(code)
 }
 
 /// [`fail`] once the token is loaded. `--rotate-token` has then already
@@ -186,14 +235,20 @@ fn fail_after_token(run: &WebArgs, why: &str) -> ExitCode {
     if run.rotate_token {
         restart_if_enabled("a new token");
     }
-    fail(why)
+    failed(run.app.is_some(), 1, why)
 }
 
 /// What a foreground start prints, for what runs (the reply's argv: two
-/// `claudio web` at once each print the one that won), then the browser.
+/// `claudio web` at once each print the one that won), then the browser
+/// tab or (`--app`) the window, signed in with a ticket.
 fn announce(argv: &[String], token: &str, asked: &WebArgs) -> ExitCode {
+    let app = asked.app.is_some();
     let Some(Ok(running)) = argv.get(2..).map(parse_args) else {
-        return fail("the daemon runs a web service this claudio cannot read");
+        return failed(
+            app,
+            1,
+            "the daemon runs a web service this claudio cannot read",
+        );
     };
     let url = start_url(&running, token);
     let remote = match running.remote {
@@ -202,20 +257,15 @@ fn announce(argv: &[String], token: &str, asked: &WebArgs) -> ExitCode {
             let password = password::read(&password::path());
             match remote::prepare(&running, addr, token, &password) {
                 Ok(r) => Some(r),
-                Err(e) => return fail(&e),
+                Err(e) => return failed(app, 1, &e),
             }
         }
     };
-    crate::announce(&url, remote.as_ref());
-    let wanted = claudio_core::app::browser::browser_wanted(
-        std::env::consts::OS,
-        |k| std::env::var(k).ok(),
-        io::stdout().is_terminal(),
-    );
-    if !asked.no_open && wanted {
-        claudio_core::app::browser::open_browser(&url);
+    app_window::announce(&running, asked, &url, remote.as_ref());
+    match app_window::open(&running, asked) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => failed(app, 1, &why),
     }
-    ExitCode::SUCCESS
 }
 
 /// A state in words.

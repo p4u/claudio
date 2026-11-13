@@ -151,6 +151,7 @@ pub(crate) fn run_args(unit: &Unit, args: &WebArgs) -> Result<WebArgs, String> {
     run.print_url = args.print_url;
     run.rotate_token = args.rotate_token;
     run.rotate_cert = args.rotate_cert;
+    run.app = args.app.clone();
     Ok(run)
 }
 
@@ -375,6 +376,14 @@ mod tests {
         );
         let err = run_args(&Unit::default(), &asked).unwrap_err();
         assert!(err.contains("--rotate-cert needs --remote"), "{err}");
+        let app = flags(&["--app", "--listen", "127.0.0.1:9000"]);
+        assert_eq!(
+            Unit::of(&app).flags(),
+            words(&["--listen=127.0.0.1:9000"]),
+            "--app is never stored nor in the service's argv"
+        );
+        let run = run_args(&Unit::of(&app), &app).unwrap();
+        assert_eq!(run.app, Some(crate::app_window::AppTarget::Local));
         let foreign = Unit {
             allow_hosts: words(&["a.example:8443"]),
             ..remote
