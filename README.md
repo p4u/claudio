@@ -2,6 +2,13 @@
 
 Run many [Claude Code](https://claude.ai/claude-code) sessions, on this machine and on your SSH hosts, from a browser or a terminal. A small daemon on each host owns the sessions, so they keep running when you close the UI or lose the connection, and every window you open shows the same sessions. claudio drives the real `claude` with your own login; nothing about Claude Code changes.
 
+```bash
+curl -fsSL https://github.com/p4u/claudio/releases/latest/download/install.sh | bash
+claudio web --app    # the web UI in its own window (claudio web: a browser tab; claudio: the terminal UI)
+```
+
+Linux and macOS, x86\_64 and arm64. More in [Install](#install) and [Quick start](#quick-start).
+
 ![claudio web: the session list, two live sessions side by side, one waiting for a permission](docs/screenshots/web-panes.png)
 
 *`claudio web`: every session on every host in the rail, two of them live in panes. The left one waits for a permission; Enter in its header approves it.*
@@ -13,6 +20,7 @@ Run many [Claude Code](https://claude.ai/claude-code) sessions, on this machine 
 ```bash
 claudio web          # serves http://127.0.0.1:7337 through the daemon and opens it in your browser
 claudio web --app    # the same, in an app window of Chrome, Chromium, Brave or Edge
+claudio web --app=https://myserver:7337/   # another machine's claudio web in an app window
 claudio web --install-launcher   # a "claudio" launcher in the desktop menu that runs claudio web --app
 claudio web status   # is it running? (claudio web stop turns it off)
 ```
@@ -45,7 +53,7 @@ It prints `claudio web: http://127.0.0.1:7337/#t=<token>` and exits: the daemon 
 
 Also: one, two or four panes, terminal tabs, search across every conversation (`/`), a command palette (`k`), desktop notifications, and the addons' panels (proxy stats, `Alt+s`).
 
-**Keys.** The page has two modes, shown in the top bar. In TERM, focus is in a terminal and every key goes to the session, except `Ctrl+Shift+Space`, which leaves it. In APP, single keys drive the page (`k` palette, `n` new session, `a` next session that needs you, `?` help). The terminal UI's `Alt` keys work in both. In a normal browser tab the browser keeps `Ctrl+W`, `Ctrl+T` and `Ctrl+N`; install the page as an app, or use Capture all keys in Settings, to give them to the session. Details: [docs/web.md](docs/web.md).
+**Keys.** The page has two modes, shown in the top bar. In TERM, focus is in a terminal and every key goes to the session, except `Ctrl+Shift+Space`, which leaves it. In APP, single keys drive the page (`k` palette, `n` new session, `a` next session that needs you, `?` help). The terminal UI's `Alt` keys work in both. In a normal browser tab the browser keeps `Ctrl+W`, `Ctrl+T` and `Ctrl+N`; in the `claudio web --app` window (or the page installed as an app) they go to the session, and in a tab Capture all keys in Settings does the same. Details: [docs/web.md](docs/web.md).
 
 ### From another machine
 
@@ -53,6 +61,8 @@ By default (without `--remote`), `claudio web` listens on loopback only. Two way
 
 - **An SSH tunnel.** `ssh -L 7337:127.0.0.1:7337 host`, then open the URL `claudio web` printed on the host.
 - **`--remote`.** Set a password once with `claudio web --set-password` (8 bytes or more), then run `claudio web --remote`. The daemon serves HTTPS on the network (port 7337 by default) with a self-signed certificate made on the first start and kept. `claudio web --remote` and `claudio web status` print the certificate's SHA-256 fingerprint: check it against the one your browser shows before you accept the certificate. Remote browsers sign in with the password; the token link works only from the machine itself. `claudio web --print-cert` prints the certificate, to install it as trusted on the devices you use.
+
+On a laptop with a desktop, `claudio web --app=https://host:7337/` opens a `--remote` web in its own window (it starts nothing on the laptop; you sign in once with the password), and `claudio web --install-launcher --app=https://host:7337/` puts that window in the desktop menu.
 
 The token, the password's hash and the certificate's key stay in `~/.config/claudio/` (mode 0600). Whoever has the token or the password can type into your sessions. The security model is in [docs/web.md](docs/web.md).
 
