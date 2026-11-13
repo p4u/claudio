@@ -2556,3 +2556,50 @@ fn web_app_restarts_a_service_older_than_its_binary() {
     svc.token();
     svc.finish();
 }
+
+/// AC7, AC14: `--install-launcher --app=<url>` writes a launcher running
+/// `web --app=<url>` under the test `HOME` (`XDG_DATA_HOME` unset);
+/// `--remove-launcher` takes it away, and again finds nothing to remove.
+#[test]
+fn web_install_launcher_writes_under_home_and_remove_takes_it_away() {
+    let h = ManagerHarness::new();
+    let no_data_home = |cmd: &mut Command| {
+        cmd.env_remove("XDG_DATA_HOME");
+    };
+    let url = "https://example.invalid:7337/";
+    let arg = format!("--app={url}");
+    let out = claudio(&h, &["web", "--install-launcher", &arg], no_data_home);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let exes = [
+        BINARY.to_owned(),
+        fs::canonicalize(BINARY).unwrap().display().to_string(),
+    ];
+    let (launcher, line) = match cfg!(target_os = "macos") {
+        true => (
+            h.home.join("Applications/claudio.app"),
+            exes.map(|e| format!("exec '{e}' web '{arg}'")),
+        ),
+        false => (
+            h.home.join(".local/share/applications/claudio.desktop"),
+            exes.map(|e| format!("Exec=\"{e}\" web {arg}")),
+        ),
+    };
+    let text = match cfg!(target_os = "macos") {
+        true => fs::read_to_string(launcher.join("Contents/MacOS/claudio")).unwrap(),
+        false => fs::read_to_string(&launcher).unwrap(),
+    };
+    assert!(text.lines().any(|l| line.contains(&l.to_owned())), "{text}");
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed
+            .lines()
+            .all(|l| l.starts_with("claudio web: wrote ")),
+        "{printed}"
+    );
+    let out = claudio(&h, &["web", "--remove-launcher"], no_data_home);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(fs::symlink_metadata(&launcher).is_err(), "removed");
+    let again = claudio(&h, &["web", "--remove-launcher"], no_data_home);
+    assert_eq!(again.status.code(), Some(0), "{again:?}");
+    assert!(String::from_utf8_lossy(&again.stdout).contains("no launcher at "));
+}

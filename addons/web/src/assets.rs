@@ -159,6 +159,11 @@ fn find(path: &str) -> Option<&'static Asset> {
     ASSETS.iter().find(|a| a.path == path)
 }
 
+/// An embedded file's bytes, decompressed: the launcher's icons. Blocking.
+pub(crate) fn embedded(path: &str) -> Option<Vec<u8>> {
+    find(path).and_then(|a| gunzip(a.gz).ok())
+}
+
 /// The asset fallback route: `GET`/`HEAD` of an app file (`/` is
 /// `/index.html`).
 pub(crate) async fn serve(

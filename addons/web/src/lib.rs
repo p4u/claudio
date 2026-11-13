@@ -18,6 +18,7 @@ mod hosts;
 mod hub;
 mod hub_io;
 mod input;
+mod launcher;
 mod lenses;
 mod limit;
 mod login;
@@ -63,6 +64,7 @@ const USAGE: &str =
     "usage: claudio web [--foreground] [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
 [--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token] [--app]
        claudio web --app=URL
+       claudio web --install-launcher [--app=URL] | --remove-launcher
        claudio web stop | status
        claudio web --set-password
        claudio web --print-cert";
@@ -93,6 +95,8 @@ pub(crate) struct WebArgs {
     /// `--app` or `--app=<url>`: an app window. This invocation's only: never
     /// in `[web]` or the service's argv.
     pub app: Option<app_window::AppTarget>,
+    /// `--install-launcher` or `--remove-launcher`: one thing, then exit.
+    pub launcher: Option<launcher::LauncherOp>,
 }
 
 /// Shared by every handler.
@@ -134,6 +138,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
         foreground: false,
         service: false,
         app: None,
+        launcher: None,
     };
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -170,6 +175,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
             "--foreground" => out.foreground = true,
             "--service" => out.service = true,
             "--app" => out.app = Some(app_window::target(inline)?),
+            "--install-launcher" => out.launcher = Some(launcher::LauncherOp::Install),
+            "--remove-launcher" => out.launcher = Some(launcher::LauncherOp::Remove),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -187,7 +194,16 @@ fn combination_ok(a: &WebArgs, n_args: usize) -> Result<(), String> {
     if (a.set_password || a.print_cert) && n_args != 1 {
         return Err("--set-password and --print-cert take no other argument".to_owned());
     }
-    if matches!(a.app, Some(app_window::AppTarget::Url(_))) && n_args != 1 {
+    let url = matches!(a.app, Some(app_window::AppTarget::Url(_)));
+    let install_url = url && a.launcher == Some(launcher::LauncherOp::Install) && n_args == 2;
+    if a.launcher.is_some() && n_args != 1 && !install_url {
+        return Err(
+            "--install-launcher and --remove-launcher take no other argument \
+                    (but --install-launcher --app=URL)"
+                .to_owned(),
+        );
+    }
+    if url && n_args != 1 && a.launcher.is_none() {
         return Err("--app=URL takes no other argument".to_owned());
     }
     if a.app.is_some() && (a.no_open || a.print_url) {
@@ -462,7 +478,8 @@ fn load_sessions(
     sessions::Sessions::new(store, epoch, path)
 }
 
-/// `--set-password`, `--print-cert` or `--app=<url>`: one thing, then exit.
+/// `--set-password`, `--print-cert`, a launcher flag or `--app=<url>`: one
+/// thing, then exit.
 fn one_shot(args: &WebArgs) -> Option<ExitCode> {
     if args.set_password {
         return Some(match password::set_password() {
@@ -477,10 +494,15 @@ fn one_shot(args: &WebArgs) -> Option<ExitCode> {
             }
         });
     }
-    if let Some(app_window::AppTarget::Url(url)) = &args.app {
-        return Some(app_window::open_url(url));
+    let url = match &args.app {
+        Some(app_window::AppTarget::Url(url)) => Some(url.as_str()),
+        _ => None,
+    };
+    if let Some(op) = args.launcher {
+        return Some(launcher::run(op, url));
     }
-    args.print_cert.then(print_cert)
+    url.map(app_window::open_url)
+        .or_else(|| args.print_cert.then(print_cert))
 }
 
 /// `--print-cert`: the kept certificate (never the key) on stdout.
@@ -883,5 +905,33 @@ mod tests {
         for bad in ["--app=", "--app=https://u:p@z6/", "--app=https://z6/#t=x"] {
             assert_eq!(parse_args(&args(&[bad])).unwrap_err(), app_window::URL_BAD);
         }
+    }
+
+    #[test]
+    fn launcher_flags_go_alone_but_install_with_an_app_url() {
+        use launcher::LauncherOp;
+        let a = parse_args(&args(&["--install-launcher"])).unwrap();
+        assert_eq!((a.launcher, a.app), (Some(LauncherOp::Install), None));
+        let a = parse_args(&args(&["--remove-launcher"])).unwrap();
+        assert_eq!(a.launcher, Some(LauncherOp::Remove));
+        let a = parse_args(&args(&["--app=https://z6:7337/", "--install-launcher"])).unwrap();
+        assert_eq!(a.launcher, Some(LauncherOp::Install));
+        assert_eq!(
+            a.app,
+            Some(app_window::AppTarget::Url("https://z6:7337/".into()))
+        );
+        for bad in [
+            &["--install-launcher", "--app"][..],
+            &["--remove-launcher", "--app=https://z6/"],
+            &["--install-launcher", "--remove-launcher"],
+            &["--install-launcher", "--foreground"],
+            &["--install-launcher", "--app=https://z6/", "--no-open"],
+            &["--remove-launcher", "--listen", "127.0.0.1:1"],
+        ] {
+            let err = parse_args(&args(bad)).unwrap_err();
+            assert!(err.contains("take no other argument"), "{bad:?}: {err}");
+        }
+        let err = parse_args(&args(&["--install-launcher", "--app=ftp://z6/"])).unwrap_err();
+        assert_eq!(err, app_window::URL_BAD);
     }
 }
