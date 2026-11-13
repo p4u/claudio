@@ -81,5 +81,15 @@ test('the settings have Capture all keys and the manifest is served', async ({ p
   await expect(page.getByTestId('capture-keys')).toBeVisible();
   const r = await page.request.get(new URL('/manifest.webmanifest', srv.url).href);
   expect(r.headers()['content-type']).toContain('application/manifest+json');
-  expect((await r.json()).display).toBe('standalone');
+  const manifest = await r.json();
+  expect(manifest.display).toBe('standalone');
+  expect([manifest.background_color, manifest.theme_color]).toEqual(['#0b0e12', '#0b0e12']);
+  const pngs = manifest.icons.filter((i) => i.type === 'image/png');
+  expect(pngs.map((i) => [i.sizes, i.purpose])).toEqual([['192x192', 'any'], ['512x512', 'any'], ['512x512', 'maskable']]);
+  for (const icon of pngs) {
+    const png = await page.request.get(new URL(icon.src, srv.url).href);
+    expect(png.status()).toBe(200);
+    expect(png.headers()['content-type']).toBe('image/png');
+    expect([...(await png.body()).subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  }
 });
