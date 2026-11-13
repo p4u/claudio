@@ -11,8 +11,11 @@ pub fn browser_wanted(os: &str, env: impl Fn(&str) -> Option<String>, tty: bool)
 }
 
 /// Open `url` with `open` (macOS) or `xdg-open`, without waiting for it;
-/// whether it could be started.
+/// whether it could be started. The opener gets a process group of its
+/// own: a browser it starts is not the terminal's to stop, so a Ctrl+C in
+/// it (`claudio web --foreground`) or its hangup never reaches that browser.
 pub fn open_browser(url: &str) -> bool {
+    use std::os::unix::process::CommandExt;
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -23,6 +26,7 @@ pub fn open_browser(url: &str) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn();
     match child {
         Ok(mut child) => {
