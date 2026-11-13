@@ -381,6 +381,17 @@ terminal and every key goes to the session; the app takes one key only. **APP**:
 anywhere else and single keys drive the app. Clicking a terminal (or Enter on a session) enters
 TERM; `Ctrl+Shift+Space` leaves it.
 
+The focus follows the mouse. Over a terminal, the keyboard goes to it and its pane becomes the
+focused one (TERM). Over the rest of the page, the keyboard leaves the terminal (APP). It does not
+move while a mouse button is held (a selection or a drag), or while a dialog, the palette or a panel
+is open. A text field such as search or the composer keeps the keyboard until you click elsewhere.
+
+A session's terminal has one size, so every client shows it at the same rows and columns. The pane
+you type in, paste into, click or return to (its window regaining focus) takes that size. Until then
+another client's size stands, shown by the `PTY cols×rows` badge, and the pane keeps the cursor row,
+where claude's prompt is, in view. Moving the mouse alone never changes the size. The scrollbar on
+the right shows once there is scrollback.
+
 | Key | Mode | Action |
 |---|---|---|
 | `Ctrl+Shift+Space` | TERM | Leave the terminal (the only key the app takes there) |
