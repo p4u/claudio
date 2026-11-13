@@ -374,7 +374,10 @@ pub(crate) fn open(running: &WebArgs, asked: &WebArgs) -> Result<(), String> {
 pub(crate) fn opens(asked: &WebArgs) -> bool {
     let env = |k: &str| std::env::var(k).ok();
     match asked.app {
-        Some(_) => env("CLAUDIO_NO_BROWSER").is_none(),
+        Some(_) => {
+            env("CLAUDIO_NO_BROWSER").is_none()
+                && browser::display_present(std::env::consts::OS, env)
+        }
         None => {
             let tty = io::stdout().is_terminal();
             !asked.no_open && browser::browser_wanted(std::env::consts::OS, env, tty)

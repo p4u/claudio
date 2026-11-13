@@ -267,35 +267,51 @@ fn data_dirs(env: impl Fn(&str) -> Option<String>, home: &Path) -> Vec<PathBuf> 
 /// line of `xdg-mime query default text/html`. No shell, stdin null, a 3 s
 /// deadline, 512 bytes read; `None` when it cannot be asked or says nothing.
 pub(crate) fn html_handler() -> Option<String> {
-    let mut cmd = Command::new("xdg-mime");
+    asked(Command::new("xdg-mime"), ASK_WAIT)
+}
+
+/// `cmd query default text/html`'s output within `wait`. `cmd` leads a
+/// process group of its own; its stdout is read on a thread, because a
+/// helper it started may hold the pipe after it was killed or has exited.
+/// Past the deadline the whole group is killed.
+fn asked(mut cmd: Command, wait: Duration) -> Option<String> {
+    use std::os::unix::process::CommandExt;
     cmd.args(["query", "default", "text/html"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .process_group(0);
     for marker in claudio_core::claude::SESSION_MARKERS {
         cmd.env_remove(marker);
     }
     let mut child = cmd.spawn().ok()?;
-    let deadline = Instant::now() + ASK_WAIT;
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.take(512).read_to_string(&mut text);
+        let _ = tx.send(text);
+    });
+    let deadline = Instant::now() + wait;
+    let text = rx.recv_timeout(wait).ok();
     let done = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if text.is_some() && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
             _ => {
-                let _ = child.kill();
+                if let Ok(pgid) = i32::try_from(child.id()) {
+                    // SAFETY: kill(2) has no memory-safety preconditions; the
+                    // child is not reaped yet, so its pid (the group id) is ours.
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
                 let _ = child.wait();
                 break false;
             }
         }
     };
-    let mut text = String::new();
-    child
-        .stdout
-        .take()?
-        .take(512)
-        .read_to_string(&mut text)
-        .ok()?;
-    (done && !text.trim().is_empty()).then_some(text)
+    text.filter(|t| done && !t.trim().is_empty())
 }
 
 /// What the default browser is opened on for `link`: a new redirect file's
@@ -354,6 +370,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("claudio-ticket-{}", uuid::Uuid::new_v4()));
         paths::ensure_private_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_default_browser_question_keeps_its_deadline() {
+        let dir = scratch();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let wait = Duration::from_secs(5);
+        let says = script("says", "printf 'brave-browser.desktop\\n'");
+        assert_eq!(
+            asked(Command::new(says), wait).as_deref(),
+            Some("brave-browser.desktop\n")
+        );
+        assert_eq!(asked(Command::new(script("fails", "exit 3")), wait), None);
+        assert_eq!(asked(Command::new(dir.join("missing")), wait), None);
+        // Its helper holds the pipe: the answer still comes at the deadline.
+        let hangs = script("hangs", "sleep 30 | cat");
+        let t = Instant::now();
+        assert_eq!(asked(Command::new(hangs), Duration::from_millis(300)), None);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn mode(p: &Path) -> u32 {

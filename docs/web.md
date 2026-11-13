@@ -204,7 +204,8 @@ has the daemon serve it), then opens the window instead of a tab. It needs a dis
 (`DISPLAY` or `WAYLAND_DISPLAY` on Linux; always on macOS) but no terminal, so a desktop launcher
 can run it; without a display it says `claudio web --app: no display here; open <URL> in a
 browser on this machine` and exits 1. `CLAUDIO_NO_BROWSER=1` opens nothing. With `--foreground`
-the window opens once the server listens. `--app` goes with `--listen`, `--remote`,
+the window opens once the server listens; if it cannot open, the reason is on stderr only (no
+log entry, no notification) and the server keeps serving. `--app` goes with `--listen`, `--remote`,
 `--allow-host`, `--foreground`, `--rotate-token` and `--rotate-cert`, not with `--no-open` or
 `--print-url`, and is never stored in `[web]`.
 

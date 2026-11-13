@@ -557,7 +557,8 @@ async fn serve(
         Arc::clone(&state.auth.sessions),
     );
     let writer = sessions.start_writer();
-    started(&args, url.as_deref(), remote.as_ref());
+    // The browser's sign-in page: files and a helper with a deadline (D3).
+    tokio::task::block_in_place(|| started(&args, url.as_deref(), remote.as_ref()));
     tracing::info!(listen = %listen, tls = remote.is_some(), "web: serving");
 
     // Tabs are closed (1001), web-state.json and the sessions written
