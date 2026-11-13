@@ -266,7 +266,7 @@ fn data_dirs(env: impl Fn(&str) -> Option<String>, home: &Path) -> Vec<PathBuf> 
 /// The desktop entry `xdg-open` opens a local `.html` file with: the one
 /// line of `xdg-mime query default text/html`. No shell, stdin null, a 3 s
 /// deadline, 512 bytes read; `None` when it cannot be asked or says nothing.
-fn html_handler() -> Option<String> {
+pub(crate) fn html_handler() -> Option<String> {
     let mut cmd = Command::new("xdg-mime");
     cmd.args(["query", "default", "text/html"])
         .stdin(Stdio::null())

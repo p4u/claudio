@@ -2,6 +2,7 @@
 //! CLI, read `claudio web status`, and end every test with no process of
 //! its own left and no token in a log (AC5, AC11).
 
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -12,7 +13,17 @@ use crate::common::{ManagerHarness, BINARY};
 /// `claudio <args>` in `h`'s isolated env, run to its end: at most 60 s,
 /// so a command that keeps running fails the test instead of hanging it.
 pub fn claudio(h: &ManagerHarness, args: &[&str], setup: impl FnOnce(&mut Command)) -> Output {
-    let mut cmd = Command::new(BINARY);
+    claudio_at(Path::new(BINARY), h, args, setup)
+}
+
+/// [`claudio`] with the binary at `bin` (a copy of it, say).
+pub fn claudio_at(
+    bin: &Path,
+    h: &ManagerHarness,
+    args: &[&str],
+    setup: impl FnOnce(&mut Command),
+) -> Output {
+    let mut cmd = Command::new(bin);
     cmd.args(args);
     apply_env(h, &mut cmd);
     setup(&mut cmd);

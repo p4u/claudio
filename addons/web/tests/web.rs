@@ -2310,3 +2310,249 @@ fn web_opens_the_browser_on_a_redirect_file_never_the_token() {
     assert_eq!(svc.ticket_login(&ticket), 204, "the ticket signs in");
     svc.finish();
 }
+
+// ── The app window (docs/specs/2026-11-13-desktop-design.md) ─────────────────
+
+/// `--class=claudio` where the app argv has it.
+fn class() -> Vec<String> {
+    match cfg!(target_os = "linux") {
+        true => vec!["--class=claudio".to_owned()],
+        false => Vec::new(),
+    }
+}
+
+/// AC5: `claudio web --app`, in a terminal and without one, starts the
+/// browser once each with `--app=file://<redirect file>`, the file holding
+/// a ticket; without a terminal neither stdout nor stderr holds the token
+/// or the ticket.
+#[test]
+fn web_app_opens_a_signed_in_window_and_prints_no_secret_without_a_terminal() {
+    let mut svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let token = svc.token();
+    let fake = FakeBin::new(&svc.h().root);
+    let mut cmd = portable_pty::CommandBuilder::new(BINARY);
+    cmd.args(["web", "--app"]);
+    svc.h().apply(&mut cmd);
+    desktop_env_pty(&mut cmd, &fake);
+    let mut tty = common::TuiProcess::spawn(cmd);
+    assert_eq!(tty.wait_exit_code(DAEMON_WAIT), 0);
+    fake.wait_calls("fake-browser", 1, WAIT);
+    let out = claudio(svc.h(), &["web", "--app"], |cmd| desktop_env(cmd, &fake));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert_eq!(
+        stdout,
+        format!("claudio web: http://127.0.0.1:{}/\n", svc.port)
+    );
+    assert!(
+        !stdout.contains(&token) && !stderr.contains(&token),
+        "{stderr}"
+    );
+    let calls = fake.wait_calls("fake-browser", 2, WAIT);
+    assert_eq!(calls.len(), 2, "once per run: {calls:?}");
+    for (i, call) in calls.iter().enumerate() {
+        assert_eq!(call[1..], class(), "{call:?}");
+        let url = call[0].strip_prefix("--app=").expect("--app=<url>");
+        assert!(!url.contains('#') && !url.contains(&token), "{url}");
+        let html = redirect_of(svc.h(), url);
+        assert!(
+            html.contains(&format!("url=http://127.0.0.1:{}/#k=", svc.port)),
+            "{html}"
+        );
+        let ticket = ticket_in(&html);
+        assert!(!call.iter().any(|a| a.contains(&ticket)), "{call:?}");
+        if i == 1 {
+            assert!(!stdout.contains(&ticket) && !stderr.contains(&ticket));
+        }
+        assert_eq!(svc.ticket_login(&ticket), 204, "its ticket signs in");
+    }
+    assert!(fake.calls("xdg-open").is_empty() && fake.calls("open").is_empty());
+    svc.finish();
+}
+
+/// AC5: without a terminal, an `--app` whose `[web]` cannot start (here
+/// `--remote` without a password) is said on the desktop (a fake
+/// `notify-send`, `osascript` on macOS) and in `<runtime>/web-app.log`.
+#[test]
+fn web_app_failures_reach_the_desktop_without_a_terminal() {
+    let h = ManagerHarness::new();
+    let fake = FakeBin::new(&h.root);
+    let remote = format!("127.0.0.1:{}", free_port());
+    let out = claudio(&h, &["web", "--app", "--remote", &remote], |cmd| {
+        desktop_env(cmd, &fake)
+    });
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(stderr.contains("--set-password"), "{stderr}");
+    let notifier = match cfg!(target_os = "macos") {
+        true => "osascript",
+        false => "notify-send",
+    };
+    let calls = fake.wait_calls(notifier, 1, WAIT);
+    let message = calls[0].last().expect("the message").clone();
+    assert!(
+        message.starts_with("claudio web: ") && message.contains("--set-password"),
+        "{message}"
+    );
+    assert!(stderr.contains(&message), "{stderr}");
+    if notifier == "notify-send" {
+        assert_eq!(calls[0][..3], ["-a", "claudio", "claudio"]);
+    }
+    let log = fs::read_to_string(runtime(&h).join("web-app.log")).unwrap();
+    assert!(log.contains(&message), "{log}");
+    assert!(fake.calls("fake-browser").is_empty(), "no window");
+}
+
+/// AC11: `claudio web --foreground --app` opens the window once the server
+/// listens, on a ticket of its own; without a terminal its stdout line has
+/// no token.
+#[test]
+fn web_foreground_app_opens_the_window_once_it_listens() {
+    let h = ManagerHarness::new();
+    let fake = FakeBin::new(&h.root);
+    let port = free_port();
+    let mut cmd = Command::new(BINARY);
+    cmd.args(["web", "--foreground", "--app", "--listen"])
+        .arg(format!("127.0.0.1:{port}"));
+    apply_env(&h, &mut cmd);
+    desktop_env(&mut cmd, &fake);
+    let log = fs::File::create(h.root.join("web.log")).unwrap();
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(log);
+    let mut child = cmd.spawn().expect("start claudio web");
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    // Dropped (killed) on every path from here.
+    let web = Web {
+        h: Some(h),
+        child,
+        port,
+        token: String::new(),
+    };
+    let line = lines.next().and_then(Result::ok).unwrap_or_default();
+    assert_eq!(line, format!("claudio web: http://127.0.0.1:{port}/"));
+    let calls = fake.wait_calls("fake-browser", 1, DAEMON_WAIT);
+    assert_eq!(web.get("/", &[]).status, 200, "it listens");
+    assert_eq!(calls[0][1..], class());
+    let html = redirect_of(web.h(), calls[0][0].strip_prefix("--app=").unwrap());
+    let body = json!({ "ticket": ticket_in(&html) }).to_string();
+    let reply = web.post("/api/login", Some(&web.origin()), &body, &[]);
+    assert_eq!(reply.status, 204, "{reply:?}");
+    let token = fs::read_to_string(web.h().config_home.join("claudio/web-token")).unwrap();
+    let stderr = fs::read_to_string(web.h().root.join("web.log")).unwrap();
+    assert!(!stderr.contains(token.trim()), "{stderr}");
+}
+
+/// AC11: `CLAUDIO_NO_BROWSER=1 claudio web --app` starts nothing and mints
+/// nothing.
+#[test]
+fn web_app_with_claudio_no_browser_opens_and_mints_nothing() {
+    let svc = ServiceWeb::start(ManagerHarness::new(), &[], |_| {});
+    let fake = FakeBin::new(&svc.h().root);
+    let out = claudio(svc.h(), &["web", "--app"], |cmd| {
+        desktop_env(cmd, &fake);
+        cmd.env("CLAUDIO_NO_BROWSER", "1");
+    });
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    thread::sleep(std::time::Duration::from_millis(300));
+    assert!(fake.calls("fake-browser").is_empty());
+    let tickets = fs::read_dir(runtime(svc.h()).join("web-tickets"));
+    assert_eq!(tickets.map(|d| d.count()).unwrap_or(0), 0, "nothing minted");
+    svc.finish();
+}
+
+/// AC14: `claudio web --app=<url>` starts the browser once on exactly that
+/// URL and nothing else: no daemon, no token, `config.toml` unchanged. A
+/// URL with credentials exits 2 with the message.
+#[test]
+fn web_app_url_opens_only_the_window() {
+    let h = ManagerHarness::new();
+    let fake = FakeBin::new(&h.root);
+    let config = h.config_home.join("claudio/config.toml");
+    let before = fs::read_to_string(&config).unwrap();
+    let url = "https://example.invalid:7337/";
+    let arg = format!("--app={url}");
+    let out = claudio(&h, &["web", &arg], |cmd| desktop_env(cmd, &fake));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let calls = fake.wait_calls("fake-browser", 1, WAIT);
+    let want: Vec<String> = std::iter::once(arg.clone()).chain(class()).collect();
+    assert_eq!(calls, [want]);
+    let sockets = fs::read_dir(runtime(&h))
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "sock"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(sockets, 0, "no daemon");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        before,
+        "config.toml unchanged"
+    );
+    assert!(
+        !h.config_home.join("claudio/web-token").exists(),
+        "no token"
+    );
+    let bad = claudio(&h, &["web", "--app=https://u:p@example.invalid/"], |cmd| {
+        desktop_env(cmd, &fake)
+    });
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&bad.stderr),
+        "claudio web --app: expected an http(s) URL without credentials or fragment\n"
+    );
+    assert_eq!(fake.calls("fake-browser").len(), 1);
+}
+
+/// Compatibility: a service that started before this binary's file changed
+/// (as when a busy daemon kept it) is restarted from the binary on disk
+/// before an `--app` window opens on a ticket; a current one is kept.
+#[test]
+fn web_app_restarts_a_service_older_than_its_binary() {
+    let h = ManagerHarness::new();
+    let bin = h.root.join("bin/claudio");
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::copy(BINARY, &bin).unwrap();
+    let fake = FakeBin::new(&h.root);
+    let port = free_port();
+    let listen = format!("127.0.0.1:{port}");
+    let mut svc = ServiceWeb::adopt(h, port);
+    let out = claudio_at(
+        &bin,
+        svc.h(),
+        &["web", "--listen", &listen, "--no-open"],
+        |_| {},
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let first = svc.running_other_than(None, WAIT);
+    let app = |svc: &ServiceWeb| {
+        claudio_at(&bin, svc.h(), &["web", "--app"], |cmd| {
+            desktop_env(cmd, &fake)
+        })
+    };
+    let out = app(&svc);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    fake.wait_calls("fake-browser", 1, WAIT);
+    assert_eq!(
+        svc.running_other_than(None, WAIT),
+        first,
+        "a current service is kept"
+    );
+    // The same build (the daemon stays), its file newer than the service.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+    fs::File::open(&bin).unwrap().set_modified(later).unwrap();
+    let out = app(&svc);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let calls = fake.wait_calls("fake-browser", 2, WAIT);
+    svc.running_other_than(Some(first), WAIT);
+    let html = redirect_of(svc.h(), calls[1][0].strip_prefix("--app=").unwrap());
+    assert_eq!(
+        svc.ticket_login(&ticket_in(&html)),
+        204,
+        "the restarted service redeems it"
+    );
+    svc.token();
+    svc.finish();
+}

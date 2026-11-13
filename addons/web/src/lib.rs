@@ -5,6 +5,7 @@
 mod addon;
 mod addon_feed;
 mod addons;
+mod app_window;
 pub(crate) mod assets;
 mod atomic;
 pub(crate) mod auth;
@@ -60,7 +61,8 @@ pub(crate) fn version() -> String {
 
 const USAGE: &str =
     "usage: claudio web [--foreground] [--listen 127.0.0.1:7337 | --remote [ADDR][:PORT] [--rotate-cert]] \
-[--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token]
+[--allow-host NAME[:PORT]]... [--no-open] [--print-url] [--rotate-token] [--app]
+       claudio web --app=URL
        claudio web stop | status
        claudio web --set-password
        claudio web --print-cert";
@@ -88,6 +90,9 @@ pub(crate) struct WebArgs {
     /// `--service`: the child the daemon runs (docs/daemon-protocol.md,
     /// "Addon services"): `ready` on stdout, never the token, stops at stdin EOF.
     pub service: bool,
+    /// `--app` or `--app=<url>`: an app window. This invocation's only: never
+    /// in `[web]` or the service's argv.
+    pub app: Option<app_window::AppTarget>,
 }
 
 /// Shared by every handler.
@@ -128,6 +133,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
         set_password: false,
         foreground: false,
         service: false,
+        app: None,
     };
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
@@ -163,6 +169,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
             "--set-password" => out.set_password = true,
             "--foreground" => out.foreground = true,
             "--service" => out.service = true,
+            "--app" => out.app = Some(app_window::target(inline)?),
             other => return Err(format!("unknown argument {other:?}\n{USAGE}")),
         }
     }
@@ -173,11 +180,18 @@ pub(crate) fn parse_args(args: &[String]) -> Result<WebArgs, String> {
 /// The flags that do not go together.
 fn combination_ok(a: &WebArgs, n_args: usize) -> Result<(), String> {
     let one_shot = a.no_open || a.print_url || a.rotate_token || a.rotate_cert;
-    if a.service && (one_shot || a.set_password || a.print_cert || a.foreground) {
+    if a.service && (one_shot || a.set_password || a.print_cert || a.foreground || a.app.is_some())
+    {
         return Err("--service takes only --listen=, --remote= and --allow-host=".to_owned());
     }
     if (a.set_password || a.print_cert) && n_args != 1 {
         return Err("--set-password and --print-cert take no other argument".to_owned());
+    }
+    if matches!(a.app, Some(app_window::AppTarget::Url(_))) && n_args != 1 {
+        return Err("--app=URL takes no other argument".to_owned());
+    }
+    if a.app.is_some() && (a.no_open || a.print_url) {
+        return Err("--app opens a window: drop --no-open and --print-url".to_owned());
     }
     if a.remote.is_some() && a.listen_given {
         return Err("--remote is the one listener: drop --listen".to_owned());
@@ -273,7 +287,7 @@ pub fn run(args: &[String], addons: Arc<claudio_core::addon::Addons>) -> ExitCod
     let args = match parse_args(args) {
         Ok(args) => args,
         Err(e) => {
-            eprintln!("claudio web: {e}");
+            eprintln!("{}", app_window::line(&e));
             return ExitCode::from(2);
         }
     };
@@ -448,7 +462,7 @@ fn load_sessions(
     sessions::Sessions::new(store, epoch, path)
 }
 
-/// `--set-password` or `--print-cert`: one thing, then exit.
+/// `--set-password`, `--print-cert` or `--app=<url>`: one thing, then exit.
 fn one_shot(args: &WebArgs) -> Option<ExitCode> {
     if args.set_password {
         return Some(match password::set_password() {
@@ -462,6 +476,9 @@ fn one_shot(args: &WebArgs) -> Option<ExitCode> {
                 ExitCode::from(2)
             }
         });
+    }
+    if let Some(app_window::AppTarget::Url(url)) = &args.app {
+        return Some(app_window::open_url(url));
     }
     args.print_cert.then(print_cert)
 }
@@ -552,7 +569,8 @@ async fn serve(
 /// Once the listener is bound and the hub runs: `--service` (no `url`)
 /// writes `ready` on stdout, the line the daemon waits for, and nothing
 /// else (never the token); a foreground start prints its URL (and banner)
-/// and opens a browser, signed in with a ticket (`ticket::open_tab`).
+/// and opens a browser tab or (`--app`) a window, signed in with a ticket.
+/// A window that cannot open is said; the server keeps serving.
 fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
     if !env!("CLAUDIO_BUILD_LABEL").is_empty() {
         eprintln!("claudio web: local build {}", version());
@@ -563,8 +581,10 @@ fn started(args: &WebArgs, url: Option<&str>, remote: Option<&remote::Remote>) {
         let _ = out.flush();
         return;
     };
-    announce(url, remote);
-    ticket::open_tab(args, args.no_open);
+    app_window::announce(args, args, url, remote);
+    if let Err(why) = app_window::open(args, args) {
+        eprintln!("{}", app_window::line(&why));
+    }
 }
 
 /// The start lines: with `--remote` the banner's stderr lines first, then
@@ -822,9 +842,46 @@ mod tests {
             "--set-password",
             "--print-cert",
             "--foreground",
+            "--app",
         ] {
             let err = parse_args(&args(&["--service", "--remote", one_shot])).unwrap_err();
             assert!(err.contains("--service takes only"), "{one_shot}: {err}");
+        }
+    }
+
+    #[test]
+    fn app_goes_with_the_service_flags_and_app_url_with_none() {
+        use app_window::AppTarget;
+        assert_eq!(parse_args(&[]).unwrap().app, None);
+        for ok in [
+            &["--app"][..],
+            &["--app", "--listen", "127.0.0.1:9000"],
+            &["--app", "--remote", ":8443", "--rotate-cert"],
+            &["--app", "--allow-host", "a.example"],
+            &["--app", "--foreground"],
+            &["--rotate-token", "--app"],
+        ] {
+            let a = parse_args(&args(ok)).map(|a| a.app);
+            assert_eq!(a, Ok(Some(AppTarget::Local)), "{ok:?}");
+        }
+        for bad in [&["--app", "--no-open"][..], &["--print-url", "--app"]] {
+            let err = parse_args(&args(bad)).unwrap_err();
+            assert!(err.contains("--app opens a window"), "{bad:?}: {err}");
+        }
+        for bad in [&["--app", "--set-password"][..], &["--print-cert", "--app"]] {
+            assert!(parse_args(&args(bad)).is_err(), "{bad:?}");
+        }
+        let url = parse_args(&args(&["--app=https://z6:7337/"])).unwrap();
+        assert_eq!(url.app, Some(AppTarget::Url("https://z6:7337/".into())));
+        for bad in [
+            &["--app=https://z6:7337/", "--foreground"][..],
+            &["--listen", "127.0.0.1:1", "--app=https://z6/"],
+        ] {
+            let err = parse_args(&args(bad)).unwrap_err();
+            assert_eq!(err, "--app=URL takes no other argument", "{bad:?}");
+        }
+        for bad in ["--app=", "--app=https://u:p@z6/", "--app=https://z6/#t=x"] {
+            assert_eq!(parse_args(&args(&[bad])).unwrap_err(), app_window::URL_BAD);
         }
     }
 }
