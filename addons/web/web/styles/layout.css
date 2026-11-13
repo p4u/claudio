@@ -158,10 +158,10 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
   box-sizing: content-box; }
 .term-host .xterm { width: max-content; }
 /* xterm's scrollbar sits in the gutter the fit leaves right of the grid (14 px, xterm's default), not
-   over the last columns, and stays shown once there is scrollback: xterm fades it out when idle
-   (`invisible fade`); `invisible` alone means nothing to scroll. */
+   over the last columns, and stays shown while there is scrollback (term.js sets data-scroll): xterm
+   fades it out when idle (`invisible fade`), and keeps `fade` after the scrollback goes. */
 .term-host .xterm .xterm-scrollable-element > .scrollbar.vertical { right: -14px !important; }
-.term-host .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible.fade { opacity: 1; pointer-events: auto; }
+.term-host[data-scroll="1"] .xterm .xterm-scrollable-element > .scrollbar.vertical.invisible.fade { opacity: 1; pointer-events: auto; }
 .term-host .xterm-viewport { background-color: var(--term-bg) !important; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px var(--space-4); }
 .facts dt { color: var(--text-muted); }

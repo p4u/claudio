@@ -73,6 +73,16 @@ test('another client sizing the terminal never hides the prompt, and typing here
   await settled(page, (f) => f.fits && f.cursorInside);
 });
 
+test('a bigger terminal font keeps the prompt in view under a taller foreign size', async ({ page }) => {
+  const { sid } = await open(page, 20);
+  await srv.api('session.attach', { sid, rows: 70, cols: 140 });
+  await srv.api('session.resize', { sid, rows: 70, cols: 140 });
+  await expect.poll(async () => (await fit(page)).rows, { timeout: 5_000 }).toBe(70);
+  await settled(page, (f) => f.cursorInside);
+  await page.evaluate(() => document.documentElement.style.setProperty('--term-font-size', '22px'));
+  await settled(page, (f) => f.cursorInside);
+});
+
 test('a prompt near the top stays in view under a taller foreign size', async ({ page }) => {
   const { sid } = await open(page, 0);
   await settled(page, (f) => f.fits && f.cursorInside);
@@ -102,4 +112,16 @@ test('the scrollbar: hidden with nothing to scroll, shown with scrollback, never
   await page.mouse.move(0, 0);
   await page.waitForTimeout(1_500);
   expect(await scrollbar(page)).toEqual({ opacity: '1', clear: true, inside: true });
+});
+
+test('the scrollbar hides again when the scrollback goes', async ({ page }) => {
+  const { sid } = await open(page);
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(1_500);
+  expect((await scrollbar(page)).opacity).toBe('1');
+  // A restart starts the terminal over: no scrollback, nothing to scroll.
+  await srv.api('session.respawn', { sid, fresh: true, rows: 30, cols: 100 });
+  await expect(page.locator('[data-testid="pane"][data-pane="0"]').getByTestId('terminal')).not.toContainText('line:x50');
+  await page.waitForTimeout(1_500);
+  expect((await scrollbar(page)).opacity).toBe('0');
 });

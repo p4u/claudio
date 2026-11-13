@@ -56,3 +56,17 @@ test('the mouse never takes the keyboard from the palette or a text field', asyn
   await expect(search).toHaveValue('abc');
   await expect(badge).toHaveAttribute('data-mode', 'app');
 });
+
+test('an open menu keeps the keyboard while the mouse crosses a terminal', async ({ page }) => {
+  const { term, badge } = await open(page);
+  const b = await term.boundingBox();
+  await page.getByTestId('hosts-btn').click();
+  const menu = page.getByTestId('hosts-menu');
+  await expect(menu).toBeVisible();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 4 });
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
+  await expect(badge).toHaveAttribute('data-mode', 'app');
+  expect(srv.inputLog(srv.dirs.a)).toBe('');
+});

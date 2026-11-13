@@ -225,8 +225,8 @@ export function installFocusModel() {
 
   // Focus follows the mouse: over a terminal the keyboard goes to it (and its pane is the focused
   // one), over the rest of the page it leaves the terminal (APP). Only for a mouse with no button
-  // held (a selection or a drag keeps its focus), never while a dialog, the palette or a panel is
-  // open, and a text field outside the terminals (search, composer) keeps the keyboard. Moving
+  // held (a selection or a drag keeps its focus), never while a dialog, the palette, a panel or a
+  // menu is open, and a text field outside the terminals (search, composer) keeps the keyboard. Moving
   // the focus never takes the terminal's size: a key or a click does (term.js).
   let hovered;
   document.addEventListener('pointerover', (ev) => {
@@ -235,8 +235,11 @@ export function installFocusModel() {
     if (host === hovered) return;
     hovered = host;
     if (modal.value || overlay.value !== null || panelOpen.value !== null || checklistOpen()) return;
+    // An open menu (Hosts, a session's ⋯) keeps the keyboard for its arrows, Enter and Escape.
+    if (document.querySelector('[aria-haspopup][aria-expanded="true"]')) return;
     const active = document.activeElement;
     if (isTyping(active) && !inTerm(active)) return;
+    if (active instanceof Element && active.closest('[role="menu"], [role="listbox"], [role="dialog"]')) return;
     if (!host) {
       if (inTerm(active)) active.blur();
       return;

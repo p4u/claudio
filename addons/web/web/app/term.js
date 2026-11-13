@@ -127,6 +127,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
 
   function refit() {
     if (disposed || !opened) return;
+    measure();
     const s = proposed();
     if (!s) return;
     onFit?.(s);
@@ -152,7 +153,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   // a fresh terminal stays in view too. Measured on every resize, applied on every cursor move.
   let over = 0; // rows of the grid below the box
   let cellH = 0;
-  let shift = 0;
+  let shiftPx = 0;
   function measure() {
     if (disposed || !opened) return;
     const screen = term.element?.querySelector('.xterm-screen');
@@ -164,15 +165,22 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   }
   function follow() {
     const rows = over > 0 ? Math.min(over, Math.max(0, term.buffer.active.cursorY + 1 - (term.rows - over))) : 0;
-    if (rows === shift) return;
-    shift = rows;
-    if (term.element) term.element.style.marginTop = rows ? `${-rows * cellH}px` : '';
+    const px = rows * cellH;
+    if (px === shiftPx) return;
+    shiftPx = px;
+    if (term.element) term.element.style.marginTop = px ? `${-px}px` : '';
+  }
+
+  // Whether the buffer has scrollback: the scrollbar is kept shown only then (layout.css).
+  function scrollable() {
+    const yes = term.buffer.active.baseY > 0;
+    if (yes !== (el.dataset.scroll === '1')) el.dataset.scroll = yes ? '1' : '';
   }
 
   // A move to a screen of another density keeps the box's CSS size (no ResizeObserver call) but
   // can change the cell size: refit, and watch the new density.
   let dpr = null;
-  const onDpr = () => { watchDpr(); refit(); };
+  const onDpr = () => { watchDpr(); refit(); requestAnimationFrame(measure); };
   function watchDpr() {
     dpr?.removeEventListener('change', onDpr);
     dpr = globalThis.matchMedia?.(`(resolution: ${globalThis.devicePixelRatio || 1}dppx)`) ?? null;
@@ -216,6 +224,8 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
   });
 
   const d3 = term.onCursorMove(follow);
+  const d4 = term.onWriteParsed(scrollable);
+  const d5 = term.buffer.onBufferChange(scrollable);
   const d1 = term.onData((d) => sendInput(sid, d));
   const d2 = term.onBinary((d) => sendInput(sid, Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)));
 
@@ -231,7 +241,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
 
   const ro = new ResizeObserver(() => {
     if (raf) return;
-    raf = requestAnimationFrame(() => { raf = 0; measure(); refit(); });
+    raf = requestAnimationFrame(() => { raf = 0; refit(); });
   });
 
   const mo = new MutationObserver(() => {
@@ -239,6 +249,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
     term.options.theme = l.theme;
     if (term.options.fontSize !== l.fontSize) term.options.fontSize = l.fontSize;
     refit();
+    requestAnimationFrame(measure); // the new cell size is laid out by then
     latex.schedule();
   });
 
@@ -271,7 +282,7 @@ export function createTerm({ sid, el, isFocused, onAttached, onFit }) {
       el.removeEventListener('paste', claim, true);
       globalThis.removeEventListener?.('focus', claim);
       dpr?.removeEventListener('change', onDpr);
-      offOut(); offEv(); d1.dispose(); d2.dispose(); d3.dispose();
+      offOut(); offEv(); d1.dispose(); d2.dispose(); d3.dispose(); d4.dispose(); d5.dispose();
       if (handles.get(sid) === handle) handles.delete(sid);
       if (conn.value === 'open') req('session.detach', { sid }).catch(() => {});
       term.dispose();
