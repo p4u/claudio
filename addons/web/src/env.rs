@@ -65,7 +65,11 @@ pub(crate) async fn dispatch(state: &AppState, op: &str, args: Json) -> Result<J
             Ok(list_json(listed))
         }
         "env.set" => {
-            let a: SetArgs = parse(args)?;
+            // serde's message would quote a non-string value.
+            let a: SetArgs = parse(args).map_err(|e| match e.contains("expected a string") {
+                true => "bad request: name and value are strings".to_owned(),
+                false => e,
+            })?;
             let scope = scope_of(state, a.scope, a.sid).await?;
             let (kept, name) = (scope.clone(), a.name.clone());
             blocking(move || store.set(&kept, &name, &a.value))

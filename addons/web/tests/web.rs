@@ -2101,6 +2101,14 @@ async fn web_env_ops_set_list_unset_and_reach_the_launch() {
     extra["more"] = 1.into();
     let bad = |e: Result<Value, String>| e.unwrap_err().starts_with("bad request: ");
     assert!(bad(tab.req("env.set", extra).await));
+    // A value that is not a string is refused without being quoted back.
+    let mut number = set(global.clone(), "A", "1");
+    number["value"] = 12345.into();
+    let err = tab.req("env.set", number).await.unwrap_err();
+    assert!(
+        err.starts_with("bad request: ") && !err.contains("12345"),
+        "{err}"
+    );
     let stray = uuid::Uuid::new_v4().to_string();
     assert!(bad(tab
         .req("env.list", json!({"scope": "global", "sid": stray}))
