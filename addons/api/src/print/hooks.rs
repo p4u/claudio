@@ -17,7 +17,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -70,15 +70,12 @@ impl Relay {
     pub fn setup() -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;
 
-        // Derive two 8-char hex tokens from XOR-shifted time — no extra dep.
-        let seed = std::time::SystemTime::now()
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0xdeadbeefcafe);
-        let a = xorshift64(seed);
-        let b = xorshift64(a);
-        let dir_token = format!("{:08x}", a as u32);
-        let bin_token = format!("{:08x}", b as u32);
+        let (dir_token, bin_token) =
+            relay_tokens(nanos, NEXT_RELAY.fetch_add(1, Ordering::Relaxed));
 
         let dir = std::env::temp_dir().join(format!(".xdg-{dir_token}"));
         std::fs::create_dir_all(&dir)?;
@@ -111,6 +108,20 @@ impl Drop for Relay {
         let _ = std::fs::remove_file(&self.bin);
         let _ = std::fs::remove_dir(&self.dir);
     }
+}
+
+static NEXT_RELAY: AtomicU64 = AtomicU64::new(0);
+
+/// Two 8-char hex tokens for a relay's dir and binary, no extra dep. The time alone is not enough:
+/// macOS clocks tick in microseconds, so relays made in one tick (parallel tests, two `-p` runs)
+/// would share a path and one's drop would delete the other's binary. The pid and a per-process
+/// counter keep them apart.
+fn relay_tokens(nanos: u64, n: u64) -> (String, String) {
+    let seed =
+        nanos ^ (u64::from(std::process::id()) << 32) ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let a = xorshift64(seed | 1);
+    let b = xorshift64(a);
+    (format!("{:08x}", a as u32), format!("{:08x}", b as u32))
 }
 
 fn xorshift64(mut x: u64) -> u64 {
@@ -434,6 +445,13 @@ mod tests {
         assert!(stop_cmd.contains("49152"), "port missing from: {stop_cmd}");
         // The relay binary must exist.
         assert!(relay.bin.exists());
+    }
+
+    #[test]
+    fn relays_made_in_the_same_tick_get_their_own_paths() {
+        // macOS clocks tick in microseconds: two relays of one tick must still differ.
+        assert_ne!(relay_tokens(5, 0).0, relay_tokens(5, 1).0);
+        assert_ne!(relay_tokens(5, 0).1, relay_tokens(5, 1).1);
     }
 
     #[test]
