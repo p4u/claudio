@@ -1456,6 +1456,7 @@ impl Hub {
             }
         }
         if applied.removed {
+            super::env::forget(&self.runtime, host, sid);
             self.remove_view(sid);
             return;
         }
@@ -1609,13 +1610,12 @@ impl Hub {
             .filter(|s| !s.ephemeral)
             .map(|s| (s.id, s))
             .collect();
-        // Sessions that ended while no web was running had no view to remove.
-        if self
+        // Sessions that ended while no web was running had no view to
+        // remove; their record and custom env go.
+        self.dirty |= self
             .web
-            .forget_unlisted(host, |sid| listed.contains_key(sid))
-        {
-            self.dirty = true;
-        }
+            .forget_unlisted(host, |sid| listed.contains_key(sid));
+        super::env::prune(&self.runtime, host, listed.keys().copied().collect());
         let gone: Vec<SessionId> = self
             .sessions
             .values()

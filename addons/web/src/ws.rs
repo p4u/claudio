@@ -475,6 +475,7 @@ pub(crate) async fn dispatch(
                 .await
                 .map_err(daemon_error)?;
             tracing::info!(op = "session.kill", host = %s.host, sid = %a.sid, "web op");
+            super::env::forget(&state.addons, &s.host, a.sid);
             Ok(json!({}))
         }
         "session.rename" => {
@@ -636,6 +637,7 @@ pub(crate) async fn dispatch(
             state.ctx.ext.render(&a.lens, &a.kind, &a.source).await
         }
         op if op.starts_with("addons.") => addons::dispatch(state, op, args).await,
+        op if op.starts_with("env.") => super::env::dispatch(state, op, args).await,
         _ => Err("unknown op".to_owned()),
     }
 }

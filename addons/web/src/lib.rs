@@ -11,6 +11,7 @@ mod atomic;
 pub(crate) mod auth;
 mod cli;
 mod dto;
+mod env;
 mod events;
 mod ext;
 mod git_ops;
