@@ -429,9 +429,9 @@ never the value.
 | Op | Args | → | Notes |
 |---|---|---|---|
 | `env.catalogue` | — | `{"vars":[EnvVar],"refused":[EnvRefused]}` | the documented variables in name order, and the names the menu refuses with the reason |
-| `env.list` | `scope`, `sid?` | `{"vars":[EnvEntry],"skipped": n}` | the valid entries in name order; `skipped` counts the entries of the file left out (not a string, a bad or refused name, a bad value, past a cap). The only reply that carries env values (§4) |
-| `env.set` | `scope`, `sid?`, `name`, `value` | `{}` | sets or replaces `name`; errors: `"bad request: …"`, `"<name>: refused: <why>"`, `"<name>: value …"`, `"too many variables"`, `"environment too large"`, `"could not save: <why>"`. Logged at INFO as `web op` with the op, scope, sid and name, never the value |
-| `env.unset` | `scope`, `sid?`, `name` | `{}` | removes `name` (absent: `{}` too); logged like `env.set` |
+| `env.list` | `scope`, `sid?` | `{"vars":[EnvEntry],"skipped": n}` | the valid entries in name order; `skipped` counts the entries of the file left out (not a string, a bad or refused name, a bad value, past a cap). A file that cannot be read lists as empty with `skipped` 0; the reason comes with the next write's error. The only reply that carries env values (§4) |
+| `env.set` | `scope`, `sid?`, `name`, `value` | `{}` | sets or replaces `name`; errors: `"bad request: …"`, `"<name>: refused: <why>"`, `"<name>: value …"`, `"too many variables"`, `"environment too large"`, `"not a variable name (…)"` (a malformed name, never quoted), `"session-env.json is not readable: fix or delete it"`, `"session-env.json is full (8 MiB)"`, `"could not save: <why>"`. Logged at INFO as `web op` with the op, scope, sid and name, never the value |
+| `env.unset` | `scope`, `sid?`, `name` | `{}` | removes `name` (absent: `{}` too); errors: `"bad request: …"`, `"not a variable name (…)"`, `"session-env.json is not readable: fix or delete it"`, `"could not save: <why>"`; logged like `env.set` |
 
 No event: the dialog lists when it opens and after each of its own writes. `session.kill` and a
 session's removal (`session_removed`) also drop its per-session env.
