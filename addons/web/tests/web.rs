@@ -1924,11 +1924,13 @@ async fn web_order_and_layout_persist_in_web_state() {
 /// [`common::record_env_sh`]), lists `--agents`/`--mcp-config` in `--help`,
 /// then prints the banner and echoes lines.
 fn write_env_fake_claude(h: &ManagerHarness, env_file: &std::path::Path) {
-    let record = common::record_env_sh(
-        &env_file.display().to_string(),
-        &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
-        &["CLAUDECODE"],
-    );
+    write_recording_fake_claude(h, env_file, &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+}
+
+/// [`write_env_fake_claude`] recording `values` (and whether `CLAUDECODE`
+/// is set).
+fn write_recording_fake_claude(h: &ManagerHarness, env_file: &std::path::Path, values: &[&str]) {
+    let record = common::record_env_sh(&env_file.display().to_string(), values, &["CLAUDECODE"]);
     let script = format!(
         r#"#!/bin/sh
 [ "$1" = "--version" ] && echo 'claude 0.0.0-fake' && exit 0
@@ -2033,6 +2035,170 @@ async fn web_direct_launches_keep_the_inherited_api_key() {
     let env = read_env_file(&env_file).await;
     assert!(env.contains("ANTHROPIC_API_KEY=test-key-not-real"), "{env}");
     assert!(!env.contains("CLAUDECODE="), "a parent claude's marker");
+}
+
+/// AC6: `env.*` sets, lists and unsets both scopes; refuses a refused
+/// name (never echoing a value), extra args, a sid with the global scope or
+/// none with the session one, an unknown sid and a terminal's; a launch gets
+/// the vars, the session's own winning; a kill drops the session's entry;
+/// the log names keys, never values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_env_ops_set_list_unset_and_reach_the_launch() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_recording_fake_claude(&h, &env_file, &["MY_VAR", "MY_GLOBAL"]);
+    let dir = h.dirs[0].clone();
+    let session_env = h.config_home.join("claudio/session-env.json");
+    let web = Web::start_with(h, &[], |_| {});
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+
+    let cat = tab
+        .req("env.catalogue", json!({}))
+        .await
+        .expect("catalogue");
+    let vars = cat["vars"].as_array().unwrap();
+    let opus = vars
+        .iter()
+        .find(|v| v["name"] == "ANTHROPIC_DEFAULT_OPUS_MODEL");
+    assert_eq!(opus.expect("documented")["category"], "model");
+    let refused = cat["refused"].as_array().unwrap();
+    assert!(refused
+        .iter()
+        .any(|r| r["name"] == "PATH" && r["reason"].is_string()));
+
+    let set = |scope: Value, name: &str, value: &str| {
+        let mut args = scope;
+        args["name"] = name.into();
+        args["value"] = value.into();
+        args
+    };
+    let global = json!({"scope": "global"});
+    for (name, value) in [
+        ("MY_GLOBAL", "g-VALUE-1"),
+        ("MY_VAR", "global-VALUE-2\nline"),
+    ] {
+        tab.req("env.set", set(global.clone(), name, value))
+            .await
+            .expect("set");
+    }
+    assert_eq!(
+        tab.req("env.list", global.clone()).await.unwrap(),
+        json!({"vars": [{"name": "MY_GLOBAL", "value": "g-VALUE-1"}, {"name": "MY_VAR", "value": "global-VALUE-2\nline"}], "skipped": 0})
+    );
+    let err = tab
+        .req("env.set", set(global.clone(), "PATH", "/x"))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("PATH: refused: "), "{err}");
+    let err = tab
+        .req("env.set", set(global.clone(), "TOKEN", "sk-SECRET\r"))
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("TOKEN: value holds a control"), "{err}");
+    let mut extra = set(global.clone(), "A", "1");
+    extra["more"] = 1.into();
+    let bad = |e: Result<Value, String>| e.unwrap_err().starts_with("bad request: ");
+    assert!(bad(tab.req("env.set", extra).await));
+    // A value that is not a string is refused without being quoted back.
+    let mut number = set(global.clone(), "A", "1");
+    number["value"] = 12345.into();
+    let err = tab.req("env.set", number).await.unwrap_err();
+    assert!(
+        err.starts_with("bad request: ") && !err.contains("12345"),
+        "{err}"
+    );
+    let stray = uuid::Uuid::new_v4().to_string();
+    assert!(bad(tab
+        .req("env.list", json!({"scope": "global", "sid": stray}))
+        .await));
+    assert!(bad(tab.req("env.list", json!({"scope": "session"})).await));
+    assert_eq!(
+        tab.req("env.list", json!({"scope": "session", "sid": stray}))
+            .await,
+        Err("no such session".to_owned())
+    );
+    let shell = json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80});
+    let term = tab.req("session.shell", shell).await.expect("shell")["sid"].clone();
+    assert_eq!(
+        tab.req(
+            "env.set",
+            set(json!({"scope": "session", "sid": term}), "A", "1")
+        )
+        .await,
+        Err("not a claude session".to_owned())
+    );
+
+    // A launch gets the global vars; a respawn its own value too.
+    let spawn =
+        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80, "launch": {"pick": "direct"}});
+    let sid = tab.req("session.spawn", spawn).await.expect("spawn")["sid"].clone();
+    let env = read_env_file(&env_file).await;
+    assert!(
+        env.contains("MY_GLOBAL=g-VALUE-1\n") && env.contains("MY_VAR=global-VALUE-2\nline\n"),
+        "{env}"
+    );
+    let own = json!({"scope": "session", "sid": sid});
+    tab.req("env.set", set(own.clone(), "MY_VAR", "own-VALUE-3"))
+        .await
+        .expect("set own");
+    assert_eq!(
+        tab.req("env.list", own.clone()).await.unwrap(),
+        json!({"vars": [{"name": "MY_VAR", "value": "own-VALUE-3"}], "skipped": 0})
+    );
+    fs::remove_file(&env_file).unwrap();
+    let again =
+        json!({"sid": sid, "fresh": true, "rows": 24, "cols": 80, "launch": {"pick": "direct"}});
+    tab.req("session.respawn", again).await.expect("respawn");
+    let env = read_env_file(&env_file).await;
+    assert!(
+        env.contains("MY_VAR=own-VALUE-3\n") && env.contains("MY_GLOBAL=g-VALUE-1\n"),
+        "{env}"
+    );
+    tab.req("env.unset", json!({"scope": "global", "name": "MY_GLOBAL"}))
+        .await
+        .expect("unset");
+    let list = tab.req("env.list", global).await.unwrap();
+    assert_eq!(list["vars"].as_array().unwrap().len(), 1);
+
+    tab.req("env.set", set(own.clone(), "MY_GLOBAL", "own-VALUE-4"))
+        .await
+        .expect("set a second own var");
+    let mut unset = own.clone();
+    unset["name"] = "MY_GLOBAL".into();
+    tab.req("env.unset", unset).await.expect("unset own");
+    assert_eq!(
+        tab.req("env.list", own.clone()).await.unwrap(),
+        json!({"vars": [{"name": "MY_VAR", "value": "own-VALUE-3"}], "skipped": 0})
+    );
+
+    // A kill drops the session's entry.
+    let key = sid.as_str().unwrap().to_owned();
+    let has = || -> bool {
+        fs::read_to_string(&session_env)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .is_some_and(|v| v["sessions"].get(&key).is_some())
+    };
+    assert!(has());
+    tab.req("session.kill", json!({"sid": sid}))
+        .await
+        .expect("kill");
+    let deadline = std::time::Instant::now() + WAIT;
+    while has() {
+        assert!(std::time::Instant::now() < deadline, "the entry stayed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let log = fs::read_to_string(web.h().root.join("web.log")).unwrap();
+    assert!(
+        log.contains("env.set") && log.contains("MY_GLOBAL"),
+        "{log}"
+    );
+    assert!(
+        !log.contains("VALUE-") && !log.contains("sk-SECRET"),
+        "a value in the log"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

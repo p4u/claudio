@@ -1496,3 +1496,6 @@ pub fn scopeguard<F: FnOnce()>(f: F) -> ScopeGuard<F> {
 pub const ALT_Z: &[u8] = b"\x1bz";
 
 pub const ALT_I: &[u8] = b"\x1bi";
+
+/// Alt+, (the custom env menu).
+pub const ALT_COMMA: &[u8] = b"\x1b,";

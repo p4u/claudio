@@ -11,6 +11,8 @@ mod builtins;
 mod checklist;
 mod claude_update;
 mod confirm;
+mod env_edge;
+mod env_view;
 mod extensions_view;
 mod fmt;
 mod git_app;
@@ -435,6 +437,8 @@ enum HostEvent {
     Launched(app::Launched),
     /// What an addon call's task found (`addon_runner`).
     Addon(app::AddonResult),
+    /// What a read or a write of the custom env found (`env_edge`).
+    Env(env_view::EnvDone),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -669,6 +673,7 @@ async fn event_loop(
                 Some(HostEvent::Notice(text)) => app.notify(text),
                 Some(HostEvent::Launched(done)) => app.on_launched(done),
                 Some(HostEvent::Addon(result)) => app.on_addon(result),
+                Some(HostEvent::Env(done)) => app.on_env(done),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
@@ -782,7 +787,7 @@ fn run_effect(
             // Stopping a program waits up to its grace: never here.
             tokio::spawn(ext_host.set_enabled(&name, on));
         }
-        e @ Effect::Addon(_) => addon_runner::run(e, app, runtime, ev_tx),
+        e @ (Effect::Addon(_) | Effect::Env(_)) => addon_runner::run(e, app, runtime, ev_tx),
         Effect::SaveExtension { name, on } => addon_runner::save_extension(name, on, ev_tx),
         Effect::RenderAnswers { gen, id, answers } => {
             // Markdown from the transcript is parsed off the UI thread.

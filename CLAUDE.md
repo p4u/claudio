@@ -183,8 +183,8 @@ declares. The services addons use today: `paths` (all); `term::{probe, strip_esc
 (api); `proto`, `text`, `client`, `remote::bootstrap`, `term::secret` and
 `app::{addons, launch, browser}` (web and vocdoni); `claude::SESSION_MARKERS` and
 `app::config_edit` (vocdoni, web; and `daemon::test_support` in the web's tests); `config`, `freshness`, `claude::{hooks, update}`,
-`remote::{hosts, validate_host}`, `sys::hostname` and `app::label` (web). The web addon (the former in-tree web UI, a second front-end) also uses
-`app::{state, connections, extensions, snippets}`: the layer both front-ends share (A5).
+`remote::{hosts, validate_host}`, `sys::hostname`, `app::label`, `app::env` and `claude::env` (web). The web addon (the former in-tree web UI, a second front-end) also uses
+`app::{state, connections, extensions, snippets, env}`: the layer both front-ends share (A5).
 
 ### Session manager (bare `claudio`)
 
@@ -242,18 +242,22 @@ flowchart LR
   `launch/` (the launch composer), `config_edit.rs` (every `config.toml` writer: a minimal,
   atomic section edit under one process-wide lock), `state.rs` (`state.json`),
   `connections.rs`, `extensions/` (the registry, external manifests in
-  `~/.config/claudio/extensions/`, the extension host), `snippets.rs`.
+  `~/.config/claudio/extensions/`, the extension host), `snippets.rs`, `env.rs` (the custom env:
+  `config.toml [env]` and `session-env.json`, both front-ends' and the composer's).
 - **Launch composer** (`app/launch/`): the one path of a claude session's `Spawn`/`Respawn`,
   from the TUI, `--plain` and the web. Resolve (every `Launch` addon's `Routing`; a `Required`
   addon that fails fails the launch, never direct) → prepare (25 s budget) → review
-  (`NeedsReview` parks the launch) → `compose.rs` (env layered, `env_remove` unioned, optional
-  args, lenses merged, instructions cut at 8158 bytes). A saved route this build cannot make
-  is kept and fails its launches, never falls back to direct.
+  (`NeedsReview` parks the launch) → `compose.rs` (the person's custom env first, read by `send`
+  with `app::env` beside the runtime's `config_path`, then the addons' env layered: an addon's
+  key or `env_remove` wins, one keys-only notice, dropped for a recovery; `env_remove` unioned,
+  optional args, lenses merged, instructions cut at 8158 bytes). A saved route this build cannot
+  make is kept and fails its launches, never falls back to direct.
 - **TUI** (`crates/tui/src/`): `lib.rs` is the I/O edge (terminal, event loop, every `Effect`);
   `app.rs` is the pure coordinator; `interaction.rs` keys, mouse and modals; `sessions.rs`
   builds every spawn (`send_spawn`; a claude session is an `Effect::Launch`);
   `addon_runner.rs` is the TUI's edge of the addon runtime and the launch composer, and keeps
-  parked launches out of `App`; `keymap.rs`'s `DEFAULT_BINDINGS` is the single source of truth
+  parked launches out of `App`; `env_view.rs` is the custom env menu (Alt+,; its I/O is
+  `env_edge.rs`); `keymap.rs`'s `DEFAULT_BINDINGS` is the single source of truth
   for keys (`Alt+Shift+<digit>` is fixed, outside it); `plain.rs` is `--plain`; `ui/` draws.
 
 ### Web UI (`claudio web`, `addons/web/src/`, `addons/web/web/`)
@@ -331,7 +335,10 @@ security model and the TUI parity table: `docs/web.md`.
   `LaunchPart.env`, whose `Debug` shows keys only); an `AddonOp` body
   (`vocdoni/apply`) carries secret names, never values, and is never logged. The journal and `state.json`
   never hold secrets (profile names only); `config.toml` and
-  `plugins.json` do, both mode 0600. Logs and notices name keys, never
+  `plugins.json` do, both mode 0600, and so may `config.toml [env]` and
+  `session-env.json` (the custom env, 0600). Custom env values are shown
+  in both UIs by owner decision: the web's `env.list` reply is the one DTO
+  that carries them. Logs and notices name keys, never
   values. The `--mcp-config` JSON on argv holds `${NAME}` placeholders
   that claude expands from the env; `--agents`/`--mcp-config` are added by
   claudio's spawn path only, never parsed from the user's args.

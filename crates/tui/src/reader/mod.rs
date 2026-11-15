@@ -12,14 +12,18 @@ pub mod layout;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::io;
 use std::rc::Rc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use claudio_core::proto::SessionId;
+use claudio_core::proto::{Msg, SessionId};
 use layout::{Line, Seg};
+
+use crate::app::{App, Effect, ReplyTo};
+use crate::interaction::Modal;
 
 /// How far PageUp/PageDown (and Space) scroll, and the mouse wheel.
 const PAGE: u16 = 10;
@@ -258,6 +262,80 @@ fn fit(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+// ── App glue: opening the view, the daemon's reply, the parsed answers ──────
+
+impl App {
+    /// The reader view of the active session (none without one): it asks
+    /// the session's daemon for the answers, and shows "Loading…" until
+    /// they are rendered.
+    pub(crate) fn open_reader(&mut self) {
+        let Some((id, host)) = self.active_view().map(|v| (v.id, v.host.clone())) else {
+            return;
+        };
+        self.modal_gen += 1;
+        let gen = self.modal_gen;
+        self.modal = Some(Modal::Reader(Box::new(ReaderView::new(id, &host, gen))));
+        self.request(&host, Msg::Answers { id }, ReplyTo::Answers { gen, id });
+    }
+
+    /// The reader view opened under `gen` for session `id`, if it is the
+    /// one open: a reply for a closed view or another session is dropped.
+    fn reader_mut(&mut self, gen: u64, id: SessionId) -> Option<&mut ReaderView> {
+        match &mut self.modal {
+            Some(Modal::Reader(view)) if view.gen == gen && view.session == id => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The daemon's answers for the reader view: parsed off the UI thread
+    /// (none to render: shown at once), or why there are none.
+    pub(crate) fn on_answers_reply(&mut self, gen: u64, id: SessionId, reply: io::Result<Msg>) {
+        let Some(view) = self.reader_mut(gen, id) else {
+            return;
+        };
+        let host = view.host.clone();
+        match reply {
+            Ok(Msg::AnswersReply { answers, .. }) if answers.is_empty() => {
+                view.set_answers(Vec::new())
+            }
+            Ok(Msg::AnswersReply { answers, .. }) => {
+                self.emit(Effect::RenderAnswers { gen, id, answers })
+            }
+            Ok(_) => view.set_failed("unexpected reply from the daemon"),
+            Err(e) => {
+                let why = App::older_daemon_notice(&host, &e).unwrap_or_else(|| e.to_string());
+                view.set_failed(why);
+            }
+        }
+    }
+
+    /// The answers of the reader view opened under `gen` for session `id`
+    /// were parsed (off the UI thread): shown, if that view is open.
+    pub fn on_answers_rendered(&mut self, gen: u64, id: SessionId, answers: Vec<RenderedAnswer>) {
+        if let Some(view) = self.reader_mut(gen, id) {
+            view.set_answers(answers);
+            self.redraw = true;
+        }
+    }
+
+    /// The answers of the reader view `gen` could not be rendered.
+    pub fn on_answers_failed(&mut self, gen: u64, id: SessionId, why: &str) {
+        if let Some(view) = self.reader_mut(gen, id) {
+            view.set_failed(why);
+            self.redraw = true;
+        }
+    }
+
+    /// A key in the reader view: Esc (or q) closes it.
+    pub(crate) fn reader_key(&mut self, key: &KeyEvent) {
+        if let Some(Modal::Reader(view)) = &mut self.modal {
+            if view.on_key(key) {
+                self.modal = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

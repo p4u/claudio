@@ -90,7 +90,9 @@ writing what the previous release reads for one release, so reverting the merge 
 redacted in-memory launch data, and reach a managed session's claude only through
 `Spawn`/`Respawn` env over the daemon socket (a print/API backend's child env directly). Never in
 argv, logs, notices, public DTOs, ordinary session state, `Debug` output or test snapshots;
-messages name keys, never values.
+messages name keys, never values. One exception (owner decision, 2026-11-15): the custom env
+values a person types in the Environment menu are shown in both UIs, and the web's `env.list`
+reply carries them; they live 0600 in `config.toml [env]` and `session-env.json`.
 
 **C2. Outside input is bounded and never panics.** Data from files, sockets, ssh, transcripts,
 extension programs, the network or a browser has a size cap and is parsed without `unwrap`,

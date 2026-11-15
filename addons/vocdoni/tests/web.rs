@@ -108,6 +108,7 @@ fn write_env_fake_claude(h: &ManagerHarness, env_file: &std::path::Path) {
         &[
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
             "VOCDONI_TEST_TOKEN",
         ],
         &["CLAUDECODE"],
@@ -309,6 +310,68 @@ async fn web_spawn_uses_the_composer_env_remove() {
     bad["launch"]["flags"] = json!(["first-party"]);
     let err = tab.req("session.spawn", bad).await.unwrap_err();
     assert_eq!(err, "bad request: launch: flags need an addon's option");
+}
+
+/// AC6: the custom env gives way to a proxy session's: a global
+/// `ANTHROPIC_BASE_URL` stays the proxy's, a global `ANTHROPIC_API_KEY` is
+/// removed (the addon's `env_remove`), and one notice names both keys,
+/// never a value; a direct session gets the user's values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_proxy_session_overrides_the_custom_env() {
+    let h = ManagerHarness::new();
+    let env_file = h.root.join("claude-env.txt");
+    write_env_fake_claude(&h, &env_file);
+    let dirs = h.dirs.clone();
+    let proxy = fake_proxy();
+    let web = web_with_proxy(h, &proxy);
+    let cookie = web.login();
+    let mut tab = Tab::open(&web, &cookie).await;
+    tab.connected("local").await;
+    for (name, value) in [
+        ("ANTHROPIC_BASE_URL", "https://user-VALUE.example"),
+        ("ANTHROPIC_API_KEY", "sk-user-VALUE"),
+    ] {
+        let set = json!({"scope": "global", "name": name, "value": value});
+        tab.req("env.set", set).await.expect("set");
+    }
+    let spawn = |dir: &std::path::PathBuf, pick: &str| {
+        json!({"host": "local", "cwd": dir, "rows": 24, "cols": 80,
+        "launch": {"pick": pick}, "defer": [{"addon": "vocdoni", "id": PLUGIN}]})
+    };
+    tab.req("session.spawn", spawn(&dirs[0], "default"))
+        .await
+        .expect("spawn through the proxy");
+    let env = launched_env(&env_file).await;
+    assert!(env.contains(&format!("ANTHROPIC_AUTH_TOKEN={PROXY_TOKEN}")));
+    assert!(
+        env.contains("ANTHROPIC_BASE_URL=http://127.0.0.1:"),
+        "{env}"
+    );
+    assert!(!env.contains("ANTHROPIC_API_KEY="), "{env}");
+    assert!(!env.contains("VALUE"), "{env}");
+    let notice = tab
+        .event("notice", |v| {
+            v["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("custom env overridden by"))
+        })
+        .await;
+    assert_eq!(
+        notice["text"],
+        "custom env overridden by vocdoni: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY"
+    );
+    fs::remove_file(&env_file).unwrap();
+    tab.req("session.spawn", spawn(&dirs[1], "direct"))
+        .await
+        .expect("spawn direct");
+    let env = launched_env(&env_file).await;
+    assert!(
+        env.contains("ANTHROPIC_API_KEY=sk-user-VALUE"),
+        "{}",
+        env.len()
+    );
+    assert!(env.contains("ANTHROPIC_BASE_URL=https://user-VALUE.example"));
+    assert!(!env.contains("ANTHROPIC_AUTH_TOKEN="));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

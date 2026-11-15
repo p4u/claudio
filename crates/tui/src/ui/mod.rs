@@ -13,6 +13,7 @@ use claudio_core::proto::{SessionKind, SessionState};
 
 mod checklist;
 mod confirm;
+mod env;
 mod extensions;
 mod git;
 mod leader;
@@ -103,6 +104,7 @@ fn draw_modal(frame: &mut Frame, app: &App, pane: Rect) {
         Some(Modal::Picker(picker)) => leader::draw_picker(frame, picker),
         Some(Modal::ExtensionsMenu(view)) => extensions::draw_extensions(frame, app, view),
         Some(Modal::Checklist(view)) => checklist::draw_checklist(frame, view),
+        Some(Modal::Environment(view)) => env::draw_env(frame, app, view),
         None => {}
     }
 }

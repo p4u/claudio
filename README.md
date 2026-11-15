@@ -96,6 +96,7 @@ Only `Alt` keys are claudio's; everything else goes to Claude Code. `Alt+h` list
 | `Alt+r` / `Alt+x` | Rename / close (asks first) |
 | `Alt+z` | Extension actions: `s` search, `p` insert a snippet, `P` save the last prompt, and your own |
 | `Alt+i` | Extensions screen: turn each one on or off |
+| `Alt+,` | Environment: env vars for claude sessions, global or this session's (next start or restart) |
 | `Alt+s` | The addon panel (the Vocdoni addon's proxy stats) |
 | `Alt+h` | Help |
 | `Alt+q` | Quit the UI; sessions keep running |
@@ -227,7 +228,27 @@ diagram = false                 # e.g. no Mermaid instruction or drawing (Alt+i 
 new_session = "alt+n"
 git_log     = "alt+l"
 formulas    = "alt+u"           # the reader
+
+[env]                           # env vars every claude session gets, on every host (Alt+, writes this table)
+ANTHROPIC_DEFAULT_OPUS_MODEL = "claude-opus-5-5"
+BASH_DEFAULT_TIMEOUT_MS = "300000"
 ```
+
+`Alt+,` (and Environment in the web UI) sets env vars for the claude sessions claudio launches:
+**global** ones in `[env]`, and **per-session** ones, which win over a global var of the same
+name, in `session-env.json` beside `config.toml` (0600; an entry goes with its session). They
+apply at the session's next start, restart (`Alt+e`), respawn or recovery; a running claude
+keeps its env. The values are shown in both UIs. Both scopes belong to the machine that runs the
+UI: another machine that restarts the session applies its own. A launch addon's vars win (a
+proxy session keeps the proxy's `ANTHROPIC_BASE_URL` and drops an `ANTHROPIC_API_KEY`), and so
+does an `env` entry in `~/.claude/settings.json`. Names claudio relies on (`PATH`, `TERM`, the
+session markers, `CLAUDE_CODE_SIMPLE`…) are refused, as is a value over 8 KiB or with a control
+character other than newline and tab (the TUI takes a newline as `\n`, a tab as `\t`). A value
+that holds a newline is written on one line, escaped; a multi-line string already in `[env]` (a
+hand edit) is listed, and either menu can change or remove it. Terminal tabs, `-p` and `--api`
+get none. The TUI shows the session scope only for a session that has started.
+
+`config.toml` keeps the mode it has: if you made it yourself, `chmod 600` it before a secret goes in `[env]`.
 
 The `[proxy]` and `[plugins.*]` tables belong to the Vocdoni addon. Snippets are files in `snippets/`; your own extensions are directories in `extensions/` ([docs/extensions.md](docs/extensions.md), example in [`examples/extensions/keys/`](examples/extensions/keys/)). `CLAUDIO_NO_UPDATE_CHECK=1` turns off the claudio and claude release checks, and `CLAUDIO_NO_BROWSER=1` keeps claudio from opening a browser.
 

@@ -116,9 +116,10 @@ async function connectApi(port, body, remote) {
 
 /**
  * `remote`: `claudio web --remote` (TLS, the fixture password in the isolated config) instead of
- * `--listen`; `allowHosts` are its `--allow-host` names.
+ * `--listen`; `allowHosts` are its `--allow-host` names; `envKeys` more env vars the fake claude
+ * records (a spec asserting on its own custom env).
  */
-export async function startServer({ proxy = false, hosts = [], remote = false, allowHosts = [] } = {}) {
+export async function startServer({ proxy = false, hosts = [], remote = false, allowHosts = [], envKeys = [] } = {}) {
   const home = os.homedir();
   const base = path.join(home, '.cache/claudio/web-e2e');
   const root = path.join(base, crypto.randomBytes(4).toString('hex'));
@@ -152,6 +153,7 @@ export async function startServer({ proxy = false, hosts = [], remote = false, a
 
   const fakeProxy = proxy ? await startFakeProxy() : null;
   const extra = fakeProxy ? { CLAUDIO_PROXY_URL: `${PROXY_TOKEN}@${fakeProxy.addr}` } : {};
+  if (envKeys.length) extra.FAKE_ENV_KEYS = ['ANTHROPIC_AUTH_TOKEN', 'VOCDONI_TEST_TOKEN', ...envKeys].join(' ');
   const env = isolatedEnv(root, extra);
   // The isolation is the point: never let a test reach the user's own daemon.
   if (!env.XDG_RUNTIME_DIR.startsWith(base)) throw new Error('runtime dir is not isolated');

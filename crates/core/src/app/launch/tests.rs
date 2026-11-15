@@ -151,7 +151,7 @@ fn compose_layers_env_later_addon_wins_no_key_twice() {
         ("a", env_part(&[("K", "1"), ("A", "x"), ("K", "1b")])),
         ("b", env_part(&[("K", "2"), ("B", "y")])),
     ];
-    let (msg, notices) = compose(spawn_base(), core(), parts).unwrap();
+    let (msg, notices) = compose(spawn_base(), core(), Vec::new(), parts).unwrap();
     let spec = spawned(&msg);
     let pairs: Vec<(&str, &str)> = spec
         .env
@@ -164,14 +164,14 @@ fn compose_layers_env_later_addon_wins_no_key_twice() {
 
 #[test]
 fn compose_unions_env_remove_and_always_sends_some() {
-    let (msg, _) = compose(spawn_base(), core(), Vec::new()).unwrap();
+    let (msg, _) = compose(spawn_base(), core(), Vec::new(), Vec::new()).unwrap();
     assert_eq!(spawned(&msg).env_remove, Some(Vec::new()));
     let part = |names: &[&str]| LaunchPart {
         env_remove: names.iter().map(|n| n.to_string()).collect(),
         ..Default::default()
     };
     let parts = vec![("a", part(&["Z", "A"])), ("b", part(&["A", "M"]))];
-    let (msg, _) = compose(respawn_base(), core(), parts).unwrap();
+    let (msg, _) = compose(respawn_base(), core(), Vec::new(), parts).unwrap();
     let Msg::Respawn(spec) = msg else {
         panic!("not a respawn")
     };
@@ -190,7 +190,7 @@ fn compose_marks_optional_args_and_respawn_drops_args() {
         ..Default::default()
     };
     let parts = vec![("a", part("{1}")), ("b", part("{2}"))];
-    let (msg, _) = compose(spawn_base(), core(), parts.clone()).unwrap();
+    let (msg, _) = compose(spawn_base(), core(), Vec::new(), parts.clone()).unwrap();
     let spec = spawned(&msg);
     let args: Vec<&str> = spec.args.iter().map(String::as_str).collect();
     assert_eq!(
@@ -206,7 +206,7 @@ fn compose_marks_optional_args_and_respawn_drops_args() {
     );
     assert_eq!(spec.optional, ["--mcp-config"]);
     // A respawn: env and extensions, no args (the journal has them).
-    let (msg, _) = compose(respawn_base(), core(), parts).unwrap();
+    let (msg, _) = compose(respawn_base(), core(), Vec::new(), parts).unwrap();
     let Msg::Respawn(spec) = msg else {
         panic!("not a respawn")
     };
@@ -239,7 +239,7 @@ fn compose_merges_lenses_first_wins_within_caps_and_cuts_instructions_at_8158() 
         ..Default::default()
     };
     let parts = vec![("a", a), ("b", b), ("c", c)];
-    let (msg, notices) = compose(spawn_base(), core(), parts).unwrap();
+    let (msg, notices) = compose(spawn_base(), core(), Vec::new(), parts).unwrap();
     let ext = spawned(&msg).extensions.clone().unwrap();
     assert_eq!(ext.lenses.len(), MAX_LENSES);
     assert_eq!(ext.lenses[0], lens("latex", "write <latex>"), "first wins");
@@ -264,6 +264,7 @@ fn compose_merges_lenses_first_wins_within_caps_and_cuts_instructions_at_8158() 
     let (msg, _) = compose(
         spawn_base(),
         core(),
+        Vec::new(),
         vec![("a", small("A")), ("b", small("B"))],
     )
     .unwrap();
@@ -273,11 +274,165 @@ fn compose_merges_lenses_first_wins_within_caps_and_cuts_instructions_at_8158() 
     );
 }
 
+fn user(env: &[(&str, &str)]) -> Vec<(String, crate::claude::env::Value)> {
+    env.iter()
+        .map(|(k, v)| (k.to_string(), crate::claude::env::Value::new(*v)))
+        .collect()
+}
+
+fn env_of(msg: &Msg) -> Vec<(&str, &str)> {
+    let env = match msg {
+        Msg::Spawn(spec) => &spec.env,
+        Msg::Respawn(spec) => &spec.env,
+        other => panic!("not a launch: {other:?}"),
+    };
+    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+}
+
+#[test]
+fn compose_puts_the_user_env_first_in_spawn_and_respawn() {
+    let mine = user(&[("A", "1"), ("MULTI", "x\ny")]);
+    let parts = vec![("a", env_part(&[("P", "p")]))];
+    for base in [spawn_base(), respawn_base()] {
+        let (msg, notices) = compose(base, core(), mine.clone(), parts.clone()).unwrap();
+        assert_eq!(env_of(&msg), [("A", "1"), ("MULTI", "x\ny"), ("P", "p")]);
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+}
+
+#[test]
+fn an_addon_key_replaces_a_user_key_and_one_notice_names_it() {
+    let mine = user(&[
+        ("ANTHROPIC_BASE_URL", "https://mine.example"),
+        ("KEEP", "k"),
+    ]);
+    let parts = vec![
+        (
+            "route",
+            env_part(&[("ANTHROPIC_BASE_URL", "http://proxy"), ("T", "t")]),
+        ),
+        ("other", env_part(&[("KEEP", "theirs")])),
+    ];
+    let (msg, notices) = compose(spawn_base(), core(), mine, parts).unwrap();
+    assert_eq!(
+        env_of(&msg),
+        [
+            ("ANTHROPIC_BASE_URL", "http://proxy"),
+            ("KEEP", "theirs"),
+            ("T", "t")
+        ]
+    );
+    assert_eq!(
+        notices,
+        ["custom env overridden by route, other: ANTHROPIC_BASE_URL, KEEP"]
+    );
+    assert!(!notices[0].contains("mine.example"), "keys only");
+}
+
+#[test]
+fn a_user_key_in_a_parts_env_remove_is_dropped_and_named() {
+    let mine = user(&[("ANTHROPIC_API_KEY", "sk-user"), ("X", "1")]);
+    let part = LaunchPart {
+        env: vec![("ANTHROPIC_AUTH_TOKEN".into(), "tok".into())],
+        env_remove: vec!["ANTHROPIC_API_KEY".into()],
+        ..Default::default()
+    };
+    let (msg, notices) = compose(spawn_base(), core(), mine, vec![("route", part)]).unwrap();
+    assert_eq!(env_of(&msg), [("X", "1"), ("ANTHROPIC_AUTH_TOKEN", "tok")]);
+    assert_eq!(
+        spawned(&msg).env_remove.as_deref(),
+        Some(&["ANTHROPIC_API_KEY".to_owned()][..])
+    );
+    assert_eq!(
+        notices,
+        ["custom env overridden by route: ANTHROPIC_API_KEY"]
+    );
+    assert!(!format!("{notices:?}").contains("sk-user"));
+}
+
+#[test]
+fn an_invalid_user_entry_is_skipped_with_a_notice() {
+    let mine = user(&[
+        ("PATH", "/x"),
+        ("1BAD", "sk-SECRET"),
+        ("CTL", "a\rb"),
+        ("OK", "y"),
+    ]);
+    let (msg, notices) = compose(spawn_base(), core(), mine, Vec::new()).unwrap();
+    assert_eq!(env_of(&msg), [("OK", "y")]);
+    assert_eq!(notices.len(), 3, "{notices:?}");
+    assert!(notices[0].starts_with("custom env skipped: PATH: refused: "));
+    assert_eq!(notices[1], "custom env: an entry with a bad name skipped");
+    assert!(notices[2].starts_with("custom env skipped: CTL: value holds"));
+    assert!(!format!("{notices:?}").contains("SECRET"));
+}
+
+#[test]
+fn an_empty_user_env_changes_nothing() {
+    let parts = vec![
+        ("a", env_part(&[("K", "a"), ("A", "1")])),
+        ("b", env_part(&[("K", "b")])),
+    ];
+    let with = compose(spawn_base(), core(), Vec::new(), parts.clone()).unwrap();
+    assert_eq!(env_of(&with.0), [("K", "b"), ("A", "1")]);
+    assert!(with.1.is_empty());
+}
+
+/// A runtime reading `config.toml` (and `session-env.json`) in `dir`.
+fn runtime_in(dir: &std::path::Path, addons: Vec<Arc<dyn Addon>>) -> (AddonRuntime, RuntimeRx) {
+    let addons = Arc::new(Addons::new(addons).unwrap());
+    let opts = RuntimeOptions {
+        config_path: dir.join("config.toml"),
+        watch_config: false,
+    };
+    AddonRuntime::start(addons, opts)
+}
+
+#[tokio::test]
+async fn the_composer_reads_the_custom_env_for_every_op_and_a_recovery_drops_the_override_notice() {
+    let dir = std::env::temp_dir().join(format!("claudio-launch-env-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        "[env]\nG = \"global\"\nT = \"mine\"\n",
+    )
+    .unwrap();
+    let store = crate::app::env::Store::beside(&dir.join("config.toml"));
+    let scope = crate::app::env::Scope::Session {
+        host: "local".into(),
+        sid: sid(),
+    };
+    store
+        .set(&scope, "G", &crate::claude::env::Value::new("session"))
+        .unwrap();
+    let addon = Arc::new(
+        TestAddon::new("route")
+            .routing(Ok(Routing::Optional))
+            .prepare(Script::Ok(env_part(&[("T", "addon")]))),
+    );
+    let (rt, _rx) = runtime_in(&dir, vec![addon]);
+    for op in [LaunchOp::New, LaunchOp::Respawn, LaunchOp::Recover] {
+        let (client, sent) = daemon().await;
+        let step = run(&rt, spec(op, LaunchSelect::default()), client).await;
+        let Step::Sent { notices, .. } = step else {
+            panic!("{op:?}: {step:?}");
+        };
+        let msg = sent.lock().unwrap()[0].clone();
+        assert_eq!(env_of(&msg), [("G", "session"), ("T", "addon")], "{op:?}");
+        let overridden = notices
+            .iter()
+            .any(|n| n.starts_with("custom env overridden"));
+        assert_eq!(overridden, op != LaunchOp::Recover, "{op:?}: {notices:?}");
+    }
+    rt.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn compose_refuses_a_frame_over_the_cap() {
     let big = "v".repeat(crate::proto::MAX_FRAME);
     let parts = vec![("a", env_part(&[("BIG", &big)]))];
-    let err = compose(spawn_base(), core(), parts).unwrap_err();
+    let err = compose(spawn_base(), core(), Vec::new(), parts).unwrap_err();
     assert_eq!(err, "launch too large");
     assert!(!err.contains("vvv"));
 }

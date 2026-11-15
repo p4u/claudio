@@ -13,6 +13,7 @@
 //! - `confirm`       – the generic multiple-choice prompt
 //! - `checklist`     – addon checklists (a plugin's setup, a review)
 //! - `addon_calls`   – what `App` asks of the addons, and their answers
+//! - `env_view`      – the custom env menu (Alt+,)
 //! - `claude_update` – keeping claude up to date on every host
 //! - `panel_view`    – addon panels (the proxy stats, Alt+s)
 //! - `git_app`       – the history viewer's glue (its state is `git_view`)
@@ -139,6 +140,9 @@ pub enum Effect {
     },
     /// A call into an addon (`addon_runner::run`).
     Addon(AddonCall),
+    /// A read or a write of the custom env, off the UI thread
+    /// (`env_edge::run`); a read's result goes to [`App::on_env`].
+    Env(super::env_view::EnvCall),
 }
 
 /// A launch for the event loop's runner (`addon_runner::launch`). It holds

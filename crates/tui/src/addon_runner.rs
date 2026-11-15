@@ -298,6 +298,8 @@ pub(super) fn run(effect: Effect, app: &mut App, edge: &Edge, tx: &mpsc::Sender<
             toggle_row(edge, (addon, name, on), tx)
         }
         Effect::Addon(AddonCall::RefreshRows) => refresh_rows(edge, tx),
+        // The custom env lives beside the runtime's config.toml.
+        Effect::Env(call) => super::env_edge::run(call, edge.config_path(), tx),
         _ => {}
     }
 }
