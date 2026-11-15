@@ -2,6 +2,8 @@
 //!
 //! Sub-modules:
 //!
+//! - [`env`] — the custom env's names, values, caps and the catalogue of
+//!   Claude Code's documented variables.
 //! - [`hooks`] — hook event constants, settings builder, per-spawn token
 //!   generator, and the short-lived relay process.
 //! - [`latex`] — the `<latex>` formulas of claude's answers, and the
@@ -13,6 +15,7 @@
 //! - [`state`] — pure state machine that maps hook events onto
 //!   [`proto::SessionEvent`]s.
 
+pub mod env;
 pub mod hooks;
 pub mod latex;
 pub mod projects;
@@ -21,6 +24,8 @@ pub mod state;
 pub mod update;
 
 use std::process::{Command, ExitCode};
+
+pub use env::catalogue as env_catalogue;
 
 /// Variables a running claude sets for its own children. A process started
 /// from inside a claude session inherits them, and a session spawned with them
