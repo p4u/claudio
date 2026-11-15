@@ -16,6 +16,10 @@ version-1 ops and args (`proxy.*`, `plugins.*`; `proxy`, `first_party`, `skip_pl
 `first_party`), snapshot field and events (`profiles`, `plugin_status`) are gone. Version 1's text
 is in git history.
 
+The custom env ops (`env.*`, §5) were added within version 2: they are additive, and the page
+and the server ship together (`docs/specs/2026-11-15-custom-env-design.md`). An older server
+answers them `"unknown op"`, which the page shows.
+
 ## 1. HTTP surface
 
 | Method and path | Cookie | Origin check | Answer |
@@ -185,7 +189,9 @@ Replies: `{"t":"res","id":<u32>,"ok":true,"data":<value>}` or
 All strings the server sends were sanitized by the daemon (`text::sanitize` or
 `daemon::git` sanitizing) and are still untrusted: render as text unless §7 says otherwise.
 Field order is not significant. No DTO ever carries a token, a plugin env value, `Spawn.env`,
-a socket path or a hook token.
+a socket path or a hook token. The one exception (owner decision): the reply of `env.list`
+(§5) carries the custom env values the person typed in the Environment menu; an addon's env
+(proxy tokens, plugin env) never reaches the page.
 
 ### Session
 
@@ -277,7 +283,8 @@ browsers.
 Every string here comes from an addon. The server cleans it before it is sent (control and
 format characters removed, one line, at most 4096 bytes; a segment at most 64 characters, a
 checklist at most 256 items, a panel over 64 KiB encoded replaced by an error page) and the
-page renders it as text (§7). No addon DTO carries an env value or a token.
+page renders it as text (§7). No addon DTO carries an env value or a token (the custom env of
+`env.list` is the person's, not an addon's).
 
 - Segment `{"addon","id","text","tone": "ok"|"warn"|"hot"|"muted"|"accent","priority": 0-255}`.
 - LaunchOption `{"id","label","group","default": bool,"detail": string|null}`: one entry of a
@@ -304,6 +311,11 @@ page renders it as text (§7). No addon DTO carries an env value or a token.
 - ExtensionRow `{"addon","name","description","on": bool,"refused": string|null,"details":[string],"setup": string|null}`
   (`setup`: the id of the checklist that sets it up, of the same addon).
 - Notice `{"text","level": "info"|"warn"|"error"}`.
+- EnvVar `{"name","category","description"}`: a documented Claude Code variable (the embedded
+  catalogue; `category` one word such as `model`, `auth`, `network`; `description` ≤ 160
+  characters, saying when a flag is presence-only). EnvRefused `{"name","reason"}`: a name the
+  menu refuses, and why. EnvEntry `{"name","value"}`: one custom env variable as stored
+  (`value` the raw text, newlines and tabs included).
 
 ## 5. Ops
 
@@ -399,6 +411,30 @@ the page sends (an extra arg answers `"bad request: …"`).
 | `addons.checklist.save` | `addon`, `checklist`, `revision`, `answer`: `{"off":[item id]}` (≤ 256 ids of ≤ 128 bytes, each one of the checklist's) \| `"defer"` | `{}` | `"stale"` when the checklist's revision is no longer `revision` (the page reads it again); `"defer"` puts it off for this server run. 15 s |
 | `addons.rows` | — | `{"rows":[ExtensionRow]}` | registry order; `on`/`refused` as the registry has them (a name a core extension holds is refused) |
 | `addons.row_action` | `addon`, `name`, `action`: `"toggle"` \| `"refresh"`, `on?` (bool; `toggle` only, required) | `{}` | `toggle` writes `[extensions] <name> = on` in config.toml, then tells the addon (a refused row answers `"refused: <why>"`); `refresh` has the addon refetch its rows' data. 15 s; then `extensions_changed` |
+
+### Custom env
+
+The person's env vars for the claude sessions this server (and the TUI on this machine)
+launches (`app::env`): `scope` `"global"` (`config.toml [env]`, every session on every host) or
+`"session"` (`session-env.json`, one open claude session, overriding a global var of the same
+name). They apply at the session's next start, restart, respawn or recovery; a running claude is
+never changed. Args use `deny_unknown_fields`. `sid` is required with `"session"` and refused
+with `"global"` (`"bad request: sid: …"`); a `sid` naming no session answers `"no such
+session"`, one naming a terminal `"not a claude session"`. A name is `[A-Za-z_][A-Za-z0-9_]{0,127}`
+and not one of `env.catalogue`'s `refused`; a value is at most 8192 UTF-8 bytes with no control
+character but newline and tab (the page turns `\r\n` into `\n` before it sends); a scope holds at
+most 128 variables and 128 KiB of names and values. A refusal names the variable and the reason,
+never the value.
+
+| Op | Args | → | Notes |
+|---|---|---|---|
+| `env.catalogue` | — | `{"vars":[EnvVar],"refused":[EnvRefused]}` | the documented variables in name order, and the names the menu refuses with the reason |
+| `env.list` | `scope`, `sid?` | `{"vars":[EnvEntry],"skipped": n}` | the valid entries in name order; `skipped` counts the entries of the file left out (not a string, a bad or refused name, a bad value, past a cap). The only reply that carries env values (§4) |
+| `env.set` | `scope`, `sid?`, `name`, `value` | `{}` | sets or replaces `name`; errors: `"bad request: …"`, `"<name>: refused: <why>"`, `"<name>: value …"`, `"too many variables"`, `"environment too large"`, `"could not save: <why>"`. Logged at INFO as `web op` with the op, scope, sid and name, never the value |
+| `env.unset` | `scope`, `sid?`, `name` | `{}` | removes `name` (absent: `{}` too); logged like `env.set` |
+
+No event: the dialog lists when it opens and after each of its own writes. `session.kill` and a
+session's removal (`session_removed`) also drop its per-session env.
 
 ### Claude, layout
 
