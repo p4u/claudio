@@ -142,14 +142,37 @@ pub fn edit_text(text: &str, section: &str, old: &Table, new: &Table) -> Option<
 }
 
 /// A value this editor writes on one line: a string, an integer, a boolean,
-/// or a flat array of those.
+/// or a flat array of those. A string holding a line break is written as a
+/// basic string with escapes ([`basic_string`]), never as a multi-line one,
+/// so the line edit can change or remove it again.
 fn line_value(value: &Value) -> Option<String> {
     let flat = |v: &Value| matches!(v, Value::String(_) | Value::Integer(_) | Value::Boolean(_));
     match value {
+        Value::String(s) if s.contains(['\n', '\r']) => Some(basic_string(s)),
         v if flat(v) => Some(v.to_string()),
         Value::Array(items) if items.iter().all(flat) => Some(value.to_string()),
         _ => None,
     }
+}
+
+/// `s` as a TOML basic string on one line: `"`, `\` and every control
+/// character escaped (`\n`, `\r`, `\t`, else `\uXXXX`).
+fn basic_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// `key` as a TOML key: bare when it can be, else a quoted string.
@@ -240,9 +263,21 @@ fn set_key(text: &str, section: &str, key: &str, value: Option<&str>) -> Option<
         if !is_key_line(line) || line_key(line.content, key).is_none() {
             continue;
         }
-        let multiline_value = lines.get(i + 1).is_some_and(|next| next.continued);
-        if multiline_value {
-            return None;
+        // A multi-line string (another writer's whole-file save, or a hand
+        // edit): its lines go, and a new value takes their place on one line
+        // (a comment after its closing quotes is not kept).
+        let more = lines.iter().skip(i + 1).take_while(|l| l.continued).count();
+        if more > 0 {
+            let ending = lines.get(i + more).map_or(eol, |l| l.ending);
+            let indent_len = line.content.len() - line.content.trim_start().len();
+            let indent = line.content.get(..indent_len).unwrap_or("");
+            for slot in out.iter_mut().skip(i).take(more + 1) {
+                slot.clear();
+            }
+            if let (Some(value), Some(slot)) = (value, out.get_mut(i)) {
+                *slot = format!("{indent}{} = {value}{ending}", render_key(key));
+            }
+            return Some(out.concat());
         }
         match value {
             Some(value) => {
@@ -776,13 +811,9 @@ mod tests {
 
     #[test]
     fn edit_section_refuses_layouts_it_cannot_edit_and_invalid_toml() {
-        // An inline table, a dotted key and a multi-line value: the edit
-        // would not land where the value is, so nothing is written.
-        for text in [
-            "team = { reviewed = \"1\" }\n",
-            "team.reviewed = \"1\"\n",
-            "[team]\nnote = \"\"\"\nline\n\"\"\"\n",
-        ] {
+        // An inline table and a dotted key: the edit would not land where
+        // the value is, so nothing is written.
+        for text in ["team = { reviewed = \"1\" }\n", "team.reviewed = \"1\"\n"] {
             let (dir, path) = scratch(Some(text));
             let err = edit_section(&path, "team", |t| {
                 t.insert("reviewed".into(), Value::String("2".into()));
@@ -801,6 +832,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A multi-line string (another writer's whole-file save, or a hand
+    /// edit) is replaced by a one-line value, or removed, with all its
+    /// lines; the keys and comments around it stay.
+    #[test]
+    fn edit_section_replaces_and_removes_a_multi_line_string() {
+        let text = "[ui]\nnotify = true\n[team]\n# before\n  note = \"\"\"\nline one\n[ui]\nline = 3\"\"\" # gone\nafter = 1\nlit = '''\na\nb'''\n[claude]\ninstall = \"off\"\n";
+        let (dir, path) = scratch(Some(text));
+        edit_section(&path, "team", |t| {
+            t.insert("note".into(), Value::String("x\ny".into()));
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ui]\nnotify = true\n[team]\n# before\n  note = \"x\\ny\"\nafter = 1\nlit = '''\na\nb'''\n[claude]\ninstall = \"off\"\n"
+        );
+        edit_section(&path, "team", |t| {
+            t.remove("lit");
+            t.remove("note");
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ui]\nnotify = true\n[team]\n# before\nafter = 1\n[claude]\ninstall = \"off\"\n"
+        );
+        // The last value of a file without a final newline.
+        let (dir2, path2) = scratch(Some("[team]\nnote = \"\"\"\na\nb\"\"\""));
+        edit_section(&path2, "team", |t| {
+            t.insert("note".into(), Value::String("c".into()));
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path2).unwrap(),
+            "[team]\nnote = \"c\""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
     /// A header the line scanner cannot read (a quoted name with a `]`)
     /// makes the table seem to go on; the key would land in the next table,
     /// so the parse check refuses the edit and nothing is written.
@@ -814,6 +883,41 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, SaveError::UnsupportedSection(_)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A string holding a newline is written on one line, as a basic string
+    /// with escapes, so it can be changed and removed again; the rest of the
+    /// file stays.
+    #[test]
+    fn edit_section_writes_a_string_with_a_newline_on_one_line() {
+        let text = "# mine\n[ui]\nnotify = true\n";
+        let (dir, path) = scratch(Some(text));
+        let header = "X-One: 1\nX-Two: \"2\"\tend\\";
+        edit_section(&path, "env", |t| {
+            t.insert("HEADERS".into(), Value::String(header.into()));
+        })
+        .unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            out,
+            "# mine\n[ui]\nnotify = true\n\n[env]\n\
+             HEADERS = \"X-One: 1\\nX-Two: \\\"2\\\"\\tend\\\\\"\n"
+        );
+        let parsed: Table = out.parse().unwrap();
+        assert_eq!(parsed["env"]["HEADERS"].as_str(), Some(header));
+        edit_section(&path, "env", |t| {
+            t.insert("HEADERS".into(), Value::String("a\r\nb".into()));
+        })
+        .unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.ends_with("[env]\nHEADERS = \"a\\r\\nb\"\n"), "{out}");
+        edit_section(&path, "env", |t| {
+            t.remove("HEADERS");
+        })
+        .unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(out, "# mine\n[ui]\nnotify = true\n\n[env]\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
