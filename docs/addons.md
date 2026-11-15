@@ -213,9 +213,15 @@ queues it until it is idle; the web ignores offers.
 
 **4. Compose.** The core merges the parts, the one implementation for every front-end:
 
-- `env`: in registry order; a later addon's key wins; no key twice. `LaunchPart.env` is a secret:
-  it goes only into `SpawnSpec.env` over the daemon socket, never into `App`, a DTO, a log, a
-  notice or `Debug` (`LaunchPart`'s `Debug` prints env keys only; C1).
+- `env`: the person's custom env first (`app::env::Store::effective` for the session, read by
+  the composer itself beside the runtime's `config_path`: global `[env]` overlaid with the
+  session's own, found by the session id alone (`host` is kept for pruning); every entry checked again), then each part in registry order; a later key wins;
+  no key twice. An addon's key replaces the person's, and a person's key named in a part's
+  `env_remove` (and set by no part) is dropped: the addon wins. One notice names the person's
+  keys an addon overrode (`custom env overridden by <addon>: NAME, …`), keys only; a recovery
+  drops it. `LaunchPart.env` and the custom env are secrets: they go only into `SpawnSpec.env`
+  over the daemon socket, never into `App`, a DTO, a log, a notice or `Debug` (`LaunchPart`'s
+  `Debug` prints env keys only, `claude::env::Value`'s its length; C1).
 - `env_remove`: names the daemon removes from the session's inherited env, besides claude's own
   session markers.
 - `args`: appended in order. `LaunchArg::Optional { flag, value }` is dropped by the daemon when
@@ -516,8 +522,8 @@ changes it: the edit gets the section as a `toml::Table`, and the core writes ba
 keys that changed, atomically, keeping every other line and comment, through one process-wide
 lock shared with every other writer of `config.toml` (B3).
 
-The core owns these sections: `ui`, `keys`, `update`, `claude`, `extensions`. No addon may
-claim them.
+The core owns these sections: `ui`, `keys`, `update`, `claude`, `extensions`, `ssh`, `env`. No
+addon may claim them.
 
 The core's command words are reserved (no addon may be named after one, and the core runs them
 before any addon's `dispatch`): `__probe`, `--slave`, `__hook`, `__context`, `--daemon`,

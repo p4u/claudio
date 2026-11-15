@@ -104,6 +104,26 @@ without one it listens on `0.0.0.0:7337`, IPv4 only. It is the one listener: `--
 (with `--remote`) makes a new certificate. `--set-password` and `--print-cert` take no other
 argument and exit.
 
+### Custom env vars
+
+`Alt+,` (or Environment in the palette and in Settings) opens the env vars of the claude
+sessions claudio launches. **Global** ones go to every session on every host (`config.toml
+[env]`); **This session** shows when the focused pane holds a claude session, and its vars win
+over a global one of the same name (`session-env.json` beside `config.toml`, 0600). The name field
+offers Claude Code's documented variables (a datalist) and shows the description of a known one;
+names claudio relies on are refused with the reason. A value is raw text: a newline is a newline. A changed value is saved when you leave its field (Escape included). A multi-line string in `[env]` (a hand edit) is listed and can be changed or removed.
+Changes apply at the session's next start, restart, respawn or recovery; a running claude keeps
+its env. A launch addon's vars win (a proxy session keeps its `ANTHROPIC_BASE_URL` and drops an
+`ANTHROPIC_API_KEY`, with a notice naming the keys), and an `env` entry in the host's
+`~/.claude/settings.json` wins over both.
+
+Both scopes belong to this machine: the TUI here and this server share them, and another
+machine's claudio that restarts the session applies its own global vars and none of this
+session's. The values are shown here and in the TUI (an owner decision). Where they end up: on the
+session's host they are in the daemon's memory and in claude's environment, readable by that
+user and root and inherited by every command claude runs, so a command that prints its
+environment puts them in that host's transcript.
+
 ### SSH hosts
 
 A host is added by name or `user@host`, from the hosts panel or Alt+n's "Another host…" (the
@@ -429,6 +449,7 @@ xterm and the browser do (matched on the physical key, so any layout works; AltG
 | `Alt+g` | The board |
 | `Alt+s` / `Alt+l` / `Alt+u` | Addon panel (proxy stats) / history / reader drawer |
 | `Alt+i` | Extensions screen |
+| `Alt+,` | Environment: custom env vars of claude sessions |
 | `Alt+h` | Help |
 | `Alt+z` | Command palette (lists the extension actions) |
 | `Alt+o` | Compose: a pop-up editor for a long or multi-line prompt (web only) |
@@ -475,6 +496,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Search | `Alt+z` `s` | `/` | `search` | `search finds a fixture conversation`; `web_reader_and_search_read_a_fixture_transcript` |
 | Snippets | `Alt+z` `p` / `P` | palette: Insert snippet, Save last prompt | `snippets.list`, `snippets.save`, `reader.last_prompt` | `save and insert a snippet`; `web_snippets_save_and_list` |
 | Extensions screen | `Alt+i` | Settings → Manage… | `extensions.list`, `extensions.toggle`, `extensions.action` | `toggling an extension rewrites its config.toml line`; `web_extension_toggle_edits_config_and_is_reread`; `web_external_extension_action_runs_its_program` |
+| Custom env vars | `Alt+,` | `Alt+,`, the palette ("Environment variables"), Settings → Environment | `env.catalogue`, `env.list`, `env.set`, `env.unset` | `the dialog adds a global and a session var, and a restart records them`; `the catalogue datalist offers documented names with their description`; `web_env_ops_set_list_unset_and_reach_the_launch`; `web_proxy_session_overrides_the_custom_env` |
 | Plugin setup (an addon checklist) | first spawn, extensions screen | the checklist a launch's `review` asks for (Save / Skip / Cancel), "Set up" on an addon row | `addons.checklist`, `addons.checklist.save`, `addons.rows`, `session.spawn` (`defer`) | `a plugin without choices asks for its checklist before spawn and Skip spawns without it`; `web_spawn_with_launch_needs_review_then_defer_spawns_without_the_plugin` |
 | claude install / update | update prompt | Hosts menu → host row → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
 | Host stats | status bar cpu / mem | footer: the host of the session in view (every host when none is) | `host_stats` events | node (`footerStats`) |

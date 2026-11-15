@@ -386,6 +386,17 @@ the upstream model.
 `ANTHROPIC_API_KEY` is unset. Note that `/proc/<pid>/environ` is readable by
 the same uid and root.
 
+#### Custom env and the proxy's
+A person's custom env (`app::env`: `config.toml [env]` and `session-env.json`, set with
+`Alt+,` or the web's Environment dialog) is composed first, then every addon's part. The
+proxy's env wins: a key it sets replaces the person's (`ANTHROPIC_BASE_URL`, the token, the
+default models), and a key in its `env_remove` (`ANTHROPIC_API_KEY`) is dropped from the
+person's env too. One launch notice names the keys the proxy overrode (`custom env overridden
+by vocdoni: ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY`), never a value; a recovery does not repeat
+it.
+
+A direct session whose custom env sets both `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` (a gateway of your own) looks like a proxy session to the usage-limit switch: at a usage limit claudio asks that gateway for `/v1/claudio/session/switch` and shows the failure as a notice. `[proxy] auto_switch = false` turns it off.
+
 **[later]** Supply the token through claude's `apiKeyHelper` (`claudio __token`,
 which asks the daemon), so it never sits in the environment.
 
