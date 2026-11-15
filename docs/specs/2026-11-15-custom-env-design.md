@@ -1,6 +1,6 @@
 # Custom environment variables for Claude Code sessions: design
 
-Status: draft   Class: architectural (config format, a new 0600 state file, web protocol ops,
+Status: audited (2026-11-15)   Class: architectural (config format, a new 0600 state file, web protocol ops,
 both front-ends, a security rule exception)
 Owner decisions so far (2026-11-15):
 - A menu in the TUI and in the web UI to set custom env vars for the Claude Code instances
@@ -31,7 +31,8 @@ monitoring, network-config and settings pages, checked against the installed bin
 ## Goals
 
 1. **Global env.** The user sets, edits and deletes env vars that every Claude Code session
-   claudio launches gets, on every host, from either front-end.
+   claudio launches gets, on every host, from either front-end. This includes `--plain` sessions
+   (global scope only: `--plain` has no menu).
 2. **Per-session env.** The user sets, edits and deletes env vars for one open Claude session.
    They override global values of the same name for that session.
 3. **When changes apply.** Changes apply to the next launch of the session: a new session, a
@@ -54,13 +55,20 @@ monitoring, network-config and settings pages, checked against the installed bin
 - No attempt to beat `~/.claude/settings.json`: an `env` entry there overrides the launch env in
   Claude Code. The docs say so, and nothing reads or writes `~/.claude`.
 - No change to the daemon or its protocol: env still travels in `Spawn`/`Respawn` env.
+- Env is not shared between client machines. Both scopes belong to the machine whose claudio
+  (TUI or web server) launches the session: another machine that restarts or recovers the
+  session applies its own global env and no per-session env. docs/web.md and the README say so.
+  (The daemon keeps a session's last spawn env in memory for its own `--resume` retry,
+  `daemon/admit.rs:34-39`, `lifecycle.rs:21-30`, so a retry never changes a running session's env.)
+- The passthrough (`claudio <args>` without `-p`) execs claude with the caller's environment and
+  applies nothing.
 
 ## Current state
 
 - **Composer.** `compose(base, core: SessionExtensions, parts)` (`app/launch/compose.rs:32`)
   layers each addon part's `env` in registry order, with later keys replacing earlier ones (:38-51).
   It unions `env_remove` (:52), writes `Spawn`/`Respawn` env (:75-92) and checks `frame_fits`
-  (:101).
+  (`:95`, `:103`).
   - The TUI (`crates/tui/src/addon_runner.rs:466-530`), `--plain` and the web
     (`addons/web/src/spawn.rs:144`, `:253`, `:345`) all build a `LaunchSpec` and go through it.
   - That includes recovery (`LaunchOp::Recover`, `crates/tui/src/sessions.rs:691`) and respawn.
@@ -71,13 +79,13 @@ monitoring, network-config and settings pages, checked against the installed bin
   `CORE_SECTIONS` (`addon/registry.rs:10`). `app/config_edit.rs` is its only writer:
   - `edit_section` (:51) edits minimally and atomically under `lock` (:24);
   - it supports flat scalar keys in `[section]`.
-- **TUI.** No Alt+letter is free (`keymap.rs:107`). Claude 2.1.323 binds no Alt+punctuation (no
+- **TUI.** No Alt+letter is free (the per-binding comments, `keymap.rs:187-188`). Claude 2.1.323 binds no Alt+punctuation (no
   `"alt+,"`/`"meta+,"` in the binary), and readline leaves Alt+, unbound.
   - Closest templates: the extensions menu (`extensions_view.rs`, `ui/extensions.rs`), the
     `Input` widget (`leader.rs:36`) and the filterable `Picker` (`leader.rs:94`).
 - **Web.**
-  - The protocol is version 2 (`docs/web-protocol.md`), and its §7 says no DTO carries an env
-    value.
+  - The protocol is version 2 (`docs/web-protocol.md`), and its §4 (`:187-188`, and again under
+    "Addons", `:280`) says no DTO carries an env value.
   - Ops route in `addons/web/src/ws.rs:434`.
   - The closest page templates are `ui/extensions.js` (a server-backed list in a `Dialog`) and
     `ui/hosts.js` (a per-host setting).
@@ -97,48 +105,82 @@ monitoring, network-config and settings pages, checked against the installed bin
 
   - `"env"` is added to `CORE_SECTIONS`.
   - Written only through `config_edit::edit_section`.
-  - Read by `Config` (a new `env: BTreeMap<String, String>` field; an unknown or invalid entry
-    is skipped with one notice naming the key).
-  - A hand-edited non-string value (`X = 1`) is refused by the menu's writer with the existing
-    `SaveError::UnsupportedSection` path, and skipped when read.
+  - `config_edit` writes a string that holds a newline on one line, as a TOML basic string with
+    `\n` escapes (a change to `line_value`; the existing parse-back check still guards it), so
+    every value this menu writes can be edited and removed again. A value someone wrote by hand
+    as a multi-line `"""` string is listed, and editing or deleting it is refused with
+    `SaveError::UnsupportedSection` ("edit [env] by hand").
+  - `Config` gets no field. `app::env` reads the `[env]` table itself, as a `toml::Table`, each
+    time it is asked, so nothing caches it and a bad entry never fails the rest of
+    `config.toml`. An entry that is not a string, or fails the validator, is skipped with one
+    notice (see "Notices and names"). The menu lists valid entries only; setting a name replaces
+    whatever the file holds for it.
 - **Per session**: `session-env.json`, next to `config.toml` (`paths::config_dir()`), mode 0600,
   written with `paths::write_atomic` under a sidecar lock (`paths::FileLock::beside`, as
   `config_edit::lock` does). The TUI and a web server on the same machine both write it.
 
   ```json
-  {"version":1,"sessions":{"<host>\u0000<session uuid>":{"NAME":"value"}}}
+  {"version":1,"sessions":{"<session uuid>":{"host":"<host>","env":{"NAME":"value"}}}}
   ```
 
-  - The local host's key is the same host name the connections layer uses for it.
-  - An entry is removed when its session is closed (killed and removed) from either front-end.
-  - Stale entries for sessions closed elsewhere are harmless and stay.
-  - A file that is missing, unreadable, of the wrong version or over 1 MiB reads as empty, with
-    one notice. It is never rewritten silently.
+  - Lookups are by session id (client-made v4 UUIDs, unique across hosts). `host` is kept for
+    pruning only.
+  - `<host>` is the client's name for the host, as in `state.json` and the Session DTO: the
+    literal `local`, or the ssh alias. The TUI and a web server on the same machine use the same
+    names, so they share entries.
+  - An entry is removed when its session is removed: on the daemon's `SessionEvent::Removed` for
+    it (a kill from any client, or a clean exit), in whichever front-end sees the event; the web
+    also forgets it on `session.kill`, the TUI when it sends `Kill`.
+  - Entries of sessions removed while no front-end ran are pruned at recovery: when a host answers
+    `ListSessions`, the entries of that host whose session it no longer lists are removed.
+  - The file is capped at 8 MiB. `set` refuses a write that would pass it.
+  - A missing file reads as empty. A file that is unreadable, not valid JSON, of a version this
+    build does not know, or over the cap reads as empty with one notice, and every `set`, `unset`
+    and `forget_session` then fails without writing ("session-env.json is not readable: fix or
+    delete it"); `forget_session`'s failure is not shown. It is never overwritten.
 - One module in the shared layer, `crates/core/src/app/env.rs` (A5), owns both scopes:
   `list(scope)`, `set(scope, name, value)`, `unset(scope, name)`, `forget_session(host, sid)`,
-  and `effective(host, sid) -> Vec<(String, String)>` (global overlaid with session).
+  and `effective(host, sid) -> Vec<(String, Value)>` (global overlaid with session).
+- Values travel in one type, `env::Value(String)`, whose `Debug` prints `<n bytes>`. Every struct
+  that carries a value outside `app::env` uses it: the TUI's effects, events and modal rows, the
+  web's `env.set` args and `env.list` reply, and the composer's input. A unit test formats each
+  with `{:?}` and checks the value is absent.
 
 ### Validation (one function, both writers, and again at compose)
 
 - **Name:** `[A-Za-z_][A-Za-z0-9_]{0,127}`, not in the refused set (goal 5). Lowercase is
   allowed (`https_proxy`, `no_proxy`).
-- **Value:** at most 8 KiB, no NUL, and no control characters other than `\n` and `\t`
-  (`ANTHROPIC_CUSTOM_HEADERS` is newline-separated). Empty is allowed.
-- **Count:** at most 128 vars per scope.
+- **Value:** at most 8192 UTF-8 bytes; no character for which Rust's `char::is_control` is true
+  except `\n` and `\t` (so NUL, `\r`, ESC, DEL and U+0080–U+009F are refused;
+  `ANTHROPIC_CUSTOM_HEADERS` is newline-separated). Empty is allowed. The web turns `\r\n` into
+  `\n` before it sends.
+- **Count and total:** at most 128 vars per scope, and at most 128 KiB per scope for the sum of
+  the names' and values' bytes. Sizes are UTF-8 bytes. `set` refuses a write that would pass
+  either cap ("too many variables" / "environment too large"), so the two scopes together stay
+  under a quarter of `MAX_FRAME` before JSON escaping.
+- A hand-edited file past a cap: entries are taken in name order until a cap is reached; the rest
+  are skipped with one notice giving their count.
 - **At compose:** an entry that fails is skipped and named in a notice. The composer's
   `frame_fits` still guards the total.
 
 ### Composition
 
-`compose` gains the user env as an input. `LaunchSpec` gets `user_env: Vec<(String, String)>`,
-filled by the caller from `env::effective(host, sid)`, or global only for a new session.
+`compose` gains the user env as an input. The composer reads it itself, in `app::launch`'s
+`send` (the one place every `Spawn` and `Respawn` of a claude session passes, after any review),
+with `spawn_blocking`: `env::effective(host, sid)` for every `LaunchOp` (a new session has no
+entry, so it gets the global scope). No front-end passes env, so no launch path can leave it out.
+The files' directory is the directory of the runtime's `config_path`
+(`RuntimeOptions.config_path`), which is what the tests set.
 
 - **Order:** user env first, then each addon part as today. A part's key replaces the user's.
-- Every user key that a part replaced is collected, and `compose` adds one notice: `custom env
-  overridden by <addon>: NAME, NAME`. Keys only, never values.
-- Respawn and recovery recompose, so they pick up the current values.
-- The respawn and recovery paths must pass the session's `effective` env.
-- Recovery after a daemon restart works because the client recomposes (§2.3).
+- **Removals win too.** After the parts are layered, every user key that is in the union of the
+  parts' `env_remove` and that no part set is dropped from the env: an addon that removes a
+  variable removes the user's value as well (the proxy's `ANTHROPIC_API_KEY`).
+- Every user key a part replaced or removed is collected, and `compose` adds one notice: `custom
+  env overridden by <addon>: NAME, NAME`. Keys only, never values. The front-ends show it for
+  `New`, `Resume` and `Respawn`, and drop it for `Recover`.
+- Respawn and recovery recompose, so they pick up the current values. Recovery after a daemon
+  restart works because the client recomposes (§2.3).
 - `retry_spawn_fresh` (in-memory `session_env`) keeps working unchanged, because the env is in
   the spawn.
 
@@ -158,8 +200,8 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
   `Modal::Environment`.
 - **Two tabs, switched with Tab.** **Global**, and **Session: <name>** for the focused Claude
   session. The session tab is disabled with a reason on a terminal tab or with no session.
-- **Rows.** `NAME = value`, with the selected row's catalogue description under the list.
-  A multi-line value shows `⏎` for newlines.
+- **Rows.** `NAME = value` (in the escaped form below), with the selected row's catalogue
+  description under the list.
 - **Keys.**
   - `a`: add. Opens an `Input` for the name, filtered by the catalogue in a `Picker` (any name
     can be typed), then an `Input` for the value.
@@ -167,29 +209,37 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
   - `d`/`Delete`: delete, with a confirm.
   - `Esc`: close.
 - The footer says "applies on next start or restart (Alt+e)".
-- **Multi-line values.** The TUI `Input` is single-line: in the TUI, `\n` typed in a value is
-  stored as a newline, and a newline in a stored value is shown and edited as `\n`. A literal
-  backslash-n is written as `\\n`.
-- **Purity.** All writes are `Effect`s run in `lib.rs` with `spawn_blocking` (A6). Results come
-  back as a notice.
+- **Escapes in the TUI.** The TUI shows and edits a value in one escaped form, in the row list
+  and in the `Input` alike: a newline is `\n`, a tab is `\t`, a backslash is `\\`. On save the
+  text is decoded: `\n` → newline, `\t` → tab, `\\` → `\`; a backslash before any other
+  character, or at the end, is an error ("unknown escape \x: write \\ for a backslash") and
+  nothing is saved. Decoding the shown form always gives the stored value back. The value prompt
+  says "\n newline, \t tab, \\ backslash". The web edits raw text in a `<textarea>` and has no
+  escapes.
+- **Purity.** Reads and writes are `Effect`s run in `lib.rs` with `spawn_blocking` (A6): the
+  modal opens on the list an effect brings back, and is re-read after each write. A failed write
+  comes back as a notice that names the key and the reason, never the value.
 - The help popup (generated), README and docs/web.md key tables list Alt+,.
 
 ### Web
 
 - **Protocol** (`docs/web-protocol.md`, changed first in its own commit; version stays 2,
   because the ops are additive and the page and server ship together). New ops:
-  - `env.catalogue` → `{vars:[{name, category, description}]}`.
-  - `env.list {scope:"global"}` | `{scope:"session", sid}` → `{vars:[{name, value}],
-    refused:[names], session_name?}`.
+  - `env.catalogue` → `{vars:[{name, category, description}], refused:[{name, reason}]}`: the
+    catalogue and the names goal 5 refuses, so the page can say why before it asks.
+  - `env.list {scope:"global"}` | `{scope:"session", sid}` → `{vars:[{name, value}], skipped:
+    n}`: the valid entries in name order, and how many entries of the file were skipped. `sid` is
+    required with `"session"` and refused with `"global"` (`bad request`).
+  - No event: the dialog lists when it opens and after each of its own writes.
   - `env.set {scope, sid?, name, value}` → `{ok}`, or an error naming the reason.
   - `env.unset {scope, sid?, name}` → `{ok}`.
   - Args use `deny_unknown_fields`. The server maps a `sid` to its host. A `sid` that names a
     terminal or an unknown session is refused.
-  - §7's rule "no DTO carries an env value" gains one exception: `env.list` returns the values
+  - §4's rule "no DTO carries an env value" gains one exception: `env.list` returns the values
     the user typed in this menu (owner decision). Addon env (proxy tokens, plugin env) still
     never reaches the page.
-- **Page.** An **Environment** dialog (`ui/env.js`, `Dialog`), opened by Alt+, (added to the
-  shared key table), a palette entry and a row in Settings.
+- **Page.** An **Environment** dialog (`ui/env.js`, `Dialog`), opened by Alt+, (`code: 'Comma'`,
+  added to `TUI_BINDINGS`), a palette entry and a row in Settings.
   - Tabs: **Global**, and **This session** when the focused pane holds a Claude session.
   - A table of name, value (a `<textarea>` that grows for multi-line values) and delete.
   - An add row: a name input with a native `<datalist>` of catalogue names, and the
@@ -197,20 +247,21 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
   - A note: "Applies on next start or restart."
   - testids: `env`, `env-tab-global`, `env-tab-session`, `env-row` (`data-name`),
     `env-value`, `env-delete`, `env-add-name`, `env-add-value`, `env-add`, `env-error`.
-- `session.close` also forgets the session's per-session env.
+- `session.kill` and a `Removed` event also forget the session's per-session env.
 
 ### Docs
 
 - README: the `[env]` block and the key.
 - docs/web.md: the parity row and the key tables.
-- docs/web-protocol.md: the ops, DTOs and the §7 exception.
-- docs/manager-design.md §2.5: env sources.
+- docs/web-protocol.md: the ops, DTOs and the §4 exception.
+- docs/manager-design.md §2.5 (claude-proxy integration): the precedence of custom env and
+  addon env.
 - docs/addons.md: the composer's user env and the precedence.
 - CLAUDE.md:
   - the secrets bullet: `config.toml [env]` and `session-env.json` are 0600 and may hold
     secrets; custom env values are shown in both UIs by owner decision;
   - the composer paragraph;
-  - the A3 services list, if the web uses `app::env`.
+  - the A3 services list gains `app::env` (web).
 - ACCEPTANCE.md C1 gains the same one-line exception.
 
 ### Alternatives considered
@@ -241,6 +292,20 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
   - A refused name in a file is skipped at compose with a notice.
 - **Concurrency.** The TUI and the web server write `config.toml` through `config_edit`'s lock,
   and `session-env.json` under its own sidecar lock with read-modify-write inside it.
+- **Notices and names.** A notice names a key only when the key passes the name rule (so it is
+  at most 128 ASCII characters); entries whose key does not are reported by count ("2 entries of
+  [env] skipped: bad name"). A hand-edited key may be a value typed on the wrong side.
+- **The exception is one message.** Only the `env.list` reply carries values. `env.set` errors,
+  notices, events, `Debug` and logs name keys at most; a value the validator refuses is never
+  echoed back.
+- **Trust.** A signed-in browser can already open a shell on every connected host, so reading
+  and setting env gives it nothing new. A global var it sets stays in `config.toml` and applies to
+  sessions launched later from the TUI; this is accepted. `env.set` and `env.unset` log `web op`
+  at INFO with the op, the scope, the sid and the name, never the value.
+- **Where values end up.** On a remote host the values are in the daemon's memory and in the
+  claude process's environment, readable by that user and root, and inherited by every command
+  claude runs; a command that prints its environment puts them in the transcript on that host.
+  docs/web.md says so next to the menu's description.
 - **settings.json precedence.** A user `env` in `~/.claude/settings.json` silently wins in Claude
   Code. This is documented, not detected.
 - **A var that breaks claude** (a bad `ANTHROPIC_BASE_URL`) breaks only the sessions that get it.
@@ -249,17 +314,26 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
 ## Acceptance criteria
 
 - [ ] AC1: core unit tests cover the validator (good and bad names, the refused set, value
-  limits including `\n`/`\t` allowed and NUL refused, the count cap) and catalogue parsing
-  (unique names, no refused names).
+  limits including `\n`/`\t` allowed and NUL, `\r` and U+0085 refused, the count and total
+  caps) and catalogue parsing (unique names, no refused names); the TUI escape codec:
+  `decode(encode(v)) == v` for values with newlines, tabs and backslashes; `C:\new` is refused;
+  `C:\\new` gives `C:\new`; every value-carrying type's `Debug` omits the value.
 - [ ] AC2: `app::env` unit tests cover:
   - global set/unset round-trips through `config.toml`, preserving other sections and comments;
   - session set/unset/forget in `session-env.json`, created 0600;
   - `effective` (session overrides global);
   - a corrupt or oversize file reads as empty with a notice;
-  - two writers under the lock lose no update.
+  - two writers under the lock lose no update;
+  - a global value with a newline is set, changed and unset, and stays on one line in
+    `config.toml`;
+  - an `[env] X = 1` entry is skipped and the rest of `config.toml` still loads;
+  - an entry of a host is pruned when the host's list no longer has its session; another host's
+    entries stay; an unreadable `session-env.json` makes `set` fail and is left untouched.
 - [ ] AC3: composer unit tests:
   - user env reaches `Spawn` and `Respawn` env;
   - an addon part's key replaces a user key, and one notice names it (keys only);
+  - a user key named in a part's `env_remove` is absent from the `Spawn`/`Respawn` env and named
+    in the notice;
   - an invalid user entry is skipped with a notice;
   - no change to the output for an empty user env.
 - [ ] AC4: TUI integration test, using the env-recording fake claude:
@@ -267,15 +341,24 @@ filled by the caller from `env::effective(host, sid)`, or global only for a new 
   - restart (Alt+e), and the fake claude records both, the session value winning over a global
     one of the same name;
   - a second session gets only the global var;
-  - closing the first session removes its entry from `session-env.json`.
+  - closing the first session removes its entry from `session-env.json`, and so does a clean
+    exit of a session;
+  - typing `ANTHROPIC_DEF` in the add prompt offers `ANTHROPIC_DEFAULT_OPUS_MODEL`, and its
+    description shows under the list once added; adding `PATH` shows the refusal and saves
+    nothing; the footer reads "applies on next start or restart"; on a terminal tab the session
+    tab is disabled and a new terminal tab's shell does not have the global var;
+  - a `--plain` session records the global var.
 - [ ] AC5: TUI recovery test: a session with a per-session var keeps it after a daemon stop and
   a new TUI recovers it.
 - [ ] AC6: web Rust test: `env.set`/`env.list`/`env.unset` for both scopes, and the refused-name
-  and unknown-`sid` errors. A spawned session's recorded env has the vars, and a proxy session's
-  `ANTHROPIC_BASE_URL` stays the proxy's.
+  and unknown-`sid` errors. A spawned session's recorded env has the vars. The proxy case is in
+  `vocdoni_web` (`addons/vocdoni/tests/web.rs`): a proxy session's `ANTHROPIC_BASE_URL` stays the
+  proxy's, and a proxy session launched with a global `ANTHROPIC_API_KEY` records no
+  `ANTHROPIC_API_KEY`.
 - [ ] AC7: web e2e (`env.spec.mjs`):
   - the dialog adds a global and a session var;
-  - a restart records them (via `FAKE_ENV_KEYS`);
+  - a restart records them (the spec file starts its server with `FAKE_ENV_KEYS` extended by the
+    names it sets);
   - the catalogue datalist offers `ANTHROPIC_DEFAULT_OPUS_MODEL` with its description;
   - zero CSP violations.
 - [ ] AC8: the help popup, README and docs/web.md list Alt+,. A keymap unit test checks Alt+,
