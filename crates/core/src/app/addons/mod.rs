@@ -16,7 +16,7 @@ pub mod test_support;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -195,6 +195,12 @@ impl AddonRuntime {
     /// The addons this runtime runs.
     pub fn addons(&self) -> &Arc<Addons> {
         &self.inner.addons
+    }
+
+    /// The `config.toml` this runtime reads (`RuntimeOptions.config_path`);
+    /// the custom env (`app::env`) lives beside it.
+    pub fn config_path(&self) -> &Path {
+        &self.inner.opts.config_path
     }
 
     /// Addon `addon`'s context (D2).

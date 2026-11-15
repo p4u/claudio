@@ -23,6 +23,8 @@ use crate::addon::{
     LaunchRequest, LaunchSelect, LegacyChoice, Pick, Routing, TEXT_BYTES,
 };
 use crate::app::addons::AddonRuntime;
+use crate::app::env::Store;
+use crate::claude::env::Value;
 use crate::client::Client;
 use crate::proto::{Msg, SessionExtensions, SessionId};
 
@@ -333,7 +335,7 @@ pub(super) async fn proceed(rt: &AddonRuntime, mut launch: Parked, client: Clien
             };
         }
         if launch.todo.is_empty() {
-            return send(launch, client).await;
+            return send(rt, launch, client).await;
         }
     }
 }
@@ -364,8 +366,9 @@ async fn prepare_all(
     join_all(calls).await
 }
 
-/// Compose `launch`'s parts and send the message.
-async fn send(mut launch: Parked, client: Client) -> Step {
+/// Read the user's custom env, compose it and `launch`'s parts, and send
+/// the message. A recovery drops the notice of the env an addon overrode.
+async fn send(rt: &AddonRuntime, mut launch: Parked, client: Client) -> Step {
     launch.sort_parts();
     let Parked {
         spec,
@@ -374,17 +377,34 @@ async fn send(mut launch: Parked, client: Client) -> Step {
         mut notices,
         ..
     } = launch;
-    let (msg, more) = match compose(spec.base, spec.core_lenses, parts) {
+    let (user, read) = user_env(rt, &spec).await;
+    notices.extend(read);
+    let recover = spec.op == LaunchOp::Recover;
+    let (msg, more) = match compose(spec.base, spec.core_lenses, user, parts) {
         Ok(composed) => composed,
         Err(e) => return Step::Failed(e),
     };
-    notices.extend(more);
+    notices.extend(
+        more.into_iter()
+            .filter(|n| !(recover && n.starts_with(compose::OVERRIDDEN))),
+    );
     let reply = client.request(msg).await;
     Step::Sent {
         choice,
         notices,
         reply,
     }
+}
+
+/// The custom env of `spec`'s session (`app::env`, beside the runtime's
+/// config.toml; a new session has none of its own), read off the executor,
+/// and the read's notices.
+async fn user_env(rt: &AddonRuntime, spec: &LaunchSpec) -> (Vec<(String, Value)>, Vec<String>) {
+    let store = Store::beside(rt.config_path());
+    let (host, sid) = (spec.host.clone(), spec.sid);
+    tokio::task::spawn_blocking(move || store.effective(&host, sid))
+        .await
+        .unwrap_or_else(|_| (Vec::new(), vec!["custom env not read".to_owned()]))
 }
 
 /// The request `addon` prepares for.
