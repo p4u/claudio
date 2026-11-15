@@ -1,6 +1,6 @@
 # Custom environment variables for Claude Code sessions: design
 
-Status: audited (2026-11-15)   Class: architectural (config format, a new 0600 state file, web protocol ops,
+Status: approved (2026-11-15)   Class: architectural (config format, a new 0600 state file, web protocol ops,
 both front-ends, a security rule exception)
 Owner decisions so far (2026-11-15):
 - A menu in the TUI and in the web UI to set custom env vars for the Claude Code instances
