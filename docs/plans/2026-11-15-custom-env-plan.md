@@ -2,7 +2,7 @@
 
 Spec: docs/specs/2026-11-15-custom-env-design.md
 Class: architectural
-Repos and branches: /home/p4u/claudio → feat/custom-env (base <plan commit>)
+Repos and branches: /home/p4u/claudio → feat/custom-env (base 15c1fa1)
 
 Implementers work in the main checkout `/home/p4u/claudio` on `feat/custom-env`, one task at a
 time, in the order below. Every code block was applied and run in a scratch worktree of main
