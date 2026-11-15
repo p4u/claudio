@@ -558,6 +558,20 @@ input[type="radio"] { accent-color: var(--accent); }
 .ext-details { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-muted); }
 .ext-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
 .setup-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2); font-size: var(--fs-sm); }
+
+/* ---- custom env (Alt+,): a name, its raw value (mono, grows with its lines), delete ---- */
+.env-table { width: 100%; border-collapse: collapse; margin-top: var(--space-2); border-top: var(--hair) solid var(--border); }
+.env-table td { padding: var(--space-2) var(--space-1); border-bottom: var(--hair) solid var(--border); vertical-align: top; }
+.env-name { width: 34%; padding-top: 10px; font-family: var(--font-mono); color: var(--text-strong); word-break: break-all; }
+.env-value {
+  width: 100%; min-height: 34px; padding: 6px 10px; resize: vertical;
+  background: var(--bg); color: var(--text-strong); border: var(--hair) solid var(--border); border-radius: var(--radius);
+  font-family: var(--font-mono);
+}
+.env-value:hover { border-color: var(--border-strong); }
+.env-value::placeholder { color: var(--text-faint); }
+.env-add { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto; gap: var(--space-2); align-items: start; margin-top: var(--space-3); }
+.env-desc { margin: var(--space-2) 0 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: 1.5; }
 .setup-bulk { display: inline-flex; gap: 6px; }
 .setup-items { max-height: 46vh; overflow-y: auto; border: var(--hair) solid var(--border); border-radius: var(--radius); background: var(--bg); }
 .setup-sec h3 { margin: 0; padding: var(--space-2) var(--space-3) 4px; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--track-mono-wide); text-transform: uppercase; color: var(--text-muted); display: flex; gap: var(--space-2); position: sticky; top: 0; background: var(--bg); border-bottom: var(--hair) solid var(--border); }

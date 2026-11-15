@@ -35,6 +35,7 @@ import './changes.js';
 import './history.js';
 import './session-tab.js';
 import { ExtensionsScreen, installExtensions } from './extensions.js';
+import { EnvDialog, installEnv } from './env.js';
 import { PanelHost, panelOpen, closePanel, installAddons } from './panel.js';
 import { ChecklistHost, checklistOpen, cancelChecklist } from './checklist.js';
 import { ClaudeToastList } from './claude.js';
@@ -99,7 +100,8 @@ export function App() {
     ${o === 'palette' ? html`<${Palette} />` : o === 'help' ? html`<${Help} />` : o === 'settings' ? html`<${Settings} />`
       : o === 'wizard' ? html`<${Wizard} />` : o === 'search' ? html`<${Search} />` : o === 'snippets' ? html`<${Snippets} />` : o === 'compose' ? html`<${ComposeDialog} />`
       : o === 'document' ? html`<${DocumentView} />` : o === 'list' ? html`<${ActionList} />`
-      : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />` : null}
+      : o === 'extensions' ? html`<${ExtensionsScreen} />` : o === 'hosts' ? html`<${HostPanel} />`
+      : o === 'env' ? html`<${EnvDialog} />` : null}
     <${PanelHost} /><${ChecklistHost} /><${ProxyChooserHost} /><${Modal} />
     <${InfoPopover} />
     <div class="toasts" aria-live="polite"><${ClaudeToastList} /><${ToastList} /></div>`;
@@ -154,6 +156,7 @@ export function installFocusModel() {
   defineAction('restart-focused', withFocused((x) => restartSession(x, false)));
   defineAction('board', () => { showBoard.value = !boardShown(model.value.layout); });
   defineAction('extensions', () => { overlay.value = 'extensions'; });
+  defineAction('environment', () => { overlay.value = 'env'; });
   for (let n = 1; n <= 4; n++) {
     defineAction(`focus-pane-${n}`, () => {
       if (narrow.value || n > model.value.layout.grid) return;
@@ -174,6 +177,7 @@ export function installFocusModel() {
   installMaximize();
   installActions();
   installExtensions();
+  installEnv();
   installHosts();
   installAddons();
   onServerEvent(trackRemoved);

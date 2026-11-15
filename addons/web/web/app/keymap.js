@@ -70,6 +70,7 @@ export const TUI_BINDINGS = [
   A('Alt+l', 'KeyL', 'history', 'history drawer'),
   A('Alt+u', 'KeyU', 'reader', 'reader drawer'),
   A('Alt+i', 'KeyI', 'extensions', 'extensions screen'),
+  A('Alt+,', 'Comma', 'environment', 'custom env vars of claude sessions', { key: ',' }),
   A('Alt+h', 'KeyH', 'help', 'this help'),
   A('Alt+z', 'KeyZ', 'palette', 'command palette (the extension actions)'),
   // Web-only. Claude Code uses Alt+P, Alt+T, Alt+M and readline's Alt+B/F/D/Enter, so Alt+O and

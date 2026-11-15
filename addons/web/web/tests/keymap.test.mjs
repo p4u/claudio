@@ -62,6 +62,7 @@ test('every TUI binding maps from ev.code', () => {
     ArrowLeft: 'session-prev', ArrowRight: 'session-next', KeyN: 'new-session', KeyC: 'terminal-beside',
     KeyR: 'rename-focused', KeyX: 'kill-focused', KeyE: 'restart-focused', KeyA: 'next-attention',
     KeyG: 'board', KeyS: 'stats', KeyL: 'history', KeyU: 'reader', KeyI: 'extensions', KeyH: 'help', KeyZ: 'palette',
+    Comma: 'environment',
   };
   for (const [code, action] of Object.entries(want)) assert.equal(tuiBinding(alt(code)), action, code);
   // layout independent: the key value is whatever the layout makes of it
