@@ -4,7 +4,7 @@
 // docs/web-protocol.md §5); the dialog lists when it opens (or its connection does) and after
 // each of its writes.
 import { html } from 'htm/preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { model, focused, conn, reqQuiet } from '../store.js';
 import { overlay, register } from '../palette.js';
 import { Dialog } from './modal.js';
@@ -36,13 +36,19 @@ export function EnvDialog() {
   const [draft, setDraft] = useState({ name: '', value: '' });
   const shown = claude ? tab : 'global';
   const args = scopeArgs(shown, claude?.id);
+  const scopeKey = JSON.stringify(args);
+  const current = useRef(scopeKey);
+  current.current = scopeKey;
   const open = conn.value === 'open';
 
+  // A reply for a tab or session no longer shown is dropped (the replies come back in any order).
   const load = async () => {
     try {
       const r = await reqQuiet('env.list', args);
+      if (current.current !== scopeKey) return;
       setList({ loading: false, vars: r.vars ?? [], skipped: r.skipped ?? 0 });
     } catch (e) {
+      if (current.current !== scopeKey) return;
       setList({ loading: false, vars: [], skipped: 0 });
       setError(e.message);
     }
@@ -63,7 +69,7 @@ export function EnvDialog() {
     try {
       await reqQuiet(op, { ...args, ...more });
     } catch (e) {
-      setError(e.message);
+      if (current.current === scopeKey) setError(e.message);
       return false;
     }
     await load();

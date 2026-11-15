@@ -84,3 +84,25 @@ test('the catalogue datalist offers documented names with their description', as
   await expect(page.getByTestId('env-row')).toHaveCount(0);
   expect(await csp(page)).toEqual([]);
 });
+
+test('a session tab edit left by a tab click never lands in the global list', async ({ page }) => {
+  await srv.api('env.set', { scope: 'global', name: 'MY_GLOBAL', value: 'g' });
+  const sid = await srv.spawn(srv.dirs.a);
+  await srv.api('env.set', { scope: 'session', sid, name: 'MY_SESSION', value: 's' });
+  await page.goto(srv.url);
+  await page.locator(`[data-testid="session-card"][data-sid="${sid}"]`).click();
+  await expect(page.getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');
+  await page.keyboard.press('Alt+Comma');
+  await page.getByTestId('env-tab-session').click();
+  const mine = page.locator('[data-testid="env-row"][data-name="MY_SESSION"]');
+  await expect(mine.getByTestId('env-value')).toHaveValue('s');
+  // The fill focuses the field; the tab click blurs it, so env.set and the tab switch race.
+  await mine.getByTestId('env-value').fill('edited');
+  await page.getByTestId('env-tab-global').click();
+  await expect(page.getByTestId('env-tab-global')).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(async () => (await srv.api('env.list', { scope: 'session', sid })).vars).toEqual([{ name: 'MY_SESSION', value: 'edited' }]);
+  await page.waitForTimeout(500);
+  await expect(page.locator('[data-testid="env-row"][data-name="MY_GLOBAL"]')).toHaveCount(1);
+  await expect(page.locator('[data-testid="env-row"][data-name="MY_SESSION"]')).toHaveCount(0);
+  expect((await srv.api('env.list', { scope: 'global' })).vars.map((v) => v.name)).not.toContain('MY_SESSION');
+});
