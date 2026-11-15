@@ -25,3 +25,4 @@
 # Scratch written by test fakes run from the repo root
 /argv.log
 /settings.json
+__pycache__/
