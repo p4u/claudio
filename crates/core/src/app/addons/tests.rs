@@ -615,8 +615,16 @@ async fn an_older_read_never_overwrites_a_newer_edit() {
         assert_eq!(ctx.config("team")["url"].as_str(), Some("b"), "stale");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(reads(&rt), 3, "one more read after the edit");
+    // The follow-up read may end after the window on a loaded machine: wait
+    // for it, then make sure no other read came.
+    until("one more read after the edit", || {
+        reads(&rt) == 3 && config_changes(&echo) == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(reads(&rt), 3, "one more read after the edit, and no other");
     assert_eq!(config_changes(&echo), 2, "the edit, then the fresh read");
+    assert_eq!(ctx.config("team")["url"].as_str(), Some("b"), "stale");
     rt.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
