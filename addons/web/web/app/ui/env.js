@@ -10,18 +10,24 @@ import { overlay, register } from '../palette.js';
 import { Dialog } from './modal.js';
 import { nameNote, normalizeValue, scopeArgs, valueRows } from '../env.js';
 
+// The last write still in flight: a list waits for it, so a dialog reopened right after an
+// edit (Escape saves on blur) never lists the old value.
+let writing = Promise.resolve();
+
 export function installEnv() {
   register({ id: 'environment', group: 'App', title: 'Environment variables', keys: 'Alt+,', run: () => { overlay.value = 'env'; } });
 }
 
 function Row({ v, onSave, onDelete }) {
   const [text, setText] = useState(v.value);
-  useEffect(() => setText(v.value), [v.value]);
+  const field = useRef(null);
+  // A list read again never overwrites what is being typed.
+  useEffect(() => { if (document.activeElement !== field.current) setText(v.value); }, [v.value]);
   return html`<tr data-testid="env-row" data-name=${v.name}>
     <td class="env-name">${v.name}</td>
-    <td><textarea class="env-value" data-testid="env-value" aria-label=${`${v.name} value`} rows=${valueRows(text)} value=${text}
+    <td><textarea ref=${field} class="env-value" data-testid="env-value" aria-label=${`${v.name} value`} rows=${valueRows(text)} value=${text}
       onInput=${(e) => setText(e.target.value)}
-      onKeyDown=${(e) => { if (e.key === 'Escape') e.currentTarget.blur(); }} onChange=${(e) => onSave(v.name, normalizeValue(e.target.value))}></textarea></td>
+      onKeyDown=${(e) => { if (e.key === 'Escape') { if (e.currentTarget.value !== v.value) onSave(v.name, normalizeValue(e.currentTarget.value)); e.currentTarget.blur(); } }} onChange=${(e) => onSave(v.name, normalizeValue(e.target.value))}></textarea></td>
     <td><button type="button" class="btn btn-sm" data-testid="env-delete" aria-label=${`delete ${v.name}`} onClick=${() => onDelete(v.name)}>Delete</button></td>
   </tr>`;
 }
@@ -44,6 +50,7 @@ export function EnvDialog() {
   // A reply for a tab or session no longer shown is dropped (the replies come back in any order).
   const load = async () => {
     try {
+      await writing;
       const r = await reqQuiet('env.list', args);
       if (current.current !== scopeKey) return;
       setList({ loading: false, vars: r.vars ?? [], skipped: r.skipped ?? 0 });
@@ -67,7 +74,9 @@ export function EnvDialog() {
   const write = async (op, more) => {
     setError(null);
     try {
-      await reqQuiet(op, { ...args, ...more });
+      const sent = reqQuiet(op, { ...args, ...more });
+      writing = sent.catch(() => {});
+      await sent;
     } catch (e) {
       if (current.current === scopeKey) setError(e.message);
       return false;
