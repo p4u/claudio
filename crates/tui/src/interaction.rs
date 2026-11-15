@@ -23,7 +23,7 @@ use super::extensions_view::ExtensionsView;
 use super::git_view::GitView;
 use super::keymap::Action;
 use super::leader::{Input, Picker};
-use super::reader::{ReaderView, RenderedAnswer};
+use super::reader::ReaderView;
 use super::selection::{self, Pos, Selection, Unit};
 use super::sessions::SessionView;
 use super::ui;
@@ -233,67 +233,6 @@ impl App {
         self.redraw = true;
     }
 
-    /// The reader view of the active session (none without one): it asks
-    /// the session's daemon for the answers, and shows "Loading…" until
-    /// they are rendered.
-    pub(super) fn open_reader(&mut self) {
-        let Some((id, host)) = self.active_view().map(|v| (v.id, v.host.clone())) else {
-            return;
-        };
-        self.modal_gen += 1;
-        let gen = self.modal_gen;
-        self.modal = Some(Modal::Reader(Box::new(ReaderView::new(id, &host, gen))));
-        self.request(&host, Msg::Answers { id }, ReplyTo::Answers { gen, id });
-    }
-
-    /// The reader view opened under `gen` for session `id`, if it is the
-    /// one open: a reply for a closed view or another session is dropped.
-    fn reader_mut(&mut self, gen: u64, id: SessionId) -> Option<&mut ReaderView> {
-        match &mut self.modal {
-            Some(Modal::Reader(view)) if view.gen == gen && view.session == id => Some(view),
-            _ => None,
-        }
-    }
-
-    /// The daemon's answers for the reader view: parsed off the UI thread
-    /// (none to render: shown at once), or why there are none.
-    fn on_answers_reply(&mut self, gen: u64, id: SessionId, reply: io::Result<Msg>) {
-        let Some(view) = self.reader_mut(gen, id) else {
-            return;
-        };
-        let host = view.host.clone();
-        match reply {
-            Ok(Msg::AnswersReply { answers, .. }) if answers.is_empty() => {
-                view.set_answers(Vec::new())
-            }
-            Ok(Msg::AnswersReply { answers, .. }) => {
-                self.emit(Effect::RenderAnswers { gen, id, answers })
-            }
-            Ok(_) => view.set_failed("unexpected reply from the daemon"),
-            Err(e) => {
-                let why = App::older_daemon_notice(&host, &e).unwrap_or_else(|| e.to_string());
-                view.set_failed(why);
-            }
-        }
-    }
-
-    /// The answers of the reader view opened under `gen` for session `id`
-    /// were parsed (off the UI thread): shown, if that view is open.
-    pub fn on_answers_rendered(&mut self, gen: u64, id: SessionId, answers: Vec<RenderedAnswer>) {
-        if let Some(view) = self.reader_mut(gen, id) {
-            view.set_answers(answers);
-            self.redraw = true;
-        }
-    }
-
-    /// The answers of the reader view `gen` could not be rendered.
-    pub fn on_answers_failed(&mut self, gen: u64, id: SessionId, why: &str) {
-        if let Some(view) = self.reader_mut(gen, id) {
-            view.set_failed(why);
-            self.redraw = true;
-        }
-    }
-
     pub fn modal_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
@@ -395,11 +334,7 @@ impl App {
                 let outcome = view.on_key(&key, rows);
                 self.git_outcome(outcome);
             }
-            Modal::Reader(view) => {
-                if view.on_key(&key) {
-                    self.modal = None;
-                }
-            }
+            Modal::Reader(_) => self.reader_key(&key),
             Modal::Leader => self.leader_key(&key),
             Modal::ActionInput(_) => self.action_input_key(&key),
             Modal::Picker(_) => self.picker_key(&key),
