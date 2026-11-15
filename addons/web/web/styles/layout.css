@@ -179,6 +179,9 @@ details:not([open]) > summary > .host-title::before, details:not([open]) > summa
   color: var(--text-muted); font-size: var(--fs-xs); letter-spacing: var(--track-mono); overflow: hidden; white-space: nowrap;
 }
 .footer .push { margin-left: auto; }
+/* one host per entry: its name in the stronger text, a hairline between hosts */
+.footer .fstat-host { color: var(--text-strong); }
+.footer .fstat + .fstat { border-left: var(--hair) solid var(--border); padding-left: var(--space-4); }
 
 /* the board, narrower than ~900 px: the attention text takes the repo's place */
 @container board (max-width: 899px) {

@@ -77,7 +77,7 @@ function Footer() {
   const m = model.value;
   const stats = footerStats(m, focused.value ?? selected.value);
   return html`<footer class="footer">
-    ${stats.map(([h, st]) => html`<span key=${h} data-testid="host-stats" data-host=${h}>${h} ${st ? `cpu ${Math.round(st.cpu)}% · mem ${st.mem_total ? Math.round((100 * st.mem_used) / st.mem_total) : 0}%` : 'cpu — · mem —'}</span>`)}
+    ${stats.map(([h, st]) => html`<span key=${h} class="fstat" data-testid="host-stats" data-host=${h}><span class="fstat-host">${h}</span> ${st ? `cpu ${Math.round(st.cpu)}% · mem ${st.mem_total ? Math.round((100 * st.mem_used) / st.mem_total) : 0}%` : 'cpu — · mem —'}</span>`)}
     <span class="push">${serverInfo.value.version ? `claudio ${serverInfo.value.version}` : conn.value}</span>
   </footer>`;
 }
