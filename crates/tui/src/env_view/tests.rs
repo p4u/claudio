@@ -192,6 +192,21 @@ fn enter_edits_and_d_deletes_after_a_confirm() {
 }
 
 #[test]
+fn a_short_popup_keeps_the_value_hint_off_its_border() {
+    let live = [info(Some(1), None)];
+    let mut app = opened(&live, &[], &[]);
+    app.on_terminal(press(KeyCode::Char('a')));
+    typed(&mut app, "MY_VAR");
+    app.on_terminal(press(KeyCode::Enter));
+    assert!(screen(&app).contains(ESCAPES));
+    for height in [3, 8, 9, 10] {
+        app.on_terminal(crossterm::event::Event::Resize(60, height));
+        let text = screen(&app);
+        assert_eq!(text.contains(ESCAPES), height > 10, "{height}:\n{text}");
+    }
+}
+
+#[test]
 fn a_terminal_tab_has_no_session_tab() {
     let live = [shell_info(Some(1))];
     let mut app = opened(&live, &[], &[]);

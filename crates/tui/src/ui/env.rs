@@ -28,7 +28,7 @@ pub fn draw_env(frame: &mut Frame, app: &App, view: &EnvView) {
         area.height.saturating_sub(4).max(3),
     );
     let inner = popup(frame, rect, TITLE);
-    if inner.height < 3 || inner.width == 0 {
+    if inner.height < 4 || inner.width == 0 {
         return;
     }
     let width = inner.width as usize;
@@ -79,7 +79,9 @@ pub fn draw_env(frame: &mut Frame, app: &App, view: &EnvView) {
         Step::Value { name, input } => {
             draw_input(frame, at(2, 1), &format!("{name} = "), &input.text);
             let hint = Line::styled(fit(&format!("  {ESCAPES}")), dim);
-            frame.render_widget(Paragraph::new(hint), at(3, 1));
+            if height > 4 {
+                frame.render_widget(Paragraph::new(hint), at(3, 1));
+            }
         }
         Step::Delete(name) => {
             let ask = Line::raw(fit(&format!("delete {name}? (y/n)")));
