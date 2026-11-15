@@ -296,6 +296,9 @@ impl App {
         }
         let removed = self.sessions.remove(i);
         self.segments.remove(&removed.id);
+        if removed.kind == SessionKind::Claude {
+            self.forget_env(&removed.host, removed.id);
+        }
         match self.active {
             Some(a) if a == i => {
                 self.active = None;
@@ -713,6 +716,8 @@ impl App {
         sessions.extend(recovered);
         self.sessions = sessions;
         self.active = active_id.and_then(|id| self.index_of(id));
+        // Sessions removed while no front-end ran: their custom env goes.
+        self.prune_env(host, live.iter().map(|info| info.id).collect());
     }
 
     /// Re-run recovery after the local daemon reconnects.

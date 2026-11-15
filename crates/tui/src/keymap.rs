@@ -46,6 +46,9 @@ pub enum Action {
     /// Open the extensions screen: each extension's description, keys and
     /// lenses, and turn it on or off.
     ExtensionsMenu,
+    /// Open the custom env menu: the env vars of claude sessions, global and
+    /// the focused session's.
+    Environment,
     /// Show/hide dot-directories in the new-session wizard (wizard scope).
     ToggleHidden,
     /// Switch ssh agent forwarding for the wizard's highlighted remote host
@@ -76,6 +79,7 @@ impl Action {
             Action::Formulas => "formulas",
             Action::Extensions => "extensions",
             Action::ExtensionsMenu => "extensions_menu",
+            Action::Environment => "environment",
             Action::ToggleHidden => "toggle_hidden",
             Action::ForwardAgent => "forward_agent",
             Action::GotoSession(_) => "goto_session",
@@ -241,6 +245,16 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
         mods: KeyModifiers::ALT,
         label: "extensions: describe, turn on/off",
         action: Action::ExtensionsMenu,
+        scope: Scope::Global,
+    },
+    // Alt+,: the custom env menu. No Alt+letter is free (see above); Claude
+    // Code 2.1.323 binds no Alt+punctuation (no "alt+,"/"meta+," in its
+    // bundle), and readline leaves Alt+, unbound.
+    Binding {
+        code: KeyCode::Char(','),
+        mods: KeyModifiers::ALT,
+        label: "custom env vars of claude sessions",
+        action: Action::Environment,
         scope: Scope::Global,
     },
     // Quit is last so it's always visible in the status bar even when truncated.
@@ -755,6 +769,32 @@ mod tests {
                 assert!(!same, "{} and {}", a.action.name(), b.action.name());
             }
         }
+    }
+
+    /// Alt+, opens the custom env menu, in the manager only, and no other
+    /// binding of any scope has it.
+    #[test]
+    fn alt_comma_opens_the_environment_menu_and_collides_with_nothing() {
+        let km = Keymap::default();
+        let alt_comma = key(KeyCode::Char(','), KeyModifiers::ALT);
+        assert_eq!(km.lookup(&alt_comma), Some(Action::Environment));
+        assert_eq!(km.key_for(Action::Environment).as_deref(), Some("Alt+,"));
+        assert_eq!(Action::Environment.name(), "environment");
+        let taken = DEFAULT_BINDINGS
+            .iter()
+            .filter(|b| b.code == KeyCode::Char(',') && b.mods == KeyModifiers::ALT)
+            .count();
+        assert_eq!(taken, 1);
+        assert_eq!(
+            parse_key_spec("alt+,"),
+            Ok((KeyCode::Char(','), KeyModifiers::ALT))
+        );
+        let help = km.help_entries();
+        assert!(help
+            .iter()
+            .any(|(k, label)| k == "Alt+," && label.contains("env")));
+        let plain = Keymap::build_plain(&Default::default(), &mut Vec::new(), &[]);
+        assert_eq!(plain.lookup(&alt_comma), None, "--plain has no menu");
     }
 
     #[test]

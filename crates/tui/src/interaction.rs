@@ -69,6 +69,9 @@ pub enum Modal {
     /// An addon's checklist (see `checklist.rs`): swallows every key,
     /// like `Confirm`.
     Checklist(Box<super::checklist::ChecklistView>),
+    /// The custom env menu (Alt+,, see `env_view.rs`): it types, so it
+    /// swallows every key.
+    Environment(Box<super::env_view::EnvView>),
 }
 
 impl Modal {
@@ -214,6 +217,7 @@ impl App {
             Action::Formulas => self.open_reader(),
             Action::Extensions => self.open_leader(),
             Action::ExtensionsMenu => self.open_extensions_menu(),
+            Action::Environment => self.open_environment(),
             _ => {}
         }
         self.redraw = true;
@@ -340,6 +344,7 @@ impl App {
             Modal::Picker(_) => self.picker_key(&key),
             Modal::ExtensionsMenu(_) => self.extensions_menu_key(&key),
             Modal::Checklist(_) => self.checklist_key(&key),
+            Modal::Environment(_) => self.env_key(&key),
         }
     }
 
@@ -398,6 +403,10 @@ impl App {
                 self.redraw = true;
             }
             Some(Modal::Git(view)) => {
+                view.on_paste(text);
+                self.redraw = true;
+            }
+            Some(Modal::Environment(view)) => {
                 view.on_paste(text);
                 self.redraw = true;
             }

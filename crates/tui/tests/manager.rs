@@ -27,10 +27,10 @@ use std::{fs, thread};
 
 use common::{
     current_nonce, encode_cwd, extract_nonce, run_git, scopeguard, wizard_pick_dir,
-    ClaudeProjectGuard, FakeSsh, ManagerHarness, Region, TuiProcess, ALT_C, ALT_E, ALT_F, ALT_G,
-    ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2, ALT_U, ALT_X,
-    ALT_Z, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW, RECONNECT_WAIT,
-    RIGHT_ARROW, UP_ARROW, WAIT,
+    ClaudeProjectGuard, FakeSsh, ManagerHarness, Region, TuiProcess, ALT_C, ALT_COMMA, ALT_E,
+    ALT_F, ALT_G, ALT_H, ALT_L, ALT_LEFT, ALT_N, ALT_Q, ALT_R, ALT_RIGHT, ALT_SHIFT_1, ALT_SHIFT_2,
+    ALT_U, ALT_X, ALT_Z, BINARY, CTRL_U, DAEMON_WAIT, DOWN_ARROW, ENTER, ESC, LEFT_ARROW,
+    RECONNECT_WAIT, RIGHT_ARROW, UP_ARROW, WAIT,
 };
 use portable_pty::CommandBuilder;
 
@@ -2281,4 +2281,250 @@ fn test_missing_claude_is_installed_at_start() {
     // The wizard is open (no sessions yet); the session runs the new claude.
     wizard_pick_dir(&mut tui, &h.dirs[0]);
     tui.quit(WAIT);
+}
+
+// ── Custom env (Alt+,) ────────────────────────────────────────────────────────
+
+/// Where the env-recording fake claude of these tests writes: its own cwd,
+/// so each session's last launch has its own record.
+const ENV_RECORD: &str = "$PWD/claude.env";
+
+/// A harness whose fake claude records `MY_VAR` and
+/// `ANTHROPIC_DEFAULT_OPUS_MODEL` at each launch into its cwd.
+fn env_harness() -> ManagerHarness {
+    let harness = ManagerHarness::new();
+    harness.write_env_recording_fake_claude(
+        std::path::Path::new(ENV_RECORD),
+        &["MY_VAR", "ANTHROPIC_DEFAULT_OPUS_MODEL"],
+        &[],
+    );
+    harness
+}
+
+/// What the fake claude in `dir` recorded at its last launch (waits for it).
+fn recorded_env(dir: &std::path::Path) -> String {
+    let file = dir.join("claude.env");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Ok(env) = fs::read_to_string(&file) {
+            return env;
+        }
+        assert!(Instant::now() < deadline, "no launch recorded in {dir:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// session-env.json, parsed (`null` while it does not exist).
+fn session_env(harness: &ManagerHarness) -> serde_json::Value {
+    let path = harness.config_home.join("claudio/session-env.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The id state.json gives the session in `dir`.
+fn sid_in(harness: &ManagerHarness, dir: &std::path::Path) -> String {
+    let dir = dir.to_str().unwrap();
+    let state = harness.read_state();
+    let sessions = state["sessions"].as_array().cloned().unwrap_or_default();
+    let session = sessions.iter().find(|s| s["cwd"] == dir);
+    session.expect("the session is saved")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Wait until session-env.json has (`want`) or has not an entry for `sid`.
+fn wait_session_env(harness: &ManagerHarness, sid: &str, want: bool) {
+    let deadline = Instant::now() + WAIT;
+    while session_env(harness)["sessions"].get(sid).is_some() != want {
+        assert!(Instant::now() < deadline, "session-env.json: {sid} {want}");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// In the open menu, on its open tab: `a`, the name, the value, saved.
+fn add_var(tui: &mut TuiProcess, name: &str, value: &str) {
+    tui.send_keys(b"a");
+    tui.wait_for("name:", Region::Screen, WAIT);
+    tui.send_keys(format!("{name}\r").as_bytes());
+    tui.wait_for("\\n newline", Region::Screen, WAIT);
+    tui.send_keys(format!("{value}\r").as_bytes());
+    let row = format!("{name} = {value}");
+    tui.wait_until(
+        |s| s.contains(&row, Region::Screen) && !s.contains("\\n newline", Region::Screen),
+        WAIT,
+    );
+}
+
+/// Close the menu (Esc, alone: nothing follows it until it is gone).
+fn close_env_menu(tui: &mut TuiProcess) {
+    tui.send_keys(ESC);
+    tui.wait_until(
+        |s| !s.contains("applies on next start", Region::Screen),
+        WAIT,
+    );
+}
+
+/// AC4: Alt+, sets a global and a session var; a restart of the session gets
+/// both (its own value wins), a second session only the global one; the
+/// catalogue offers names and describes them; PATH is refused; closing the
+/// session drops its entry; a terminal tab has no session tab and its shell
+/// none of the vars.
+#[test]
+fn test_env_menu_sets_global_and_session_vars_for_the_next_start() {
+    let harness = env_harness();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    let first = recorded_env(&harness.dirs[0]);
+    assert!(!first.contains("MY_VAR="), "{first}");
+
+    tui.send_keys(ALT_COMMA);
+    tui.wait_for("applies on next start or restart", Region::Screen, WAIT);
+    // Typing part of a documented name offers it; added, it is described.
+    tui.send_keys(b"a");
+    tui.wait_for("name:", Region::Screen, WAIT);
+    tui.send_keys(b"ANTHROPIC_DEF");
+    tui.wait_for("ANTHROPIC_DEFAULT_OPUS_MODEL", Region::Screen, WAIT);
+    tui.send_keys(b"AULT_OPUS_MODEL\r");
+    tui.wait_for("\\n newline", Region::Screen, WAIT);
+    tui.send_keys(b"opus-global\r");
+    tui.wait_until(
+        |s| {
+            s.contains("ANTHROPIC_DEFAULT_OPUS_MODEL = opus-global", Region::Screen)
+                && s.contains("Model ID that the opus alias resolves to", Region::Screen)
+        },
+        WAIT,
+    );
+    // PATH is refused and nothing is saved.
+    tui.send_keys(b"aPATH\r");
+    tui.wait_for("PATH: refused", Region::Screen, WAIT);
+    tui.send_keys(CTRL_U);
+    tui.send_keys(b"MY_VAR\r");
+    tui.wait_for("\\n newline", Region::Screen, WAIT);
+    tui.send_keys(b"global\r");
+    tui.wait_until(
+        |s| {
+            s.contains("MY_VAR = global", Region::Screen)
+                && !s.contains("\\n newline", Region::Screen)
+        },
+        WAIT,
+    );
+    // The session tab: this session's own value.
+    tui.send_keys(b"\t");
+    tui.wait_for("none yet", Region::Screen, WAIT);
+    add_var(&mut tui, "MY_VAR", "session");
+    close_env_menu(&mut tui);
+
+    let config = fs::read_to_string(harness.config_home.join("claudio/config.toml")).unwrap();
+    assert!(
+        config.contains("ANTHROPIC_DEFAULT_OPUS_MODEL = \"opus-global\""),
+        "{config}"
+    );
+    assert!(config.contains("MY_VAR = \"global\""), "{config}");
+    assert!(!config.contains("PATH"), "{config}");
+    let sid = sid_in(&harness, &harness.dirs[0]);
+    let entry = &session_env(&harness)["sessions"][&sid];
+    assert_eq!(entry["host"], "local");
+    assert_eq!(entry["env"]["MY_VAR"], "session");
+
+    // A restart gets both, the session's value winning.
+    fs::remove_file(harness.dirs[0].join("claude.env")).unwrap();
+    tui.send_keys(ALT_E);
+    tui.wait_for("restart & resume", Region::Screen, WAIT);
+    tui.send_keys(b"r");
+    let env = recorded_env(&harness.dirs[0]);
+    assert!(env.lines().any(|l| l == "MY_VAR=session"), "{env}");
+    assert!(
+        env.lines()
+            .any(|l| l == "ANTHROPIC_DEFAULT_OPUS_MODEL=opus-global"),
+        "{env}"
+    );
+
+    // A second session gets the global vars only.
+    tui.send_keys(ALT_N);
+    wizard_pick_dir(&mut tui, &harness.dirs[1]);
+    let env = recorded_env(&harness.dirs[1]);
+    assert!(env.lines().any(|l| l == "MY_VAR=global"), "{env}");
+
+    // Closing the first session drops its entry.
+    tui.send_keys(ALT_LEFT);
+    tui.send_keys(ALT_X);
+    tui.wait_for("Kill session", Region::Screen, WAIT);
+    tui.send_keys(b"y");
+    wait_session_env(&harness, &sid, false);
+
+    // A terminal tab: no session tab, and its shell has none of the vars.
+    tui.send_keys(ALT_C);
+    tui.wait_for("$ term@local", Region::TabBar, WAIT);
+    tui.wait_for("$", Region::Pane, WAIT);
+    tui.send_keys(ALT_COMMA);
+    tui.wait_for("a terminal tab runs no claude", Region::Screen, WAIT);
+    close_env_menu(&mut tui);
+    tui.send_keys(b"echo \"[${MY_VAR:-unset}]\"\r");
+    tui.wait_for("[unset]", Region::Pane, WAIT);
+    tui.quit(WAIT);
+}
+
+/// AC4: a clean exit of a session (Ctrl+D) drops its custom env.
+#[test]
+fn test_env_of_a_session_goes_with_its_clean_exit() {
+    let harness = env_harness();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.send_keys(ALT_COMMA);
+    tui.wait_for("applies on next start or restart", Region::Screen, WAIT);
+    tui.send_keys(b"\t");
+    tui.wait_for("none yet", Region::Screen, WAIT);
+    add_var(&mut tui, "MY_VAR", "mine");
+    close_env_menu(&mut tui);
+    let sid = sid_in(&harness, &harness.dirs[0]);
+    wait_session_env(&harness, &sid, true);
+
+    tui.send_keys(b"\x04");
+    tui.wait_for("session ended", Region::Screen, WAIT);
+    wait_session_env(&harness, &sid, false);
+    tui.send_keys(ESC);
+    tui.wait_until(|s| !s.contains("New session", Region::Screen), WAIT);
+    tui.quit(WAIT);
+}
+
+/// AC5: a session's own var survives a daemon stop: a new TUI recovers the
+/// session (through the composer) with it.
+#[test]
+fn test_env_of_a_session_survives_a_daemon_stop_and_recovery() {
+    let harness = env_harness();
+    let mut tui = harness.start_tui();
+    wizard_pick_dir(&mut tui, &harness.dirs[0]);
+    tui.send_keys(ALT_COMMA);
+    tui.wait_for("applies on next start or restart", Region::Screen, WAIT);
+    tui.send_keys(b"\t");
+    tui.wait_for("none yet", Region::Screen, WAIT);
+    add_var(&mut tui, "MY_VAR", "kept");
+    close_env_menu(&mut tui);
+    tui.quit(WAIT);
+
+    harness.kill_daemon();
+    fs::remove_file(harness.dirs[0].join("claude.env")).unwrap();
+    let tui = harness.start_tui();
+    let env = recorded_env(&harness.dirs[0]);
+    assert!(env.lines().any(|l| l == "MY_VAR=kept"), "{env}");
+    let sid = sid_in(&harness, &harness.dirs[0]);
+    wait_session_env(&harness, &sid, true);
+    drop(tui);
+}
+
+/// AC4: a `--plain` session gets the global vars (it has no menu).
+#[test]
+fn test_plain_session_gets_the_global_env() {
+    let harness = env_harness();
+    let config = harness.config_home.join("claudio/config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str("\n[env]\nMY_VAR = \"plain\"\n");
+    fs::write(&config, text).unwrap();
+    let tui = harness.start_plain_with(&[], |_| {});
+    let env = recorded_env(&harness.dirs[0]);
+    assert!(env.lines().any(|l| l == "MY_VAR=plain"), "{env}");
+    drop(tui);
 }
