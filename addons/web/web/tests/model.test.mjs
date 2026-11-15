@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyModel, applySnapshot, applyEvent, orderedSessions, groupSessions, railGroups } from '../app/model.js';
+import { emptyModel, applySnapshot, applyEvent, orderedSessions, groupSessions, railGroups, footerStats } from '../app/model.js';
 
 const S = (id, o = {}) => ({ id, host: 'local', kind: 'claude', cwd: '/w/a', label: id, state: 'idle', created_at: 1, ...o });
 const H = (name) => ({ name, connected: true });
@@ -99,4 +99,17 @@ test('railGroups lists a repo flat unless it holds two sessions on that host', (
   assert.deepEqual(r.singles.map((s) => s.id), ['b', 'd']);
   assert.deepEqual(r.groups.map((g) => [g.label, g.sessions.map((s) => s.id)]), [['api', ['a', 'c']]]);
   assert.deepEqual(railGroups([]), { singles: [], groups: [] });
+});
+
+test('the footer shows the stats of the host of the session in view', () => {
+  let m = applySnapshot(emptyModel(), { hosts: [H('local'), H('z6'), H('box')],
+    sessions: [S('a'), S('b', { host: 'z6' }), S('c', { host: 'box' })], order: [] });
+  m = applyEvent(m, { ev: 'host_stats', host: 'local', cpu: 10, mem_used: 1, mem_total: 2 });
+  m = applyEvent(m, { ev: 'host_stats', host: 'z6', cpu: 70, mem_used: 3, mem_total: 4 });
+  assert.deepEqual(footerStats(m, 'b'), [['z6', { cpu: 70, mem_used: 3, mem_total: 4 }]]);
+  assert.deepEqual(footerStats(m, 'a'), [['local', { cpu: 10, mem_used: 1, mem_total: 2 }]]);
+  // A host with no sample yet shows as such, never another host's numbers.
+  assert.deepEqual(footerStats(m, 'c'), [['box', null]]);
+  // No session in view: every host, as before.
+  assert.deepEqual(footerStats(m, null).map(([h]) => h), ['local', 'z6']);
 });

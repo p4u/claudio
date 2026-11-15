@@ -477,7 +477,7 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | Extensions screen | `Alt+i` | Settings → Manage… | `extensions.list`, `extensions.toggle`, `extensions.action` | `toggling an extension rewrites its config.toml line`; `web_extension_toggle_edits_config_and_is_reread`; `web_external_extension_action_runs_its_program` |
 | Plugin setup (an addon checklist) | first spawn, extensions screen | the checklist a launch's `review` asks for (Save / Skip / Cancel), "Set up" on an addon row | `addons.checklist`, `addons.checklist.save`, `addons.rows`, `session.spawn` (`defer`) | `a plugin without choices asks for its checklist before spawn and Skip spawns without it`; `web_spawn_with_launch_needs_review_then_defer_spawns_without_the_plugin` |
 | claude install / update | update prompt | Hosts menu → host row → panel → Update claude; toasts | `claude.update`, `claude.skip`, `claude` events | `claude update shows progress and completion` |
-| Host stats | status bar cpu / mem | footer line per host | `host_stats` events | manual check (footer shows `local cpu N% · mem N%`) |
+| Host stats | status bar cpu / mem | footer: the host of the session in view (every host when none is) | `host_stats` events | node (`footerStats`) |
 | Notifications | OSC 9 | desktop notification, tab title count | (client side, from `session` events) | `a hidden session needing approval notifies once` |
 | Next attention | `Alt+a` | `Alt+a`, `a` | (client side) | manual check (`a` focuses the session that needs approval); approve path: `a permission prompt shows its text…` |
 | Help | `Alt+h` | `Alt+h`, `?` | (client side) | `the help has the key check and describes keys without sending them` |

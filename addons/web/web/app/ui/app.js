@@ -1,7 +1,7 @@
 import { html } from 'htm/preact';
 import { effect } from '@preact/signals';
 import { model, mode, setMode, banner, selected, focused, conn, serverInfo, onServerEvent } from '../store.js';
-import { orderedSessions } from '../model.js';
+import { orderedSessions, footerStats } from '../model.js';
 import { appAction, isLeaveTerminal, tuiBinding, describeKey } from '../keymap.js';
 import { overlay, defineAction, runAction } from '../palette.js';
 import { settings, updateSettings } from '../settings.js';
@@ -75,9 +75,9 @@ function Stage({ railCollapsed, railAuto }) {
 
 function Footer() {
   const m = model.value;
-  const stats = Object.entries(m.stats);
+  const stats = footerStats(m, focused.value ?? selected.value);
   return html`<footer class="footer">
-    ${stats.map(([h, st]) => html`<span key=${h}>${h} cpu ${Math.round(st.cpu)}% · mem ${st.mem_total ? Math.round((100 * st.mem_used) / st.mem_total) : 0}%</span>`)}
+    ${stats.map(([h, st]) => html`<span key=${h} data-testid="host-stats" data-host=${h}>${h} ${st ? `cpu ${Math.round(st.cpu)}% · mem ${st.mem_total ? Math.round((100 * st.mem_used) / st.mem_total) : 0}%` : 'cpu — · mem —'}</span>`)}
     <span class="push">${serverInfo.value.version ? `claudio ${serverInfo.value.version}` : conn.value}</span>
   </footer>`;
 }

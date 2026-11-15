@@ -98,3 +98,10 @@ export function railGroups(groups) {
   for (const g of groups) (g.sessions.length >= 2 ? multi : singles).push(g);
   return { singles: singles.flatMap((g) => g.sessions), groups: multi };
 }
+
+// The host stats the footer shows: those of the host of the session in view, as the TUI's status
+// bar does (null while that host has sent none), or every host's when no session is in view.
+export function footerStats(model, sid) {
+  const host = model.sessions[sid]?.host;
+  return host ? [[host, model.stats[host] ?? null]] : Object.entries(model.stats);
+}
