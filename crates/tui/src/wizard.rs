@@ -130,7 +130,15 @@ pub struct Wizard {
     /// the lifetime of the wizard. A query that starts with `.` reveals them
     /// regardless (see [`Wizard::refilter`]).
     pub show_hidden: bool,
+    /// Why the listed directory could not be listed (one line, sanitized);
+    /// cleared by the next listing.
+    dir_error: Option<String>,
+    /// Whether the daemon cut the listing (a folder may be missing from it).
+    dir_cut: bool,
 }
+
+/// The status line of a cut listing.
+pub const CUT_NOTE: &str = "list cut: type the folder's full name";
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
 /// ignored when comparing).
@@ -228,6 +236,8 @@ impl Wizard {
             meta,
             saved_host_step: None,
             show_hidden: false,
+            dir_error: None,
+            dir_cut: false,
         };
         w.refilter();
         w
@@ -284,6 +294,7 @@ impl Wizard {
         self.seeds = new_seeds;
         self.completions.clear();
         self.listed = None;
+        (self.dir_error, self.dir_cut) = (None, false);
         self.input.clear();
         self.selected = 0;
         // Reset meta for the new host but preserve recently_used marks.
@@ -308,11 +319,13 @@ impl Wizard {
         self.refilter();
     }
 
-    /// A `ListDir` reply. Ignored unless it answers the latest request.
-    pub fn set_dir_entries(&mut self, path: &str, entries: &[DirEntry]) {
+    /// A `ListDir` reply (`truncated`: the daemon cut it). Ignored unless it
+    /// answers the latest request.
+    pub fn set_dir_entries(&mut self, path: &str, entries: &[DirEntry], truncated: bool) {
         if self.listed.as_deref() != Some(path) {
             return;
         }
+        (self.dir_error, self.dir_cut) = (None, truncated);
         self.completions = entries
             .iter()
             .filter(|e| e.dir)
@@ -332,6 +345,35 @@ impl Wizard {
             m.hidden = e.hidden;
         }
         self.refilter();
+    }
+
+    /// A `ListDir` of `path` failed with `error` (the daemon's "cannot list
+    /// <path>: <why>"): the list empties and the step says why. Ignored
+    /// unless it answers the latest request.
+    pub fn set_dir_error(&mut self, path: &str, error: &str) {
+        if self.listed.as_deref() != Some(path) {
+            return;
+        }
+        let line = claudio_core::text::sanitize(error.lines().next().unwrap_or(""));
+        let shown = match line.strip_prefix(&format!("cannot list {path}")) {
+            Some(why) => format!("cannot list {}{why}", self.display(path)),
+            None => line,
+        };
+        (self.dir_error, self.dir_cut) = (Some(shown), false);
+        self.completions.clear();
+        self.refilter();
+    }
+
+    /// The directory step's status line while browsing: the listing's error,
+    /// or that the daemon cut it.
+    pub fn dir_status(&self) -> Option<&str> {
+        if !self.browsing() || self.host_step.is_some() {
+            return None;
+        }
+        match &self.dir_error {
+            Some(error) => Some(error),
+            None => self.dir_cut.then_some(CUT_NOTE),
+        }
     }
 
     /// Populate enrichment metadata from a `RecentProjects` reply.
@@ -956,6 +998,7 @@ mod tests {
                 DirEntry::simple("Desktop", true),
                 DirEntry::simple("reports", true),
             ],
+            false,
         );
         assert_eq!(w.items[..2], strings(&["/home/u/reports", "/home/u/repos"]));
         // The best match (first child) is preselected; Down moves to `repos`.
@@ -973,7 +1016,7 @@ mod tests {
     fn stale_dir_entries_are_ignored() {
         let mut w = wizard_local(vec![], "/h");
         type_str(&mut w, "/a/");
-        w.set_dir_entries("/b", &[DirEntry::simple("x", true)]);
+        w.set_dir_entries("/b", &[DirEntry::simple("x", true)], false);
         assert!(w.items.is_empty());
     }
 
@@ -1356,6 +1399,7 @@ mod tests {
                 DirEntry::simple(".secret", true),
                 DirEntry::simple("repos", true),
             ],
+            false,
         );
         w
     }
@@ -1443,7 +1487,7 @@ mod tests {
         w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
         let opened = w.browse_home();
         let entries: Vec<DirEntry> = entries.iter().map(|n| DirEntry::simple(*n, true)).collect();
-        w.set_dir_entries("/home/u", &entries);
+        w.set_dir_entries("/home/u", &entries, false);
         (w, opened)
     }
 
@@ -1474,7 +1518,7 @@ mod tests {
         );
         w.on_host_connected("box", "/home/remote", vec![]);
         assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
-        w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)]);
+        w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)], false);
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
             Outcome::ChooseDir("/home/remote".into())
@@ -1544,7 +1588,7 @@ mod tests {
             w.here_selected(),
             "`start here` is selected after descending"
         );
-        w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)]);
+        w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)], false);
         w.on_key(&press(KeyCode::Down));
         assert_eq!(
             w.on_key(&press(KeyCode::Tab)),
@@ -1656,7 +1700,7 @@ mod tests {
     fn seeds_do_not_leak_into_a_browsed_directory() {
         let mut w = wizard_local(strings(&["/home/u/repos/claudio"]), "/home/u");
         type_str(&mut w, "~/");
-        w.set_dir_entries("/home/u", &[DirEntry::simple("docs", true)]);
+        w.set_dir_entries("/home/u", &[DirEntry::simple("docs", true)], false);
         assert_eq!(w.items, strings(&["/home/u/docs"]));
     }
 
@@ -1680,5 +1724,54 @@ mod tests {
         // A non-path paste extends it.
         w.on_paste("x");
         assert_eq!(w.input, "/srv/app/x");
+    }
+
+    #[test]
+    fn a_listing_error_shows_and_the_next_listing_clears_it() {
+        let (mut w, _) = browser(&["repos"]);
+        assert_eq!(
+            type_str(&mut w, "x/")[1],
+            Outcome::ListDir("/home/u/x".into())
+        );
+        let error = "cannot list /home/u/x: Permission denied (os error 13)\nmore";
+        w.set_dir_error("/home/u/other", error);
+        assert_eq!(w.dir_status(), None, "an error for another path is stale");
+        w.set_dir_error("/home/u/x", error);
+        assert_eq!(
+            w.dir_status(),
+            Some("cannot list ~/x: Permission denied (os error 13)")
+        );
+        assert!(w.items.is_empty());
+        w.set_dir_entries("/home/u/x", &[DirEntry::simple("y", true)], false);
+        assert_eq!(w.dir_status(), None);
+        assert_eq!(names(&w), vec!["y"]);
+    }
+
+    #[test]
+    fn a_cut_listing_says_so_and_enter_takes_a_typed_unlisted_name() {
+        let (mut w, _) = browser(&[]);
+        w.set_dir_entries("/home/u", &[DirEntry::simple("alpha", true)], true);
+        assert_eq!(w.dir_status(), Some(CUT_NOTE));
+        assert_eq!(CUT_NOTE, "list cut: type the folder's full name");
+        type_str(&mut w, "zeta");
+        assert!(w.items.is_empty());
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u/zeta".into())
+        );
+    }
+
+    #[test]
+    fn an_unsorted_listing_shows_folders_only_sorted_case_insensitively() {
+        let (mut w, _) = browser(&[]);
+        let entries = [
+            DirEntry::simple("b.txt", false),
+            DirEntry::simple("zed", true),
+            DirEntry::simple("A.md", false),
+            DirEntry::simple("Alpha", true),
+            DirEntry::simple("beta", true),
+        ];
+        w.set_dir_entries("/home/u", &entries, false);
+        assert_eq!(names(&w), vec!["Alpha", "beta", "zed"]);
     }
 }

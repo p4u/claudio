@@ -192,9 +192,11 @@ pub enum ReplyTo {
     Respawned(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
-    /// A directory listing for the wizard (which ignores one for a path it
-    /// no longer shows).
-    DirEntries,
+    /// A directory listing of `path` for the wizard (which ignores one for a
+    /// path it no longer shows).
+    DirEntries {
+        path: String,
+    },
     /// The claude sessions in `cwd` on `host`, for the wizard of generation
     /// `gen`; a reply for a cancelled or replaced wizard is dropped.
     ClaudeSessions {

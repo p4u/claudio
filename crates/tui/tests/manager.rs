@@ -619,6 +619,21 @@ fn test_wizard_browse_from_home_and_start_here() {
     tui.quit(WAIT);
 }
 
+/// A path under a regular file cannot be listed: the directory step says
+/// why instead of showing an empty list (a mode-000 folder would not do: it
+/// is listable when the suite runs as root).
+#[test]
+fn test_wizard_shows_a_listing_error() {
+    let harness = ManagerHarness::new();
+    fs::write(harness.home.join("afile"), b"").expect("write a file under HOME");
+    let mut tui = harness.start_tui();
+    tui.send_keys(ENTER);
+    tui.wait_for("start here: ~", Region::Screen, WAIT);
+    tui.send_keys(b"afile/x");
+    tui.wait_for("cannot list ~/afile: Not a directory", Region::Screen, WAIT);
+    tui.quit(WAIT);
+}
+
 // ── daemon CLI ────────────────────────────────────────────────────────────────
 
 /// `claudio daemon status` reports "running" and a session count.
