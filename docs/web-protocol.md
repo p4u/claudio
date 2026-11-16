@@ -263,7 +263,9 @@ browsers.
 
 ### Others
 
-- DirEntry `{"name","dir","git": string|null,"claude_at": n|null,"symlink","hidden"}`;
+- DirEntry `{"name","dir","git": string|null,"claude_at": n|null,"symlink","hidden"}`
+  (`claude_at` is always null today; `git` is filled for folders only; a listing is folders
+  first, by name case-insensitively, and `truncated` says entries were left out);
   ProjectDir `{"path","modified","git","symlink","hidden"}`; ClaudeSession
   `{"id","title","last_prompt","modified","messages"}`; Answer `{"prompt","text"}`;
   GitLogPage, GitCommitInfo, GitPatch, GitWorktreeStatus: exactly the `proto.rs` structs.
