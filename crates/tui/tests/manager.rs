@@ -1898,7 +1898,8 @@ fn test_wizard_search_row_finds_and_resumes_a_conversation() {
     tui.send_keys(ENTER);
     tui.wait_for("1 conversations", Region::Screen, WAIT);
     tui.wait_for("local  ", Region::Screen, WAIT);
-    tui.wait_for("explain the zyzzyva please", Region::Screen, WAIT);
+    // The row may be cut at the pane's width (a long temp folder on macOS).
+    tui.wait_for("explain the z", Region::Screen, WAIT);
     tui.send_keys(ENTER);
     // (The fake prints its argv on one long, wrapped line.)
     tui.wait_for("--resume 11111111-2222", Region::Pane, WAIT);
