@@ -19,6 +19,9 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum entries returned by [`list_dir`].
 const MAX_DIR_ENTRIES: usize = 5000;
 
+/// Maximum entries [`list_dir`] reads before it sorts and cuts.
+const MAX_SCAN: usize = 50_000;
+
 /// The current user's home directory.
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
@@ -218,41 +221,159 @@ pub fn detect_git_branch(path: &Path) -> Option<String> {
     }
 }
 
-/// List `path` (with `~` expanded): directories first, then by name, capped
-/// at 5000 entries. Returns the expanded path alongside the entries.
-pub fn list_dir(path: &str) -> io::Result<(String, Vec<DirEntry>)> {
+/// List `path` (with `~` expanded): folders first, then files, each by name
+/// case-insensitively, at most [`MAX_DIR_ENTRIES`]. Returns the expanded
+/// path, the entries, and whether any were left out.
+pub fn list_dir(path: &str) -> io::Result<(String, Vec<DirEntry>, bool)> {
+    list_dir_with(path, detect_git_branch)
+}
+
+/// [`list_dir`] with `git` as the branch probe (a test counts its calls).
+fn list_dir_with(
+    path: &str,
+    git: impl Fn(&Path) -> Option<String>,
+) -> io::Result<(String, Vec<DirEntry>, bool)> {
     let dir = expand_tilde(path);
-    let mut entries: Vec<DirEntry> = std::fs::read_dir(&dir)?
-        .filter_map(Result::ok)
-        .take(MAX_DIR_ENTRIES)
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let path = e.path();
-            let hidden = name.starts_with('.');
-            // Detect symlinks without following them (symlink_metadata vs metadata).
-            let symlink = e
-                .metadata()
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
-            // Follow symlinks so a link to a directory can be descended into.
-            let dir_flag = path.is_dir();
-            DirEntry {
-                name,
-                dir: dir_flag,
-                git: detect_git_branch(&path),
-                claude_at: None, // enriched below for dirs only
-                symlink,
-                hidden,
-            }
+    let (mut scanned, mut truncated) = scan(&dir)?;
+    scanned.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    truncated |= scanned.len() > MAX_DIR_ENTRIES;
+    scanned.truncate(MAX_DIR_ENTRIES);
+    // Only the kept entries are enriched, and only folders get a git probe.
+    let entries = scanned
+        .into_iter()
+        .map(|s| DirEntry {
+            git: s.dir.then(|| git(&dir.join(&s.name))).flatten(),
+            hidden: s.name.starts_with('.'),
+            symlink: s.symlink,
+            dir: s.dir,
+            claude_at: None,
+            name: s.name,
         })
         .collect();
-    entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.cmp(&b.name)));
-    Ok((dir.to_string_lossy().into_owned(), entries))
+    Ok((dir.to_string_lossy().into_owned(), entries, truncated))
+}
+
+/// One entry as read: its name and kind, nothing more.
+struct Scanned {
+    name: String,
+    dir: bool,
+    symlink: bool,
+}
+
+/// Read at most [`MAX_SCAN`] entries of `dir`, the kind from the directory
+/// entry itself (no extra syscall on Linux and macOS); a symlink costs one
+/// `metadata` call to learn whether it leads to a folder. `true` when the
+/// folder held more.
+fn scan(dir: &Path) -> io::Result<(Vec<Scanned>, bool)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)?.filter_map(Result::ok) {
+        if out.len() == MAX_SCAN {
+            return Ok((out, true));
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let symlink = kind.is_symlink();
+        let dir = match symlink {
+            true => entry.path().metadata().is_ok_and(|m| m.is_dir()),
+            false => kind.is_dir(),
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        out.push(Scanned { name, dir, symlink });
+    }
+    Ok((out, false))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh folder under the temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("claudio-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn folders_come_first_before_the_cut_and_only_they_are_probed() {
+        let dir = scratch("listing");
+        for i in 0..6000 {
+            std::fs::write(dir.join(format!("file{i:04}")), b"").unwrap();
+        }
+        for name in [
+            "delta", "Alpha", "charlie", "Bravo", "echo", "Foxtrot", "golf", "Hotel", "india",
+            "Juliet",
+        ] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+        }
+        let probes = std::cell::Cell::new(0);
+        let (_, entries, truncated) = list_dir_with(dir.to_str().unwrap(), |_| {
+            probes.set(probes.get() + 1);
+            None
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let first: Vec<&str> = entries[..10].iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            first,
+            [
+                "Alpha", "Bravo", "charlie", "delta", "echo", "Foxtrot", "golf", "Hotel", "india",
+                "Juliet"
+            ]
+        );
+        assert!(entries[..10].iter().all(|e| e.dir));
+        assert!(entries[10..].iter().all(|e| !e.dir && e.git.is_none()));
+        assert_eq!(entries.len(), MAX_DIR_ENTRIES);
+        assert!(truncated);
+        assert_eq!(
+            probes.get(),
+            10,
+            "the git probe runs on the kept folders only"
+        );
+    }
+
+    #[test]
+    fn names_sort_case_insensitively_and_flags_are_kept() {
+        let dir = scratch("listing-case");
+        std::fs::create_dir(dir.join("b")).unwrap();
+        std::fs::create_dir(dir.join("A")).unwrap();
+        std::fs::create_dir(dir.join(".cfg")).unwrap();
+        std::fs::write(dir.join("Z.txt"), b"").unwrap();
+        std::fs::write(dir.join("a.txt"), b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("b"), dir.join("link")).unwrap();
+        let (_, entries, truncated) = list_dir(dir.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let got: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+        #[cfg(unix)]
+        assert_eq!(
+            got,
+            [
+                (".cfg", true),
+                ("A", true),
+                ("b", true),
+                ("link", true),
+                ("a.txt", false),
+                ("Z.txt", false)
+            ]
+        );
+        assert!(!truncated);
+        assert!(entries
+            .iter()
+            .find(|e| e.name == ".cfg")
+            .is_some_and(|e| e.hidden));
+        #[cfg(unix)]
+        assert!(entries
+            .iter()
+            .find(|e| e.name == "link")
+            .is_some_and(|e| e.symlink));
+    }
 
     #[test]
     fn tilde_expansion() {

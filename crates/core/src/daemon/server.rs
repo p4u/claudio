@@ -32,8 +32,7 @@ use crate::claude::projects;
 use crate::claude::search::{self, BadQuery, Budget};
 use crate::paths;
 use crate::proto::{
-    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, MAX_FRAME,
-    PROTO,
+    self, Envelope, Frame, Msg, ProjectDir, SessionId, SessionKind, SpawnSpec, Welcome, PROTO,
 };
 
 /// Deadline for a connection's first frame.
@@ -709,40 +708,13 @@ fn not_running(id: SessionId) -> String {
     format!("session {id} is not running")
 }
 
-/// Approximate encoded size of a `DirEntry` (name + bool + JSON overhead).
-fn dir_entry_encoded_size(name: &str) -> usize {
-    // JSON: {"name":"<name>","dir":false} ≈ 20 + name.len() bytes.
-    name.len() + 24
-}
-
 async fn list_dir(path: String) -> Msg {
     let listed = tokio::task::spawn_blocking(move || {
         host::list_dir(&path).map_err(|e| format!("cannot list {path}: {e}"))
     })
     .await;
     match listed {
-        Ok(Ok((path, entries))) => {
-            // Cap entries so the reply fits within MAX_FRAME.
-            // Reserve ~256 bytes for the JSON envelope.
-            let budget = MAX_FRAME.saturating_sub(256);
-            let mut used = 0usize;
-            let mut truncated = false;
-            let mut capped: Vec<_> = Vec::new();
-            for entry in entries {
-                let sz = dir_entry_encoded_size(&entry.name);
-                if used + sz > budget {
-                    truncated = true;
-                    break;
-                }
-                used += sz;
-                capped.push(entry);
-            }
-            Msg::DirEntries {
-                path,
-                entries: capped,
-                truncated,
-            }
-        }
+        Ok(Ok((path, entries, truncated))) => proto::dir_entries_reply(path, entries, truncated),
         Ok(Err(message)) => Msg::Error { message },
         Err(e) => Msg::Error {
             message: format!("list_dir failed: {e}"),
