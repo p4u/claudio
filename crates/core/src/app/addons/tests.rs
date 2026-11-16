@@ -596,7 +596,9 @@ async fn config_reloads_are_single_flight_and_coalesced() {
 /// edit, and one more read follows.
 #[tokio::test]
 async fn an_older_read_never_overwrites_a_newer_edit() {
-    let (dir, _path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 300).await;
+    // A read that pauses 1 s, so the edit below lands while it runs even on a
+    // loaded machine (with a short pause the read could end first, not stale).
+    let (dir, _path, echo, rt) = slow_reads("[team]\nurl = \"a\"\n", 1000).await;
     let ctx = rt.ctx("echo");
     rt.config_changed();
     until("the read started", || reads(&rt) == 2).await;
@@ -610,7 +612,7 @@ async fn an_older_read_never_overwrites_a_newer_edit() {
     .await
     .unwrap();
     // Through the stale read's end and the next read's.
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(900);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(2300);
     while tokio::time::Instant::now() < deadline {
         assert_eq!(ctx.config("team")["url"].as_str(), Some("b"), "stale");
         tokio::time::sleep(Duration::from_millis(10)).await;
