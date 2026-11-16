@@ -45,10 +45,10 @@ fn crates/tui/src/lib.rs::main 91
 fn crates/tui/src/lib.rs::run_effect 123
 fn crates/tui/src/ui/extensions.rs::draw_extensions 85
 fn crates/tui/src/ui/mod.rs::draw_wizard 188
-fn crates/tui/src/wizard.rs::on_key 110
-fn crates/tui/src/wizard.rs::on_key#2 155
+fn crates/tui/src/wizard.rs::on_key 155
 fn crates/tui/src/wizard.rs::refilter 85
-fn crates/tui/src/wizard.rs::refilter#2 85
+fn crates/tui/src/wizard_host.rs::on_key 110
+fn crates/tui/src/wizard_host.rs::refilter 85
 unwrap addons/api/src/api/pool.rs 9
 unwrap addons/api/src/print/hooks.rs 3
 unwrap addons/vocdoni/src/cmd.rs 2

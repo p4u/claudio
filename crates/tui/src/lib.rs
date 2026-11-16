@@ -50,6 +50,7 @@ fn existing_local_dirs(
 mod test_support;
 mod ui;
 mod wizard;
+mod wizard_host;
 mod wizard_route;
 
 use std::io::{self, Stdout};
