@@ -328,7 +328,8 @@ impl Wizard {
         if self.listed.as_deref() != Some(path) {
             return;
         }
-        (self.dir_error, self.dir_cut) = (None, truncated);
+        // Folders come first: a cut whose last entry is a file left no folder out.
+        (self.dir_error, self.dir_cut) = (None, truncated && entries.last().is_none_or(|e| e.dir));
         self.completions = entries
             .iter()
             .filter(|e| e.dir)
@@ -1793,6 +1794,17 @@ mod tests {
             w.on_key(&press(KeyCode::Enter)),
             Outcome::ChooseDir("/home/u/zeta".into())
         );
+    }
+
+    #[test]
+    fn a_cut_listing_that_ends_in_a_file_says_nothing() {
+        let (mut w, _) = browser(&[]);
+        let entries = [
+            DirEntry::simple("alpha", true),
+            DirEntry::simple("notes", false),
+        ];
+        w.set_dir_entries("/home/u", &entries, true);
+        assert_eq!(w.dir_status(), None, "folders come first: none was cut");
     }
 
     #[test]
