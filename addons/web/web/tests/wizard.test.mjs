@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initialWizard, spawnRequest, filterDirs } from '../app/wizard.js';
+import { initialWizard, spawnRequest } from '../app/wizard.js';
 
 const decls = [{ name: 'vocdoni', panels: [], launch_flags: [{ name: 'first-party', label: 'First-party session' }],
   launch_options: [{ id: 'work', label: 'work', group: 'Proxy', default: true, detail: null }, { id: 'personal', label: 'personal', group: 'Proxy', default: false, detail: null }] }];
@@ -30,15 +30,4 @@ test('a terminal spawns a shell without launch, resume or prompt', () => {
   const r = spawnRequest(w, { rows: 24, cols: 80 });
   assert.equal(r.op, 'session.shell');
   assert.deepEqual(r.args, { host: 'local', cwd: '/tmp/x', rows: 24, cols: 80, name: 'sh' });
-});
-
-test('typed paths filter the recent dirs fuzzily', () => {
-  const dirs = [{ path: '/home/dev/claudio' }, { path: '/home/dev/api' }, { path: '/srv/infra' }];
-  assert.deepEqual(filterDirs(dirs, '').map((d) => d.path), dirs.map((d) => d.path));
-  assert.deepEqual(filterDirs(dirs, 'dvapi').map((d) => d.path), ['/home/dev/api']);
-  const typed = filterDirs(dirs, '/opt/new');
-  assert.equal(typed[0].path, '/opt/new');
-  assert.equal(typed[0].typed, true);
-  assert.equal(filterDirs(dirs, '/srv/infra')[0].path, '/srv/infra');
-  assert.equal(filterDirs(dirs, '/srv/infra').length, 1);
 });

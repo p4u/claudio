@@ -303,24 +303,25 @@ input[type="radio"] { accent-color: var(--accent); }
 .wz-note { color: var(--text-muted); font-size: var(--fs-sm); margin: 2px 0; line-height: 1.5; }
 .wz-warn { color: var(--state-waiting); }
 .wz-error { margin: 0; padding: 6px 10px; background: var(--bg); border: var(--hair) solid var(--state-error); border-radius: var(--radius); color: var(--state-error); font-size: var(--fs-sm); white-space: pre-wrap; }
-.wz-dirs, .wz-entries, .wz-resume, .snippet-list, .search-hits { list-style: none; margin: 0; padding: 0; }
-.wz-dirs { border: var(--hair) solid var(--border); border-radius: var(--radius); background: var(--bg); }
-.wz-dirs > li + li { border-top: var(--hair) solid var(--border); }
-.wz-dir, .wz-entry {
-  display: flex; align-items: baseline; gap: var(--space-3); width: 100%; text-align: left; min-width: 0;
-  background: none; border: 0; border-left: var(--hair) solid transparent; padding: 5px 10px;
-  font-family: var(--font-mono); color: var(--text);
+.wz-dir-list, .wz-resume, .snippet-list, .search-hits { list-style: none; margin: 0; padding: 0; }
+/* the folder combobox: the field, its listbox, and one line of tools (error or cut, hidden) */
+.wz-combo { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.wz-dir-list { max-height: 220px; overflow-y: auto; border: var(--hair) solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.wz-dir-list > li + li { border-top: var(--hair) solid var(--border); }
+.wz-dir-row {
+  display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; padding: 5px 10px; cursor: pointer;
+  border-left: var(--hair) solid transparent; font-family: var(--font-mono); color: var(--text);
 }
-.wz-dir:hover, .wz-entry:hover { background: var(--hover); color: var(--text-strong); }
-.wz-dir[aria-pressed="true"] { background: var(--surface); border-left-color: var(--accent); color: var(--text-strong); }
+.wz-dir-row:hover { background: var(--hover); color: var(--text-strong); }
+.wz-dir-row[aria-selected="true"] { background: var(--surface); border-left-color: var(--accent); color: var(--text-strong); }
+.wz-dir-use { color: var(--text-2); }
+.wz-dir-use[aria-disabled="true"] { color: var(--text-muted); cursor: default; }
 .wz-dir-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wz-dir-branch, .wz-dir-age { color: var(--text-muted); font-size: var(--fs-xs); white-space: nowrap; }
+.wz-dir-tools { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: 22px; }
+.wz-find-hits { max-height: 200px; border: var(--hair) solid var(--border); border-radius: var(--radius); }
 .wz-link { align-self: flex-start; background: none; border: 0; padding: 0; color: var(--text-2); font-size: var(--fs-sm); text-decoration: none; }
 .wz-link:hover { color: var(--text-strong); }
-.wz-browser { border: var(--hair) solid var(--border); border-radius: var(--radius); background: var(--bg); }
-.wz-browser-head { display: flex; align-items: center; gap: var(--space-2); padding: 6px; border-bottom: var(--hair) solid var(--border); font-family: var(--font-mono); }
-.wz-browser-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wz-entries { max-height: 180px; overflow-y: auto; padding: 4px 0; }
 .wz-check { display: flex; align-items: center; gap: var(--space-2); font-size: var(--fs-sm); color: var(--text); }
 .wz-resume { max-height: 170px; overflow-y: auto; border: var(--hair) solid var(--border); border-radius: var(--radius); background: var(--bg); }
 .wz-resume > li + li { border-top: var(--hair) solid var(--border); }
