@@ -190,3 +190,20 @@ test('a hit whose conversation is live focuses that session and closes the wizar
   await expect(page.locator(`[data-testid="session-card"][data-sid="${sid}"]`)).toHaveAttribute('aria-current', 'true');
   await expect(page.locator('[data-testid="pane"][data-focus="true"]').getByTestId('terminal')).toContainText('FAKE_CLAUDE_BANNER');
 });
+
+// The folder list takes room in the dialog: closing it at the mousedown on Start moved Start away
+// and lost the click (a tall window, or the terminal form, whose body is not scrolled).
+for (const [name, kind, size] of [['claude, tall window', 'claude', { width: 1600, height: 1400 }], ['terminal', 'shell', { width: 1600, height: 900 }]]) {
+  test(`one click on Start with the folder list open starts the session (${name})`, async ({ page }) => {
+    await page.setViewportSize(size);
+    const input = await openWizard(page);
+    if (kind === 'shell') await page.getByTestId('wizard-kind-shell').click();
+    await input.focus();
+    await input.pressSequentially(srv.dirs.a);
+    await expect(page.getByTestId('wizard-dir-list')).toBeVisible();
+    await expect(page.getByTestId('wizard-dir-use')).toBeVisible();
+    await page.getByTestId('wizard-start').click();
+    await expect(page.getByTestId('session-card')).toHaveCount(1);
+    await expect(page.getByTestId('wizard')).toHaveCount(0);
+  });
+}

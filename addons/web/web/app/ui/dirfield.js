@@ -22,6 +22,24 @@ export function DirField({ w, set, home, online, browse, onPicked, onEdit }) {
   const seq = useRef(sequencer());
   const input = useRef(null);
   const list = useRef(null);
+  // The list takes room in the dialog: closing it at the mousedown that takes the focus moves the
+  // control under the pointer and loses its click, so a blur by the pointer closes it after the click.
+  const pointer = useRef(false);
+  useEffect(() => {
+    const down = () => { pointer.current = true; };
+    const up = () => {
+      pointer.current = false;
+      setTimeout(() => { if (document.activeElement !== input.current) setOpen(false); }, 0);
+    };
+    document.addEventListener('pointerdown', down, true);
+    document.addEventListener('pointerup', up, true);
+    document.addEventListener('pointercancel', up, true);
+    return () => {
+      document.removeEventListener('pointerdown', down, true);
+      document.removeEventListener('pointerup', up, true);
+      document.removeEventListener('pointercancel', up, true);
+    };
+  }, []);
   const text = w.cwd;
   const path = isPath(text);
   const { parent, fragment } = splitPath(text);
@@ -111,7 +129,7 @@ export function DirField({ w, set, home, online, browse, onPicked, onEdit }) {
   return html`<div class="wz-combo">
     <input id="wz-dir" ref=${input} class="input" data-testid="wizard-dir-input" data-autofocus value=${text} placeholder="~/ or /path/to/project" autocomplete="off" spellcheck=${false}
       role="combobox" aria-expanded=${open} aria-controls="wz-dir-list" aria-autocomplete="list"
-      onInput=${(e) => edit(e.target.value)} onKeyDown=${key} onBlur=${() => setOpen(false)} />
+      onInput=${(e) => edit(e.target.value)} onKeyDown=${key} onBlur=${() => { if (!pointer.current) setOpen(false); }} />
     ${open ? html`<ul id="wz-dir-list" class="wz-dir-list" role="listbox" data-testid="wizard-dir-list" ref=${list} onMouseDown=${(e) => e.preventDefault()}>
       ${path ? html`<li role="option" class="wz-dir-row wz-dir-use" data-testid="wizard-dir-use" aria-selected=${cur === 0} aria-disabled=${use.notFound}
           onMouseMove=${() => cur !== 0 && setSel(0)} onClick=${() => choose(0)}>
