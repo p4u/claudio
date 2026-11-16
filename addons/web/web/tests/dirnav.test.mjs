@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_LISTED, isPath, splitPath, useTarget, resolveTilde, abbreviateHome, startFolder, folderRows, useRow,
-  firstHighlight, complete, backspaceUp, recentRows, sequencer, listNote,
+  firstHighlight, complete, backspaceUp, recentRows, sequencer, listNote, listingOf,
 } from '../app/dirnav.js';
 
 const dir = (name) => ({ name, dir: true, hidden: name.startsWith('.') });
@@ -120,4 +120,23 @@ test('the note under the field: the error, the cut, or nothing', () => {
   assert.equal(listNote({ ...ok, error: 'cannot list ~/f: Not a directory' }), 'cannot list ~/f: Not a directory');
   assert.equal(listNote({ ...ok, truncated: true }), "list cut: type the folder's full name");
   assert.equal(listNote({ ...ok, truncated: true, error: 'boom' }), 'boom');
+});
+
+test('not found compares names without case (a case-insensitive filesystem)', () => {
+  const whole = { parent: '~/', entries: [dir('Documents')], truncated: false, error: null };
+  assert.equal(useRow('~/documents', whole).notFound, false);
+  assert.equal(useRow('~/docs', whole).notFound, true);
+});
+
+test('a cut listing is cut for folders only when its last entry is a folder', () => {
+  const cutFolders = listingOf('~/', { entries: [dir('a'), dir('b')], truncated: true });
+  assert.equal(cutFolders.truncated, true);
+  assert.equal(listNote(cutFolders), "list cut: type the folder's full name");
+  assert.equal(useRow('~/zz', cutFolders).notFound, false);
+  const cutFiles = listingOf('~/', { entries: [dir('a'), file('x'), file('y')], truncated: true });
+  assert.equal(cutFiles.truncated, false);
+  assert.equal(listNote(cutFiles), null, 'only files were cut');
+  assert.equal(useRow('~/zz', cutFiles).notFound, true);
+  assert.equal(listingOf('~/', { entries: [], truncated: true }).truncated, true, 'nothing listed: unknown');
+  assert.equal(listingOf('~/', { entries: [dir('a')], truncated: false }).truncated, false);
 });

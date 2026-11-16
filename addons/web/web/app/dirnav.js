@@ -82,7 +82,7 @@ export function useRow(text, listing) {
   const { parent, fragment } = splitPath(text);
   const whole = !!listing && listing.parent === parent && !listing.error && listing.entries !== null
     && !listing.truncated && listing.entries.length < MAX_LISTED;
-  const notFound = !!fragment && whole && !listing.entries.some((e) => e.dir && e.name === fragment);
+  const notFound = !!fragment && whole && !listing.entries.some((e) => e.dir && e.name.toLowerCase() === fragment.toLowerCase());
   return { target, notFound };
 }
 
@@ -121,6 +121,14 @@ export function recentRows(dirs, text) {
 export function sequencer() {
   let last = 0;
   return { next: () => ++last, fresh: (n) => n === last, drop: () => { last += 1; } };
+}
+
+// A `fs.list` reply as stored. `truncated` here means folders may be missing: the daemon lists
+// folders first, so a cut reply whose last entry is a file left no folder out.
+export function listingOf(parent, r) {
+  const entries = r?.entries ?? [];
+  const cut = !!r?.truncated && (!entries.length || entries[entries.length - 1].dir);
+  return { parent, entries, truncated: cut, error: null };
 }
 
 // The line shown under the field about a listing: its error, or that it was cut, else null.

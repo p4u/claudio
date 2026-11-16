@@ -4,7 +4,7 @@
 import { html } from 'htm/preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { reqQuiet } from '../store.js';
-import { isPath, splitPath, folderRows, useRow, firstHighlight, complete, backspaceUp, recentRows, sequencer, listNote } from '../dirnav.js';
+import { isPath, splitPath, folderRows, useRow, firstHighlight, complete, backspaceUp, recentRows, sequencer, listNote, listingOf } from '../dirnav.js';
 import { ago } from './glyph.js';
 
 const LIST_DEBOUNCE = 120;
@@ -15,7 +15,7 @@ const LIST_DEBOUNCE = 120;
 // of the field) cancels that move if it is still waiting.
 export function DirField({ w, set, home, online, browse, onPicked, onEdit }) {
   const [dirs, setDirs] = useState(null);
-  const [listing, setListing] = useState(null); // { parent, entries | null, truncated, error }
+  const [listing, setListing] = useState(null); // { parent, entries | null, truncated (cut with folders possibly missing), error }
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState(0);
   const [showHidden, setShowHidden] = useState(false);
@@ -63,6 +63,9 @@ export function DirField({ w, set, home, online, browse, onPicked, onEdit }) {
     input.current?.focus();
   }, [browse]);
 
+  // A listing is asked again each time the list opens (a folder made meanwhile, a transient error).
+  useEffect(() => { if (open) setListing(null); }, [open]);
+
   // The parent's listing, asked when the parent changes (debounced); only the latest reply counts.
   const want = open && online && path && parent ? parent : null;
   useEffect(() => {
@@ -71,11 +74,11 @@ export function DirField({ w, set, home, online, browse, onPicked, onEdit }) {
       const mine = seq.current.next();
       setListing({ parent: want, entries: null, truncated: false, error: null });
       reqQuiet('fs.list', { host: w.host, path: want })
-        .then((r) => { if (seq.current.fresh(mine)) setListing({ parent: want, entries: r.entries ?? [], truncated: !!r.truncated, error: null }); })
+        .then((r) => { if (seq.current.fresh(mine)) setListing(listingOf(want, r)); })
         .catch((e) => { if (seq.current.fresh(mine)) setListing({ parent: want, entries: [], truncated: false, error: e.message }); });
     }, LIST_DEBOUNCE);
     return () => clearTimeout(t);
-  }, [want, w.host]);
+  }, [want, w.host, listing?.parent]);
 
   const listed = listing?.parent === parent ? listing : null;
   const folders = useMemo(() => (path && listed ? folderRows(listed.entries, fragment, showHidden) : []), [path, listed, fragment, showHidden]);

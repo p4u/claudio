@@ -14,6 +14,7 @@ export function FindField({ onPick, homes }) {
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState(0);
   const seq = useRef(0);
+  const list = useRef(null);
 
   function run(query) {
     const mine = ++seq.current;
@@ -27,6 +28,7 @@ export function FindField({ onPick, homes }) {
   useEffect(() => { const t = setTimeout(() => run(q), 280); return () => clearTimeout(t); }, [q]);
 
   const hits = res?.hits ?? [];
+  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [sel, res]);
   const choose = (h) => { if (!h) return; seq.current += 1; setQ(''); setRes(null); onPick(h); };
   const key = (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setSel(moveSel(sel, e.key === 'ArrowDown' ? 1 : -1, hits.length)); }
@@ -39,7 +41,7 @@ export function FindField({ onPick, homes }) {
     <input id="wz-find" class="input" data-testid="wizard-find" value=${q} placeholder="Find a conversation…" autocomplete="off" spellcheck=${false}
       onInput=${(e) => setQ(e.target.value)} onKeyDown=${key} />
     ${state ? html`<p class=${`wz-note${res?.error ? ' wz-warn' : ''}`} aria-live="polite">${state}</p>` : null}
-    ${hits.length ? html`<ul class="search-hits wz-find-hits" role="listbox">
+    ${hits.length ? html`<ul class="search-hits wz-find-hits" role="listbox" ref=${list}>
       ${hits.map((h, i) => html`<li key=${`${h.host}:${h.conversation}`} class="search-hit" role="option" data-testid="wizard-find-row" data-conversation=${h.conversation} aria-selected=${i === sel}
         onMouseMove=${() => sel !== i && setSel(i)} onClick=${() => choose(h)}>
         <div class="hit-top"><b class="hit-title">${h.title || '(untitled)'}</b></div>

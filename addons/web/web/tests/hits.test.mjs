@@ -6,7 +6,9 @@ test('a query needs two characters', () => {
   assert.equal(MIN_QUERY, 2);
   assert.equal(searchable(' a '), false);
   assert.equal(searchable('ab'), true);
-  assert.equal(searchable('é'), false);
+  assert.equal(searchable('é'), true, 'two bytes, as the daemon counts');
+  assert.equal(searchable('a'), false);
+  assert.equal(searchable('字'), true, 'one CJK character is three bytes');
 });
 
 test('hits are shown newest first with the failures and the cut', () => {

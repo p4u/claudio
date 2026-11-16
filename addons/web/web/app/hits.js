@@ -5,7 +5,7 @@
 export const MIN_QUERY = 2;
 
 // Whether `text` is worth asking every host about.
-export const searchable = (text) => [...String(text ?? '').trim()].length >= MIN_QUERY;
+export const searchable = (text) => new TextEncoder().encode(String(text ?? '').trim()).length >= MIN_QUERY;
 
 // A `search` reply as shown: hits newest first (the server merges them so; kept stable), the
 // hosts that failed, and whether a host cut its list.

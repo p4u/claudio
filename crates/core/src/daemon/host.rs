@@ -235,12 +235,7 @@ fn list_dir_with(
 ) -> io::Result<(String, Vec<DirEntry>, bool)> {
     let dir = expand_tilde(path);
     let (mut scanned, mut truncated) = scan(&dir)?;
-    scanned.sort_by(|a, b| {
-        b.dir
-            .cmp(&a.dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    scanned.sort_by_cached_key(|s| (!s.dir, s.name.to_lowercase(), s.name.clone()));
     truncated |= scanned.len() > MAX_DIR_ENTRIES;
     scanned.truncate(MAX_DIR_ENTRIES);
     // Only the kept entries are enriched, and only folders get a git probe.

@@ -181,6 +181,9 @@ export function Wizard() {
       .catch((e) => { if (!dead) setHome({ host: w.host, path: null, error: e.message }); });
     return () => { dead = true; };
   }, [w.host, online]);
+  // Every home learned so far, by host, for the find hits' `~`.
+  const [homes, setHomes] = useState({});
+  useEffect(() => { if (home.path) setHomes((m) => ({ ...m, [home.host]: home.path })); }, [home]);
   // The home of the host shown: the render after a host change still holds the previous one's.
   const mine = home.host === w.host ? home : { path: null, error: null };
   const folder = startFolder(w.cwd, mine.path, mine.error);
@@ -236,7 +239,7 @@ export function Wizard() {
 
   return html`<${Dialog} title=${shell ? 'New terminal' : 'New session'} testid="wizard" wide onClose=${() => { overlay.value = null; }}>
     <div class="wizard" onKeyDown=${key}>
-      <${FindField} onPick=${found} homes=${mine.path ? { [w.host]: mine.path } : {}} />
+      <${FindField} onPick=${found} homes=${homes} />
       <${HostField} w=${w} set=${set} />
       <div class="wz-field">
         <label id="wz-kind-l">What to start</label>
