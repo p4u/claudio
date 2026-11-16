@@ -1,6 +1,6 @@
 # New-session wizard: folder navigation and finding a conversation: design
 
-Status: audited (2026-11-16)   Class: architectural (daemon listing, TUI wizard, web wizard; no wire change)
+Status: approved (2026-11-16)   Class: architectural (daemon listing, TUI wizard, web wizard; no wire change)
 Owner decisions so far (2026-11-16):
 - The web wizard's folder field must let a person navigate to any folder, including a new one
   with no claude history.
