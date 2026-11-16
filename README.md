@@ -49,7 +49,7 @@ It prints `claudio web: http://127.0.0.1:7337/#t=<token>` and exits: the daemon 
 
 ![The new-session wizard](docs/screenshots/web-wizard.png)
 
-*New session (`n` or `Alt+n`): pick a host and a folder, then start a new conversation or resume one from that folder. A terminal tab starts from the same dialog.*
+*New session (`n` or `Alt+n`): pick a host and a folder, then start a new conversation or resume one from that folder. Typing `~/` or `/` in the folder field walks the host's folders (Tab enters one, Backspace goes up), and "Find a conversation…" searches every connected host when you do not know the folder. A terminal tab starts from the same dialog.*
 
 Also: one, two or four panes, terminal tabs, search across every conversation (`/`), a command palette (`k`), desktop notifications, and the addons' panels (proxy stats, `Alt+s`).
 

@@ -17,7 +17,7 @@ renders). You can add your own as a small program in any language.
 |---|---|---|---|
 | `latex` (web addon) | tag `<latex>` | — | Math typeset with KaTeX in the web UI's reader. |
 | `diagram` (web addon) | fence ```` ```mermaid ```` | — | Mermaid diagrams drawn in the web UI's reader. |
-| `search` | — | `Alt+z s` | Search the claude conversations on the active session's host; Enter resumes one. |
+| `search` | — | `Alt+z s` | Search the claude conversations on the active session's host; Enter resumes one. The wizard (`Alt+n`, the web's `n`) also searches every connected host: its "Search conversations" row, the web's "Find a conversation…". |
 | `snippets` | — | `Alt+z p`, `Alt+z P` | Paste a saved prompt; save the last prompt as one. |
 
 `Alt+z` opens the leader popup: one line per action. Press the action's key to
