@@ -46,6 +46,9 @@ pub enum Outcome {
     ListDir(String),
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
+    /// Search every connected host's conversations for this text (the first
+    /// screen's "Search conversations" row).
+    Search(String),
     /// Start claude in `cwd`, resuming `resume` if set, routed as `select`.
     Spawn {
         cwd: String,
@@ -1291,10 +1294,41 @@ mod tests {
             "connect_raw should be set for unknown host-like query"
         );
         assert_eq!(hs.focus, HostSection::Remote);
-        assert_eq!(hs.remote_len(), 1, "only the connect_raw row");
-        // Enter should use the raw input.
+        assert_eq!(hs.remote_len(), 2, "the search row, then connect_raw");
+        // ↓ past the search row (the default), then Enter uses the raw input.
+        hs.on_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(out, Outcome::ConnectHost("newhost".to_owned()));
+    }
+
+    #[test]
+    fn host_step_search_row_is_the_default_when_nothing_matches() {
+        let mut hs = make_host_step(&["prod"], &["/home/u/repos/claudio"]);
+        for c in "zyzzyva".chars() {
+            hs.on_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(hs.search && hs.connect_raw);
+        assert_eq!(hs.focus, HostSection::Remote);
+        assert!(hs.search_selected(), "connect to is never the default");
+        let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out, Outcome::Search("zyzzyva".to_owned()));
+        assert_eq!(hs.connecting, None);
+    }
+
+    #[test]
+    fn host_step_search_row_follows_the_hosts_and_needs_two_characters() {
+        let mut hs = make_host_step(&["prod", "nas"], &[]);
+        hs.on_key(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(!hs.search, "one character searches nothing");
+        hs.on_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(hs.items, ["prod"]);
+        assert!(hs.search && !hs.connect_raw);
+        // The matching host stays the default; the search row is below it.
+        assert_eq!((hs.focus.clone(), hs.selected), (HostSection::Remote, 0));
+        hs.on_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(hs.search_selected());
+        let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out, Outcome::Search("pr".to_owned()));
     }
 
     /// "Explore local dirs…" must NOT stay selected when query doesn't match it.

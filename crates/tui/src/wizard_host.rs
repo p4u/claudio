@@ -41,6 +41,9 @@ pub struct HostStep {
     pub connecting: Option<String>,
     /// The full unfiltered SSH host list.
     pub(crate) candidates: Vec<String>,
+    /// Whether the "Search conversations for “<query>”" row shows (after the
+    /// hosts, before "connect to"): the query has at least 2 characters.
+    pub search: bool,
     /// `true` when the query looks like a bare hostname / `user@host` but matches no
     /// known candidate.  A synthetic "connect to <query>" row is appended to the
     /// REMOTE section and auto-selected so Enter immediately initiates the connection.
@@ -81,6 +84,7 @@ impl HostStep {
             items,
             connecting: None,
             candidates,
+            search: false,
             connect_raw: false,
         }
     }
@@ -92,9 +96,15 @@ impl HostStep {
 
     /// Total rows in the REMOTE section.
     ///
-    /// Includes the synthetic "connect to <query>" row when `connect_raw` is set.
+    /// Includes the synthetic "Search conversations" and "connect to <query>"
+    /// rows when they show.
     pub fn remote_len(&self) -> usize {
-        self.items.len() + if self.connect_raw { 1 } else { 0 }
+        self.items.len() + usize::from(self.search) + usize::from(self.connect_raw)
+    }
+
+    /// Whether the "Search conversations" row is highlighted.
+    pub fn search_selected(&self) -> bool {
+        self.search && self.focus == HostSection::Remote && self.selected == self.items.len()
     }
 
     /// Handle a key press on the host step.
@@ -145,7 +155,7 @@ impl HostStep {
                         let max = self.local_len().saturating_sub(1);
                         if self.local_selected < max {
                             self.local_selected += 1;
-                        } else if !self.items.is_empty() {
+                        } else if self.remote_len() > 0 {
                             // Cross edge: go to top of REMOTE section.
                             self.focus = HostSection::Remote;
                             self.selected = 0;
@@ -160,36 +170,7 @@ impl HostStep {
                 }
                 Outcome::None
             }
-            KeyCode::Enter => match self.focus {
-                HostSection::Local => {
-                    if self.local_selected == 0 {
-                        // "Explore local dirs…" → directory step
-                        Outcome::ConnectHost("local".to_owned())
-                    } else {
-                        // A specific recent dir → go directly to that dir
-                        match self.local_items.get(self.local_selected - 1) {
-                            Some(dir) => Outcome::ChooseDir(dir.clone()),
-                            None => Outcome::ConnectHost("local".to_owned()),
-                        }
-                    }
-                }
-                HostSection::Remote => {
-                    match self.items.get(self.selected) {
-                        Some(h) => {
-                            self.connecting = Some(h.clone());
-                            Outcome::ConnectHost(h.clone())
-                        }
-                        // connect_raw row or any non-empty query with no list match
-                        // → treat the raw input as the hostname.
-                        None if !self.input.trim().is_empty() => {
-                            let h = self.input.trim().to_owned();
-                            self.connecting = Some(h.clone());
-                            Outcome::ConnectHost(h)
-                        }
-                        None => Outcome::None,
-                    }
-                }
-            },
+            KeyCode::Enter => self.enter(),
             KeyCode::Backspace => {
                 self.input.pop();
                 self.refilter();
@@ -206,6 +187,43 @@ impl HostStep {
                 Outcome::None
             }
             _ => Outcome::None,
+        }
+    }
+
+    /// Enter: the highlighted row's action.
+    fn enter(&mut self) -> Outcome {
+        match self.focus {
+            HostSection::Local => {
+                if self.local_selected == 0 {
+                    // "Explore local dirs…" → directory step
+                    Outcome::ConnectHost("local".to_owned())
+                } else {
+                    // A specific recent dir → go directly to that dir
+                    match self.local_items.get(self.local_selected - 1) {
+                        Some(dir) => Outcome::ChooseDir(dir.clone()),
+                        None => Outcome::ConnectHost("local".to_owned()),
+                    }
+                }
+            }
+            HostSection::Remote if self.search_selected() => {
+                Outcome::Search(self.input.trim().to_owned())
+            }
+            HostSection::Remote => {
+                match self.items.get(self.selected) {
+                    Some(h) => {
+                        self.connecting = Some(h.clone());
+                        Outcome::ConnectHost(h.clone())
+                    }
+                    // connect_raw row or any non-empty query with no list match
+                    // → treat the raw input as the hostname.
+                    None if !self.input.trim().is_empty() => {
+                        let h = self.input.trim().to_owned();
+                        self.connecting = Some(h.clone());
+                        Outcome::ConnectHost(h)
+                    }
+                    None => Outcome::None,
+                }
+            }
         }
     }
 
@@ -227,7 +245,7 @@ impl HostStep {
             self.focus = HostSection::Local;
             self.local_selected = 0;
             self.selected = 0;
-            self.connect_raw = false;
+            (self.search, self.connect_raw) = (false, false);
             return;
         }
 
@@ -252,8 +270,8 @@ impl HostStep {
         // ── Score the "Explore local dirs…" pseudo-entry. ─────────────────────
         let explore_score: Option<i64> = fuzzy_score(&input, "explore local dirs");
 
-        // ── Decide whether to offer a "connect to <query>" synthetic row. ─────
-        // Only when nothing else matches and the query looks like a hostname.
+        // ── Synthetic rows: search (2+ chars); "connect to" if nothing matches. ─
+        self.search = input.chars().count() >= 2;
         let has_any_match =
             !scored_remote.is_empty() || !scored_local.is_empty() || explore_score.is_some();
         self.connect_raw = !has_any_match && looks_like_host(self.input.trim());
@@ -292,10 +310,10 @@ impl HostStep {
             self.selected = self.selected.min(self.remote_len().saturating_sub(1));
             return;
         }
-        // Nothing matched. If connect_raw, point Remote at the synthetic row.
-        if self.connect_raw {
+        // Nothing matched: the first synthetic row (search, else connect_raw).
+        if self.search || self.connect_raw {
             self.focus = HostSection::Remote;
-            self.selected = 0; // remote_len() == 1 (only the connect_raw row)
+            self.selected = 0; // no host rows: the first synthetic one
         }
         // Clamp both indices within the new bounds.
         let remote_cap = self.remote_len().saturating_sub(1);

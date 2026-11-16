@@ -629,6 +629,7 @@ impl App {
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
+            Outcome::Search(query) => self.search_all(query),
             Outcome::Spawn {
                 cwd,
                 resume,
