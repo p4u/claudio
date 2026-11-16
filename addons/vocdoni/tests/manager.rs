@@ -968,6 +968,7 @@ fn test_a_recovered_remote_proxy_session_keeps_its_proxy() {
     let mut tui = harness.start_tui_with(|cmd| cmd.env("PATH", &path));
     tui.send_paste("fakehost");
     tui.wait_for("connect to fakehost", Region::Screen, WAIT);
+    tui.send_keys(DOWN_ARROW); // past the "Search conversations" row
     tui.send_keys(ENTER);
     tui.wait_for("New session on fakehost", Region::Screen, DAEMON_WAIT);
     tui.send_paste(harness.dirs[0].to_str().unwrap());

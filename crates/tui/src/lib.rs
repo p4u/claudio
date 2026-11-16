@@ -31,6 +31,7 @@ mod pane;
 mod panel_view;
 pub mod plain;
 mod reader;
+mod search_edge;
 mod selection;
 pub(crate) mod sessions;
 
@@ -50,6 +51,7 @@ fn existing_local_dirs(
 mod test_support;
 mod ui;
 mod wizard;
+mod wizard_host;
 mod wizard_route;
 
 use std::io::{self, Stdout};
@@ -439,6 +441,8 @@ enum HostEvent {
     Addon(app::AddonResult),
     /// What a read or a write of the custom env found (`env_edge`).
     Env(env_view::EnvDone),
+    /// What an `Effect::SearchAll` found (`search_edge`).
+    SearchAllDone(builtins::SearchAllDone),
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -674,6 +678,7 @@ async fn event_loop(
                 Some(HostEvent::Launched(done)) => app.on_launched(done),
                 Some(HostEvent::Addon(result)) => app.on_addon(result),
                 Some(HostEvent::Env(done)) => app.on_env(done),
+                Some(HostEvent::SearchAllDone(done)) => app.on_search_all(done),
                 None => return Ok(Default::default()),
             },
             Some((to, reply)) = reply_rx.recv() => addon_runner::on_reply(&mut app, &runtime, to, reply),
@@ -705,13 +710,8 @@ fn run_effect(
                     });
                 }
                 None => {
-                    let _ = tx.send((
-                        to,
-                        Err(io::Error::new(
-                            io::ErrorKind::NotConnected,
-                            format!("{host}: not connected"),
-                        )),
-                    ));
+                    let error = format!("{host}: not connected");
+                    let _ = tx.send((to, Err(io::Error::new(io::ErrorKind::NotConnected, error))));
                 }
             }
         }
@@ -806,5 +806,6 @@ fn run_effect(
             }
         }
         Effect::Launch(call) => addon_runner::launch(call, app.mode, runtime, conns, ev_tx),
+        Effect::SearchAll { gen, query } => search_edge::run(gen, query, conns, ev_tx),
     }
 }

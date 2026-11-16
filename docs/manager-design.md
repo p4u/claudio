@@ -595,12 +595,28 @@ step.
    - The default is the current session's host.
    - claudio needs only the alias. The system `ssh` resolves User, Port,
      ProxyJump and keys from the user's config.
+   - Two typed characters or more add a row "Search conversations for
+     “<text>”" after the host rows and before "connect to <text>"; it is the
+     default when no host or folder row matches ("connect to" never is while
+     it shows: ↓ to it, then Enter). Enter closes the wizard and searches
+     every connected host whose daemon has the `search` feature
+     (`claudio_core::app::search`, the web's too: 10 s a host, one retry
+     500 ms after `search busy`, newest first). The hits open in the search
+     list (`<age>  <host>  <~/cwd>  <title>`); Enter focuses the tab that has
+     the conversation, or starts one resuming it in its folder. Hosts that
+     failed are named in one notice.
 2. **Directory:** a fuzzy list seeded from:
    - the current dir
    - recent dirs
    - dirs that have claude history (the `cwd` fields in `~/.claude/projects`)
 
-   You can also type a path with completion through `ListDir`.
+   A typed path (`~/…` or `/…`) browses instead: the list is the parent's
+   subfolders (`ListDir`), → or Tab enters one, ← goes up, "start here" picks
+   the listed folder, Alt+. shows hidden ones. A folder that cannot be listed
+   says why ("cannot list ~/x: Permission denied"). The daemon lists folders
+   first, sorted case-insensitively, before it cuts at 5000 entries or at the
+   reply's frame budget; a cut list says "list cut: type the folder's full
+   name", and a typed folder that is not listed is still taken.
    **[later]** zoxide seeding.
 3. **Resume?** If the dir has claude sessions, the list shows `New session`
    plus each existing session with title, last prompt, age and message count.

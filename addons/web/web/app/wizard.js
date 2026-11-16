@@ -1,5 +1,5 @@
-// New-session wizard, pure part. Imports only the fuzzy matcher and the launch options.
-import { filter } from './fuzzy.js';
+// New-session wizard, pure part. Imports only the launch options (the folder field's rules are
+// in dirnav.js).
 import { flagsAllowed, selectFrom } from './launch.js';
 
 // `decls`: the addons' declarations (addons.list), for the launch options and flags.
@@ -22,13 +22,4 @@ export function spawnRequest(state, size, defer = []) {
   if (name) args.name = name;
   if (state.prompt && state.prompt.trim() !== '') args.prompt = state.prompt;
   return { op: 'session.spawn', args };
-}
-
-// Fuzzy over the directories' paths; a typed absolute path that is not listed comes first.
-export function filterDirs(dirs, typed) {
-  const q = String(typed ?? '').trim();
-  if (!q) return dirs;
-  const hits = filter(dirs, q, (d) => d.path);
-  if (q.startsWith('/') && !dirs.some((d) => d.path === q)) return [{ path: q, typed: true }, ...hits];
-  return hits;
 }

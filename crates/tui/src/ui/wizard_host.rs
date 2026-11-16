@@ -67,6 +67,10 @@ pub(super) fn draw_host_step(frame: &mut Frame, rect: Rect, w: &Wizard, hs: &Hos
         .iter()
         .map(|h| format!("  {h}{}", mark(h)))
         .collect();
+    if hs.search {
+        let typed = hs.input.trim();
+        remote_rows.push(format!("  Search conversations for “{typed}”"));
+    }
     if hs.connect_raw {
         let typed = hs.input.trim();
         remote_rows.push(format!("  connect to {typed}{}", mark(typed)));

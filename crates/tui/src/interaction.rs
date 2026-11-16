@@ -607,7 +607,8 @@ impl App {
             }
             Outcome::ConnectHost(host) => self.emit(Effect::Connect(host)),
             Outcome::ListDir(path) => {
-                self.request(&wizard_host, Msg::ListDir { path }, ReplyTo::DirEntries)
+                let to = ReplyTo::DirEntries { path: path.clone() };
+                self.request(&wizard_host, Msg::ListDir { path }, to)
             }
             Outcome::ChooseDir(cwd) => {
                 // A directory picked from the first screen's LOCAL section:
@@ -628,6 +629,7 @@ impl App {
                 };
                 self.request(&wizard_host, Msg::ListClaudeSessions { cwd }, to)
             }
+            Outcome::Search(query) => self.search_all(query),
             Outcome::Spawn {
                 cwd,
                 resume,
@@ -685,6 +687,23 @@ impl App {
             .take(LOCAL_RECENT_LIMIT)
             .cloned()
             .collect()
+    }
+
+    /// The wizard's `ListDir` of `path` answered: its folders, or why it
+    /// could not be listed (shown in the directory step).
+    fn on_dir_entries(&mut self, path: &str, reply: io::Result<Msg>) {
+        let Some(w) = self.wizard_mut() else {
+            return;
+        };
+        match reply {
+            Ok(Msg::DirEntries {
+                path,
+                entries,
+                truncated,
+            }) => w.set_dir_entries(&path, &entries, truncated),
+            Ok(_) => {}
+            Err(e) => w.set_dir_error(path, &e.to_string()),
+        }
     }
 
     pub fn on_host_error(&mut self, host: &str, error: &str) {
@@ -865,11 +884,7 @@ impl App {
                     }
                 }
             }
-            (ReplyTo::DirEntries, Ok(Msg::DirEntries { path, entries, .. })) => {
-                if let Some(w) = self.wizard_mut() {
-                    w.set_dir_entries(&path, &entries);
-                }
-            }
+            (ReplyTo::DirEntries { path }, reply) => self.on_dir_entries(&path, reply),
             (ReplyTo::ClaudeSessions { host, cwd, gen }, reply) => {
                 if gen != self.wizard_generation() {
                     return;
@@ -932,8 +947,6 @@ impl App {
                 }
             }
             (ReplyTo::ClaudeUpdate(host), reply) => self.on_claude_updated(&host, reply),
-            // Typing a path that doesn't exist (yet) is not an error.
-            (ReplyTo::DirEntries, Err(_)) => {}
             (to, Err(e)) if self.connected => {
                 let what = match to {
                     ReplyTo::Ack(what) => what,

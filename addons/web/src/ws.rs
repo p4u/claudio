@@ -24,8 +24,9 @@ use super::spawn::{self, check_size, RespawnReq, SpawnReq};
 use super::state::Layout;
 use super::AppState;
 use super::{addons, auth, ext, git_ops, hosts, sessions};
+use claudio_core::app::search;
 use claudio_core::paths;
-use claudio_core::proto::{Msg, SearchHit, SessionId};
+use claudio_core::proto::{Msg, SessionId};
 
 /// The largest client text frame: a 64 KiB text and its JSON envelope.
 pub(crate) const MAX_TEXT: usize = 128 * 1024;
@@ -42,8 +43,6 @@ const CLOSE_BAD_FRAME: u16 = 1003;
 
 /// Requests one tab may have in flight.
 const IN_FLIGHT: usize = 64;
-/// A search's deadline, counting the wait for the host's slot.
-const SEARCH_DEADLINE: Duration = Duration::from_secs(10);
 
 /// One of the [`MAX_TABS`] tab slots, held from the upgrade to the end of
 /// the tab.
@@ -643,8 +642,9 @@ pub(crate) async fn dispatch(
 }
 
 /// `search` (docs/web-protocol.md §5): every connected host with the
-/// `search` feature, one request per host at a time, 10 s counting the
-/// wait, one more try 500 ms after `search busy`; hits newest first.
+/// `search` feature, through the core's search (`claudio_core::app::search`:
+/// 10 s a host counting the wait for its slot, one more try 500 ms after
+/// `search busy`, hits newest first).
 async fn search(state: &AppState, query: String) -> Value {
     let hosts: Vec<String> = state
         .hub
@@ -659,29 +659,14 @@ async fn search(state: &AppState, query: String) -> Value {
         })
         .filter_map(|h| h["name"].as_str().map(str::to_owned))
         .collect();
-    let asks = hosts.into_iter().map(|host| {
-        let (state, query) = (state.clone(), query.clone());
-        async move {
-            let res = tokio::time::timeout(SEARCH_DEADLINE, search_host(&state, &host, query))
-                .await
-                .unwrap_or_else(|_| Err("timed out".to_owned()));
-            (host, res)
-        }
-    });
-    let mut hits: Vec<(String, SearchHit)> = Vec::new();
-    let mut failed = Vec::new();
-    let mut truncated = false;
-    for (host, res) in futures::future::join_all(asks).await {
-        match res {
-            Ok((found, cut)) => {
-                truncated |= cut;
-                hits.extend(found.into_iter().map(|h| (host.clone(), h)));
-            }
-            Err(error) => failed.push(json!({"host": host, "error": error})),
-        }
-    }
-    hits.sort_by_key(|h| std::cmp::Reverse(h.1.modified));
-    let hits: Vec<Value> = hits
+    let found = search::search_all(hosts, |host| search_host(state, host, query.clone())).await;
+    let failed: Vec<Value> = found
+        .failed
+        .into_iter()
+        .map(|(host, error)| json!({"host": host, "error": daemon_error(error)}))
+        .collect();
+    let hits: Vec<Value> = found
+        .hits
         .into_iter()
         .map(|(host, h)| {
             json!({
@@ -695,19 +680,16 @@ async fn search(state: &AppState, query: String) -> Value {
             })
         })
         .collect();
-    json!({"hits": hits, "failed": failed, "truncated": truncated})
+    json!({"hits": hits, "failed": failed, "truncated": found.truncated})
 }
 
-async fn search_host(
-    state: &AppState,
-    host: &str,
-    query: String,
-) -> Result<(Vec<SearchHit>, bool), String> {
+/// One host's search, one at a time per host (the daemon runs one).
+async fn search_host(state: &AppState, host: String, query: String) -> search::HostHits {
     let slot = {
         let mut slots = state.search_slots.lock().unwrap_or_else(|p| p.into_inner());
         Arc::clone(
             slots
-                .entry(host.to_owned())
+                .entry(host.clone())
                 .or_insert_with(|| Arc::new(Semaphore::new(1))),
         )
     };
@@ -715,24 +697,14 @@ async fn search_host(
         .acquire_owned()
         .await
         .map_err(|_| "closed".to_owned())?;
-    let (client, _) = state.hub.host_client(host).await?;
+    let (client, _) = state.hub.host_client(&host).await?;
     let ask = || {
         client.request(Msg::Search {
             query: query.clone(),
             limit: 0,
         })
     };
-    let mut reply = ask().await;
-    if matches!(&reply, Err(e) if e.to_string() == "search busy") {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        reply = ask().await;
-    }
-    match reply.map_err(daemon_error)? {
-        Msg::SearchReply {
-            hits, truncated, ..
-        } => Ok((hits, truncated)),
-        _ => Err(UNEXPECTED.to_owned()),
-    }
+    search::ask_host(ask).await
 }
 
 #[cfg(test)]

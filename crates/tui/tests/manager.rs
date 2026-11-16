@@ -507,9 +507,11 @@ fn test_wizard_alt_f_forwards_the_agent_and_reconnects_the_host() {
     let path = fake.path();
     let mut tui = harness.start_tui_with(|cmd| cmd.env("PATH", &path));
 
-    // A typed host ("connect to"), then a session in one of its dirs.
+    // A typed host ("connect to", below the search row), then a session in
+    // one of its dirs.
     tui.send_paste("fakehost");
     tui.wait_for("connect to fakehost", Region::Screen, WAIT);
+    tui.send_keys(DOWN_ARROW);
     tui.wait_for("Alt+f ssh agent for fakehost: off", Region::Screen, WAIT);
     tui.send_keys(ENTER);
     tui.wait_for("New session on fakehost", Region::Screen, DAEMON_WAIT);
@@ -616,6 +618,21 @@ fn test_wizard_browse_from_home_and_start_here() {
         WAIT,
     );
 
+    tui.quit(WAIT);
+}
+
+/// A path under a regular file cannot be listed: the directory step says
+/// why instead of showing an empty list (a mode-000 folder would not do: it
+/// is listable when the suite runs as root).
+#[test]
+fn test_wizard_shows_a_listing_error() {
+    let harness = ManagerHarness::new();
+    fs::write(harness.home.join("afile"), b"").expect("write a file under HOME");
+    let mut tui = harness.start_tui();
+    tui.send_keys(ENTER);
+    tui.wait_for("start here: ~", Region::Screen, WAIT);
+    tui.send_keys(b"afile/x");
+    tui.wait_for("cannot list ~/afile: Not a directory", Region::Screen, WAIT);
     tui.quit(WAIT);
 }
 
@@ -1823,6 +1840,11 @@ fn test_plain_rejects_print_mode() {
 /// Write one claude transcript for `dir` in `home`, filed the way claude
 /// files it (under the resolved path).
 fn write_transcript(home: &std::path::Path, dir: &std::path::Path) {
+    write_transcript_saying(home, dir, "PROBE-PROMPT hello");
+}
+
+/// [`write_transcript`] whose one prompt is `prompt`.
+fn write_transcript_saying(home: &std::path::Path, dir: &std::path::Path, prompt: &str) {
     let real = fs::canonicalize(dir).unwrap();
     let encoded: String = real
         .to_string_lossy()
@@ -1833,7 +1855,7 @@ fn write_transcript(home: &std::path::Path, dir: &std::path::Path) {
     fs::create_dir_all(&pdir).unwrap();
     let rec = serde_json::json!({
         "type": "user", "cwd": real.to_string_lossy(),
-        "message": {"role": "user", "content": "PROBE-PROMPT hello"},
+        "message": {"role": "user", "content": prompt},
     });
     fs::write(
         pdir.join("11111111-2222-3333-4444-555555555555.jsonl"),
@@ -1859,6 +1881,28 @@ fn test_wizard_start_here_offers_resume() {
     tui.send_keys(ENTER);
     thread::sleep(Duration::from_millis(1500));
     tui.wait_for("resume?", Region::Screen, WAIT);
+}
+
+/// The first screen's "Search conversations" row finds a conversation on
+/// the connected hosts, lists it with its host, and Enter resumes it in its
+/// folder. (The harness has no CLAUDE_CONFIG_DIR: transcripts are under
+/// `$HOME/.claude/projects`.)
+#[test]
+fn test_wizard_search_row_finds_and_resumes_a_conversation() {
+    let h = ManagerHarness::new();
+    write_transcript_saying(&h.home, &h.dirs[0], "explain the zyzzyva please");
+    let mut tui = h.start_tui();
+    tui.wait_for("Explore local dirs", Region::Screen, WAIT);
+    tui.send_keys(b"zyzzyva");
+    tui.wait_for("Search conversations for “zyzzyva”", Region::Screen, WAIT);
+    tui.send_keys(ENTER);
+    tui.wait_for("1 conversations", Region::Screen, WAIT);
+    tui.wait_for("local  ", Region::Screen, WAIT);
+    tui.wait_for("explain the zyzzyva please", Region::Screen, WAIT);
+    tui.send_keys(ENTER);
+    // (The fake prints its argv on one long, wrapped line.)
+    tui.wait_for("--resume 11111111-2222", Region::Pane, WAIT);
+    tui.quit(WAIT);
 }
 
 /// The same when the directory is picked from the first screen's recent list.

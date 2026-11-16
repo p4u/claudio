@@ -1,12 +1,14 @@
-// The new-session wizard: one dialog, top to bottom (host, kind, folder, conversation, launch
-// options, name, prompt). A launch an addon wants reviewed first shows that checklist next.
+// The new-session wizard: one dialog, top to bottom (find a conversation, host, kind, folder,
+// conversation, launch options, name, prompt). A launch an addon wants reviewed first shows that checklist next.
 import { html } from 'htm/preact';
 import { signal } from '@preact/signals';
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { model, focused, reqQuiet } from '../store.js';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { model, focused, reqQuiet, conn } from '../store.js';
 import { overlay, defineAction } from '../palette.js';
 import { termSize } from '../term.js';
-import { initialWizard, spawnRequest, filterDirs } from '../wizard.js';
+import { initialWizard, spawnRequest } from '../wizard.js';
+import { startFolder } from '../dirnav.js';
+import { pickHit } from '../hits.js';
 import { optionsByGroup, groupChoices, groupValue, launchFlags, flagsAllowed, reviewLoop } from '../launch.js';
 import { Dialog } from './modal.js';
 import { toast } from './toasts.js';
@@ -15,6 +17,8 @@ import { openSession } from './session-actions.js';
 import { addonDecls, loadAddonDecls } from './panel.js';
 import { openChecklist, checklist as checklistShown } from './checklist.js';
 import { AGENT_HELP } from './hosts.js';
+import { DirField } from './dirfield.js';
+import { FindField } from './wizard-find.js';
 
 export const wizardArgs = signal({});
 
@@ -25,8 +29,6 @@ export function openWizard(opts = {}) {
 }
 
 const abs = (p) => typeof p === 'string' && p.startsWith('/');
-const dirname = (p) => { const t = p.replace(/\/+$/, ''); const i = t.lastIndexOf('/'); return i <= 0 ? '/' : t.slice(0, i); };
-const join = (a, b) => `${a.replace(/\/+$/, '')}/${b}`;
 
 function useDebounced(value, ms) {
   const [v, setV] = useState(value);
@@ -88,66 +90,21 @@ function HostField({ w, set }) {
   </div>`;
 }
 
-function Folders({ w, set }) {
-  const [dirs, setDirs] = useState(null);
-  const [browse, setBrowse] = useState(null); // { path, entries, truncated, error }
-  const [showHidden, setShowHidden] = useState(false);
-  useEffect(() => {
-    let dead = false;
-    setDirs(null);
-    reqQuiet('fs.projects', { host: w.host, limit: 50 }).then((r) => { if (!dead) setDirs(r.dirs ?? []); }).catch(() => { if (!dead) setDirs([]); });
-    return () => { dead = true; };
-  }, [w.host]);
-  const list = useMemo(() => filterDirs(dirs ?? [], w.cwd).slice(0, 8), [dirs, w.cwd]);
-  async function open(path) {
-    setBrowse({ path, entries: null, error: null });
-    try {
-      const r = await reqQuiet('fs.list', { host: w.host, path });
-      setBrowse({ path: r.path ?? path, entries: r.entries ?? [], truncated: !!r.truncated, error: null });
-    } catch (e) {
-      setBrowse({ path, entries: [], error: e.message });
-    }
-  }
-  const home = dirs?.[0] ? dirname(dirs[0].path) : '/';
+// The folder field, "Browse folders…" and why the folder cannot start yet. `folder`:
+// startFolder()'s answer for the field.
+function Folders({ w, set, home, online, folder, onPicked, onEdit }) {
+  const [browse, setBrowse] = useState(0);
   return html`<div class="wz-field">
     <label for="wz-dir">Folder</label>
-    <input id="wz-dir" class="input" data-testid="wizard-dir-input" data-autofocus value=${w.cwd} placeholder="/path/to/project" autocomplete="off" spellcheck=${false}
-      onInput=${(e) => set({ cwd: e.target.value, resume: null })} />
-    ${w.cwd && !abs(w.cwd) ? html`<p class="wz-note wz-warn">Type an absolute path (it starts with /).</p>` : null}
-    <ul class="wz-dirs" data-testid="wizard-dirs">
-      ${dirs === null ? html`<li class="wz-note">Looking for recent projects…</li>` : null}
-      ${list.map((d) => html`<li key=${d.path}><button type="button" class="wz-dir" data-testid="wizard-dir" data-path=${d.path} aria-pressed=${d.path === w.cwd} onClick=${() => set({ cwd: d.path, resume: null })}>
-        <span class="wz-dir-path">${d.typed ? `Use ${d.path}` : d.path}</span>
-        ${d.git ? html`<span class="wz-dir-branch">⎇ ${d.git}</span>` : null}
-        ${d.modified ? html`<span class="wz-dir-age">${ago(d.modified)}</span>` : null}
-      </button></li>`)}
-    </ul>
-    <button type="button" class="wz-link" data-testid="wizard-browse" aria-expanded=${browse !== null} onClick=${() => (browse ? setBrowse(null) : open(abs(w.cwd) ? w.cwd : home))}>
-      ${browse ? 'Hide folder browser' : 'Browse folders…'}</button>
-    ${browse ? html`<div class="wz-browser" data-testid="wizard-browser">
-      <div class="wz-browser-head">
-        <button type="button" class="btn btn-sm" aria-label="Parent folder" disabled=${browse.path === '/'} onClick=${() => open(dirname(browse.path))}>..</button>
-        <code class="wz-browser-path" title=${browse.path}>${browse.path}</code>
-        <button type="button" class="btn btn-sm" onClick=${() => set({ cwd: browse.path, resume: null })}>Use this folder</button>
-        <label class="wz-check"><input type="checkbox" checked=${showHidden} onChange=${(e) => setShowHidden(e.target.checked)} /> hidden</label>
-      </div>
-      <ul class="wz-entries">
-        ${browse.entries === null ? html`<li class="wz-note">Reading…</li>` : null}
-        ${browse.error ? html`<li class="wz-note wz-warn">${browse.error}</li>` : null}
-        ${(browse.entries ?? []).filter((e) => e.dir && (showHidden || !e.hidden)).map((e) => html`<li key=${e.name}>
-          <button type="button" class="wz-entry" onClick=${() => { set({ cwd: join(browse.path, e.name), resume: null }); open(join(browse.path, e.name)); }}>
-            <span>▸ ${e.name}${e.symlink ? ' →' : ''}</span>
-            ${e.git ? html`<span class="wz-dir-branch">⎇ ${e.git}</span>` : null}
-            ${e.claude_at ? html`<span class="wz-dir-age">claude ${ago(e.claude_at)}</span>` : null}
-          </button></li>`)}
-        ${browse.truncated ? html`<li class="wz-note">The list is cut. Type the path to go further.</li>` : null}
-      </ul>
-    </div>` : null}
+    <${DirField} w=${w} set=${set} home=${home.path} online=${online} browse=${browse} onPicked=${onPicked} onEdit=${onEdit} />
+    ${folder.why ? html`<p class="wz-note wz-warn">${folder.why}</p>` : null}
+    <button type="button" class="wz-link" data-testid="wizard-browse" onClick=${() => setBrowse((n) => n + 1)}>Browse folders…</button>
   </div>`;
 }
 
-function ResumeField({ w, set }) {
-  const cwd = useDebounced(w.cwd, 300);
+// `cwd`: the folder, absolute (`~` resolved), or '' while there is none.
+function ResumeField({ w, set, cwd: folder }) {
+  const cwd = useDebounced(folder, 300);
   const [list, setList] = useState(null);
   useEffect(() => {
     if (!abs(cwd)) { setList(null); return; }
@@ -211,7 +168,41 @@ export function Wizard() {
   const set = (patch) => setW((cur) => ({ ...cur, ...patch }));
   useEffect(() => { loadAddonDecls(); }, []);
   const shell = w.kind === 'shell';
-  const ready = abs(w.cwd) && !busy && !w.other;
+  // The host's home, for `~` in the folder (the page never sends `~` as a cwd); asked once the
+  // connection is up (a wizard can open before it is).
+  const online = conn.value === 'open';
+  const [home, setHome] = useState({ host: null, path: null, error: null });
+  useEffect(() => {
+    let dead = false;
+    setHome({ host: w.host, path: null, error: null });
+    if (!online) return undefined;
+    reqQuiet('fs.list', { host: w.host, path: '~' })
+      .then((r) => { if (!dead) setHome({ host: w.host, path: r.path ?? null, error: null }); })
+      .catch((e) => { if (!dead) setHome({ host: w.host, path: null, error: e.message }); });
+    return () => { dead = true; };
+  }, [w.host, online]);
+  // Every home learned so far, by host, for the find hits' `~`.
+  const [homes, setHomes] = useState({});
+  useEffect(() => { if (home.path) setHomes((m) => ({ ...m, [home.host]: home.path })); }, [home]);
+  // The home of the host shown: the render after a host change still holds the previous one's.
+  const mine = home.host === w.host ? home : { path: null, error: null };
+  const folder = startFolder(w.cwd, mine.path, mine.error);
+  const ready = abs(folder.cwd) && !busy && !w.other;
+  // Focus Start once it can start (it may wait for the home, for a `~` folder).
+  const startBtn = useRef(null);
+  const [toStartAsked, setToStart] = useState(false);
+  useEffect(() => {
+    if (toStartAsked && ready) { startBtn.current?.focus(); setToStart(false); }
+  }, [toStartAsked, ready]);
+  const toStart = () => setToStart(true);
+  // A hit of "Find a conversation…": its live session, or this wizard filled in to resume it.
+  const found = (hit) => {
+    const to = pickHit(model.value.sessions, hit);
+    if (to.focus) { overlay.value = null; openSession(to.focus); return; }
+    const { host, cwd, conversation } = to.resume;
+    set({ host, hosts: [...new Set([...w.hosts, host])], cwd, resume: conversation, kind: 'claude', other: false });
+    toStart();
+  };
 
   async function start() {
     if (!ready || busyRef.current) return;
@@ -219,9 +210,9 @@ export function Wizard() {
     setBusy(true);
     try {
       const size = termSize(focused.value) ?? { rows: 24, cols: 80 };
-      const starting = w.name.trim() || w.cwd.replace(/\/+$/, '').split('/').pop() || 'the session';
+      const starting = w.name.trim() || folder.cwd.replace(/\/+$/, '').split('/').pop() || 'the session';
       const spawn = (defer) => {
-        const { op, args: a } = spawnRequest(w, size, defer);
+        const { op, args: a } = spawnRequest({ ...w, cwd: folder.cwd }, size, defer);
         return reqQuiet(op, a);
       };
       const r = await reviewLoop(spawn, (rv) => openChecklist({ addon: rv.addon, id: rv.id, review: true, starting }));
@@ -248,6 +239,7 @@ export function Wizard() {
 
   return html`<${Dialog} title=${shell ? 'New terminal' : 'New session'} testid="wizard" wide onClose=${() => { overlay.value = null; }}>
     <div class="wizard" onKeyDown=${key}>
+      <${FindField} onPick=${found} homes=${homes} />
       <${HostField} w=${w} set=${set} />
       <div class="wz-field">
         <label id="wz-kind-l">What to start</label>
@@ -256,8 +248,8 @@ export function Wizard() {
           <button type="button" class="seg-btn" role="radio" aria-checked=${shell} data-testid="wizard-kind-shell" onClick=${() => set({ kind: 'shell', resume: null })}>Terminal</button>
         </div>
       </div>
-      <${Folders} w=${w} set=${set} />
-      ${shell ? null : html`<${ResumeField} w=${w} set=${set} />
+      <${Folders} w=${w} set=${set} home=${mine} online=${online} folder=${folder} onPicked=${toStart} onEdit=${() => setToStart(false)} />
+      ${shell ? null : html`<${ResumeField} w=${w} set=${set} cwd=${folder.cwd ?? ''} />
         <${LaunchFields} w=${w} set=${set} />`}
       <div class="wz-field">
         <label for="wz-name">Name <span class="muted">(optional)</span></label>
@@ -270,7 +262,7 @@ export function Wizard() {
     </div>
     <div class="dialog-actions">
       <button type="button" class="btn" onClick=${() => { overlay.value = null; }}>Cancel</button>
-      <button type="button" class="btn btn-primary" data-testid="wizard-start" disabled=${!ready} onClick=${start}>${busy ? 'Starting…' : shell ? 'Open terminal' : 'Start session'}</button>
+      <button type="button" class="btn btn-primary" data-testid="wizard-start" ref=${startBtn} disabled=${!ready} onClick=${start}>${busy ? 'Starting…' : shell ? 'Open terminal' : 'Start session'}</button>
     </div>
   <//>`;
 }

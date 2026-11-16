@@ -492,9 +492,15 @@ fn draw_wizard(frame: &mut Frame, w: &Wizard, app: &App) {
         } else {
             ""
         };
+        let (line, style) = match w.dir_status() {
+            Some(status) => (status.to_owned(), Style::default().fg(Color::Yellow)),
+            None => (
+                format!("{hint}{} hidden: {state}", toggle_key(app)),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        };
         frame.render_widget(
-            Paragraph::new(format!("{hint}{} hidden: {state}", toggle_key(app)))
-                .style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(line).style(style),
             Rect {
                 y: head.y + 1,
                 height: 1,

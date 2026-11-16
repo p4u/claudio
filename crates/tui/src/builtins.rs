@@ -1,5 +1,6 @@
 //! The built-in extensions' actions: search (`s`: find a conversation on
-//! the active session's host and resume it) and snippets (`p`: paste a
+//! the active session's host and resume it; the wizard's "Search
+//! conversations" row searches every connected host) and snippets (`p`: paste a
 //! saved prompt, `P`: save the last one). Pure, like `app.rs`: the daemon
 //! searches and reads the last prompt (`Msg::Search`, `Msg::LastPrompt`),
 //! and the snippet files are read and written by the event loop
@@ -16,6 +17,30 @@ use claudio_core::proto::{Msg, SearchHit, SessionKind};
 
 /// The most hits a search asks for.
 const SEARCH_LIMIT: u32 = 50;
+
+/// Why the wizard's search found no host to ask.
+const NO_SEARCH_HOST: &str = "no connected host can search (run `claudio daemon restart` there)";
+
+/// What an [`Effect::SearchAll`] found (`search_edge::run`).
+#[derive(Debug)]
+pub struct SearchAllDone {
+    pub gen: u64,
+    pub query: String,
+    /// How many hosts were asked (0: none could search).
+    pub searched: usize,
+    /// Newest first.
+    pub hits: Vec<HostHit>,
+    /// `(host, error)`.
+    pub failed: Vec<(String, String)>,
+}
+
+/// One hit with its host and that host's home (for `~/`).
+#[derive(Debug)]
+pub struct HostHit {
+    pub host: String,
+    pub home: String,
+    pub hit: SearchHit,
+}
 
 impl App {
     /// A built-in extension's action (`input`: what its input line got).
@@ -67,9 +92,14 @@ impl App {
             }
             Ok(Msg::SearchReply { query, hits, .. }) => {
                 let title = format!("{} conversations · \"{query}\"", hits.len());
+                let home = if host == "local" {
+                    self.home.as_str()
+                } else {
+                    ""
+                };
                 let items = hits
                     .into_iter()
-                    .map(|hit| self.search_item(host, hit))
+                    .map(|hit| self.search_item(host, home, hit, false))
                     .collect();
                 if self.modal.is_none() {
                     self.modal = Some(Modal::Picker(Box::new(Picker::new(title, items))));
@@ -89,24 +119,80 @@ impl App {
         self.redraw = true;
     }
 
-    /// One hit as a list line: `<when>  <~/cwd>  <title>`, the snippet as
-    /// its detail, resuming it as its result.
-    fn search_item(&self, host: &str, hit: SearchHit) -> ListItem {
-        let home = if host == "local" {
-            self.home.as_str()
-        } else {
-            ""
-        };
+    /// One hit as a list line: `<when>  [<host>  ]<~/cwd>  <title>` (`home`
+    /// is `host`'s, empty when unknown), the snippet as its detail, resuming
+    /// it as its result.
+    fn search_item(&self, host: &str, home: &str, hit: SearchHit, with_host: bool) -> ListItem {
         let age = fmt_age(self.now.saturating_sub(hit.modified));
         let cwd = abbreviate_home(&hit.cwd, home);
+        let host_col = if with_host {
+            format!("{host}  ")
+        } else {
+            String::new()
+        };
         ListItem {
-            label: format!("{age}  {cwd}  {}", hit.title),
+            label: format!("{age}  {host_col}{cwd}  {}", hit.title),
             detail: Some(hit.snippet),
             result: ActionResult::Resume {
                 host: host.to_owned(),
                 cwd: hit.cwd,
                 conversation: hit.conversation,
             },
+        }
+    }
+
+    /// The wizard's "Search conversations" row: close the wizard and search
+    /// every connected host ([`Effect::SearchAll`], one at a time); the hits
+    /// come back to [`App::on_search_all`].
+    pub(super) fn search_all(&mut self, query: String) {
+        self.modal = None;
+        if self.searching.is_some() {
+            return self.notify("a search is already running");
+        }
+        self.modal_gen += 1;
+        let gen = self.modal_gen;
+        (self.pending_action, self.searching) = (Some(gen), Some(gen));
+        self.notify("searching…");
+        self.emit(Effect::SearchAll { gen, query });
+    }
+
+    /// What the search started under `gen` found: its hits in the search
+    /// list (Enter resumes one), the hosts that failed in one notice.
+    pub(crate) fn on_search_all(&mut self, done: SearchAllDone) {
+        if self.searching == Some(done.gen) {
+            self.searching = None;
+        }
+        if self.pending_action != Some(done.gen) {
+            return;
+        }
+        self.pending_action = None;
+        self.redraw = true;
+        if done.searched == 0 {
+            return self.notify(NO_SEARCH_HOST);
+        }
+        let failed = (!done.failed.is_empty()).then(|| {
+            let hosts: Vec<String> = done
+                .failed
+                .iter()
+                .map(|(h, e)| format!("{h} ({e})"))
+                .collect();
+            format!("search failed on {}", hosts.join(", "))
+        });
+        if done.hits.is_empty() {
+            return self.notify(failed.unwrap_or_else(|| "no matches".to_owned()));
+        }
+        if self.modal.is_some() {
+            return self.notify("close the popup and run it again");
+        }
+        let title = format!("{} conversations · \"{}\"", done.hits.len(), done.query);
+        let items = done
+            .hits
+            .into_iter()
+            .map(|h| self.search_item(&h.host, &h.home, h.hit, true))
+            .collect();
+        self.modal = Some(Modal::Picker(Box::new(Picker::new(title, items))));
+        if let Some(failed) = failed {
+            self.notify(failed);
         }
     }
 
@@ -238,7 +324,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::LaunchCall;
-    use crate::test_support::{app_with, info};
+    use crate::test_support::{alt, app_with, info, press};
+    use crossterm::event::KeyCode;
 
     fn hit(conversation: &str, cwd: &str) -> SearchHit {
         SearchHit {
@@ -322,6 +409,149 @@ mod tests {
         let spec = spawned.expect("a spawn");
         assert_eq!(spec.cwd, "/home/u/p");
         assert_eq!(spec.args, ["--resume", "new-conv"]);
+    }
+
+    /// Open the wizard (Alt+n) unless it is, type `text` on its first
+    /// screen and press Enter: the `SearchAll` that emits.
+    fn wizard_search(app: &mut App, text: &str) -> (u64, String) {
+        if app.modal.is_none() {
+            app.on_terminal(alt('n'));
+        }
+        for c in text.chars() {
+            app.on_terminal(press(KeyCode::Char(c)));
+        }
+        app.on_terminal(press(KeyCode::Enter));
+        app.take_effects()
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::SearchAll { gen, query } => Some((gen, query)),
+                _ => None,
+            })
+            .expect("a SearchAll")
+    }
+
+    fn host_hit(host: &str, home: &str, conversation: &str, cwd: &str, modified: u64) -> HostHit {
+        let hit = SearchHit {
+            modified,
+            ..hit(conversation, cwd)
+        };
+        let (host, home) = (host.to_owned(), home.to_owned());
+        HostHit { host, home, hit }
+    }
+
+    #[test]
+    fn the_wizard_search_row_lists_every_hosts_hits_and_resumes() {
+        let mut app = app_with(&[info(Some(1), Some("open-conv"))]);
+        app.activate(0);
+        app.on_terminal(alt('n'));
+        assert!(matches!(app.modal, Some(Modal::Wizard(_))));
+        let (gen, query) = wizard_search(&mut app, "zyzzyva");
+        assert_eq!(query, "zyzzyva");
+        assert!(app.modal.is_none(), "Enter closes the wizard");
+        let done = |gen, hits, failed| SearchAllDone {
+            gen,
+            query: query.clone(),
+            searched: 3,
+            hits,
+            failed,
+        };
+        // A reply for an older search is dropped.
+        app.on_search_all(done(
+            gen - 1,
+            vec![host_hit("local", "/home/u", "x", "/x", 1)],
+            vec![],
+        ));
+        assert!(app.modal.is_none());
+        let hits = vec![
+            host_hit("local", "/home/u", "open-conv", "/home/u/p", 200),
+            host_hit("z6", "/srv", "far-conv", "/srv/app", 100),
+        ];
+        let failed = vec![("box".to_owned(), "timed out".to_owned())];
+        app.on_search_all(done(gen, hits, failed));
+        let Some(Modal::Picker(picker)) = &app.modal else {
+            panic!("no list")
+        };
+        assert_eq!(picker.title, "2 conversations · \"zyzzyva\"");
+        assert!(
+            picker.items[0]
+                .label
+                .ends_with("local  ~/p  Fix the parser"),
+            "{}",
+            picker.items[0].label
+        );
+        assert!(
+            picker.items[1].label.ends_with("z6  ~/app  Fix the parser"),
+            "{}",
+            picker.items[1].label
+        );
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "search failed on box (timed out)"
+        );
+        // A hit whose conversation is open in a tab: that tab, no new one.
+        let open = picker.items[0].result.clone();
+        app.modal = None;
+        let tabs = app.sessions.len();
+        app.apply_result(open);
+        assert_eq!(app.sessions.len(), tabs);
+        assert_eq!(app.active, Some(0));
+    }
+
+    #[test]
+    fn a_wizard_search_says_why_it_found_nothing_and_runs_one_at_a_time() {
+        let mut app = app_with(&[]);
+        let (gen, query) = wizard_search(&mut app, "zyzzyva");
+        // One at a time: a second search waits for the first.
+        app.on_terminal(alt('n'));
+        for c in "other".chars() {
+            app.on_terminal(press(KeyCode::Char(c)));
+        }
+        app.on_terminal(press(KeyCode::Enter));
+        assert!(!app
+            .take_effects()
+            .iter()
+            .any(|e| matches!(e, Effect::SearchAll { .. })));
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "a search is already running"
+        );
+        let none = SearchAllDone {
+            gen,
+            query,
+            searched: 0,
+            hits: vec![],
+            failed: vec![],
+        };
+        app.on_search_all(none);
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "no connected host can search (run `claudio daemon restart` there)"
+        );
+        let (gen, query) = wizard_search(&mut app, "zyzzyva");
+        let failed = vec![("z6".to_owned(), "connection closed".to_owned())];
+        let (searched, hits) = (2, vec![]);
+        app.on_search_all(SearchAllDone {
+            gen,
+            query,
+            searched,
+            hits,
+            failed,
+        });
+        assert_eq!(
+            app.notice.as_ref().unwrap().text,
+            "search failed on z6 (connection closed)"
+        );
+        let (gen, query) = wizard_search(&mut app, "zyzzyva");
+        let (searched, hits, failed) = (1, vec![], vec![]);
+        app.on_search_all(SearchAllDone {
+            gen,
+            query,
+            searched,
+            hits,
+            failed,
+        });
+        assert_eq!(app.notice.as_ref().unwrap().text, "no matches");
+        assert!(app.modal.is_none());
     }
 
     #[test]

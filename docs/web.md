@@ -104,6 +104,21 @@ without one it listens on `0.0.0.0:7337`, IPv4 only. It is the one listener: `--
 (with `--remote`) makes a new certificate. `--set-password` and `--print-cert` take no other
 argument and exit.
 
+### The new-session wizard
+
+`n` (or `Alt+n`) opens it. "Find a conversation…" at the top searches every connected host
+(two characters at least); Enter or a click on a hit fills in its host and folder to resume it,
+or focuses its session when one already has it. The folder field takes a recent folder (typing
+filters them) or a path: `~/` or `/` lists that folder's subfolders as you type, filtered by
+what follows the last `/`. ↓/↑ move, Tab (or → at the end) enters the highlighted folder,
+Backspace after a `/` goes up a level, Enter on a folder enters it and Enter on "▸ use <folder>"
+picks the folder you typed and moves to Start (Enter again starts). Esc closes the list, a
+second Esc the wizard. "Browse folders…" opens the list at `~/`. Hidden folders show with the
+"hidden" box or a name starting with `.`. A folder that cannot be listed says why; a cut list
+(more than 5000 entries) says "list cut: type the folder's full name", and a folder that is not
+listed can still be typed. `~` is resolved with the host's home (read with `fs.list`) before
+anything starts: the page never sends `~` as a folder.
+
 ### Custom env vars
 
 `Alt+,` (or Environment in the palette and in Settings) opens the env vars of the claude
@@ -127,7 +142,7 @@ environment puts them in that host's transcript.
 ### SSH hosts
 
 A host is added by name or `user@host`, from the hosts panel or Alt+n's "Another host…" (the
-TUI's Alt+n takes a typed host too). It needs no `~/.ssh/config` entry, but key-based ssh:
+TUI's Alt+n takes a typed host too: ↓ to "connect to", then Enter). It needs no `~/.ssh/config` entry, but key-based ssh:
 claudio runs ssh with `BatchMode`, so a password is never asked. The first connection records
 the host's key (`StrictHostKeyChecking=accept-new`); a changed key is refused with ssh's message.
 claudio gives ssh that option on its command line, so for claudio's connections it replaces a
@@ -477,7 +492,8 @@ Rust test in `addons/web/tests/web.rs`; rows without an automated test say how t
 | SSH agent forwarding | `Alt+f` in the wizard's Where step | host panel "SSH agent" row; "Forward my SSH agent" in Add host and the wizard's "Another host…" | `hosts.forward_agent`, Host `forward_agent` | `the host panel switches ssh agent forwarding for a remote host`; `the wizard sends the agent choice before it connects a typed host`; `web_forward_agent_reconnects_a_connected_host_and_keeps_its_sessions`; `web_forwarded_agent_reaches_terminals_through_the_relay` |
 | Terminal panes (1, 2, 4) | `Alt+←/→` | pane grid buttons, `1`-`4`, drag a card | `session.attach`, `session.detach`, `session.resize`, `layout.save` | `a pane shows the terminal and typed keys echo`; `web_attach_snapshot_input_and_resize`; `web_two_tabs_share_one_attach` |
 | Terminal tabs | `Alt+c` | `t`, "Terminal beside" in a pane | `session.shell` | `a terminal tab runs echo ok`; `web_session_lifecycle_shell_rename_kill` |
-| New-session wizard: dirs | `Alt+n` | `n`: folder field, recent folders, browser | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir` |
+| New-session wizard: dirs | `Alt+n` (typed `~/`, `/` browse) | `n`: the folder combobox (recent folders, typed `~/`, `/` navigation), "Browse folders…" | `fs.list`, `fs.projects`, `session.spawn` | `the wizard starts a session in a chosen dir`; `typing ~/ lists the home folders; typing filters, Tab enters, Backspace goes up`; `Enter on use picks the folder and focuses Start; Enter again starts there` |
+| Wizard: find a conversation | `Alt+n`: "Search conversations for …" row | "Find a conversation…" | `search`, `session.spawn` (`resume`) | `Find a conversation fills the wizard and starts it with resume`; `a hit whose conversation is live focuses that session and closes the wizard` |
 | Wizard: resume | `Alt+n` resume list | "Conversation" field | `claude.sessions`, `session.spawn` (`resume`) | `web_reader_and_search_read_a_fixture_transcript`; `search finds a fixture conversation` |
 | Wizard: launch options (proxy profile) | wizard proxy choice | one select per launch option group ("Proxy") | `addons.list`, `session.spawn` (`launch`) | `web_spawn_keeps_proxy_and_plugin_secrets_out_of_the_browser`; `the wizard starts a session in a chosen dir` |
 | Wizard: launch flags (first-party) | wizard checkbox | one checkbox per labelled flag ("First-party session") | `session.spawn` (`launch.flags`) | `web_addons_ops_refuse_unknown_addons_and_bad_args` (the rule); the UI box: manual check |

@@ -11,6 +11,7 @@ pub mod env;
 pub mod extensions;
 pub mod label;
 pub mod launch;
+pub mod search;
 pub mod snippets;
 pub mod state;
 

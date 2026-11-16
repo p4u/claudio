@@ -183,7 +183,7 @@ declares. The services addons use today: `paths` (all); `term::{probe, strip_esc
 (api); `proto`, `text`, `client`, `remote::bootstrap`, `term::secret` and
 `app::{addons, launch, browser}` (web and vocdoni); `claude::SESSION_MARKERS` and
 `app::config_edit` (vocdoni, web; and `daemon::test_support` in the web's tests); `config`, `freshness`, `claude::{hooks, update}`,
-`remote::{hosts, validate_host}`, `sys::hostname`, `app::label`, `app::env` and `claude::env` (web). The web addon (the former in-tree web UI, a second front-end) also uses
+`remote::{hosts, validate_host}`, `sys::hostname`, `app::label`, `app::env`, `app::search` and `claude::env` (web). The web addon (the former in-tree web UI, a second front-end) also uses
 `app::{state, connections, extensions, snippets, env}`: the layer both front-ends share (A5).
 
 ### Session manager (bare `claudio`)
@@ -242,7 +242,8 @@ flowchart LR
   `launch/` (the launch composer), `config_edit.rs` (every `config.toml` writer: a minimal,
   atomic section edit under one process-wide lock), `state.rs` (`state.json`),
   `connections.rs`, `extensions/` (the registry, external manifests in
-  `~/.config/claudio/extensions/`, the extension host), `snippets.rs`, `env.rs` (the custom env:
+  `~/.config/claudio/extensions/`, the extension host), `snippets.rs`, `search.rs` (the
+  conversation search over every connected host, both front-ends'), `env.rs` (the custom env:
   `config.toml [env]` and `session-env.json`, both front-ends' and the composer's).
 - **Launch composer** (`app/launch/`): the one path of a claude session's `Spawn`/`Respawn`,
   from the TUI, `--plain` and the web. Resolve (every `Launch` addon's `Routing`; a `Required`

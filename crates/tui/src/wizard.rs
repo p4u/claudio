@@ -14,6 +14,7 @@ use claudio_core::addon::{LaunchOption, LaunchSelect};
 use claudio_core::proto::{ClaudeSession, DirEntry};
 
 use super::fmt::{abbreviate_home, fmt_age};
+pub use super::wizard_host::{HostSection, HostStep};
 use super::wizard_route::Routes;
 
 /// Enrichment metadata for a candidate directory.
@@ -45,323 +46,15 @@ pub enum Outcome {
     ListDir(String),
     /// A directory was chosen: request `ListClaudeSessions` for it.
     ChooseDir(String),
+    /// Search every connected host's conversations for this text (the first
+    /// screen's "Search conversations" row).
+    Search(String),
     /// Start claude in `cwd`, resuming `resume` if set, routed as `select`.
     Spawn {
         cwd: String,
         resume: Option<String>,
         select: LaunchSelect,
     },
-}
-
-// ── Step 0: host / first screen ───────────────────────────────────────────────
-
-/// Which section of the first screen has keyboard focus.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostSection {
-    Local,
-    Remote,
-}
-
-/// State for the wizard's first screen.
-///
-/// Two scrollable sections:
-/// - **LOCAL** (top): "Explore local dirs…" + recent local dirs not already open
-/// - **REMOTE** (bottom): SSH host candidates
-///
-/// Tab switches focus between sections. ↑/↓ cross section edges. Typing
-/// filters both sections at once. Backspace edits the filter; Esc cancels.
-#[derive(Debug, Clone)]
-pub struct HostStep {
-    /// Shared filter string (applied to both sections).
-    pub input: String,
-    /// Which section has keyboard focus.
-    pub focus: HostSection,
-    /// Selected row in the LOCAL section (0 = "Explore local dirs…").
-    pub local_selected: usize,
-    /// Filtered local dirs (does not include the "Explore" pseudo-entry).
-    pub local_items: Vec<String>,
-    /// All recent local dirs (unfiltered).
-    local_dirs: Vec<String>,
-    /// Selected row in the REMOTE section.
-    pub selected: usize,
-    /// Filtered candidate list of SSH hosts.
-    pub items: Vec<String>,
-    /// `Some(host)` while bootstrap + connect_ssh is running.
-    pub connecting: Option<String>,
-    /// The full unfiltered SSH host list.
-    candidates: Vec<String>,
-    /// `true` when the query looks like a bare hostname / `user@host` but matches no
-    /// known candidate.  A synthetic "connect to <query>" row is appended to the
-    /// REMOTE section and auto-selected so Enter immediately initiates the connection.
-    pub connect_raw: bool,
-}
-
-impl HostStep {
-    /// Build a host step: `active_host` is pre-selected, `extra` are the SSH
-    /// host candidates (from `hosts::candidates()`) and `local_dirs` the
-    /// LOCAL section's recent dirs.
-    pub fn with_local_dirs(active_host: &str, extra: &[String], local_dirs: &[String]) -> HostStep {
-        let candidates: Vec<String> = extra
-            .iter()
-            .filter(|h| h.as_str() != "local")
-            .cloned()
-            .collect();
-        let remote_selected = if active_host != "local" {
-            candidates
-                .iter()
-                .position(|h| h == active_host)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let focus = if active_host != "local" && !candidates.is_empty() {
-            HostSection::Remote
-        } else {
-            HostSection::Local
-        };
-        let items = candidates.clone();
-        HostStep {
-            input: String::new(),
-            focus,
-            local_selected: 0,
-            local_items: local_dirs.to_vec(),
-            local_dirs: local_dirs.to_vec(),
-            selected: remote_selected,
-            items,
-            connecting: None,
-            candidates,
-            connect_raw: false,
-        }
-    }
-
-    /// Total rows in the LOCAL section (including the "Explore" pseudo-entry).
-    pub fn local_len(&self) -> usize {
-        1 + self.local_items.len()
-    }
-
-    /// Total rows in the REMOTE section.
-    ///
-    /// Includes the synthetic "connect to <query>" row when `connect_raw` is set.
-    pub fn remote_len(&self) -> usize {
-        self.items.len() + if self.connect_raw { 1 } else { 0 }
-    }
-
-    /// Handle a key press on the host step.
-    pub fn on_key(&mut self, key: &KeyEvent) -> Outcome {
-        if key.kind == KeyEventKind::Release {
-            return Outcome::None;
-        }
-        if self.connecting.is_some() {
-            // Waiting for connection: only allow backing out.
-            if key.code == KeyCode::Esc {
-                self.connecting = None;
-            }
-            return Outcome::None;
-        }
-        let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
-        match key.code {
-            KeyCode::Esc => Outcome::Cancel,
-            KeyCode::Tab => {
-                // Switch focus between LOCAL and REMOTE.
-                self.focus = match self.focus {
-                    HostSection::Local => HostSection::Remote,
-                    HostSection::Remote => HostSection::Local,
-                };
-                Outcome::None
-            }
-            KeyCode::Up => {
-                match self.focus {
-                    HostSection::Local => {
-                        if self.local_selected > 0 {
-                            self.local_selected -= 1;
-                        }
-                    }
-                    HostSection::Remote => {
-                        if self.selected > 0 {
-                            self.selected -= 1;
-                        } else {
-                            // Cross edge: go to bottom of LOCAL section.
-                            self.focus = HostSection::Local;
-                            self.local_selected = self.local_len().saturating_sub(1);
-                        }
-                    }
-                }
-                Outcome::None
-            }
-            KeyCode::Down => {
-                match self.focus {
-                    HostSection::Local => {
-                        let max = self.local_len().saturating_sub(1);
-                        if self.local_selected < max {
-                            self.local_selected += 1;
-                        } else if !self.items.is_empty() {
-                            // Cross edge: go to top of REMOTE section.
-                            self.focus = HostSection::Remote;
-                            self.selected = 0;
-                        }
-                    }
-                    HostSection::Remote => {
-                        let max = self.remote_len().saturating_sub(1);
-                        if self.selected < max {
-                            self.selected += 1;
-                        }
-                    }
-                }
-                Outcome::None
-            }
-            KeyCode::Enter => match self.focus {
-                HostSection::Local => {
-                    if self.local_selected == 0 {
-                        // "Explore local dirs…" → directory step
-                        Outcome::ConnectHost("local".to_owned())
-                    } else {
-                        // A specific recent dir → go directly to that dir
-                        match self.local_items.get(self.local_selected - 1) {
-                            Some(dir) => Outcome::ChooseDir(dir.clone()),
-                            None => Outcome::ConnectHost("local".to_owned()),
-                        }
-                    }
-                }
-                HostSection::Remote => {
-                    match self.items.get(self.selected) {
-                        Some(h) => {
-                            self.connecting = Some(h.clone());
-                            Outcome::ConnectHost(h.clone())
-                        }
-                        // connect_raw row or any non-empty query with no list match
-                        // → treat the raw input as the hostname.
-                        None if !self.input.trim().is_empty() => {
-                            let h = self.input.trim().to_owned();
-                            self.connecting = Some(h.clone());
-                            Outcome::ConnectHost(h)
-                        }
-                        None => Outcome::None,
-                    }
-                }
-            },
-            KeyCode::Backspace => {
-                self.input.pop();
-                self.refilter();
-                Outcome::None
-            }
-            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
-                self.input.clear();
-                self.refilter();
-                Outcome::None
-            }
-            KeyCode::Char(c) if plain => {
-                self.input.push(c);
-                self.refilter();
-                Outcome::None
-            }
-            _ => Outcome::None,
-        }
-    }
-
-    /// Paste handler for the host step: set input to the first pasted line.
-    pub fn on_paste(&mut self, text: &str) {
-        let first = text.lines().next().unwrap_or("").trim();
-        if !first.is_empty() {
-            self.input = first.to_owned();
-            self.refilter();
-        }
-    }
-
-    fn refilter(&mut self) {
-        let input = self.input.trim().to_lowercase();
-        if input.is_empty() {
-            // Empty query → restore unfiltered lists and default selection.
-            self.items = self.candidates.clone();
-            self.local_items = self.local_dirs.clone();
-            self.focus = HostSection::Local;
-            self.local_selected = 0;
-            self.selected = 0;
-            self.connect_raw = false;
-            return;
-        }
-
-        // ── Filter remote hosts (scored, best first). ──────────────────────────
-        let mut scored_remote: Vec<(i64, String)> = self
-            .candidates
-            .iter()
-            .filter_map(|h| Some((fuzzy_score(&input, h)?, h.clone())))
-            .collect();
-        scored_remote.sort_by_key(|s| std::cmp::Reverse(s.0));
-        self.items = scored_remote.iter().map(|(_, h)| h.clone()).collect();
-
-        // ── Filter local dirs (scored, best first). ────────────────────────────
-        let mut scored_local: Vec<(i64, String)> = self
-            .local_dirs
-            .iter()
-            .filter_map(|d| Some((fuzzy_score(&input, d)?, d.clone())))
-            .collect();
-        scored_local.sort_by_key(|s| std::cmp::Reverse(s.0));
-        self.local_items = scored_local.iter().map(|(_, d)| d.clone()).collect();
-
-        // ── Score the "Explore local dirs…" pseudo-entry. ─────────────────────
-        let explore_score: Option<i64> = fuzzy_score(&input, "explore local dirs");
-
-        // ── Decide whether to offer a "connect to <query>" synthetic row. ─────
-        // Only when nothing else matches and the query looks like a hostname.
-        let has_any_match =
-            !scored_remote.is_empty() || !scored_local.is_empty() || explore_score.is_some();
-        self.connect_raw = !has_any_match && looks_like_host(self.input.trim());
-
-        // ── Auto-select the best-scoring visible row. ──────────────────────────
-        // Remote beats local on ties (typing a host name is more specific than
-        // a dir fragment, and we must not stay pinned on "Explore local dirs…").
-        let best_remote = scored_remote.first().map(|(s, _)| *s);
-        let best_local_dir = scored_local.first().map(|(s, _)| *s);
-
-        if let Some(rs) = best_remote {
-            let ls = best_local_dir.unwrap_or(i64::MIN);
-            let es = explore_score.unwrap_or(i64::MIN);
-            if rs >= ls && rs >= es {
-                self.focus = HostSection::Remote;
-                self.selected = 0;
-                // Clamp local too.
-                self.local_selected = self.local_selected.min(self.local_len().saturating_sub(1));
-                return;
-            }
-        }
-        if let Some(ls) = best_local_dir {
-            let es = explore_score.unwrap_or(i64::MIN);
-            if ls > es {
-                // A specific recent local dir beats "Explore local dirs…".
-                self.focus = HostSection::Local;
-                self.local_selected = 1; // index 1 = first local_items entry
-                self.selected = self.selected.min(self.remote_len().saturating_sub(1));
-                return;
-            }
-        }
-        if explore_score.is_some() {
-            // "Explore local dirs…" matched the query.
-            self.focus = HostSection::Local;
-            self.local_selected = 0;
-            self.selected = self.selected.min(self.remote_len().saturating_sub(1));
-            return;
-        }
-        // Nothing matched. If connect_raw, point Remote at the synthetic row.
-        if self.connect_raw {
-            self.focus = HostSection::Remote;
-            self.selected = 0; // remote_len() == 1 (only the connect_raw row)
-        }
-        // Clamp both indices within the new bounds.
-        let remote_cap = self.remote_len().saturating_sub(1);
-        self.selected = self.selected.min(remote_cap);
-        let local_cap = self.local_len().saturating_sub(1);
-        self.local_selected = self.local_selected.min(local_cap);
-    }
-}
-
-/// Returns `true` if `s` looks like a hostname or `user@host` (no spaces,
-/// at least 2 chars, does not start with `/` or `~`).
-///
-/// Used by [`HostStep::refilter`] to decide whether to show a "connect to
-/// <query>" synthetic row in the REMOTE section.
-pub fn looks_like_host(s: &str) -> bool {
-    let s = s.trim();
-    s.len() >= 2 && !s.contains(' ') && !s.starts_with('/') && !s.starts_with('~')
 }
 
 /// Step 2: the resume picker.
@@ -440,7 +133,15 @@ pub struct Wizard {
     /// the lifetime of the wizard. A query that starts with `.` reveals them
     /// regardless (see [`Wizard::refilter`]).
     pub show_hidden: bool,
+    /// Why the listed directory could not be listed (one line, sanitized);
+    /// cleared by the next listing.
+    dir_error: Option<String>,
+    /// Whether the daemon cut the listing (a folder may be missing from it).
+    dir_cut: bool,
 }
+
+/// The status line of a cut listing.
+pub const CUT_NOTE: &str = "list cut: type the folder's full name";
 
 /// Seed candidates in priority order, deduplicated (trailing slashes are
 /// ignored when comparing).
@@ -538,6 +239,8 @@ impl Wizard {
             meta,
             saved_host_step: None,
             show_hidden: false,
+            dir_error: None,
+            dir_cut: false,
         };
         w.refilter();
         w
@@ -594,6 +297,7 @@ impl Wizard {
         self.seeds = new_seeds;
         self.completions.clear();
         self.listed = None;
+        (self.dir_error, self.dir_cut) = (None, false);
         self.input.clear();
         self.selected = 0;
         // Reset meta for the new host but preserve recently_used marks.
@@ -618,11 +322,14 @@ impl Wizard {
         self.refilter();
     }
 
-    /// A `ListDir` reply. Ignored unless it answers the latest request.
-    pub fn set_dir_entries(&mut self, path: &str, entries: &[DirEntry]) {
+    /// A `ListDir` reply (`truncated`: the daemon cut it). Ignored unless it
+    /// answers the latest request.
+    pub fn set_dir_entries(&mut self, path: &str, entries: &[DirEntry], truncated: bool) {
         if self.listed.as_deref() != Some(path) {
             return;
         }
+        // Folders come first: a cut whose last entry is a file left no folder out.
+        (self.dir_error, self.dir_cut) = (None, truncated && entries.last().is_none_or(|e| e.dir));
         self.completions = entries
             .iter()
             .filter(|e| e.dir)
@@ -642,6 +349,35 @@ impl Wizard {
             m.hidden = e.hidden;
         }
         self.refilter();
+    }
+
+    /// A `ListDir` of `path` failed with `error` (the daemon's "cannot list
+    /// <path>: <why>"): the list empties and the step says why. Ignored
+    /// unless it answers the latest request.
+    pub fn set_dir_error(&mut self, path: &str, error: &str) {
+        if self.listed.as_deref() != Some(path) {
+            return;
+        }
+        let line = claudio_core::text::sanitize(error.lines().next().unwrap_or(""));
+        let shown = match line.strip_prefix(&format!("cannot list {path}")) {
+            Some(why) => format!("cannot list {}{why}", self.display(path)),
+            None => line,
+        };
+        (self.dir_error, self.dir_cut) = (Some(shown), false);
+        self.completions.clear();
+        self.refilter();
+    }
+
+    /// The directory step's status line while browsing: the listing's error,
+    /// or that the daemon cut it.
+    pub fn dir_status(&self) -> Option<&str> {
+        if !self.browsing() || self.host_step.is_some() {
+            return None;
+        }
+        match &self.dir_error {
+            Some(error) => Some(error),
+            None => self.dir_cut.then_some(CUT_NOTE),
+        }
     }
 
     /// Populate enrichment metadata from a `RecentProjects` reply.
@@ -1139,6 +875,7 @@ fn join(dir: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wizard_host::looks_like_host;
     use claudio_core::addon::Pick;
 
     /// No launch options: the wizard offers no route row, and launches
@@ -1265,6 +1002,7 @@ mod tests {
                 DirEntry::simple("Desktop", true),
                 DirEntry::simple("reports", true),
             ],
+            false,
         );
         assert_eq!(w.items[..2], strings(&["/home/u/reports", "/home/u/repos"]));
         // The best match (first child) is preselected; Down moves to `repos`.
@@ -1282,7 +1020,7 @@ mod tests {
     fn stale_dir_entries_are_ignored() {
         let mut w = wizard_local(vec![], "/h");
         type_str(&mut w, "/a/");
-        w.set_dir_entries("/b", &[DirEntry::simple("x", true)]);
+        w.set_dir_entries("/b", &[DirEntry::simple("x", true)], false);
         assert!(w.items.is_empty());
     }
 
@@ -1557,10 +1295,41 @@ mod tests {
             "connect_raw should be set for unknown host-like query"
         );
         assert_eq!(hs.focus, HostSection::Remote);
-        assert_eq!(hs.remote_len(), 1, "only the connect_raw row");
-        // Enter should use the raw input.
+        assert_eq!(hs.remote_len(), 2, "the search row, then connect_raw");
+        // ↓ past the search row (the default), then Enter uses the raw input.
+        hs.on_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(out, Outcome::ConnectHost("newhost".to_owned()));
+    }
+
+    #[test]
+    fn host_step_search_row_is_the_default_when_nothing_matches() {
+        let mut hs = make_host_step(&["prod"], &["/home/u/repos/claudio"]);
+        for c in "zyzzyva".chars() {
+            hs.on_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(hs.search && hs.connect_raw);
+        assert_eq!(hs.focus, HostSection::Remote);
+        assert!(hs.search_selected(), "connect to is never the default");
+        let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out, Outcome::Search("zyzzyva".to_owned()));
+        assert_eq!(hs.connecting, None);
+    }
+
+    #[test]
+    fn host_step_search_row_follows_the_hosts_and_needs_two_characters() {
+        let mut hs = make_host_step(&["prod", "nas"], &[]);
+        hs.on_key(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(!hs.search, "one character searches nothing");
+        hs.on_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(hs.items, ["prod"]);
+        assert!(hs.search && !hs.connect_raw);
+        // The matching host stays the default; the search row is below it.
+        assert_eq!((hs.focus.clone(), hs.selected), (HostSection::Remote, 0));
+        hs.on_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(hs.search_selected());
+        let out = hs.on_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out, Outcome::Search("pr".to_owned()));
     }
 
     /// "Explore local dirs…" must NOT stay selected when query doesn't match it.
@@ -1611,14 +1380,14 @@ mod tests {
     /// looks_like_host rejects paths and whitespace.
     #[test]
     fn looks_like_host_basic() {
-        assert!(super::looks_like_host("devbox"));
-        assert!(super::looks_like_host("user@host"));
-        assert!(super::looks_like_host("my-server"));
-        assert!(!super::looks_like_host("/tmp"), "paths are not hosts");
-        assert!(!super::looks_like_host("~/foo"), "~ paths are not hosts");
-        assert!(!super::looks_like_host("a b"), "spaces disqualify");
-        assert!(!super::looks_like_host("x"), "single char too short");
-        assert!(!super::looks_like_host(""), "empty is not a host");
+        assert!(looks_like_host("devbox"));
+        assert!(looks_like_host("user@host"));
+        assert!(looks_like_host("my-server"));
+        assert!(!looks_like_host("/tmp"), "paths are not hosts");
+        assert!(!looks_like_host("~/foo"), "~ paths are not hosts");
+        assert!(!looks_like_host("a b"), "spaces disqualify");
+        assert!(!looks_like_host("x"), "single char too short");
+        assert!(!looks_like_host(""), "empty is not a host");
     }
 
     #[test]
@@ -1665,6 +1434,7 @@ mod tests {
                 DirEntry::simple(".secret", true),
                 DirEntry::simple("repos", true),
             ],
+            false,
         );
         w
     }
@@ -1752,7 +1522,7 @@ mod tests {
         w.on_host_connected("local", "/home/u", strings(&["/srv/app"]));
         let opened = w.browse_home();
         let entries: Vec<DirEntry> = entries.iter().map(|n| DirEntry::simple(*n, true)).collect();
-        w.set_dir_entries("/home/u", &entries);
+        w.set_dir_entries("/home/u", &entries, false);
         (w, opened)
     }
 
@@ -1783,7 +1553,7 @@ mod tests {
         );
         w.on_host_connected("box", "/home/remote", vec![]);
         assert_eq!(w.browse_home(), Outcome::ListDir("/home/remote".into()));
-        w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)]);
+        w.set_dir_entries("/home/remote", &[DirEntry::simple("src", true)], false);
         assert_eq!(
             w.on_key(&press(KeyCode::Enter)),
             Outcome::ChooseDir("/home/remote".into())
@@ -1853,7 +1623,7 @@ mod tests {
             w.here_selected(),
             "`start here` is selected after descending"
         );
-        w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)]);
+        w.set_dir_entries("/home/u/repos", &[DirEntry::simple("claudio", true)], false);
         w.on_key(&press(KeyCode::Down));
         assert_eq!(
             w.on_key(&press(KeyCode::Tab)),
@@ -1965,7 +1735,7 @@ mod tests {
     fn seeds_do_not_leak_into_a_browsed_directory() {
         let mut w = wizard_local(strings(&["/home/u/repos/claudio"]), "/home/u");
         type_str(&mut w, "~/");
-        w.set_dir_entries("/home/u", &[DirEntry::simple("docs", true)]);
+        w.set_dir_entries("/home/u", &[DirEntry::simple("docs", true)], false);
         assert_eq!(w.items, strings(&["/home/u/docs"]));
     }
 
@@ -1989,5 +1759,65 @@ mod tests {
         // A non-path paste extends it.
         w.on_paste("x");
         assert_eq!(w.input, "/srv/app/x");
+    }
+
+    #[test]
+    fn a_listing_error_shows_and_the_next_listing_clears_it() {
+        let (mut w, _) = browser(&["repos"]);
+        assert_eq!(
+            type_str(&mut w, "x/")[1],
+            Outcome::ListDir("/home/u/x".into())
+        );
+        let error = "cannot list /home/u/x: Permission denied (os error 13)\nmore";
+        w.set_dir_error("/home/u/other", error);
+        assert_eq!(w.dir_status(), None, "an error for another path is stale");
+        w.set_dir_error("/home/u/x", error);
+        assert_eq!(
+            w.dir_status(),
+            Some("cannot list ~/x: Permission denied (os error 13)")
+        );
+        assert!(w.items.is_empty());
+        w.set_dir_entries("/home/u/x", &[DirEntry::simple("y", true)], false);
+        assert_eq!(w.dir_status(), None);
+        assert_eq!(names(&w), vec!["y"]);
+    }
+
+    #[test]
+    fn a_cut_listing_says_so_and_enter_takes_a_typed_unlisted_name() {
+        let (mut w, _) = browser(&[]);
+        w.set_dir_entries("/home/u", &[DirEntry::simple("alpha", true)], true);
+        assert_eq!(w.dir_status(), Some(CUT_NOTE));
+        assert_eq!(CUT_NOTE, "list cut: type the folder's full name");
+        type_str(&mut w, "zeta");
+        assert!(w.items.is_empty());
+        assert_eq!(
+            w.on_key(&press(KeyCode::Enter)),
+            Outcome::ChooseDir("/home/u/zeta".into())
+        );
+    }
+
+    #[test]
+    fn a_cut_listing_that_ends_in_a_file_says_nothing() {
+        let (mut w, _) = browser(&[]);
+        let entries = [
+            DirEntry::simple("alpha", true),
+            DirEntry::simple("notes", false),
+        ];
+        w.set_dir_entries("/home/u", &entries, true);
+        assert_eq!(w.dir_status(), None, "folders come first: none was cut");
+    }
+
+    #[test]
+    fn an_unsorted_listing_shows_folders_only_sorted_case_insensitively() {
+        let (mut w, _) = browser(&[]);
+        let entries = [
+            DirEntry::simple("b.txt", false),
+            DirEntry::simple("zed", true),
+            DirEntry::simple("A.md", false),
+            DirEntry::simple("Alpha", true),
+            DirEntry::simple("beta", true),
+        ];
+        w.set_dir_entries("/home/u", &entries, false);
+        assert_eq!(names(&w), vec!["Alpha", "beta", "zed"]);
     }
 }

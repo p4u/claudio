@@ -21,11 +21,13 @@ use uuid::Uuid;
 
 mod git;
 mod handshake;
+mod listing;
 mod spawn;
 
 pub use crate::version::PROTO;
 pub use git::*;
 pub use handshake::*;
+pub use listing::*;
 pub use spawn::*;
 
 /// Hard cap on a single frame (tag + payload).
@@ -649,44 +651,6 @@ impl GitStatus {
     /// The branch name when HEAD is on one.
     pub fn branch(&self) -> Option<&str> {
         (!self.detached && !self.head.is_empty()).then_some(self.head.as_str())
-    }
-}
-
-/// One entry of a [`Msg::DirEntries`] listing (the wizard's directory
-/// browser), with the daemon's git and claude-activity enrichment.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DirEntry {
-    pub name: String,
-    pub dir: bool,
-    /// The git branch name when the directory is a git repo, `Some("")` for a
-    /// detached/unknown HEAD, `None` when not a git repo. Filled by the daemon;
-    /// older daemons leave this as `None`.
-    #[serde(default)]
-    pub git: Option<String>,
-    /// Unix seconds of the last claude session activity in this directory.
-    /// `None` when no claude session is known. Filled by the daemon.
-    #[serde(default)]
-    pub claude_at: Option<u64>,
-    /// Whether the directory entry is a symlink.
-    #[serde(default)]
-    pub symlink: bool,
-    /// Whether the entry name starts with `.`.
-    #[serde(default)]
-    pub hidden: bool,
-}
-
-impl DirEntry {
-    /// Construct a minimal entry with no enrichment. Used in tests and by
-    /// callers that do their own field assignment.
-    pub fn simple(name: impl Into<String>, dir: bool) -> Self {
-        DirEntry {
-            name: name.into(),
-            dir,
-            git: None,
-            claude_at: None,
-            symlink: false,
-            hidden: false,
-        }
     }
 }
 

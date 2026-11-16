@@ -245,6 +245,18 @@ function toTerminals(sid, text) {
 
 const BANNER = (s) => `\x1b[2J\x1b[H\x1b[1;36mclaudio mock\x1b[0m  ${s.label} @ ${s.host}\r\n\x1b[2mThis is a fixture terminal: what you type is echoed back.\x1b[0m\r\n\r\n$ `;
 
+// The folders fs.list answers with (a name ending in `/` is a folder); `~` is MOCK_HOME.
+const MOCK_HOME = '/home/dev';
+const MOCK_TREE = {
+  '/': ['home/', 'srv/', 'etc/'],
+  '/home': ['dev/'],
+  '/home/dev': ['api/', 'blog/', 'claudio/', 'docs/', 'Notebooks/', '.config/', '.cache/', 'notes.txt'],
+  '/home/dev/claudio': ['addons/', 'crates/', 'docs/', '.git/', 'Cargo.toml', 'README.md'],
+  '/home/dev/claudio/crates': ['core/', 'tui/'],
+  '/home/dev/api': ['src/', 'package.json'],
+  '/srv': ['infra/'],
+};
+
 // ---- ops ----
 class OpError extends Error {}
 const bad = (m) => new OpError(`bad request: ${m}`);
@@ -531,12 +543,12 @@ const OPS = {
   'fs.list': (a) => {
     host(a);
     const p = need(a, 'path');
-    return { path: p, truncated: false, entries: [
-      { name: 'src', dir: true, git: null, claude_at: null, symlink: false, hidden: false },
-      { name: 'web', dir: true, git: null, claude_at: now() - 86400, symlink: false, hidden: false },
-      { name: '.git', dir: true, git: null, claude_at: null, symlink: false, hidden: true },
-      { name: 'Cargo.toml', dir: false, git: null, claude_at: null, symlink: false, hidden: false },
-    ] };
+    const abs = p === '~' || p.startsWith('~/') ? MOCK_HOME + p.slice(1) : p;
+    const path = abs.replace(/\/+$/, '') || '/';
+    const names = MOCK_TREE[path];
+    if (!names) throw new OpError(`cannot list ${p}: No such file or directory (os error 2)`);
+    const entry = (n) => ({ name: n.replace(/\/$/, ''), dir: n.endsWith('/'), git: n === 'claudio/' ? 'main' : null, claude_at: null, symlink: false, hidden: n.startsWith('.') });
+    return { path, truncated: false, entries: names.map(entry) };
   },
   'fs.projects': (a) => {
     host(a);

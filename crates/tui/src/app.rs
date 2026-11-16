@@ -138,6 +138,9 @@ pub enum Effect {
         id: SessionId,
         answers: Vec<claudio_core::proto::Answer>,
     },
+    /// Search the conversations on every connected host that can
+    /// (`search_edge::run`); the hits go to [`App::on_search_all`] with `gen`.
+    SearchAll { gen: u64, query: String },
     /// A call into an addon (`addon_runner::run`).
     Addon(AddonCall),
     /// A read or a write of the custom env, off the UI thread
@@ -192,9 +195,11 @@ pub enum ReplyTo {
     Respawned(SessionId),
     /// Kill acknowledged; the `SessionId` lets us clear the tombstone.
     Kill(SessionId),
-    /// A directory listing for the wizard (which ignores one for a path it
-    /// no longer shows).
-    DirEntries,
+    /// A directory listing of `path` for the wizard (which ignores one for a
+    /// path it no longer shows).
+    DirEntries {
+        path: String,
+    },
     /// The claude sessions in `cwd` on `host`, for the wizard of generation
     /// `gen`; a reply for a cancelled or replaced wizard is dropped.
     ClaudeSessions {
@@ -331,6 +336,8 @@ pub struct App {
     pub extension_config: std::collections::BTreeMap<String, bool>,
     /// The `modal_gen` of the external action whose result is awaited.
     pub(super) pending_action: Option<u64>,
+    /// The `gen` of the [`Effect::SearchAll`] under way: one runs at a time.
+    pub(super) searching: Option<u64>,
     /// The external extensions the extension host disabled after
     /// failures (until claudio restarts), by name.
     pub failed_extensions: Vec<String>,
@@ -422,6 +429,7 @@ impl App {
                 Vec::new(),
             ),
             pending_action: None,
+            searching: None,
             failed_extensions: Vec::new(),
             extension_config: Default::default(),
             addons: cfg.addons,
@@ -462,6 +470,7 @@ impl App {
         }
         match hs.items.get(hs.selected) {
             Some(host) => Some(host.clone()),
+            None if hs.search_selected() => None,
             None => hs.connect_raw.then(|| hs.input.trim().to_owned()),
         }
     }
@@ -866,6 +875,9 @@ mod tests {
         for c in "me@10.0.0.9".chars() {
             app.on_terminal(press(KeyCode::Char(c)));
         }
+        // The search row comes first and names no host; ↓ is "connect to".
+        assert_eq!(app.wizard_remote_host(), None);
+        app.on_terminal(press(KeyCode::Down));
         assert_eq!(app.wizard_remote_host().as_deref(), Some("me@10.0.0.9"));
         app.on_terminal(alt('f'));
         let effects = app.take_effects();

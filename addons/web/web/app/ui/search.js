@@ -8,16 +8,17 @@ import { toast } from './toasts.js';
 import { ago } from './glyph.js';
 import { openSession } from './session-actions.js';
 import { openWizard } from './wizard.js';
+import { searchable, searchResult, pickHit, moveSel } from '../hits.js';
 
 export function openSearch() {
   overlay.value = 'search';
 }
 
 // A live session on that conversation gets focus; otherwise the wizard opens filled in to resume it.
-export function openConversation({ host, cwd, conversation }) {
-  const live = Object.values(model.value.sessions).find((s) => s.host === host && s.claude_session_id === conversation && !s.dormant && s.state !== 'exited');
-  if (live) { overlay.value = null; openSession(live.id); return; }
-  openWizard({ host, cwd, resume: conversation, kind: 'claude' });
+export function openConversation(hit) {
+  const to = pickHit(model.value.sessions, hit);
+  if (to.focus) { overlay.value = null; openSession(to.focus); return; }
+  openWizard({ host: to.resume.host, cwd: to.resume.cwd, resume: to.resume.conversation, kind: 'claude' });
 }
 
 export function Search() {
@@ -32,11 +33,11 @@ export function Search() {
   function run(query) {
     const mine = ++seq.current;
     const text = query.trim();
-    if (!text) { setRes(null); setBusy(false); return; }
+    if (!searchable(text)) { setRes(null); setBusy(false); return; }
     setBusy(true);
     reqQuiet('search', { query: text })
-      .then((r) => { if (mine === seq.current) { setRes({ hits: r.hits ?? [], failed: r.failed ?? [], truncated: !!r.truncated }); setSel(0); } })
-      .catch((e) => { if (mine === seq.current) { setRes({ hits: [], failed: [], truncated: false, error: e.message }); } })
+      .then((r) => { if (mine === seq.current) { setRes(searchResult(r)); setSel(0); } })
+      .catch((e) => { if (mine === seq.current) { setRes({ ...searchResult(null), error: e.message }); } })
       .finally(() => { if (mine === seq.current) setBusy(false); });
   }
   useEffect(() => { const t = setTimeout(() => run(q), 280); return () => clearTimeout(t); }, [q]);
@@ -45,8 +46,8 @@ export function Search() {
   const hits = res?.hits ?? [];
   const choose = (h) => { if (h) openConversation(h); };
   const key = (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setSel((sel + 1) % Math.max(hits.length, 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setSel((sel - 1 + hits.length) % Math.max(hits.length, 1)); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSel(moveSel(sel, 1, hits.length)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setSel(moveSel(sel, -1, hits.length)); }
     else if (e.key === 'Enter') {
       e.preventDefault();
       if (hits.length && res && q.trim()) choose(hits[sel]);
@@ -57,7 +58,7 @@ export function Search() {
     <input ref=${input} class="input search-input" data-testid="search-input" data-autofocus value=${q} placeholder="Search every host's past conversations" autocomplete="off" spellcheck=${false}
       onInput=${(e) => setQ(e.target.value)} onKeyDown=${key} />
     <div class="search-state" aria-live="polite">
-      ${busy ? 'Searching…' : res?.error ? html`<span class="wz-warn">${res.error}</span>` : res && !hits.length && q.trim() ? 'No conversation matches.' : !q.trim() ? 'Type a word or a phrase. Enter opens the highlighted result.' : ''}
+      ${busy ? 'Searching…' : res?.error ? html`<span class="wz-warn">${res.error}</span>` : res && !hits.length && q.trim() ? 'No conversation matches.' : !q.trim() ? 'Type a word or a phrase (2 characters at least). Enter opens the highlighted result.' : ''}
     </div>
     <ul class="search-hits" ref=${list} role="listbox">
       ${hits.map((h, i) => html`<li key=${`${h.host}:${h.conversation}`} class="search-hit" data-testid="search-hit" role="option" aria-selected=${i === sel}
