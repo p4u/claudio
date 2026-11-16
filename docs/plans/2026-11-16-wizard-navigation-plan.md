@@ -2,7 +2,7 @@
 
 Spec: docs/specs/2026-11-16-wizard-navigation-design.md
 Class: architectural
-Repos and branches: /home/p4u/claudio → feat/wizard-nav (base: the commit that adds this plan on main; main is 3bf7d67 before it)
+Repos and branches: /home/p4u/claudio → feat/wizard-nav (base 115925b)
 
 Implementers work in the main checkout `/home/p4u/claudio` on `feat/wizard-nav`, one task at a
 time, in the order below. Every code block was applied, in this order, in a scratch worktree of
